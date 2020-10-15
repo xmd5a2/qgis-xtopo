@@ -104,6 +104,8 @@ COPY --from=builder /usr/bin/osmconvert /usr/bin/osmfilter /usr/bin/
 
 COPY --from=builder /tmp/refFunctions-master /app/QGIS3/profiles/default/python/plugins/refFunctions/
 
+COPY startup.py /app/QGIS3/profiles/default/python/
+
 COPY QGIS3/ /app/QGIS3/
 
 COPY icons/ /app/icons/

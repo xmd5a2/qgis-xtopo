@@ -10,3 +10,4 @@ queries/bak/
 QGIS3/profiles/default/python/expressions/
 expressions/__pycache__
 *.pyc
+processing/
