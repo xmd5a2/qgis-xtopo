@@ -1,0 +1,4 @@
+(
+way["natural"="sinkhole"];
+relation["natural"="sinkhole"];
+);

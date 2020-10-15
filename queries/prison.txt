@@ -1,0 +1,4 @@
+(
+way["amenity"="prison"];
+relation["amenity"="prison"];
+);

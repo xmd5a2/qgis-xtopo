@@ -1,0 +1,8 @@
+(
+node["natural"="strait"];
+way["natural"="strait"];
+relation["natural"="strait"];
+node["natural"="strait"];
+way["natural"="strait"];
+relation["natural"="strait"];
+);

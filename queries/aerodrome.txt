@@ -1,0 +1,5 @@
+(
+node["aeroway"="aerodrome"]["abandoned"!~"yes"]["disused"!~"yes"]["closed"!~"yes"];
+way["aeroway"="aerodrome"]["abandoned"!~"yes"]["disused"!~"yes"]["closed"!~"yes"];
+relation["aeroway"="aerodrome"]["abandoned"!~"yes"]["disused"!~"yes"]["closed"!~"yes"];
+);

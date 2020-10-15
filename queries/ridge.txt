@@ -1,0 +1,7 @@
+(
+way["natural"="ridge"];
+way["natural"="arete"];
+relation["natural"="ridge"];
+relation["natural"="arete"];
+way["ridge"="yes"];
+);

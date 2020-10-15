@@ -1,0 +1,4 @@
+(
+way["landuse"="vineyard"];
+relation["landuse"="vineyard"];
+);

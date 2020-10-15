@@ -1,0 +1,3 @@
+(
+way["place"="locality"]["historic"!~"archaeological_site"]["seamark:type"!~"platform"]["man_made"!~"offshore_platform"]["landuse"!~"industrial"]["natural"!~"bay"]["natural"!~"bay"]["natural"!~"strait"]["natural"!~"water"];
+);

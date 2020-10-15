@@ -1,0 +1,6 @@
+(
+way["amenity"="monastery"]["religion"="christian"];
+relation["amenity"="monastery"]["religion"="christian"];
+way["historic"="monastery"]["religion"="christian"];
+relation["historic"="monastery"]["religion"="christian"];
+);

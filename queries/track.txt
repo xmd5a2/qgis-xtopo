@@ -1,0 +1,4 @@
+(
+way["highway"="track"]["bridge"!="yes"];
+way["highway"="road"]["bridge"!="yes"];
+);

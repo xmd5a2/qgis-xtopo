@@ -1,0 +1,5 @@
+(
+way["railway"="abandoned"]["bridge"!="yes"]["highway"!~".*"];
+way["railway"="razed"]["bridge"!="yes"]["highway"!~".*"];
+way["railway"="dismantled"]["bridge"!="yes"]["highway"!~".*"];
+);

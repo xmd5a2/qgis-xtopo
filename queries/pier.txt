@@ -1,0 +1,4 @@
+(
+way["man_made"="pier"];
+relation["man_made"="pier"];
+);

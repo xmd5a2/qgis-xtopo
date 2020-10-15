@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="monastery_christian.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.32586207"
+     inkscape:cx="-241.50545"
+     inkscape:cy="153.52916"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     inkscape:connector-curvature="0"
+     id="palace"
+     style="fill:#000000;fill-opacity:1;stroke:none;stroke-width:0.77459675"
+     d="m 445.67535,288.43936 -31.13508,55.0027 v 18.33422 h 93.4052 v -18.33422 l -31.13508,-55.0027 z m -342.48575,0 -31.135083,55.0027 v 18.33422 h 93.405213 v -18.33422 l -31.13508,-55.0027 z m 93.40519,73.33692 h 186.8104 V 325.10784 L 289.99999,215.1025 196.59478,325.10784 Z M 72.054517,386.28319 V 546.21698 H 227.72987 c 0,-36.66847 0,-110.00535 62.27013,-110.00535 62.27014,0 62.27014,73.33688 62.27014,110.00535 H 507.94545 V 386.28319 h -92.84319 l -0.56042,36.66848 h -31.13508 l 1.01189,-36.66848 H 197.94544 l -1.34814,36.66848 h -31.1351 v -36.66848 z"
+     sodipodi:nodetypes="cccccccccccccccccccccccscccccccccccc" />
+  <path
+     style="color:#000000;display:inline;overflow:visible;visibility:visible;fill:#000000;fill-opacity:1;stroke:none;stroke-width:21.51408958;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1;marker:none;enable-background:accumulate"
+     d="m 428.5966,125.57504 -0.0572,-0.096 -128.7457,33.69953 31.67921,-126.801743 -0.0877,-0.05706 h -82.77082 l -0.0877,0.05706 25.91306,126.801743 -122.97959,-33.69953 -0.0572,0.096 v 90.68265 l 0.0572,0.096 122.97958,-30.36929 -25.91308,123.47147 0.0877,0.0573 h 82.77081 l 0.0877,-0.0573 -31.67919,-123.47147 128.74568,30.36929 0.0572,-0.096 v -90.68263 z"
+     id="rect2987-6"
+     inkscape:connector-curvature="0"
+     sodipodi:nodetypes="cccccccccccccccccccccc" />
+</svg>

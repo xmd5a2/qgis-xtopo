@@ -1,0 +1,4 @@
+(
+node["ford"="yes"];
+way["ford"="yes"];
+);

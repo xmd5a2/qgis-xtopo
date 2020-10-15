@@ -1,0 +1,4 @@
+(
+node["place"="island"];
+node["place"="islet"];
+);

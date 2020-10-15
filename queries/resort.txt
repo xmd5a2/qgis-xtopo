@@ -1,0 +1,4 @@
+(
+way["leisure"="resort"];
+relation["leisure"="resort"];
+);

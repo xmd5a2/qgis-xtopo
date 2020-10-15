@@ -1,0 +1,5 @@
+(
+node["waterway"="waterfall"];
+way["waterway"="waterfall"];
+relation["waterway"="waterfall"];
+);

@@ -1,0 +1,6 @@
+(
+way["landuse"="cemetery"];
+relation["landuse"="cemetery"];
+way["amenity"="grave_yard"];
+relation["amenity"="grave_yard"];
+);

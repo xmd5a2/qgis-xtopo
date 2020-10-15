@@ -1,0 +1,3 @@
+(
+node["mountain_pass"="yes"];
+);

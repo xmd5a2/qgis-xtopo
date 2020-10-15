@@ -1,0 +1,5 @@
+(
+node["natural"="cape"];
+way["natural"="cape"];
+relation["natural"="cape"];
+);

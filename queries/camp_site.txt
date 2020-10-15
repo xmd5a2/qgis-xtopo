@@ -1,0 +1,5 @@
+(
+node["tourism"="camp_site"]["abandoned"!="yes"];
+way["tourism"="camp_site"]["abandoned"!="yes"];
+relation["tourism"="camp_site"]["abandoned"!="yes"];
+);

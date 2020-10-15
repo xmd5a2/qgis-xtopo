@@ -1,0 +1,14 @@
+(
+way["natural"="grassland"];
+relation["natural"="grassland"];
+way["landuse"="grass"];
+relation["landuse"="grass"];
+way["natural"="heath"];
+relation["natural"="heath"];
+way["natural"="meadow"];
+relation["natural"="meadow"];
+way["landuse"="meadow"];
+relation["landuse"="meadow"];
+way["natural"="fell"];
+relation["natural"="fell"];
+);

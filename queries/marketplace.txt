@@ -1,0 +1,5 @@
+(
+node["amenity"="marketplace"];
+way["amenity"="marketplace"];
+relation["amenity"="marketplace"];
+);

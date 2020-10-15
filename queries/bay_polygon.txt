@@ -1,0 +1,4 @@
+(
+way["natural"="bay"];
+relation["natural"="bay"];
+);

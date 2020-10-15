@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="hunting_stand.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.92167712"
+     inkscape:cx="-222.40162"
+     inkscape:cy="313.07012"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     style="fill:#000000;stroke-width:4.5358305"
+     d="m 158.46092,519.59748 c 0,-5.45678 23.48408,-126.03784 29.51046,-151.52404 2.19691,-9.29101 0.77949,-10.20562 -15.81655,-10.20562 -17.81011,0 -18.22974,-0.36543 -18.22974,-15.8754 v -15.87541 h 136.07492 136.07491 v 15.87541 c 0,15.54126 -0.38831,15.8754 -18.44898,15.8754 -15.50003,0 -18.04892,1.26879 -15.94615,7.9377 1.37656,4.36575 8.68986,38.55457 16.25179,75.97517 7.56195,37.4206 14.87526,71.60943 16.25181,75.97516 2.17535,6.89909 -0.75221,7.9377 -22.37404,7.9377 h -24.87686 l -4.49441,-21.54519 c -2.47191,-11.84986 -10.18565,-49.61065 -17.14163,-83.91287 l -12.64723,-62.36767 h -52.57499 -52.575 l -15.26122,78.24308 c -8.39368,43.03369 -16.19006,80.79448 -17.32529,83.91287 -2.95047,8.10461 -46.45181,7.70542 -46.4518,-0.42629 z m 31.75082,-304.60831 c 0,-56.90786 1.35859,-74.81479 5.66978,-74.73098 3.11838,0.0606 47.51283,10.98302 98.65432,24.27199 l 92.98453,24.16177 1.2825,50.56921 1.28251,50.56921 H 290.14855 190.21174 Z M 282.0623,125.05123 153.92508,92.682344 V 73.324765 c 0,-10.646673 1.53084,-19.299047 3.40187,-19.227514 1.87104,0.07152 62.59446,14.986238 134.94096,33.14379 l 131.53908,33.013709 1.39476,19.01826 c 1.1703,15.95769 0.0754,18.94818 -6.80375,18.58269 -4.50917,-0.23957 -65.86024,-15.00158 -136.3357,-32.80447 z"
+     id="path825"
+     inkscape:connector-curvature="0" />
+</svg>

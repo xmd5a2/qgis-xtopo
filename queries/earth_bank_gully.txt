@@ -1,0 +1,6 @@
+(
+way["natural"="earth_bank"];
+relation["natural"="earth_bank"];
+way["natural"="gully"];
+relation["natural"="gully"];
+);

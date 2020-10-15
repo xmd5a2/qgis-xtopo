@@ -1,0 +1,5 @@
+(
+node["historic"="ruins"]["building"!~".*"];
+way["historic"="ruins"]["building"!~".*"];
+relation["historic"="ruins"]["building"!~".*"];
+);

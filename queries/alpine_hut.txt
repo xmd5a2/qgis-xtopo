@@ -1,0 +1,6 @@
+(
+node["tourism"="alpine_hut"];
+way["tourism"="alpine_hut"];
+node["tourism"="chalet"];
+way["tourism"="chalet"];
+);

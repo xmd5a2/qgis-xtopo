@@ -1,0 +1,3 @@
+(
+node["natural"="cave_entrance"];
+);

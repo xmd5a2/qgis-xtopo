@@ -1,0 +1,5 @@
+(
+node["tourism"="attraction"]["historic"!="ruins"]["historic"!="archaeological_site"]["natural"!~".*"]["place"!="locality"]["waterway"!="waterfall"];
+way["tourism"="attraction"]["historic"!="ruins"]["historic"!="archaeological_site"]["natural"!~".*"]["place"!="locality"]["waterway"!="waterfall"];
+relation["tourism"="attraction"]["historic"!="ruins"]["historic"!="archaeological_site"]["natural"!~".*"]["place"!="locality"]["waterway"!="waterfall"];
+);

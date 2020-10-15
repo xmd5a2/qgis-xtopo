@@ -1,0 +1,6 @@
+(
+node["tower:type"="communication"]["fixme"!~".*"];
+way["tower:type"="communication"]["fixme"!~".*"];
+node["man_made"="antenna"]["fixme"!~".*"];
+way["man_made"="antenna"]["fixme"!~".*"];
+);

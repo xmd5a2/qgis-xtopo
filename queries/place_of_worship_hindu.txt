@@ -1,0 +1,8 @@
+(
+node["amenity"="place_of_worship"]["religion"="hindu"];
+way["amenity"="place_of_worship"]["religion"="hindu"];
+relation["amenity"="place_of_worship"]["religion"="hindu"];
+node["disused:amenity"="place_of_worship"]["religion"="hindu"];
+way["disused:amenity"="place_of_worship"]["religion"="hindu"];
+relation["disused:amenity"="place_of_worship"]["religion"="hindu"];
+);

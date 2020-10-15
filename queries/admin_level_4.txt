@@ -1,0 +1,4 @@
+(
+way["admin_level"="4"];
+relation["admin_level"="4"];
+);

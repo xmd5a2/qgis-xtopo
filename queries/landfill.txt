@@ -1,0 +1,4 @@
+(
+way["landuse"="landfill"]["content"!="manure"];
+relation["landuse"="landfill"]["content"!="manure"];
+);

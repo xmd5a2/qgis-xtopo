@@ -1,0 +1,6 @@
+(
+way["place"="island"];
+relation["place"="island"];
+way["place"="islet"];
+relation["place"="islet"];
+);

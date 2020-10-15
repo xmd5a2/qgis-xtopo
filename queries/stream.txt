@@ -1,0 +1,5 @@
+(
+way["waterway"="stream"]["intermittent"!="yes"];
+way["waterway"="drain"]["intermittent"!="yes"];
+way["waterway"="ditch"]["intermittent"!="yes"];
+);

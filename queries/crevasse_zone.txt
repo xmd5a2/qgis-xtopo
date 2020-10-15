@@ -1,0 +1,4 @@
+(
+way["glacial"="crevasse_zone"];
+relation["glacial"="crevasse_zone"];
+);

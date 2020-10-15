@@ -1,0 +1,12 @@
+.stfolder/
+.stversions/
+author.txt
+config_debug.ini
+docker_prepare_data.ini
+docker_run.ini
+prepare_automap_for_github.sh
+update_local_extdir.sh
+queries/bak/
+QGIS3/profiles/default/python/expressions/
+expressions/__pycache__
+*.pyc

@@ -1,0 +1,6 @@
+(
+node["man_made"="observatory"];
+way["man_made"="observatory"];
+node["man_made"="monitoring_station"]["observatory:type"="astronomical"];
+way["man_made"="monitoring_station"]["observatory:type"="astronomical"];
+);

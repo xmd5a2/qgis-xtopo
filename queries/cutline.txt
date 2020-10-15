@@ -1,0 +1,4 @@
+(
+way["man_made"="cutline"];
+relation["man_made"="cutline"];
+);

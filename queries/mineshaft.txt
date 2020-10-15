@@ -1,0 +1,5 @@
+(
+node["man_made"="adit"];
+node["man_made"="mineshaft"];
+node["historic"="mine"];
+);

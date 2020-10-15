@@ -1,0 +1,6 @@
+(
+way["natural"="wood"];
+relation["natural"="wood"];
+way["landuse"="forest"];
+relation["landuse"="forest"];
+);

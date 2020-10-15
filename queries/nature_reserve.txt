@@ -1,0 +1,6 @@
+(
+way["boundary"="national_park"];
+relation["boundary"="national_park"];
+way["leisure"="nature_reserve"];
+relation["leisure"="nature_reserve"];
+);

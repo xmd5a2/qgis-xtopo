@@ -1,0 +1,4 @@
+(
+node["railway"="halt"]["abandoned"!="yes"]["disused"!="yes"];
+way["railway"="halt"]["abandoned"!="yes"]["disused"!="yes"];
+);
