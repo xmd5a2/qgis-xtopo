@@ -7,6 +7,7 @@ if [ -f /.dockerenv ] ; then
 	qgistopo_extdir=/mnt/external_scripts
 	if [[ -f ${qgistopo_extdir}/config.ini ]] ; then
 		. ${qgistopo_extdir}/config.ini
+		export XDG_RUNTIME_DIR=/mnt/qgis_projects/$project_name/tmp
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
@@ -30,6 +31,8 @@ else
 		. ${qgistopo_extdir}/config_debug.ini
 	fi
 fi
+
+echo -e "\e[101mProject:" $project_dir"\e[49m"
 
 if [[ "$project_name" == "" ]] ; then
 	echo -e "\033[93mproject_name not defined. Please define it in config.ini. Stopping.\033[0m"
@@ -153,7 +156,6 @@ function jsonlines2json { # Convert JSON lines to JSON
 	sed -i '$ s/\]/\]}/' $1.geojson
 }
 
-echo -e "\e[101mProject:" $project_dir"\e[49m"
 echo -e "\e[100mbbox:" $bbox_query"\e[49m"
 
 rm -f "$project_dir"/crop.geojson
@@ -585,7 +587,6 @@ function run_alg_smoothgeometry {
 # # 	mv $temp_dir/${1}_merged.$ext $work_dir/$1.$ext
 # }
 function merge_vector_layers {
-	echo merge
 	case $1 in
 		"geojson")
 			ext="geojson"

@@ -1,5 +1,9 @@
 #!/bin/bash
 # Populate Overpass DB from local sources in osm_data_dir
+if [[ ! -f /.dockerenv ]] ; then
+	echo -e "\033[93mThis script is not meant to run outside the docker container. Stopping.\033[0m"
+	exit 1;
+fi
 if [[ -f /mnt/external_scripts/config.ini ]] ; then
 	. /mnt/external_scripts/config.ini
 else
