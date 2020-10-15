@@ -8,6 +8,15 @@ if [ -f "docker_run.ini" ] ; then
 	. docker_run.ini
 fi
 
+if [[ ! -d $qgis_projects_dir ]] ; then
+	mkdir $qgis_projects_dir
+fi
+if [[ ! -d $overpass_db_dir ]] ; then
+	mkdir $overpass_db_dir
+fi
+if [[ ! -d $qgistopo_extdir ]] ; then
+	mkdir $qgistopo_extdir
+fi
 if [[ -d $terrain_dir ]] ; then
 	terrain_mount_str="--mount type=bind,source=$terrain_dir,target=/mnt/terrain"
 fi

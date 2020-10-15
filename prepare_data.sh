@@ -176,6 +176,9 @@ if [[ $generate_terrain == "true" ]] ; then
 		fi
 		if [[ ! -d $source_dem_dir ]] ; then
 			echo -e "\033[93msource_dem_dir "$source_dem_dir" don't exist but get_dem_tiles=true. Turn it off or check path. Stopping.\033[0m"
+			if [[ $running_in_container == true ]] ; then
+				echo -e "\033[93mCheck terrain_dir in docker_run script\033[0m"
+			fi
 			exit 1;
 		fi
 		for tile in "${tiles_list[@]}"

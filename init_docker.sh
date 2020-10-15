@@ -1,4 +1,5 @@
 #!/bin/bash
+first_launch=
 if [[ -f /mnt/external_scripts/config.ini ]] ; then
 	. /mnt/external_scripts/config.ini
 	if [[ -f /mnt/external_scripts/config_debug.ini ]] ; then
@@ -27,17 +28,24 @@ if [[ -f /mnt/external_scripts/config.ini ]] ; then
 		if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 			cd /app
 			zip "$project_dir/$project_name.qgz" automap.qgs
+			if [[ $? == 0 ]] ; then
+				echo -e "\033[93mQGIS project '$project_name.qgz' is created. Check your config.ini and execute prepare_data script.\033[0m"
+			else
+				echo -e "\033[93mError creating '$project_name.qgz'. Check directory permissions.\033[0m"
+				exit 1;
+			fi
 		fi
 	fi
 	rm -f "$project_dir/qgistopo_version.txt"
 	sed -n 1p /app/README.md | grep -o '[^v]*$' > "$project_dir/qgistopo_version.txt"
-fi
-
-if [[ ! -f /mnt/external_scripts/config.ini ]] ; then
-	echo -e "\033[93mThis is the first launch of the script. To use qgis-topo you need to modify config.ini for your needs and execute docker_run script again.\nThe path to the config.ini file is set by the qgistopo_extdir variable in the docker_run file\033[0m"
+elif [[ ! -f /mnt/external_scripts/config.ini ]] ; then
+	echo -e "\033[93mLooks like this is the first launch of the script. To use qgis-topo you need to modify config.ini for your needs and execute docker_run script again.\nThe path to the config.ini file is set by the qgistopo_extdir variable in the docker_run file\033[0m"
+	first_launch=true
 elif cmp -s /app/config.ini /mnt/external_scripts/config.ini ; then
 	echo -e "\033[93mconfig.ini was not modified. To use qgis-topo you need to modify config.ini for your needs. The path to the config.ini file is set by the qgistopo_extdir variable in the docker_run file\033[0m"
+	first_launch=true
 fi
+
 files=(config.ini crop_template.geojson prepare_data.sh calc_srtm_tiles_list.py query_srtm_tiles_list.sh run_alg.py)
 for f in ${files[@]}; do
 	if [[ ! -f /mnt/external_scripts/$f ]] ; then
@@ -69,11 +77,20 @@ if [[ -d /mnt/external_scripts/QGIS3 ]] ; then
 	cp -r -n /app/QGIS3 /mnt/external_scripts
 fi
 
-mkdir -p /home/user/.local/share/QGIS
-ln -s /mnt/external_scripts/QGIS3 /home/user/.local/share/QGIS/QGIS3
-ln -s /mnt/qgis_projects /home/user/qgis_projects
-if [[ -d /mnt/terrain ]] ; then
-	ln -s /mnt/terrain /home/user/terrain
+qgis_config_path=/home/user/.local/share/QGIS
+mkdir -p $qgis_config_path
+if [[ ! -L $qgis_config_path/QGIS3 ]] || [[ ! -e $qgis_config_path/QGIS3/profiles/ ]] ; then
+	ln -s /mnt/external_scripts/QGIS3 $qgis_config_path/QGIS3
+fi
+if [[ ! -L /home/user/qgis_projects ]] || [[ ! -e /home/user/qgis_projects ]] ; then
+	ln -s /mnt/qgis_projects/ /home/user/qgis_projects
+	rm -f /home/user/qgis_projects/qgis_projects
+fi
+if [[ ! -L /home/user/terrain ]] || [[ ! -e /home/user/terrain ]] ; then
+	ln -s /mnt/terrain/ /home/user/terrain
+	rm -f /home/user/terrain/terrain
 fi
 
-echo Initialization finished
+if [[ $first_launch != "true" ]] ; then
+	echo -e "\e[42mInitialization finished\e[49m"
+fi
