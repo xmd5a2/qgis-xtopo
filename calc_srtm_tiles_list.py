@@ -9,8 +9,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-bbox")
 args = parser.parse_args()
 
-#def calc_srtm_tiles_list(agrs.lon_min: float, agrs.lat_min: float, agrs.lon_max: float, agrs.lat_max: float):
-#def calc_srtm_tiles_list(lon_min: float, lat_min: float, lon_max: float, lat_max: float):
 def calc_srtm_tiles_list(bbox):
     bbox_list=bbox.split(',')
     lon_min = math.floor(float(bbox_list[0]))  # (W,E)   left

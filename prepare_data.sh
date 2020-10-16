@@ -4,33 +4,35 @@
 # Place DEM tiles (GeoTIFF/HGT) to project_dir/input_dem or use get_dem_tiles and source_dem_dir variables
 #read -rsp $'Press any key to continue...\n' -n1 key
 if [ -f /.dockerenv ] ; then
-	qgistopo_extdir=/mnt/external_scripts
-	if [[ -f ${qgistopo_extdir}/config.ini ]] ; then
-		. ${qgistopo_extdir}/config.ini
+	qgistopo-config=/mnt/external_scripts
+	if [[ -f ${qgistopo-config}/config.ini ]] ; then
+		. ${qgistopo-config}/config.ini
 		export XDG_RUNTIME_DIR=/mnt/qgis_projects/$project_name/tmp
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
 	fi
-		
-	if [[ -f ${qgistopo_extdir}/config_debug.ini ]] ; then
-		. ${qgistopo_extdir}/config_debug.ini
+
+	if [[ -f ${qgistopo-config}/config_debug.ini ]] ; then
+		. ${qgistopo-config}/config_debug.ini
 	fi
 	rm -f /tmp/.X99-lock
 	Xvfb :99 -ac -noreset &
 	export DISPLAY=:99
 else
-	qgistopo_extdir=$(pwd)
-	if [[ -f ${qgistopo_extdir}/config.ini ]] ; then
-		. ${qgistopo_extdir}/config.ini
+	qgistopo-config=$(pwd)
+	if [[ -f ${qgistopo-config}/config.ini ]] ; then
+		. ${qgistopo-config}/config.ini
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
 	fi
-	if [[ -f ${qgistopo_extdir}/config_debug.ini ]] ; then
-		. ${qgistopo_extdir}/config_debug.ini
+	if [[ -f ${qgistopo-config}/config_debug.ini ]] ; then
+		. ${qgistopo-config}/config_debug.ini
 	fi
 fi
+
+script_dir=$(pwd)
 
 echo -e "\e[101mProject:" $project_dir"\e[49m"
 
@@ -115,7 +117,7 @@ command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmconvert is re
 command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[93mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m"; sleep 60 && exit 1;}
 
 function run_alg_linestopolygons {
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "qgis:linestopolygons" \
 		-param1 INPUT -value1 "$temp_dir/$1.geojson" \
 		-param2 OUTPUT -value2 $temp_dir/${1}_polygonized.geojson
@@ -148,7 +150,9 @@ function jsonlines2json { # Convert JSON lines to JSON
 echo -e "\e[100mbbox:" $bbox_query"\e[49m"
 
 rm -f "$project_dir"/crop.geojson
-cp ${qgistopo_extdir}/crop_template.geojson "$project_dir"/crop.geojson
+echo '{ "type": "FeatureCollection","name": "crop","crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [ { "type": "Feature", "properties": { "properties": null }, "geometry": { "type": "MultiPolygon", "coordinates": [ [ [ [ {lon_min}, {lat_max} ], [ {lon_max}, {lat_max} ], [ {lon_max}, {lat_min} ], [ {lon_min}, {lat_min} ], [ {lon_min}, {lat_max} ] ] ] ] } } ] }' >> "$project_dir"/crop.geojson
+
 sed -i s/{lon_min}/$lon_min/g "$project_dir"/crop.geojson
 sed -i s/{lon_max}/$lon_max/g "$project_dir"/crop.geojson
 sed -i s/{lat_min}/$lat_min/g "$project_dir"/crop.geojson
@@ -156,7 +160,7 @@ sed -i s/{lat_max}/$lat_max/g "$project_dir"/crop.geojson
 
 if [[ $generate_terrain == "true" ]] ; then
 	rm -f "$merged_dem"
-	IFS=' ' read -r -a tiles_list <<< $(python3 ${qgistopo_extdir}/calc_srtm_tiles_list.py -bbox "$bbox")
+	IFS=' ' read -r -a tiles_list <<< $(python3 ${script_dir}/calc_srtm_tiles_list.py -bbox "$bbox")
 	echo -e "\e[100mDEM tiles list: ${tiles_list[@]}\e[49m"
 	if [[ $get_dem_tiles == "true" ]] ; then
 		rm -f $dem_dir/*.*
@@ -368,7 +372,7 @@ fi
 # 	unset GRASS_BATCH_JOB
 # 	rm -rf $temp_dir/grassdata/mytemploc
 # 	rm -rf $temp_dir/grassdata
-# 		python3 ${qgistopo_extdir}/run_alg.py \
+# 		python3 ${script_dir}/run_alg.py \
 # 			-alg "grass7:v.overlay" \
 # 			-param1 ainput -value1 $temp_dir/$1.$ext \
 # 			-param2 atype -value2 $3 \
@@ -429,7 +433,7 @@ function run_alg_dissolve {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:dissolve" \
 		-param1 INPUT -value1 "$temp_dir/$1.$ext$4" \
 		-param2 FIELD -value2 "$2" \
@@ -447,7 +451,7 @@ function run_alg_polygonstolines {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:polygonstolines" \
 		-param1 INPUT -value1 $temp_dir/$1.$ext \
 		-param2 OUTPUT -value2 $temp_dir/${1}_lines.$ext
@@ -464,7 +468,7 @@ function run_alg_multiparttosingleparts {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:multiparttosingleparts" \
 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
 		-param2 OUTPUT -value2 $temp_dir/${1}_parts.$ext
@@ -481,7 +485,7 @@ function run_alg_difference {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:difference" \
 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
 		-param2 OVERLAY -value2 $temp_dir/${2}.$ext$4$5 \
@@ -499,7 +503,7 @@ function run_alg_intersection {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:intersection" \
 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
 		-param2 OVERLAY -value2 $temp_dir/${2}.$ext$4$5 \
@@ -517,14 +521,14 @@ function run_alg_intersection {
 # 			ext="geojson"
 # 			;;
 # 	esac
-# 	python3 ${qgistopo_extdir}/run_alg.py \
+# 	python3 ${script_dir}/run_alg.py \
 # 		-alg "native:union" \
 # 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
 # 		-param2 OVERLAY -value2 $temp_dir/${2}.$ext$4$5 \
 # 		-param3 OUTPUT -value3 $temp_dir/${1}_union.$ext
 # }
 function run_alg_centroids {
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:centroids" \
 		-param1 INPUT -value1 $temp_dir/$1.geojson \
 		-param2 ALL_PARTS -value2 True \
@@ -542,7 +546,7 @@ function run_alg_smoothgeometry {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:smoothgeometry" \
 		-param1 INPUT -value1 $temp_dir/$1.$ext$6 \
 		-param2 ITERATIONS -value2 $2 \
@@ -605,7 +609,7 @@ function merge_vector_layers {
 	elif [ $4 ] ; then
 		str="$temp_dir/$3.$ext$geometrytype,$temp_dir/$4.$ext$geometrytype"
 	fi
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:mergevectorlayers" \
 		-param1 LAYERS -value1 "[$str]" \
 		-param2 CRS -value2 "QgsCoordinateReferenceSystem('EPSG:4326')" \
@@ -623,7 +627,7 @@ function run_alg_buffer {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:buffer" \
 		-param1 INPUT -value1 $temp_dir/$1.$ext \
 		-param2 DISTANCE -value2 $2 \
@@ -641,7 +645,7 @@ function run_alg_singlesidedbuffer {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "qgis:singlesidedbuffer" \
 		-param1 INPUT -value1 "$temp_dir/$1.$ext|geometrytype=LineString" \
 		-param2 DISTANCE -value2 $2 \
@@ -650,7 +654,7 @@ function run_alg_singlesidedbuffer {
 		-param5 OUTPUT -value5 $temp_dir/${1}_sbuffered.$ext
 }
 # function run_alg_rasterize {
-# 	python3 ${qgistopo_extdir}/run_alg.py \
+# 	python3 ${script_dir}/run_alg.py \
 # 		-alg "gdal:rasterize" \
 # 		-param1 INPUT -value1 $temp_dir/$1.geojson \
 # 		-param2 WIDTH -value2 $2 \
@@ -664,13 +668,13 @@ function run_alg_singlesidedbuffer {
 # 		-param10 OUTPUT -value10 $temp_dir/${1}_rast.tiff
 # }
 # function run_alg_r_thin {
-# 	python3 ${qgistopo_extdir}/run_alg.py \
+# 	python3 ${script_dir}/run_alg.py \
 # 		-alg "grass7:r.thin" \
 # 		-param1 input -value1 $temp_dir/$1.tiff \
 # 		-param2 output -value2 $temp_dir/${1}_thin.tiff
 # }
 # function run_alg_r_to_vect {
-# 	python3 ${qgistopo_extdir}/run_alg.py \
+# 	python3 ${script_dir}/run_alg.py \
 # 		-alg "grass7:r.to.vect" \
 # 		-param1 input -value1 $temp_dir/$1.tiff \
 # 		-param2 type -value2 $2 \
@@ -679,7 +683,7 @@ function run_alg_singlesidedbuffer {
 # 		-param5 output -value5 $temp_dir/${1}_vect.geojson
 # }
 function run_alg_explodelines {
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:explodelines" \
 		-param1 INPUT -value1 $temp_dir/$1.geojson \
 		-param2 OUTPUT -value2 $temp_dir/${1}_exploded.geojson
@@ -696,14 +700,14 @@ function run_alg_splitwithlines {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:splitwithlines" \
 		-param1 INPUT -value1 $temp_dir/$1.$ext \
 		-param2 LINES -value2 $temp_dir/$2.$ext \
 		-param3 OUTPUT -value3 $temp_dir/${1}_split.$ext
 }
 function run_alg_pyfieldcalc {
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "qgis:advancedpythonfieldcalculator" \
 		-param1 INPUT -value1 $temp_dir/$1.geojson \
 		-param2 FIELD_NAME -value2 $2 \
@@ -712,7 +716,7 @@ function run_alg_pyfieldcalc {
 		-param5 OUTPUT -value5 $temp_dir/${1}_pyfieldcalc.geojson
 }
 function run_alg_joinattributesbylocation {
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "qgis:joinattributesbylocation" \
 		-param1 INPUT -value1 $temp_dir/$1.geojson \
 		-param2 JOIN -value2 $temp_dir/$2.geojson \
@@ -722,7 +726,7 @@ function run_alg_joinattributesbylocation {
 		-param6 OUTPUT -value6 $temp_dir/${1}_joinattrsloc.geojson
 }
 # function run_alg_extractbyattribute {
-# 	python3 ${qgistopo_extdir}/run_alg.py \
+# 	python3 ${script_dir}/run_alg.py \
 # 		-alg "native:extractbyattribute" \
 # 		-param1 INPUT -value1 $temp_dir/$1.geojson \
 # 		-param2 FIELD -value2 $2 \
@@ -742,7 +746,7 @@ function run_alg_extractbylocation {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:extractbylocation" \
 		-param1 INPUT -value1 $temp_dir/$1.$ext \
 		-param2 PREDICATE -value2 $3 \
@@ -761,7 +765,7 @@ function run_alg_generalize {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "grass7:v.generalize" \
 		-param1 input -value1 $temp_dir/$1.$ext$4 \
 		-param2 method -value2 $2 \
@@ -788,7 +792,7 @@ function run_alg_fixgeometries {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:fixgeometries" \
 		-param1 INPUT -value1 $dir/$1.$ext$4 \
 		-param2 OUTPUT -value2 $dir/${1}_fixed.$ext
@@ -822,7 +826,7 @@ function run_alg_simplifygeometries {
 			ext="geojson"
 			;;
 	esac
-	python3 ${qgistopo_extdir}/run_alg.py \
+	python3 ${script_dir}/run_alg.py \
 		-alg "native:simplifygeometries" \
 		-param1 INPUT -value1 "$temp_dir/$1.$ext$5" \
 		-param2 METHOD -value2 $3 \
@@ -854,11 +858,10 @@ for t in ${array_queries[@]}; do
 	if [ -f $work_dir/$t.sqlite ] ; then
 		rm $work_dir/$t.sqlite
 	fi
-	if [[ ! -f $qgistopo_extdir/queries/$t.txt ]] ; then
-		echo -e "\033[93m$qgistopo_extdir/queries/$t.txt not found. Try executing docker_run again. Stopping.\033[0m"
-		exit 1;
+	if [[ ! -f ${script_dir}/queries/$t.txt ]] ; then
+		echo -e "\033[93mqueries/$t.txt not found.\033[0m"
 	fi
-	query=$(cat $qgistopo_extdir/queries/$t.txt)
+	query=$(cat ${script_dir}/queries/$t.txt)
 	req_string_query='[out:xml][timeout:3600][maxsize:2000000000][bbox:'$bbox_query'];'$query
 	req_string_out="out body;>;out skel qt;"
 	echo -e "\e[92m=== ($index / ${#array_queries[@]}) Downloading ${t}...\e[39m"

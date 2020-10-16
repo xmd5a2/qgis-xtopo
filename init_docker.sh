@@ -17,7 +17,7 @@ if [[ -f /mnt/external_scripts/config.ini ]] ; then
 			cd /app
 			zip "$project_dir/$project_name.qgz" automap.qgs
 			if [[ $? == 0 ]] ; then
-				echo -e "\033[93mQGIS project '$project_name.qgz' is created. Check your config.ini and execute prepare_data script.\033[0m"
+				echo -e "\033[93mQGIS project '$project_name.qgz' is created. Check your config.ini in qgistopo-config dir and execute prepare_data script.\033[0m"
 			else
 				echo -e "\033[93mError creating '$project_name.qgz'. Check directory permissions.\033[0m"
 				exit 1;
@@ -27,34 +27,21 @@ if [[ -f /mnt/external_scripts/config.ini ]] ; then
 	rm -f "$project_dir/qgistopo_version.txt"
 	sed -n 1p /app/README.md | grep -o '[^v]*$' > "$project_dir/qgistopo_version.txt"
 elif [[ ! -f /mnt/external_scripts/config.ini ]] ; then
-	echo -e "\033[93mLooks like this is the first launch of the script. To use qgis-topo you need to modify config.ini for your needs and execute docker_run script again.\nThe path to the config.ini file is set by the qgistopo_extdir variable in the docker_run file\033[0m"
+	echo -e "\033[93mLooks like this is the first launch of the script. To use qgis-topo you need to modify config.ini which is located in qgistopo-extdir. After that execute docker_run script again.\nPath to the qgistopo-config is set in docker_run file.\033[0m"
 	first_launch=true
 elif cmp -s /app/config.ini /mnt/external_scripts/config.ini ; then
-	echo -e "\033[93mconfig.ini was not modified. To use qgis-topo you need to modify config.ini for your needs. The path to the config.ini file is set by the qgistopo_extdir variable in the docker_run file\033[0m"
+	echo -e "\033[93mconfig.ini was not modified. To use qgis-topo you need to modify config.ini for your needs. The path to the config.ini file is set by the qgistopo-config variable in the docker_run file\033[0m"
 	first_launch=true
 fi
 
-files=(config.ini crop_template.geojson prepare_data.sh calc_srtm_tiles_list.py query_srtm_tiles_list.sh run_alg.py)
-for f in ${files[@]}; do
-	if [[ ! -f /mnt/external_scripts/$f ]] ; then
-		cp /app/$f /mnt/external_scripts/$f
-	fi
-done
+cp /app/config.ini /mnt/external_scripts/
 
 mkdir -p /mnt/external_scripts/queries
 mkdir -p /mnt/external_scripts/QGIS3
 mkdir -p /mnt/qgis_projects/icons
 
-for q in /app/queries/*.txt; do
-	if [[ ! -f /mnt/external_scripts/$(basename $q) ]] ; then
-		cp /app/queries/$(basename $q) /mnt/external_scripts/queries/$(basename $q)
-	fi
-done
-for i in /app/icons/*.svg; do
-	if [[ ! -f /mnt/qgis_projects/icons/$(basename $i) ]] ; then
-		cp /app/icons/$(basename $i) /mnt/qgis_projects/icons/$(basename $i)
-	fi
-done
+cp /app/icons/*.svg /mnt/qgis_projects/icons/
+
 if [[ -d /mnt/external_scripts/QGIS3 ]] ; then
 	cp -r -n /app/QGIS3 /mnt/external_scripts
 fi

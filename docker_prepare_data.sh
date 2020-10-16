@@ -5,4 +5,4 @@ fi
 if [[ ! $(docker container ls | grep qgis-topo) ]] ; then
 	. docker_run.sh
 fi
-docker exec -it --user user qgis-topo /mnt/external_scripts/prepare_data.sh
+docker exec -it --user user qgis-topo /app/prepare_data.sh

@@ -1,27 +1,29 @@
 #!/bin/bash
 # Query SRTM tiles list based on bbox in config.ini
 if [ -f /.dockerenv ] ; then
-	qgistopo_extdir=/mnt/external_scripts
-	if [[ -f ${qgistopo_extdir}/config.ini ]] ; then
-		. ${qgistopo_extdir}/config.ini
+	qgistopo-config=/mnt/external_scripts
+	if [[ -f ${qgistopo-config}/config.ini ]] ; then
+		. ${qgistopo-config}/config.ini
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
 	fi
-	if [[ -f ${qgistopo_extdir}/config_debug.ini ]] ; then
-		. ${qgistopo_extdir}/config_debug.ini
+	if [[ -f ${qgistopo-config}/config_debug.ini ]] ; then
+		. ${qgistopo-config}/config_debug.ini
 	fi
+	app_dir=/app
 else
-	qgistopo_extdir=$(pwd)
-	if [[ -f ${qgistopo_extdir}/config.ini ]] ; then
-		. ${qgistopo_extdir}/config.ini
+	qgistopo-config=$(pwd)
+	if [[ -f ${qgistopo-config}/config.ini ]] ; then
+		. ${qgistopo-config}/config.ini
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
 	fi
-	if [[ -f ${qgistopo_extdir}/config_debug.ini ]] ; then
-		. ${qgistopo_extdir}/config_debug.ini
+	if [[ -f ${qgistopo-config}/config_debug.ini ]] ; then
+		. ${qgistopo-config}/config_debug.ini
 	fi
+	app_dir=$(pwd)
 fi
 
 IFS=',' read -r -a array_bbox <<< "$bbox"
@@ -38,5 +40,5 @@ fi
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
 echo -e "\e[100mbbox:" $bbox_query"\e[49m"
 
-IFS=' ' read -r -a tiles_list <<< $(python3 ${qgistopo_extdir}/calc_srtm_tiles_list.py -bbox "$bbox")
+IFS=' ' read -r -a tiles_list <<< $(python3 $app_dir/calc_srtm_tiles_list.py -bbox "$bbox")
 echo -e "\e[100mDEM tiles list: ${tiles_list[@]}\e[49m"
