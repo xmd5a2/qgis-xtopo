@@ -4,31 +4,31 @@
 # Place DEM tiles (GeoTIFF/HGT) to project_dir/input_dem or use get_dem_tiles and source_dem_dir variables
 #read -rsp $'Press any key to continue...\n' -n1 key
 if [ -f /.dockerenv ] ; then
-	qgistopo-config=/mnt/external_scripts
-	if [[ -f ${qgistopo-config}/config.ini ]] ; then
-		. ${qgistopo-config}/config.ini
+	qgistopo_config_dir=/mnt/external_scripts
+	if [[ -f ${qgistopo_config_dir}/config.ini ]] ; then
+		. ${qgistopo_config_dir}/config.ini
 		export XDG_RUNTIME_DIR=/mnt/qgis_projects/$project_name/tmp
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
 	fi
 
-	if [[ -f ${qgistopo-config}/config_debug.ini ]] ; then
-		. ${qgistopo-config}/config_debug.ini
+	if [[ -f ${qgistopo_config_dir}/config_debug.ini ]] ; then
+		. ${qgistopo_config_dir}/config_debug.ini
 	fi
 	rm -f /tmp/.X99-lock
 	Xvfb :99 -ac -noreset &
 	export DISPLAY=:99
 else
-	qgistopo-config=$(pwd)
-	if [[ -f ${qgistopo-config}/config.ini ]] ; then
-		. ${qgistopo-config}/config.ini
+	qgistopo_config_dir=$(pwd)
+	if [[ -f ${qgistopo_config_dir}/config.ini ]] ; then
+		. ${qgistopo_config_dir}/config.ini
 	else
 		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
 		exit 1;
 	fi
-	if [[ -f ${qgistopo-config}/config_debug.ini ]] ; then
-		. ${qgistopo-config}/config_debug.ini
+	if [[ -f ${qgistopo_config_dir}/config_debug.ini ]] ; then
+		. ${qgistopo_config_dir}/config_debug.ini
 	fi
 fi
 

@@ -17,7 +17,7 @@ if [[ -f /mnt/external_scripts/config.ini ]] ; then
 			cd /app
 			zip "$project_dir/$project_name.qgz" automap.qgs
 			if [[ $? == 0 ]] ; then
-				echo -e "\033[93mQGIS project '$project_name.qgz' is created. Check your config.ini in qgistopo-config dir and execute prepare_data script.\033[0m"
+				echo -e "\033[93mQGIS project '$project_name.qgz' is created. Check your config.ini in qgistopo-config folder and execute docker_prepare_data script.\033[0m"
 			else
 				echo -e "\033[93mError creating '$project_name.qgz'. Check directory permissions.\033[0m"
 				exit 1;
@@ -27,10 +27,10 @@ if [[ -f /mnt/external_scripts/config.ini ]] ; then
 	rm -f "$project_dir/qgistopo_version.txt"
 	sed -n 1p /app/README.md | grep -o '[^v]*$' > "$project_dir/qgistopo_version.txt"
 elif [[ ! -f /mnt/external_scripts/config.ini ]] ; then
-	echo -e "\033[93mLooks like this is the first launch of the script. To use qgis-topo you need to modify config.ini which is located in qgistopo-extdir. After that execute docker_run script again.\nPath to the qgistopo-config is set in docker_run file.\033[0m"
+	echo -e "\033[93mLooks like this is the first launch of the script. To use qgis-topo you need to modify config.ini which is located in qgistopo-config folder. After that execute docker_run script again.\nPath to the qgistopo_config_dir is set in docker_run file.\033[0m"
 	first_launch=true
 elif cmp -s /app/config.ini /mnt/external_scripts/config.ini ; then
-	echo -e "\033[93mconfig.ini was not modified. To use qgis-topo you need to modify config.ini for your needs. The path to the config.ini file is set by the qgistopo-config variable in the docker_run file\033[0m"
+	echo -e "\033[93mconfig.ini was not modified. To use qgis-topo you need to modify config.ini for your needs. The path to the config.ini file is set by the qgistopo_config_dir variable in the docker_run file\033[0m"
 	first_launch=true
 fi
 
