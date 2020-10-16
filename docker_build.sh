@@ -9,8 +9,9 @@ if [ -f "config_debug.ini" ] ; then
 	expressions_dir=$work_dir/expressions
 	rm $work_dir/icons/*.*
 	cp -f $qgis_projects_dir/icons/*.* $work_dir/icons/
+	rm $work_dir/QGIS3/profiles/default/python/expressions/*.py
 fi
-rm $work_dir/QGIS3/profiles/default/python/expressions/*.py
+mkdir -p $work_dir/QGIS3/profiles/default/python/expressions/
 cp -f $expressions_dir/*.py $work_dir/QGIS3/profiles/default/python/expressions/
 docker build -t $(basename $work_dir) . #--no-cache --pull
 docker rmi $(docker images -q -f dangling=true)
