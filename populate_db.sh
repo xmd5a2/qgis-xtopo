@@ -25,13 +25,6 @@ else
     rm -f $osm_tmp_dir/*.*
 fi
 osm_data_is_present=""
-# timestamp=""
-# function set_timestamp {
-# 	timestamp_tmp=$(osmium fileinfo -e -g data.timestamp.last $1)
-# 	if [[ ${#timestamp_tmp} -eq 20 ]] && [[ ${timestamp_tmp::4} != "1970" ]]; then
-# 		timestamp=$timestamp_tmp
-# 	fi
-# }
 # Determine input file list
 shopt -s nullglob
 cd $osm_data_dir
@@ -49,26 +42,13 @@ for f in $osm_data_dir/*.osm.bz2; do
 done
 for f in $osm_data_dir/*.pbf; do
 	[ -e "$f" ] && osm_data_is_present="true"; pbf_str="$osm_data_dir/*.pbf"
-# 	if [[ $UPDATE_OSM == true ]] ; then # too slow
-# 		/app/osmupdate -v $f $osm_data_dir/new_$(basename $f) && rm -f $f && mv $osm_data_dir/new_$(basename $f) $f
-# 	fi
 done
 shopt -u nullglob
-# echo Timestamp is $timestamp
-# sequenceNumber_str=$(wget -qO- "https://replicate-sequences.osm.mazdermind.de/?$timestamp&stream=hour" | grep sequenceNumber)
-# sequenceNumber="${sequenceNumber_str##*=}"
-# echo sequenceNumber is $sequenceNumber
-# if [[ $sequenceNumber -le 10000 ]] ; then
-# 	echo -e "\033[93msequenceNumber is invalid. Update Overpass DB will not work.\033[0m"
-# fi
-#set -- $osm_data_dir/*.pbf
-# if [ -f "$1" ]; then echo $1; osm_data_is_present="true"; pbf_str="$osm_data_dir/*.pbf"; fi
 if [[ $osm_data_is_present == "true" ]]; then
 	echo Merging and converting OSM files in osm_data_dir
 	osmium cat $pbf_str $osm_str $osmbz2_str $o5m_str -o $osm_tmp_dir/input.osm.bz2 -f osm.bz2
 	echo Populating local Overpass database
 	bash /app/osm-3s/bin/init_osm3s.sh $osm_tmp_dir/input.osm.bz2 /mnt/overpass_db /app/osm-3s
-# 	echo $sequenceNumber > /mnt/overpass_db/replicate_id
 	if [[ -f /mnt/overpass_db/nodes.map ]] ; then
 		echo Done
 		rm -f $osm_data_dir/tmp/input.osm.bz2

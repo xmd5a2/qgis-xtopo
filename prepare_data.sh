@@ -132,9 +132,6 @@ function convert2spatialite {
 		layername_string="-nln $3"
 	else layername_string=""
 	fi
-#	if [ "${1##*.}" == "osm" ] ; then
-# 		osm_string="--config OSM_USE_CUSTOM_INDEXING NO --config OSM_MAX_TMPFILE_SIZE 2048 --config OSM_CONFIG_FILE osmconf_loc.ini"
-# 	fi
 	ogr2ogr -dsco SPATIALITE=YES -lco COMPRESS_GEOM=YES -f SQLite $layername_string $2 $1 # $osm_string
 }
 function jsonlines2json { # Convert JSON lines to JSON
