@@ -4,25 +4,13 @@ if [[ -f /mnt/external_scripts/config.ini ]] ; then
 	. /mnt/external_scripts/config.ini
 	if [[ -f /mnt/external_scripts/config_debug.ini ]] ; then
 		. /mnt/external_scripts/config_debug.ini
-		if [[ ! -d "/mnt/qgis_projects/$override_dir" ]] ; then
-			mkdir "/mnt/qgis_projects/$override_dir"
-		fi
+		mkdir -p "/mnt/qgis_projects/$override_dir"
 	fi
-	if [[ ! -d "$project_dir" ]] ; then
-		mkdir "$project_dir"
-	fi
-	if [[ ! -d "$work_dir" ]] ; then
-		mkdir "$work_dir"
-	fi
-	if [[ ! -d "$dem_dir" ]] ; then
-		mkdir "$dem_dir"
-	fi
-	if [[ ! -d "$osm_data_dir" ]] ; then
-		mkdir "$osm_data_dir"
-	fi
-	if [[ ! -d "$temp_dir" ]] ; then
-		mkdir "$temp_dir"
-	fi
+	mkdir -p "$project_dir"
+	mkdir -p "$work_dir"
+	mkdir -p "$dem_dir"
+	mkdir -p "$osm_data_dir"
+	mkdir -p "$temp_dir"
 
 	if [[ -f /app/automap.qgs ]] ; then
 		if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
@@ -53,15 +41,9 @@ for f in ${files[@]}; do
 	fi
 done
 
-if [[ ! -d /mnt/external_scripts/queries ]] ; then
-	mkdir /mnt/external_scripts/queries
-fi
-if [[ ! -d /mnt/external_scripts/QGIS3 ]] ; then
-	mkdir /mnt/external_scripts/QGIS3
-fi
-if [[ ! -d /mnt/qgis_projects/icons ]] ; then
-	mkdir /mnt/qgis_projects/icons
-fi
+mkdir -p /mnt/external_scripts/queries
+mkdir -p /mnt/external_scripts/QGIS3
+mkdir -p /mnt/qgis_projects/icons
 
 for q in /app/queries/*.txt; do
 	if [[ ! -f /mnt/external_scripts/$(basename $q) ]] ; then

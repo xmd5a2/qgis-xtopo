@@ -80,21 +80,11 @@ override_dir=$qgis_projects_dir/$override_dir
 merged_dem="$project_dir/merged_dem.tif"
 
 if [[ $running_in_container == false ]] ; then
-	if [[ ! -d "$project_dir" ]] ; then
-		mkdir "$project_dir"
-	fi
-	if [[ ! -d "$work_dir" ]] ; then
-		mkdir "$work_dir"
-	fi
-	if [[ ! -d "$override_dir" ]] ; then
-		mkdir "$override_dir"
-	fi
-	if [[ ! -d "$osm_data_dir" ]] ; then
-		mkdir "$osm_data_dir"
-	fi
-	if [[ ! -d "$temp_dir" ]] ; then
-		mkdir "$temp_dir"
-	fi
+	mkdir -p "$project_dir"
+	mkdir -p "$work_dir"
+	mkdir -p "$override_dir"
+	mkdir -p "$osm_data_dir"
+	mkdir -p "$temp_dir"
 fi
 if [[ $running_in_container == true ]] ; then
 	cd /app
