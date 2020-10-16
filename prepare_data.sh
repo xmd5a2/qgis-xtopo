@@ -85,8 +85,7 @@ if [[ $running_in_container == false ]] ; then
 	mkdir -p "$override_dir"
 	mkdir -p "$osm_data_dir"
 	mkdir -p "$temp_dir"
-fi
-if [[ $running_in_container == true ]] ; then
+else
 	cd /app
 fi
 if [[ -d "$temp_dir" ]] ; then

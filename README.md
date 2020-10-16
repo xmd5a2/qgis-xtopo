@@ -1,4 +1,4 @@
-QGIS-topo v0.1.20201008
+QGIS-topo v0.1.20201016
 ================
 
-Rendering style for QGIS and data preparation scripts
+Topographic rendering style for QGIS and data preparation scripts
