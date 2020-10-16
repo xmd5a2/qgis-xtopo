@@ -109,8 +109,10 @@ bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
 
 command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m"; sleep 60 && exit 1;}
 command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[93mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m"; sleep 60 && exit 1;}
+command -v grass >/dev/null 2>&1 || { echo >&2 -e "\033[93mGRASS > 7.0 is required but not installed.\033[0m"; sleep 60 && exit 1;}
 command -v osmfilter >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmfilter is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m"; sleep 60 && exit 1;}
 command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmconvert is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m"; sleep 60 && exit 1;}
+command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmium is required but not installed. If you are using Ubuntu please install 'osmium-tool' package.\033[0m"; sleep 60 && exit 1;}
 command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[93mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m"; sleep 60 && exit 1;}
 
 function run_alg_linestopolygons {
@@ -1259,7 +1261,7 @@ if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" 
 		echo -e "\e[104m=== Substracting water from isolines...\e[49m"
 		cp $project_dir/isolines_full.sqlite $temp_dir/isolines_full.sqlite
 		cp $work_dir/water.sqlite $temp_dir
-		run_alg_difference isolines_full "water" "sqlite"
+		time run_alg_difference isolines_full "water" "sqlite"
 		set_projection $temp_dir/isolines_full_diff.sqlite
 		convert2spatialite "$temp_dir/isolines_full_diff.sqlite" "$temp_dir/isolines_full_tmp.sqlite"
 	else
