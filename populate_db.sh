@@ -4,14 +4,14 @@ if [[ ! -f /.dockerenv ]] ; then
 	echo -e "\033[93mThis script is not meant to run outside the docker container. Stopping.\033[0m"
 	exit 1;
 fi
-if [[ -f /mnt/external_scripts/config.ini ]] ; then
-	. /mnt/external_scripts/config.ini
+if [[ -f /mnt/qgistopo-config/config.ini ]] ; then
+	. /mnt/qgistopo-config/config.ini
 else
 	echo -e "\033[93mconfig.ini not found. Check project installation integrity. Stopping.\033[0m"
 	exit 1;
 fi
-if [[ -f /mnt/external_scripts/config_debug.ini ]] ; then
-	. /mnt/external_scripts/config_debug.ini
+if [[ -f /mnt/qgistopo-config/config_debug.ini ]] ; then
+	. /mnt/qgistopo-config/config_debug.ini
 fi
 
 osm_tmp_dir=$osm_data_dir/tmp
