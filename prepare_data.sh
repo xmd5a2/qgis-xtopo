@@ -403,6 +403,24 @@ function run_alg_multiparttosingleparts {
 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
 		-param2 OUTPUT -value2 $temp_dir/${1}_parts.$ext
 }
+function run_alg_convertgeometrytype {
+	case $2 in
+		"geojson")
+			ext="geojson"
+			;;
+		"sqlite")
+			ext="sqlite"
+			;;
+		*)
+			ext="geojson"
+			;;
+	esac
+	python3 ${script_dir}/run_alg.py \
+		-alg "qgis:convertgeometrytype" \
+		-param1 INPUT -value1 $temp_dir/${1}.$ext$4 \
+		-param2 TYPE -value2 $3 \
+		-param3 OUTPUT -value3 $temp_dir/${1}_conv.$ext
+}
 function run_alg_difference {
 	case $3 in
 		"geojson")
@@ -1183,20 +1201,24 @@ for t in ${array_queries[@]}; do
 			;;
 
 		"coastline") # should be requested after "water","island"
+			date
 			osmtogeojson_wrapper $work_dir/$t.osm $work_dir/$t.geojson
 			convert2spatialite "$work_dir/$t.geojson" "$work_dir/$t.sqlite"
 			if [ $(wc -c <"$work_dir/$t.sqlite") -ge 70 ] ; then
 				cp $work_dir/$t.sqlite $temp_dir/${t}_tmp.sqlite
-				run_alg_simplifygeometries ${t}_tmp "sqlite" 0 0.000025 "|geometrytype=LineString" && mv $temp_dir/${t}_tmp_simpl.sqlite $temp_dir/${t}_simpl.sqlite
-				run_alg_dissolve ${t}_simpl 'natural' "sqlite"
-				set_projection "$temp_dir/${t}_simpl_dissolved.sqlite"
+				run_alg_polygonstolines ${t}_tmp "sqlite" "|geometrytype=Polygon"
+				run_alg_convertgeometrytype ${t}_tmp_lines "sqlite" 2
+				merge_vector_layers "sqlite" "LineString" ${t}_tmp_lines_conv ${t}_tmp
+				rm -f $temp_dir/${t}_tmp.sqlite && mv $temp_dir/${t}_tmp_lines_conv_merged.sqlite $temp_dir/${t}_tmp.sqlite
+				run_alg_dissolve ${t}_tmp 'natural' "sqlite"
+				run_alg_simplifygeometries ${t}_tmp_dissolved "sqlite" 0 0.000050 "|geometrytype=LineString" && mv $temp_dir/${t}_tmp_dissolved_simpl.sqlite $temp_dir/${t}_dissolved_simpl.sqlite
 				convert2spatialite "$project_dir/crop.geojson" "$temp_dir/crop.sqlite"
-				time run_alg_splitwithlines "crop" ${t}_simpl_dissolved "sqlite"
+				time run_alg_splitwithlines "crop" ${t}_dissolved_simpl "sqlite"
 				run_alg_fixgeometries crop_split "sqlite" && rm -f $temp_dir/crop_split.sqlite && mv $temp_dir/crop_split_fixed.sqlite $temp_dir/crop_split.sqlite
 				set_projection $temp_dir/crop_split.sqlite
-				run_alg_singlesidedbuffer ${t}_simpl_dissolved 0.000001 1 "sqlite"
-				run_alg_buffer ${t}_simpl_dissolved_sbuffered -0.0000001 "sqlite"
-				run_alg_extractbylocation crop_split ${t}_simpl_dissolved_sbuffered_buffered 5 "sqlite"
+				run_alg_singlesidedbuffer ${t}_dissolved_simpl 0.000001 1 "sqlite"
+				run_alg_buffer ${t}_dissolved_simpl_sbuffered -0.0000001 "sqlite"
+				run_alg_extractbylocation crop_split ${t}_dissolved_simpl_sbuffered_buffered 5 "sqlite"
 				mv $temp_dir/crop_split_extracted.sqlite $temp_dir/ocean.sqlite
 				if [[ -f $work_dir/island.sqlite ]] ; then
 					cp $work_dir/island.sqlite $temp_dir
@@ -1219,6 +1241,7 @@ for t in ${array_queries[@]}; do
 				rm $work_dir/$t.osm
 				rm $work_dir/$t.geojson
 			fi
+			date
 			;;
 		"highway_main")
 			osmium sort -o $work_dir/${t}_sorted.osm $work_dir/$t.osm && rm -f $work_dir/$t.osm && mv $work_dir/${t}_sorted.osm $work_dir/$t.osm
