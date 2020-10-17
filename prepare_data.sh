@@ -415,7 +415,7 @@ function run_alg_convertgeometrytype {
 			ext="geojson"
 			;;
 	esac
-	python3 ${script_dir}/run_alg.py \
+	python3 $(pwd)/run_alg.py \
 		-alg "qgis:convertgeometrytype" \
 		-param1 INPUT -value1 $temp_dir/${1}.$ext$4 \
 		-param2 TYPE -value2 $3 \
@@ -1200,7 +1200,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 
-		"coastline") # should be requested after "water","island"
+		"coastline") # Create ocean polygons and merge it with water polygons. Should be requested after "water","island"
 			date
 			osmtogeojson_wrapper $work_dir/$t.osm $work_dir/$t.geojson
 			convert2spatialite "$work_dir/$t.geojson" "$work_dir/$t.sqlite"
