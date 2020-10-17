@@ -6,9 +6,9 @@ work_dir=$PWD
 
 if [ -f "config_debug.ini" ] ; then
 	qgis_projects_dir=~/qgis_projects
-	rm $work_dir/icons/*.*
+	rm -f $work_dir/icons/*.*
 	cp -f $qgis_projects_dir/icons/*.* $work_dir/icons/
-	rm $work_dir/QGIS3/profiles/default/python/expressions/*.py
+	rm -f $work_dir/QGIS3/profiles/default/python/expressions/*.py
 fi
 expressions_dir=$work_dir/expressions
 mkdir -p $work_dir/QGIS3/profiles/default/python/expressions/
