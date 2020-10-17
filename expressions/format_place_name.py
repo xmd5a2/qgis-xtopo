@@ -3,7 +3,7 @@ from qgis.gui import *
 import re
 
 @qgsfunction(args='auto', group='Custom')
-def format_place_name(name, population, feature, parent):
+def format_place_name(name, population, name_pref_suf_lang, feature, parent):
     n = name
 
     if "санатория" in n.lower(): n = re.sub("санатория","сан.", n, flags=re.IGNORECASE)
@@ -124,6 +124,6 @@ def format_place_name(name, population, feature, parent):
 
     if "перевал " in n.lower(): n = re.sub("перевал ","пер. ", n, flags=re.IGNORECASE)
 
-    if population == "0": n = n + "\n(неж.)"
+    if population == "0" and name_pref_suf_lang == "ru": n = n + "\n(неж.)"
 
     return n
