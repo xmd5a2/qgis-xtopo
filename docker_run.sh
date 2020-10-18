@@ -41,4 +41,3 @@ docker run -dti --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --name qgis-top
 	--mount type=bind,source=$overpass_db_dir,target=/mnt/overpass_db \
 	qgis-topo:latest
 docker exec -it --user user qgis-topo /app/init_docker.sh
-sleep 20
