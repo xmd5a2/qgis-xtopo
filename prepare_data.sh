@@ -802,7 +802,7 @@ for t in ${array_queries[@]}; do
 
 	fi
 	if grep -q \</osm\> "$work_dir/$t.osm" ; then
-		echo OK
+		echo -e "\033[92mOK\033[0m"
 	else
 		echo -e "\033[93m$work_dir/$t.osm is incomplete. It looks like overpass server has interrupted the transmission. Try again or use another server (overpass_instance and overpass_endpoint_* variables in config.ini). Stopping.\033[0m"
 		exit 1;

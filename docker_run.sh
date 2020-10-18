@@ -23,7 +23,7 @@ fi
 if [ ! -z $qgistopo_config_dir ] ; then
 	mkdir -p $qgistopo_config_dir
 else
-	echo -e "\033[qgistopo_config_dir is not defined. Stopping.\033[0m"
+	echo -e "\033[93mqgistopo_config_dir is not defined. Stopping.\033[0m"
 	exit 1
 fi
 if [[ -d $terrain_dir ]] ; then
