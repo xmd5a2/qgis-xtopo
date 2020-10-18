@@ -8,9 +8,24 @@ if [ -f "docker_run.ini" ] ; then
 	. docker_run.ini
 fi
 
-mkdir -p $qgis_projects_dir
-mkdir -p $overpass_db_dir
-mkdir -p $qgistopo_config_dir
+if [ ! -z $qgis_projects_dir ] ; then
+	mkdir -p $qgis_projects_dir
+else
+	echo -e "\033[93mqgis_projects_dir is not defined. Stopping.\033[0m"
+	exit 1
+fi
+if [ ! -z $overpass_db_dir ] ; then
+	mkdir -p $overpass_db_dir
+else
+	echo -e "\033[93moverpass_db_dir is not defined. Stopping.\033[0m"
+	exit 1
+fi
+if [ ! -z $qgistopo_config_dir ] ; then
+	mkdir -p $qgistopo_config_dir
+else
+	echo -e "\033[qgistopo_config_dir is not defined. Stopping.\033[0m"
+	exit 1
+fi
 if [[ -d $terrain_dir ]] ; then
 	terrain_mount_str="--mount type=bind,source=$terrain_dir,target=/mnt/terrain"
 fi
