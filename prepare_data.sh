@@ -33,6 +33,9 @@ else
 fi
 
 echo -e "\e[105mProject: $project_dir\e[49m"
+if [[ $running_in_container == true ]] ; then
+	echo -e "\e[100mRunning in docker\e[49m"
+fi
 echo -e "\e[100mconfig: ${qgistopo_config_dir}/config.ini\e[49m"
 
 if [[ "$project_name" == "" ]] ; then
