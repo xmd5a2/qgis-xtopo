@@ -28,7 +28,7 @@
         <cc:license
            rdf:resource="http://web.resource.org/cc/PublicDomain" />
         <dc:language>en</dc:language>
-        <dc:title></dc:title>
+        <dc:title />
       </cc:Work>
     </rdf:RDF>
   </metadata>
@@ -45,9 +45,9 @@
      pagecolor="#ffffff"
      id="base"
      showgrid="true"
-     inkscape:zoom="16"
-     inkscape:cx="14.544839"
-     inkscape:cy="17.249523"
+     inkscape:zoom="8"
+     inkscape:cx="6.3358134"
+     inkscape:cy="16.224181"
      inkscape:window-x="1920"
      inkscape:window-y="0"
      inkscape:current-layer="svg2"

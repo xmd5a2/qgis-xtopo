@@ -1,0 +1,3 @@
+(
+nwr["natural"="volcano"]["volcano:type"="dirt"];
+);

@@ -32,7 +32,8 @@ else
 	fi
 fi
 
-echo -e "\e[101mProject:" $project_dir"\e[49m"
+echo -e "\e[105mProject: $project_dir\e[49m"
+echo -e "\e[100mconfig: ${qgistopo_config_dir}/config.ini\e[49m"
 
 if [[ "$project_name" == "" ]] ; then
 	echo -e "\033[93mproject_name not defined. Please define it in config.ini. Stopping.\033[0m"
@@ -965,7 +966,7 @@ for t in ${array_queries[@]}; do
 			rm $work_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
-		"place_of_worship_muslim" | "place_of_worship_hindu" | "place_of_worship_buddhist" | "place_of_worship_shinto" | "place_of_worship_jewish" | "place_of_worship_taoist" | "place_of_worship_sikh" | "place_of_worship_other" | "sinkhole_polygon" | "alpine_hut" | "wilderness_hut" | "memorial" | "monument" | "tower_communication" | "monastery_no_religion" | "barrier_border_control" | "cape" | "chimney" | "water_tower")
+		"place_of_worship_muslim" | "place_of_worship_hindu" | "place_of_worship_buddhist" | "place_of_worship_shinto" | "place_of_worship_jewish" | "place_of_worship_taoist" | "place_of_worship_sikh" | "place_of_worship_other" | "sinkhole_polygon" | "alpine_hut" | "wilderness_hut" | "memorial" | "monument" | "tower_communication" | "monastery_no_religion" | "barrier_border_control" | "cape" | "chimney" | "water_tower" | "volcano" | "volcano_dirt")
 			osmtogeojson $work_dir/$t.osm > $work_dir/$t.geojson
 			cp $work_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
