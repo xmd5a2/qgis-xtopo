@@ -17,7 +17,7 @@ fi
 osm_tmp_dir=$osm_data_dir/tmp
 if [[ ! -d $osm_data_dir ]] ; then
 	echo -e "\033[93mosm_data_dir in project_dir does not exist. Stopping.\033[0m"
-	exit 0
+	exit 1;
 fi
 if [[ ! -d $osm_tmp_dir ]] ; then
 	mkdir $osm_tmp_dir

@@ -836,7 +836,7 @@ for t in ${array_queries[@]}; do
 			run_alg_simplifygeometries $t "geojson" 0 0.0007
 			run_alg_smoothgeometry ${t}_simpl 10 0.25 180 "geojson"
 			run_alg_dissolve ${t}_simpl_smoothed "name" "geojson"
-			convert2spatialite "$temp_dir/${t}_simpl_smoothed_dissolved.geojson" "$work_dir/${t}_simpl_smoothed.sqlite" "ridge_names_smoothed"
+			convert2spatialite "$temp_dir/${t}_simpl_smoothed_dissolved.geojson" "$work_dir/${t}_simpl_smoothed.sqlite"
 			cp $temp_dir/${t}_simpl_smoothed_dissolved.geojson $work_dir/${t}_simpl_smoothed.geojson
 			rm $work_dir/$t.osm
 			rm $temp_dir/*.*
