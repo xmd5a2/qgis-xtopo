@@ -2,10 +2,12 @@
 .stversions/
 author.txt
 config_debug.ini
+config_debug.ini1
 docker_prepare_data.ini
 docker_run.ini
 prepare_files_for_github.sh
 update_local_extdir.sh
+update_local_extdir.sh1
 queries/bak/
 QGIS3/profiles/default/python/expressions/
 expressions/__pycache__

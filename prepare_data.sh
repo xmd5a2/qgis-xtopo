@@ -1221,7 +1221,7 @@ for t in ${array_queries[@]}; do
 				run_alg_fixgeometries crop_split "sqlite" && rm -f $temp_dir/crop_split.sqlite && mv $temp_dir/crop_split_fixed.sqlite $temp_dir/crop_split.sqlite
 				set_projection $temp_dir/crop_split.sqlite
 				run_alg_singlesidedbuffer ${t}_dissolved_simpl 0.000001 1 "sqlite"
-				run_alg_buffer ${t}_dissolved_simpl_sbuffered -0.0000001 "sqlite"
+				run_alg_buffer ${t}_dissolved_simpl_sbuffered -0.00000048 "sqlite"
 				run_alg_extractbylocation crop_split ${t}_dissolved_simpl_sbuffered_buffered 5 "sqlite"
 				mv $temp_dir/crop_split_extracted.sqlite $temp_dir/ocean.sqlite
 				if [[ -f $work_dir/island.sqlite ]] ; then
