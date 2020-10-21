@@ -776,7 +776,7 @@ for t in ${array_queries[@]}; do
 	query=$(cat $(pwd)/queries/$t.txt)
 	req_string_query='[out:xml][timeout:3600][maxsize:2000000000][bbox:'$bbox_query'];'$query
 	req_string_out="out body;>;out skel qt;"
-	echo -e "\e[92m=== ($index / ${#array_queries[@]}) Downloading ${t}...\e[39m"
+	echo -e "\033[92m\e[44m=== ($index / ${#array_queries[@]}) Downloading ${t}...\e[49m\033[0m"
 	if [[ $overpass_instance == external ]] ; then
 		req_string=$overpass_endpoint_external'?data='$req_string_query$req_string_out
 		wget -O $work_dir/$t.osm -t 1 --timeout=3600 --remote-encoding=utf-8 --local-encoding=utf-8 "$req_string"
