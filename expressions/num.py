@@ -2,8 +2,11 @@ from qgis.core import *
 from qgis.gui import *
 
 @qgsfunction(args='auto', group='Custom')
-def num(s,feature, parent):
+def num(s, feature, parent):
     try:
-        return float(s.replace(",",".").replace("m","").replace("м","").strip())
+        return float(s)
     except ValueError:
-        return "null"
+        try:
+            return float(s.replace(",","."))
+        except ValueError:
+            return ""

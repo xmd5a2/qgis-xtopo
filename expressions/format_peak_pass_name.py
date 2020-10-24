@@ -5,6 +5,11 @@ import re
 @qgsfunction(args='auto', group='Custom')
 def format_peak_pass_name(name, feature, parent):
     n = name
+    if n.lower() == 'сопка': n = ""
+    if n.lower() == 'вершина': n = ""
+    if n.lower() == 'пик': n = ""
+    if n.lower() == 'скала': n = ""
+    if n.lower() == 'гора': n = ""
     if n.lower().startswith('пик '): n = re.sub("^пик ","", n, flags=re.IGNORECASE)
     if n.lower().endswith(' пик'): n = re.sub(" пик$","", n, flags=re.IGNORECASE)
     if ' пик ' in n.lower(): n = re.sub(" пик "," ", n, flags=re.IGNORECASE)
@@ -13,6 +18,11 @@ def format_peak_pass_name(name, feature, parent):
     if n.lower().endswith(' скала'): n = re.sub(" скала$","", n, flags=re.IGNORECASE)
     if n.lower().startswith('гора '): n = re.sub("^гора ","", n, flags=re.IGNORECASE)
     if n.lower().endswith(' гора'): n = re.sub(" гора$","", n, flags=re.IGNORECASE)
+    if n.lower().startswith('г. '): n = re.sub("^г. ","г. ", n, flags=re.IGNORECASE)
+    if n.lower().startswith('сопка '): n = re.sub("^сопка ","соп. ", n, flags=re.IGNORECASE)
+    if n.lower().endswith(' сопка'): n = re.sub(" сопка$"," соп.", n, flags=re.IGNORECASE)
+    if n.lower().startswith('соп.'): n = re.sub("^соп.","соп.", n, flags=re.IGNORECASE)
+    if n.lower().endswith(' соп.'): n = re.sub(" соп.$"," соп.", n, flags=re.IGNORECASE)
     if 'плато' in n.lower() and " " in n: n = re.sub("плато","пл.", n, flags=re.IGNORECASE)
     if 'перевал' in n.lower() and " " in n: n = re.sub("перевал","", n, flags=re.IGNORECASE)
     if 'пер.' in n.lower(): n = re.sub("пер.","", n, flags=re.IGNORECASE)

@@ -14,7 +14,6 @@ def compose_peak_name(name, ele, map_scale, name_pref_suf_lang, feature, parent)
     if ele < -500: ele = ""
 
     ele = num(ele)
-    print(type(num(name)))
     name_type=type(num(name))
     if not isBlank(name): result = name;
     if name_type == str:

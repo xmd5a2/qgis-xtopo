@@ -35,6 +35,9 @@ def isBlank(myString):
 
 def num(s):
     try:
-        return float(s.replace(",",".").replace("m","").replace("м","").strip())
+        return float(s)
     except ValueError:
-        return "null"
+        try:
+            return float(s.replace(",","."))
+        except ValueError:
+            return "null"
