@@ -120,10 +120,21 @@ command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmium is required b
 command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[93mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m"; sleep 60 && exit 1;}
 
 function run_alg_linestopolygons {
+	case $2 in
+		"geojson")
+			ext="geojson"
+			;;
+		"sqlite")
+			ext="sqlite"
+			;;
+		*)
+			ext="geojson"
+			;;
+	esac
 	python3 $(pwd)/run_alg.py \
 		-alg "qgis:linestopolygons" \
-		-param1 INPUT -value1 "$temp_dir/$1.geojson" \
-		-param2 OUTPUT -value2 $temp_dir/${1}_polygonized.geojson
+		-param1 INPUT -value1 "$temp_dir/$1.$ext$3" \
+		-param2 OUTPUT -value2 "$temp_dir/${1}_polygonized.$ext"
 }
 function osmtogeojson_wrapper {
 	mem=$(echo $(($(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE) / (1024 * 1024))))
@@ -460,6 +471,24 @@ function run_alg_intersection {
 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
 		-param2 OVERLAY -value2 $temp_dir/${2}.$ext$4$5 \
 		-param3 OUTPUT -value3 $temp_dir/${1}_intersection.$ext
+}
+function run_alg_extractspecificvertices {
+	case $3 in
+		"geojson")
+			ext="geojson"
+			;;
+		"sqlite")
+			ext="sqlite"
+			;;
+		*)
+			ext="geojson"
+			;;
+	esac
+	python3 $(pwd)/run_alg.py \
+		-alg "native:extractspecificvertices" \
+		-param1 INPUT -value1 $temp_dir/${1}.$ext \
+		-param2 VERTICES -value2 $2 \
+		-param3 OUTPUT -value3 $temp_dir/${1}_vertices.$ext
 }
 # function run_alg_union {
 # 	case $3 in
@@ -1206,36 +1235,64 @@ for t in ${array_queries[@]}; do
 
 		"coastline") # Create ocean polygons and merge it with water polygons. Should be requested after "water","island"
 			date
+			if [ $manual_coastline_processing = true ] ; then
+				sed 's/<relation/<relation version="1" timestamp="2007-02-14T19:11:58Z"/g' "$work_dir/$t.osm" | sed 's/<way/<way version="1" timestamp="2007-02-14T19:11:58Z"/g' | sed 's/<node/<node version="1" timestamp="2007-02-14T19:11:58Z"/g' > "$work_dir/$t.osm_new" && mv -f "$work_dir/$t.osm_new" "$work_dir/$t.osm"
+				read -rsp $'\033[93mManually complete the coastline to a full ocean polygon, avoiding intersections and incorrect geometry. Coastline location: '$work_dir/$t.osm.' Then save it and press any key.' -n1 key
+				echo '\n'
+			fi
 			osmtogeojson_wrapper $work_dir/$t.osm $work_dir/$t.geojson
 			convert2spatialite "$work_dir/$t.geojson" "$work_dir/$t.sqlite"
 			if [ $(wc -c <"$work_dir/$t.sqlite") -ge 70 ] ; then
-				cp $work_dir/$t.sqlite $temp_dir/${t}_tmp.sqlite
-				run_alg_polygonstolines ${t}_tmp "sqlite" "|geometrytype=Polygon"
-				run_alg_convertgeometrytype ${t}_tmp_lines "sqlite" 2
-				merge_vector_layers "sqlite" "LineString" ${t}_tmp_lines_conv ${t}_tmp
-				rm -f $temp_dir/${t}_tmp.sqlite && mv $temp_dir/${t}_tmp_lines_conv_merged.sqlite $temp_dir/${t}_tmp.sqlite
-				run_alg_dissolve ${t}_tmp 'natural' "sqlite"
-				run_alg_simplifygeometries ${t}_tmp_dissolved "sqlite" 0 0.000050 "|geometrytype=LineString" && mv $temp_dir/${t}_tmp_dissolved_simpl.sqlite $temp_dir/${t}_dissolved_simpl.sqlite
-				convert2spatialite "$project_dir/crop.geojson" "$temp_dir/crop.sqlite"
-				time run_alg_splitwithlines "crop" ${t}_dissolved_simpl "sqlite"
-				run_alg_fixgeometries crop_split "sqlite" && rm -f $temp_dir/crop_split.sqlite && mv $temp_dir/crop_split_fixed.sqlite $temp_dir/crop_split.sqlite
-				set_projection $temp_dir/crop_split.sqlite
-				run_alg_singlesidedbuffer ${t}_dissolved_simpl 0.000001 1 "sqlite"
-				run_alg_buffer ${t}_dissolved_simpl_sbuffered -0.00000048 "sqlite"
-				run_alg_extractbylocation crop_split ${t}_dissolved_simpl_sbuffered_buffered 5 "sqlite"
-				mv $temp_dir/crop_split_extracted.sqlite $temp_dir/ocean.sqlite
+				if [ $manual_coastline_processing = false ] || [ $manual_coastline_processing = "" ]; then
+					cp $work_dir/$t.sqlite $temp_dir/${t}_tmp.sqlite
+					# Prepare coastline
+					run_alg_polygonstolines ${t}_tmp "sqlite" "|geometrytype=Polygon"
+					run_alg_convertgeometrytype ${t}_tmp_lines "sqlite" 2
+					merge_vector_layers "sqlite" "LineString" ${t}_tmp_lines_conv ${t}_tmp
+					rm -f $temp_dir/${t}_tmp.sqlite && mv $temp_dir/${t}_tmp_lines_conv_merged.sqlite $temp_dir/${t}_tmp.sqlite
+					run_alg_dissolve ${t}_tmp 'natural' "sqlite"
+					run_alg_simplifygeometries ${t}_tmp_dissolved "sqlite" 0 0.00005 "|geometrytype=LineString" && mv $temp_dir/${t}_tmp_dissolved_simpl.sqlite $temp_dir/${t}_dissolved_simpl.sqlite
+					convert2spatialite "$project_dir/crop.geojson" "$temp_dir/crop.sqlite"
+					# Split bbox polygon by coastline
+					time run_alg_splitwithlines "crop" ${t}_dissolved_simpl "sqlite"
+					run_alg_fixgeometries crop_split "sqlite" && rm -f $temp_dir/crop_split.sqlite && mv $temp_dir/crop_split_fixed.sqlite $temp_dir/crop_split.sqlite
+					set_projection $temp_dir/crop_split.sqlite
+					# Add single-sided buffer to coastline to determine ocean side
+					run_alg_singlesidedbuffer ${t}_dissolved_simpl 0.000001 1 "sqlite"
+					run_alg_buffer ${t}_dissolved_simpl_sbuffered -0.00000048 "sqlite"
+					run_alg_multiparttosingleparts ${t}_dissolved_simpl_sbuffered_buffered "sqlite"
+					run_alg_intersection ${t}_dissolved_simpl_sbuffered_buffered_parts "crop" "sqlite"
+					# Extract first vertice from each buffer objects
+					run_alg_extractspecificvertices ${t}_dissolved_simpl_sbuffered_buffered_parts_intersection 0 "sqlite"
+					# Extract ocean from splitted bbox polygon by comparing it with nodes, obtained from single-sided buffer
+					run_alg_extractbylocation crop_split ${t}_dissolved_simpl_sbuffered_buffered_parts_intersection_vertices [1,4] "sqlite"
+					mv "$temp_dir/crop_split_extracted.sqlite" "$temp_dir/ocean.sqlite"
+				else
+					cp "$work_dir/$t.sqlite" "$temp_dir/$t.sqlite"
+					run_alg_dissolve "$t" "" "sqlite" "|geometrytype=LineString"
+					run_alg_linestopolygons "${t}_dissolved" "sqlite" "|geometrytype=LineString"
+					run_alg_fixgeometries "${t}_dissolved_polygonized" "sqlite"
+					run_alg_difference "${t}_dissolved_polygonized_fixed" "$t" "sqlite" "|geometrytype=Polygon"
+					mv "$temp_dir/${t}_dissolved_polygonized_fixed_diff.sqlite" "$temp_dir/ocean.sqlite"
+				fi
 				if [[ -f $work_dir/island.sqlite ]] ; then
 					cp $work_dir/island.sqlite $temp_dir
 					run_alg_fixgeometries island "sqlite" && rm -f $temp_dir/island.sqlite && mv $temp_dir/island_fixed.sqlite $temp_dir/island.sqlite
+					# Substract islands from ocean just in case
 					run_alg_difference ocean island "sqlite"
-					run_alg_difference ocean_diff ${t}_tmp "sqlite" "|geometrytype=Polygon" && rm -f "$temp_dir/ocean_diff.sqlite" && mv "$temp_dir/ocean_diff_diff.sqlite" "$temp_dir/ocean.sqlite"
+					if [ $manual_coastline_processing = false ] ; then
+						run_alg_difference ocean_diff ${t}_tmp "sqlite" "|geometrytype=Polygon" && rm -f "$temp_dir/ocean_diff.sqlite" && mv "$temp_dir/ocean_diff_diff.sqlite" "$temp_dir/ocean.sqlite"
+					else
+						mv "$temp_dir/ocean_diff.sqlite" "$temp_dir/ocean.sqlite"
+					fi
 				fi
 				if [[ -f $work_dir/water_dissolved.sqlite ]] ; then
 					cp $work_dir/water_dissolved.sqlite $temp_dir
 					set_projection $temp_dir/ocean.sqlite
-					merge_vector_layers "sqlite" "Polygon" water_dissolved ocean # Merge ocean with inner water
+					# Merge ocean with inner water
+					merge_vector_layers "sqlite" "Polygon" water_dissolved ocean
 					run_alg_fixgeometries water_dissolved_merged "sqlite"
-					run_alg_dissolve water_dissolved_merged_fixed 'properties' "sqlite"
+					run_alg_dissolve water_dissolved_merged_fixed 'natural' "sqlite"
 					set_projection $temp_dir/water_dissolved_merged_fixed_dissolved.sqlite
 					convert2spatialite "$temp_dir/water_dissolved_merged_fixed_dissolved.sqlite" "$work_dir/water_dissolved.sqlite"
 				else
