@@ -1,5 +1,5 @@
 #!/bin/bash
-if [ -f "docker_prepare_data.ini" ] ; then
+if [[ -f "docker_prepare_data.ini" ]] ; then
 	. docker_prepare_data.ini
 fi
 if [[ ! $(docker container ls | grep qgis-topo) ]] ; then

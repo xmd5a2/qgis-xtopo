@@ -1,10 +1,10 @@
 #/!bin/bash
-if [ -f "prepare_automap_for_github.sh" ] ; then
+if [[ -f "prepare_automap_for_github.sh" ]] ; then
 	. prepare_automap_for_github.sh
 fi
 work_dir=$PWD
 
-if [ -f "config_debug.ini" ] ; then
+if [[ -f "config_debug.ini" ]] ; then
 	qgis_projects_dir=~/qgis_projects
 	rm -f $work_dir/icons/*.*
 	cp -f $qgis_projects_dir/icons/*.* $work_dir/icons/

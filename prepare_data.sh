@@ -3,7 +3,7 @@
 # Requirements: qgis >=3.14 with grass plugin, osmtogeojson, gdal
 # Place DEM tiles (GeoTIFF/HGT) to project_dir/input_dem or use get_dem_tiles and source_dem_dir variables
 #read -rsp $'Press any key to continue...\n' -n1 key
-if [ -f /.dockerenv ] ; then
+if [[ -f /.dockerenv ]] ; then
 	qgistopo_config_dir=/mnt/qgistopo-config
 	if [[ -f ${qgistopo_config_dir}/config.ini ]] ; then
 		. ${qgistopo_config_dir}/config.ini
@@ -89,6 +89,8 @@ fi
 if [[ -d "$temp_dir" ]] ; then
 	rm -f "$temp_dir"/*.*
 fi
+rm -f $work_dir/*.sqlite_tmp
+rm -f $work_dir/*.sqlite_tmp-journal
 # rm -f $project_dir/log.txt
 # exec > >(tee -a $project_dir/log.txt)
 
@@ -136,10 +138,10 @@ function osmtogeojson_wrapper {
 	node --max_old_space_size=$node_mem `which osmtogeojson` $1 > $2
 }
 function convert2spatialite {
-	if [ -f $2 ] ; then
+	if [[ -f $2 ]] ; then
 		rm $2
 	fi
-	if [ $3 ] ; then
+	if [[ $3 ]] ; then
 		layername_string="-nln $3"
 	else layername_string=""
 	fi
@@ -233,13 +235,13 @@ if [[ $generate_terrain == "true" ]] ; then
 			height=$(echo $size_str | sed 's/.*,//')
 			width_mod=$(( $width * 3 ))
 			height_mod=$(( $height * 3 ))
-			echo "Resizing from $width x$height"
+			echo -e "\033[95mResizing from $width x$height to $width_mod x$height_mod\033[0m"
 			rm -f "$project_dir/slope_upscaled.tif.ovr"
 			gdalwarp -overwrite -ts $width_mod $height_mod -r $terrain_resample_method -co "COMPRESS=LZW" -co "BIGTIFF=YES" -ot Float32 "$project_dir"/slope_cut.tif "$project_dir"/slope_upscaled.tif
 			if [[ -f "$project_dir/slope_upscaled.tif" ]] && [[ $(wc -c <"$project_dir/slope_upscaled.tif") -ge 100000 ]] ; then
-				echo "Generating slope overviews"
+				echo -e "\033[95mGenerating slope overviews\033[0m"
 				gdaladdo -ro --config COMPRESS_OVERVIEW LZW "$project_dir/slope_upscaled.tif" 512 256 128 64 32 16 8 4 2
-				echo "Slopes generated"
+				echo -e "\033[92mSlopes generated\033[0m"
 			else
 				echo -e "\033[91mError. $project_dir/slope_upscaled.tif is empty. Stopping.\033[0m" && exit 1;
 			fi
@@ -252,7 +254,7 @@ if [[ $generate_terrain == "true" ]] ; then
 			height=$(echo $size_str | sed 's/.*,//')
 			width_mod=$(( $width / 2 ))
 			height_mod=$(( $height / 2 ))
-			echo "Resizing from $width x$height"
+			echo -e "\033[95mResizing from $width x$height to $width_mod x$height_mod\033[0m"
 			gdalwarp -overwrite -ts $width_mod $height_mod -r $terrain_resample_method -co "COMPRESS=LZW" -co "BIGTIFF=YES" -ot Float32 "$project_dir"/merged_dem.tif "$project_dir"/merged_dem_downscaled.tif
 			width_mod=$(( $width * 3 ))
 			height_mod=$(( $height * 3 ))
@@ -268,9 +270,9 @@ if [[ $generate_terrain == "true" ]] ; then
 			rm -f "$project_dir"/color_slope.txt
 			rm -f "$project_dir/hillshade_composite.tif.ovr"
 			if [[ -f "$project_dir/hillshade_composite.tif" ]] && [[ $(wc -c <"$project_dir/hillshade_composite.tif") -ge 100000 ]] ; then
-				echo "Generating hillshade overviews"
+				echo -e "\033[95mGenerating hillshade overviews\033[0m"
 				gdaladdo -ro --config COMPRESS_OVERVIEW LZW "$project_dir/hillshade_composite.tif" 512 256 128 64 32 16 8 4 2
-				echo "Hillshade generated"
+				echo -e "\033[92mHillshade generated\033[0m"
 			else
 				echo -e "\033[93mWarning! $project_dir/hillshade_composite.tif is empty.\033[0m";
 			fi
@@ -279,7 +281,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		if [[ $generate_terrain_isolines == "true" ]] ; then
 			rm -f "$project_dir"/isolines_full.sqlite
 			echo -e "\e[104m=== Generating isolines...\e[49m"
-			if [ $smooth_isolines == "true" ] ; then
+			if [[ $smooth_isolines == "true" ]] ; then
 				isolines_source="merged_dem_upscaled.tif"
 			else
 				isolines_source="merged_dem.tif"
@@ -295,7 +297,7 @@ if [[ $generate_terrain == "true" ]] ; then
 			rm -f "$project_dir/isolines_full.dbf"
 			rm -f "$project_dir/isolines_full.prj"
 			if [[ -f "$project_dir/isolines_full.sqlite" ]] && [[ $(wc -c <"$project_dir/isolines_full.sqlite") -ge 100000 ]] ; then
-				echo "Isolines generated"
+				echo -e "\033[92mIsolines generated\033[0m"
 			else
 				echo -e "\033[93mWarning! $project_dir/isolines_full.sqlite is empty.\033[0m";
 			fi
@@ -535,13 +537,13 @@ function merge_vector_layers {
 			;;
 	esac
 	str=""
-	if [ $7 ] ; then
+	if [[ $7 ]] ; then
 		str="$temp_dir/$3.$ext$geometrytype,$temp_dir/$4.$ext$geometrytype,$temp_dir/$5.$ext$geometrytype,$temp_dir/$6.$ext$geometrytype,$temp_dir/$7.$ext$geometrytype"
-	elif [ $6 ] ; then
+	elif [[ $6 ]] ; then
 		str="$temp_dir/$3.$ext$geometrytype,$temp_dir/$4.$ext$geometrytype,$temp_dir/$5.$ext$geometrytype,$temp_dir/$6.$ext$geometrytype"
-	elif [ $5 ] ; then
+	elif [[ $5 ]] ; then
 		str="$temp_dir/$3.$ext$geometrytype,$temp_dir/$4.$ext$geometrytype,$temp_dir/$5.$ext$geometrytype"
-	elif [ $4 ] ; then
+	elif [[ $4 ]] ; then
 		str="$temp_dir/$3.$ext$geometrytype,$temp_dir/$4.$ext$geometrytype"
 	fi
 	python3 $(pwd)/run_alg.py \
@@ -775,7 +777,7 @@ if [[ ${#array_queries[@]} -ge 1 ]] ; then
 fi
 
 for t in ${array_queries[@]}; do
-	if [ -f $work_dir/$t.sqlite ] ; then
+	if [[ -f $work_dir/$t.sqlite ]] ; then
 		rm $work_dir/$t.sqlite
 	fi
 	if [[ ! -f $(pwd)/queries/$t.txt ]] ; then
@@ -799,7 +801,7 @@ for t in ${array_queries[@]}; do
 		echo -e "\033[93mResult is empty!\033[0m"
 		rm -f "$work_dir/$t.osm"
 		if [[ $debug_copy_from_override_dir == true ]] ; then
-			echo "Copying from override dir..."
+			echo -e "\033[95mCopying from override dir...\033[0m"
 			if [[ -f "$override_dir/$t.osm" ]] ; then
 				cp $override_dir/$t.osm $work_dir/$t.osm
 			else
@@ -882,7 +884,7 @@ for t in ${array_queries[@]}; do
 		"river" | "river_intermittent") # should be requested after "water_without_riverbanks"
 			osmtogeojson $work_dir/$t.osm > $work_dir/$t.geojson
 			cp $work_dir/$t.geojson $temp_dir
-			if [ -f $work_dir/water_dissolved.geojson ] ; then
+			if [[ -f $work_dir/water_dissolved.geojson ]] ; then
 				cp $work_dir/water_without_riverbanks.geojson $temp_dir
 				run_alg_difference $t "water_without_riverbanks"
 				mv $temp_dir/${t}_diff.geojson $temp_dir/$t.geojson
@@ -897,7 +899,7 @@ for t in ${array_queries[@]}; do
 			;;
 		"stream_intermittent") # should be requested after "water"
 			osmtogeojson $work_dir/$t.osm > $temp_dir/$t.geojson
-			if [ -f $work_dir/water_dissolved.geojson ] ; then
+			if [[ -f $work_dir/water_dissolved.geojson ]] ; then
 				cp $work_dir/water_dissolved.geojson $temp_dir
 				run_alg_difference $t "water_dissolved"
 				cp $temp_dir/${t}_diff.geojson $work_dir/$t.geojson
@@ -913,12 +915,12 @@ for t in ${array_queries[@]}; do
 			convert2spatialite "$work_dir/$t.geojson" "$work_dir/$t.sqlite"
 			cp $work_dir/$t.geojson $temp_dir
 			cp $work_dir/$t.sqlite $temp_dir
-			if [ -f $work_dir/water_dissolved.geojson ] ; then
+			if [[ -f $work_dir/water_dissolved.geojson ]] ; then
 				suffixdiff="_diff"
 				cp $work_dir/water_dissolved.geojson $temp_dir
 				run_alg_difference $t "water_dissolved"
 			fi
-			if [ -f $work_dir/stream_intermittent.geojson ] ; then
+			if [[ -f $work_dir/stream_intermittent.geojson ]] ; then
 				suffixmerged="_merged"
 				cp $work_dir/stream_intermittent.geojson $temp_dir
 				merge_vector_layers "geojson" "LineString" ${t}$suffixdiff "stream_intermittent" # for names
@@ -945,7 +947,7 @@ for t in ${array_queries[@]}; do
 			osmtogeojson $work_dir/$t.osm > $work_dir/$t.geojson
 			cp $work_dir/$t.geojson $temp_dir
 			run_alg_polygonstolines $t
-			if [ -f $work_dir/admin_level_2_dissolved.geojson ] ; then
+			if [[ -f $work_dir/admin_level_2_dissolved.geojson ]] ; then
 				mv $work_dir/admin_level_2_dissolved.geojson $temp_dir
 				run_alg_difference ${t}_lines "admin_level_2_dissolved"
 			else mv $temp_dir/${t}_lines.geojson $temp_dir/${t}_lines_diff.geojson
@@ -961,7 +963,7 @@ for t in ${array_queries[@]}; do
 			osmtogeojson $work_dir/$t.osm > $work_dir/$t.geojson
 			cp $work_dir/$t.geojson $temp_dir
 			run_alg_pyfieldcalc $t admin_centre_${t: -1} 2 "value='true'"
-			if [ -f $work_dir/places_main.geojson ] ; then
+			if [[ -f $work_dir/places_main.geojson ]] ; then
 				cp $work_dir/places_main.geojson $temp_dir
 			else
 				echo -e "\033[91m$work_dir/places_main.geojson not found. Please request places_main before $t. Stopping.\033[0m" && exit 1;
@@ -996,12 +998,12 @@ for t in ${array_queries[@]}; do
 			osmtogeojson $work_dir/$t.osm > $work_dir/$t.geojson
 			cp $work_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
-			if [ -f "$work_dir/prison.geojson" ] ; then
+			if [[ -f "$work_dir/prison.geojson" ]] ; then
 				cp "$work_dir/prison.geojson" $temp_dir
 				run_alg_difference ${t}_centroids "prison"
 				mv $temp_dir/${t}_centroids_diff.geojson $temp_dir/${t}_centroids.geojson
 			fi
-			if [ -f "$work_dir/monastery_christian_centroids_buffered.geojson" ] ; then
+			if [[ -f "$work_dir/monastery_christian_centroids_buffered.geojson" ]] ; then
 				cp $work_dir/monastery_christian_centroids_buffered.geojson $temp_dir/
 				run_alg_difference ${t}_centroids "monastery_christian_centroids_buffered"
 				run_alg_multiparttosingleparts ${t}_centroids
@@ -1210,15 +1212,15 @@ for t in ${array_queries[@]}; do
 
 		"coastline") # Create ocean polygons and merge it with water polygons. Should be requested after "water","island"
 			date
-			if [ $manual_coastline_processing = true ] ; then
+			if [[ $manual_coastline_processing == "true" ]] ; then
 				sed 's/<relation/<relation version="1" timestamp="2007-02-14T19:11:58Z"/g' "$work_dir/$t.osm" | sed 's/<way/<way version="1" timestamp="2007-02-14T19:11:58Z"/g' | sed 's/<node/<node version="1" timestamp="2007-02-14T19:11:58Z"/g' > "$work_dir/$t.osm_new" && mv -f "$work_dir/$t.osm_new" "$work_dir/$t.osm"
 				read -rsp $'\033[93mManually complete the coastline to a full ocean polygon, avoiding intersections and incorrect geometry. Coastline location: '$work_dir/$t.osm.' Then save it and press any key.' -n1 key
 				echo '\n'
 			fi
 			osmtogeojson_wrapper $work_dir/$t.osm $work_dir/$t.geojson
 			convert2spatialite "$work_dir/$t.geojson" "$work_dir/$t.sqlite"
-			if [ $(wc -c <"$work_dir/$t.sqlite") -ge 70 ] ; then
-				if [ $manual_coastline_processing = false ] || [ $manual_coastline_processing = "" ]; then
+			if [[ $(wc -c <"$work_dir/$t.sqlite") -ge 70 ]] ; then
+				if [[ $manual_coastline_processing == "false" ]] || [[ $manual_coastline_processing == "" ]]; then
 					cp $work_dir/$t.sqlite $temp_dir/${t}_tmp.sqlite
 					# Prepare coastline
 					run_alg_polygonstolines ${t}_tmp "sqlite" "|geometrytype=Polygon"
@@ -1255,7 +1257,7 @@ for t in ${array_queries[@]}; do
 					run_alg_fixgeometries island "sqlite" && rm -f $temp_dir/island.sqlite && mv $temp_dir/island_fixed.sqlite $temp_dir/island.sqlite
 					# Substract islands from ocean just in case
 					run_alg_difference ocean island "sqlite"
-					if [ $manual_coastline_processing = false ] ; then
+					if [[ $manual_coastline_processing == "false" ]] ; then
 						run_alg_difference ocean_diff ${t}_tmp "sqlite" "|geometrytype=Polygon" && rm -f "$temp_dir/ocean_diff.sqlite" && mv "$temp_dir/ocean_diff_diff.sqlite" "$temp_dir/ocean.sqlite"
 					else
 						mv "$temp_dir/ocean_diff.sqlite" "$temp_dir/ocean.sqlite"
@@ -1311,7 +1313,7 @@ for t in ${array_queries[@]}; do
 done
 # Following code is needed to cut artefacts isolines placed on water and split glacier isolines
 if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" ]]; then
-	if [ ! -f $work_dir/../isolines_full.sqlite ] ; then
+	if [[ ! -f $work_dir/../isolines_full.sqlite ]] ; then
 		echo -e "\033[91m$work_dir/../isolines_full.sqlite not found\033[0m" && exit 1;
 	fi
 	rm -f "$work_dir/../isolines_glacier.sqlite"
@@ -1352,4 +1354,3 @@ echo -e "\e[42m====== Data preparation finished\e[49m"
 if [[ $running_in_container == "false" ]] && [[ $(command -v notify-send) == 0 ]]; then
 	notify-send "QGIS-topo: data preparation finished"
 fi
-#sleep 60

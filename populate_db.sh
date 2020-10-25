@@ -42,7 +42,7 @@ for f in $osm_data_dir/*.pbf; do
 done
 shopt -u nullglob
 if [[ $osm_data_is_present == "true" ]]; then
-	echo Merging and converting OSM files in osm_data_dir
+	echo -e "\e[104mMerging and converting OSM files in osm_data_dir\e[49m"
 	osmium cat $pbf_str $osm_str $osmbz2_str $o5m_str -o $osm_tmp_dir/input.osm.bz2 -f osm.bz2
 	echo Populating local Overpass database
 	bash /app/osm-3s/bin/init_osm3s.sh $osm_tmp_dir/input.osm.bz2 /mnt/overpass_db /app/osm-3s

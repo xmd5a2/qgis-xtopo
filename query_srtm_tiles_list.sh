@@ -1,6 +1,6 @@
 #!/bin/bash
 # Query SRTM tiles list based on bbox in config.ini
-if [ -f /.dockerenv ] ; then
+if [[ -f /.dockerenv ]] ; then
 	qgistopo_config_dir=/mnt/qgistopo-config
 	if [[ -f ${qgistopo_config_dir}/config.ini ]] ; then
 		. ${qgistopo_config_dir}/config.ini
