@@ -9,8 +9,7 @@ if [ -f /.dockerenv ] ; then
 		. ${qgistopo_config_dir}/config.ini
 		export XDG_RUNTIME_DIR=/mnt/qgis_projects/$project_name/tmp
 	else
-		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
-		exit 1;
+		echo -e "\033[91mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 	fi
 
 	if [[ -f ${qgistopo_config_dir}/config_debug.ini ]] ; then
@@ -24,8 +23,7 @@ else
 	if [[ -f ${qgistopo_config_dir}/config.ini ]] ; then
 		. ${qgistopo_config_dir}/config.ini
 	else
-		echo -e "\033[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
-		exit 1;
+		echo -e "\031[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 	fi
 	if [[ -f ${qgistopo_config_dir}/config_debug.ini ]] ; then
 		. ${qgistopo_config_dir}/config_debug.ini
@@ -39,23 +37,20 @@ fi
 echo -e "\e[100mconfig: ${qgistopo_config_dir}/config.ini\e[49m"
 
 if [[ "$project_name" == "" ]] ; then
-	echo -e "\033[93mproject_name not defined. Please define it in config.ini. Stopping.\033[0m"
-	exit 1;
+	echo -e "\033[91mproject_name not defined. Please define it in config.ini. Stopping.\033[0m" && exit 1;
 fi
 if [[ ! -d "$project_dir" ]] && [[ $running_in_container == true ]] ; then
-	echo -e "\033[93mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Also executing of initialization script (docker_run) can solve this. Stopping.\033[0m"
-	exit 1;
+	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Also executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 fi
 if [[ ! -d "$project_dir" ]] && [[ $running_in_container == false ]] ; then
-	echo -e "\033[93mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Stopping.\033[0m"
-	exit 1;
+	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Stopping.\033[0m" && exit 1;
 fi
 case $overpass_instance in
 	"docker")
 		if [[ $running_in_container == true ]] ; then
 			req_path_string="/app/osm-3s/bin/osm3s_query --quiet --db-dir=/mnt/overpass_db"
 		else
-			echo -e "\033[93moverpass_instance=docker can't be started outside of container. Please use overpass_instance=external/local/ssh. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91moverpass_instance=docker can't be started outside of container. Please use overpass_instance=external/local/ssh. Stopping.\033[0m" && exit 1;
 		fi
 		;;
 	"local")
@@ -64,18 +59,17 @@ case $overpass_instance in
 			if [[ -f "${array_bbox[0]}" ]] ; then
 				req_path_string=$overpass_endpoint_local
 			else
-				echo -e "\033[93m${array_bbox[0]} not found. Check overpass_endpoint_local. Stopping.\033[0m"
-				exit 1;
+				echo -e "\033[91m${array_bbox[0]} not found. Check overpass_endpoint_local. Stopping.\033[0m" && exit 1;
 			fi
 		else
-			echo -e "\033[93moverpass_instance=local can't be started inside a container. Please use overpass_instance=external/docker/ssh. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91moverpass_instance=local can't be started inside a container. Please use overpass_instance=external/docker/ssh. Stopping.\033[0m" && exit 1;
 		fi
 		;;
 	"ssh")
 		if [[ $running_in_container == false ]] ; then
 			req_path_string="$overpass_endpoint_ssh --quiet"
 		else
-			echo -e "\033[93moverpass_instance=ssh can't be started inside a container. Please use overpass_instance=docker/external/local. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91moverpass_instance=ssh can't be started inside a container. Please use overpass_instance=docker/external/local. Stopping.\033[0m" && exit 1;
 		fi
 		;;
 esac
@@ -106,18 +100,18 @@ lat_max=${array_bbox[3]}
 
 if (( $(echo "$lon_min > $lon_max" | bc -l) )) || (( $(echo "$lat_min > $lat_max" | bc -l) )) || \
 	(( $(echo "$lat_min > 90" | bc -l) )) || (( $(echo "$lat_min < -90" | bc -l) )) ; then
-	echo -e "\033[93mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max)\033[0m"
+	echo -e "\033[91mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max)\033[0m"
 	exit 1;
 fi
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
 
-command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m"; sleep 60 && exit 1;}
-command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[93mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m"; sleep 60 && exit 1;}
-command -v grass >/dev/null 2>&1 || { echo >&2 -e "\033[93mGRASS > 7.0 is required but not installed.\033[0m"; sleep 60 && exit 1;}
-command -v osmfilter >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmfilter is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m"; sleep 60 && exit 1;}
-command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmconvert is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m"; sleep 60 && exit 1;}
-command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[93mosmium is required but not installed. If you are using Ubuntu please install 'osmium-tool' package.\033[0m"; sleep 60 && exit 1;}
-command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[93mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m"; sleep 60 && exit 1;}
+command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m" && exit 1;}
+command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[91mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m" && exit 1;}
+command -v grass >/dev/null 2>&1 || { echo >&2 -e "\033[91mGRASS > 7.0 is required but not installed.\033[0m" && exit 1;}
+command -v osmfilter >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmfilter is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && exit 1;}
+command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmconvert is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && exit 1;}
+command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmium is required but not installed. If you are using Ubuntu please install 'osmium-tool' package.\033[0m" && exit 1;}
+command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[91mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m" && exit 1;}
 
 function run_alg_linestopolygons {
 	case $2 in
@@ -177,11 +171,10 @@ if [[ $generate_terrain == "true" ]] ; then
 		rm -f $dem_dir/*.*
 		echo -e "\e[104m=== Copying DEM tiles from $source_dem_dir...\e[49m"
 		if [[ $source_dem_dir == "" ]] ; then
-			echo -e "\033[93msource_dem_dir "$source_dem_dir" not defined in config but get_dem_tiles=true. Stopping.\033[0m"
-			exit 1;
+			echo -e "\033[91msource_dem_dir "$source_dem_dir" not defined in config but get_dem_tiles=true. Stopping.\033[0m" && exit 1;
 		fi
 		if [[ ! -d $source_dem_dir ]] ; then
-			echo -e "\033[93msource_dem_dir "$source_dem_dir" don't exist but get_dem_tiles=true. Turn it off or check path. Stopping.\033[0m"
+			echo -e "\033[91msource_dem_dir "$source_dem_dir" don't exist but get_dem_tiles=true. Turn it off or check path. Stopping.\033[0m"
 			if [[ $running_in_container == true ]] ; then
 				echo -e "\033[93mCheck terrain_dir in docker_run script\033[0m"
 			fi
@@ -217,7 +210,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		[ -e "$f" ] && gdalwarp -of GTiff $f ${f%.*}.tif && rm $f
 	done
 	for f in "$dem_dir"/*.tif; do
-		[ ! -e "$f" ] && echo -e "\033[93mNo DEM tiles (GeoTIFF/HGT) found in "$dem_dir". Add them manually or use get_dem_tiles=true option. Stopping.\033[0m" && exit 1;
+		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$dem_dir". Add them manually or use get_dem_tiles=true option. Stopping.\033[0m" && exit 1;
 		break;
 	done
 	shopt -u nullglob
@@ -248,8 +241,7 @@ if [[ $generate_terrain == "true" ]] ; then
 				gdaladdo -ro --config COMPRESS_OVERVIEW LZW "$project_dir/slope_upscaled.tif" 512 256 128 64 32 16 8 4 2
 				echo "Slopes generated"
 			else
-				echo -e "\033[93mError. $project_dir/slope_upscaled.tif is empty.\033[0m"
-				exit 1;
+				echo -e "\033[91mError. $project_dir/slope_upscaled.tif is empty. Stopping.\033[0m" && exit 1;
 			fi
 			rm -f "$project_dir"/slope.tif
 			rm -f "$project_dir"/slope_cut.tif
@@ -270,17 +262,6 @@ if [[ $generate_terrain == "true" ]] ; then
 	90 0 0 0" > "$project_dir"/color_slope.txt
 			gdaldem color-relief "$project_dir"/slope_upscaled.tif "$project_dir"/color_slope.txt "$project_dir"/slope_shade.tif
 			gdal_calc.py -A "$project_dir"/hillshade.tif -B "$project_dir"/slope_shade.tif --A_band=1 --type=Float32 --co COMPRESS=LZW --outfile="$project_dir"/hillshade_composite.tif --calc="A+(B*0.5)" --overwrite
-	# 		# Normalize hillshade raster
-	# 		stat_max_hillshade=$(gdalinfo -stats "$project_dir"/hillshade_composite.tif | sed -ne 's/.*STATISTICS_MAXIMUM=//p')
-	# 		stat_mean_hillshade=$(gdalinfo -stats "$project_dir"/hillshade_composite.tif | sed -ne 's/.*STATISTICS_MEAN=//p')
-	# 		stat_min_hillshade_calc=$(bc<<<2.5*$stat_mean_hillshade-1.5*$stat_max_hillshade)
-	# 		if (( $(echo "$stat_min_hillshade_calc < 0" |bc -l) )); then
-	# 			stat_min_hillshade_calc=0
-	# 		fi
-	# 		echo "$stat_min_hillshade_calc 0 0 0
-	# 376 255 255 255" > "$project_dir"/color_hillshade.txt
-	# 		gdaldem color-relief "$project_dir"/hillshade_composite.tif "$project_dir"/color_hillshade.txt "$project_dir"/hillshade_composite_tmp.tif && rm -f "$project_dir"/hillshade_composite.tif && mv "$project_dir"/hillshade_composite_tmp.tif "$project_dir"/hillshade_composite.tif
-
 			rm -f "$project_dir"/hillshade.tif
 			rm -f "$project_dir"/slope_shade.tif
 			rm -f "$project_dir"/merged_dem_downscaled.tif
@@ -291,8 +272,7 @@ if [[ $generate_terrain == "true" ]] ; then
 				gdaladdo -ro --config COMPRESS_OVERVIEW LZW "$project_dir/hillshade_composite.tif" 512 256 128 64 32 16 8 4 2
 				echo "Hillshade generated"
 			else
-				echo -e "\033[93mError. $project_dir/hillshade_composite.tif is empty.\033[0m"
-				exit 1;
+				echo -e "\033[93mWarning! $project_dir/hillshade_composite.tif is empty.\033[0m";
 			fi
 		fi
 
@@ -317,8 +297,7 @@ if [[ $generate_terrain == "true" ]] ; then
 			if [[ -f "$project_dir/isolines_full.sqlite" ]] && [[ $(wc -c <"$project_dir/isolines_full.sqlite") -ge 100000 ]] ; then
 				echo "Isolines generated"
 			else
-				echo -e "\033[93mError. $project_dir/isolines_full.sqlite is empty.\033[0m"
-				exit 1;
+				echo -e "\033[93mWarning! $project_dir/isolines_full.sqlite is empty.\033[0m";
 			fi
 		fi
 	else
@@ -800,7 +779,7 @@ for t in ${array_queries[@]}; do
 		rm $work_dir/$t.sqlite
 	fi
 	if [[ ! -f $(pwd)/queries/$t.txt ]] ; then
-		echo -e "\033[93mqueries/$t.txt not found.\033[0m"
+		echo -e "\033[93mQuery for $t not found.\033[0m"
 	fi
 	query=$(cat $(pwd)/queries/$t.txt)
 	req_string_query='[out:xml][timeout:3600][maxsize:2000000000][bbox:'$bbox_query'];'$query
@@ -814,8 +793,7 @@ for t in ${array_queries[@]}; do
 		echo "$req_string" | $req_path_string > $work_dir/$t.osm
 	fi
 	if [[ $? != 0 ]] ; then
-		echo -e "\033[93mOverpass server error. Stopping.\033[0m"
-		exit 1;
+		echo -e "\033[91mOverpass server error. Stopping.\033[0m" && exit 1;
 	fi
 	if ! grep -q "tag k" "$work_dir/$t.osm" || ( ( [[ $t == "admin_level_2" ]] || [[ $t == "admin_level_4" ]] ) && ! grep -q "way id" "$work_dir/$t.osm" ); then
 		echo -e "\033[93mResult is empty!\033[0m"
@@ -825,8 +803,7 @@ for t in ${array_queries[@]}; do
 			if [[ -f "$override_dir/$t.osm" ]] ; then
 				cp $override_dir/$t.osm $work_dir/$t.osm
 			else
-				echo -e "\033[93m$override_dir/$t.osm not found. Stopping.\033[0m"
-				exit 1;
+				echo -e "\033[91m$override_dir/$t.osm not found. Stopping.\033[0m" && exit 1;
 			fi
 		else
 			((index++))
@@ -837,8 +814,7 @@ for t in ${array_queries[@]}; do
 	if grep -q \</osm\> "$work_dir/$t.osm" ; then
 		echo -e "\033[92mOK\033[0m"
 	else
-		echo -e "\033[93m$work_dir/$t.osm is incomplete. It looks like overpass server has interrupted the transmission. Try again or use another server (overpass_instance and overpass_endpoint_* variables in config.ini). Stopping.\033[0m"
-		exit 1;
+		echo -e "\033[91m$work_dir/$t.osm is incomplete. It looks like overpass server has interrupted the transmission. Try again or use another server (overpass_instance and overpass_endpoint_* variables in config.ini). Stopping.\033[0m" && exit 1;
 	fi
 
 	case $t in
@@ -988,8 +964,7 @@ for t in ${array_queries[@]}; do
 			if [ -f $work_dir/places_main.geojson ] ; then
 				cp $work_dir/places_main.geojson $temp_dir
 			else
-				echo -e "\033[93m$work_dir/places_main.geojson not found. Please request places_main before $t. Stopping.\033[0m"
-				exit 1;
+				echo -e "\033[91m$work_dir/places_main.geojson not found. Please request places_main before $t. Stopping.\033[0m" && exit 1;
 			fi
 			run_alg_joinattributesbylocation places_main ${t}_pyfieldcalc 2 "admin_centre_${t: -1}" 0
 			cp -f $temp_dir/places_main_joinattrsloc.geojson $work_dir/places_main.geojson
@@ -1337,8 +1312,7 @@ done
 # Following code is needed to cut artefacts isolines placed on water and split glacier isolines
 if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" ]]; then
 	if [ ! -f $work_dir/../isolines_full.sqlite ] ; then
-		echo -e "\033[93m$work_dir/../isolines_full.sqlite not found\033[0m"
-		exit 1;
+		echo -e "\033[91m$work_dir/../isolines_full.sqlite not found\033[0m" && exit 1;
 	fi
 	rm -f "$work_dir/../isolines_glacier.sqlite"
 	if [[ -f "$work_dir/water.sqlite" ]] && [[ $(stat --printf="%s" "$work_dir/water.sqlite") -ge 70 ]] ; then

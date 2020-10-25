@@ -1,14 +1,12 @@
 #!/bin/bash
 # Populate Overpass DB from local sources in osm_data_dir
 if [[ ! -f /.dockerenv ]] ; then
-	echo -e "\033[93mThis script is not meant to run outside the docker container. Stopping.\033[0m"
-	exit 1;
+	echo -e "\033[91mThis script is not meant to run outside the docker container. Stopping.\033[0m" && exit 1;
 fi
 if [[ -f /mnt/qgistopo-config/config.ini ]] ; then
 	. /mnt/qgistopo-config/config.ini
 else
-	echo -e "\033[93mconfig.ini not found. Check project installation integrity. Stopping.\033[0m"
-	exit 1;
+	echo -e "\033[91mconfig.ini not found. Check project installation integrity. Stopping.\033[0m" && exit 1;
 fi
 if [[ -f /mnt/qgistopo-config/config_debug.ini ]] ; then
 	. /mnt/qgistopo-config/config_debug.ini
@@ -16,8 +14,7 @@ fi
 
 osm_tmp_dir=$osm_data_dir/tmp
 if [[ ! -d $osm_data_dir ]] ; then
-	echo -e "\033[93mosm_data_dir in project_dir does not exist. Stopping.\033[0m"
-	exit 1;
+	echo -e "\033[91mosm_data_dir in project_dir does not exist. Stopping.\033[0m" && exit 1;
 fi
 if [[ ! -d $osm_tmp_dir ]] ; then
 	mkdir $osm_tmp_dir
@@ -54,8 +51,8 @@ if [[ $osm_data_is_present == "true" ]]; then
 		rm -f $osm_data_dir/tmp/input.osm.bz2
 		rmdir $osm_data_dir/tmp --ignore-fail-on-non-empty
 	else
-		echo -e "\033[93mError populating Overpass DB\033[0m"
+		echo -e "\033[91mError populating Overpass DB\033[0m"
 	fi
 else
-	echo -e "\033[93mError. No osm.bz2 files found in $osm_tmp_dir\033[0m"
+	echo -e "\033[91mError. No osm.bz2 files found in $osm_tmp_dir\033[0m"
 fi

@@ -19,8 +19,7 @@ if [[ -f /mnt/qgistopo-config/config.ini ]] ; then
 			if [[ $? == 0 ]] ; then
 				echo -e "\033[93mQGIS project '$project_name.qgz' is created. Check your config.ini in qgistopo-config folder and execute docker_prepare_data script. If you want to use docker overpass instance for OSM data source then place OSM files to osm_data dir in your project folder and run docker_populate_db script.\033[0m"
 			else
-				echo -e "\033[93mError creating '$project_name.qgz'. Check directory permissions.\033[0m"
-				exit 1;
+				echo -e "\033[91mError creating '$project_name.qgz'. Check directory permissions.\033[0m" && exit 1;
 			fi
 		fi
 	fi
