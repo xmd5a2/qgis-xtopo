@@ -44,15 +44,15 @@ shopt -u nullglob
 if [[ $osm_data_is_present == "true" ]]; then
 	echo -e "\e[104mMerging and converting OSM files in osm_data_dir\e[49m"
 	osmium cat $pbf_str $osm_str $osmbz2_str $o5m_str -o $osm_tmp_dir/input.osm.bz2 -f osm.bz2
-	echo Populating local Overpass database
+	echo -e "\e[104mPopulating docker Overpass database\e[49m"
 	bash /app/osm-3s/bin/init_osm3s.sh $osm_tmp_dir/input.osm.bz2 /mnt/overpass_db /app/osm-3s
 	if [[ -f /mnt/overpass_db/nodes.map ]] ; then
-		echo Done
+		echo -e "\e[42mOverpass database is ready\e[49m"
 		rm -f $osm_data_dir/tmp/input.osm.bz2
 		rmdir $osm_data_dir/tmp --ignore-fail-on-non-empty
 	else
-		echo -e "\033[91mError populating Overpass DB\033[0m"
+		echo -e "\033[91mError populating Overpass database\033[0m"
 	fi
 else
-	echo -e "\033[91mError. No osm.bz2 files found in $osm_tmp_dir\033[0m"
+	echo -e "\033[91mError. No osm.bz2 files found in $osm_tmp_dir\033[0m" && exit 1;
 fi

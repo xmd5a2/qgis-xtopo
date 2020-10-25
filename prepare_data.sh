@@ -34,7 +34,8 @@ echo -e "\e[105mProject: $project_dir\e[49m"
 if [[ $running_in_container == true ]] ; then
 	echo -e "\e[100mRunning in docker\e[49m"
 fi
-echo -e "\e[100mconfig: ${qgistopo_config_dir}/config.ini\e[49m"
+echo -e "\e[100mconfig: $qgistopo_config_dir/config.ini\e[49m"
+echo -e "\e[100mterrain dir: $source_dem_dir\e[49m"
 
 if [[ "$project_name" == "" ]] ; then
 	echo -e "\033[91mproject_name not defined. Please define it in config.ini. Stopping.\033[0m" && exit 1;
@@ -197,7 +198,7 @@ if [[ $generate_terrain == "true" ]] ; then
 				cp $source_dem_dir/${tile}.hgt $dem_dir
 				continue
 			else
-				echo -e "\033[93m${tile}.tif not found. Possible cause: no data\033[0m"
+				echo -e "\033[93m${tile}.tif not found. Possible cause: no data in this area\033[0m"
 			fi
 		done
 	fi
@@ -235,7 +236,7 @@ if [[ $generate_terrain == "true" ]] ; then
 			height=$(echo $size_str | sed 's/.*,//')
 			width_mod=$(( $width * 3 ))
 			height_mod=$(( $height * 3 ))
-			echo -e "\033[95mResizing from $width x$height to $width_mod x$height_mod\033[0m"
+			echo -e "\033[95mResizing from $width x$height to $width_mod x $height_mod\033[0m"
 			rm -f "$project_dir/slope_upscaled.tif.ovr"
 			gdalwarp -overwrite -ts $width_mod $height_mod -r $terrain_resample_method -co "COMPRESS=LZW" -co "BIGTIFF=YES" -ot Float32 "$project_dir"/slope_cut.tif "$project_dir"/slope_upscaled.tif
 			if [[ -f "$project_dir/slope_upscaled.tif" ]] && [[ $(wc -c <"$project_dir/slope_upscaled.tif") -ge 100000 ]] ; then
@@ -254,7 +255,7 @@ if [[ $generate_terrain == "true" ]] ; then
 			height=$(echo $size_str | sed 's/.*,//')
 			width_mod=$(( $width / 2 ))
 			height_mod=$(( $height / 2 ))
-			echo -e "\033[95mResizing from $width x$height to $width_mod x$height_mod\033[0m"
+			echo -e "\033[95mResizing from $width x$height to $width_mod x $height_mod\033[0m"
 			gdalwarp -overwrite -ts $width_mod $height_mod -r $terrain_resample_method -co "COMPRESS=LZW" -co "BIGTIFF=YES" -ot Float32 "$project_dir"/merged_dem.tif "$project_dir"/merged_dem_downscaled.tif
 			width_mod=$(( $width * 3 ))
 			height_mod=$(( $height * 3 ))
@@ -1158,13 +1159,17 @@ for t in ${array_queries[@]}; do
 			run_alg_simplifygeometries ${t}_buffered_buffered "geojson" 0 0.0002 "|geometrytype=Polygon"
 			sed -i 's/name_/name:/g' $temp_dir/${t}_buffered_buffered_simpl.geojson
 			run_grass_alg_voronoiskeleton ${t}_buffered_buffered_simpl 20 1 "geojson" "|geometrytype=Polygon"
-			run_alg_simplifygeometries ${t}_buffered_buffered_simpl_skel "geojson" 0 0.002
-			sed -i 's/name_/name:/g' $temp_dir/${t}_buffered_buffered_simpl_skel_simpl.geojson
-			run_alg_smoothgeometry ${t}_buffered_buffered_simpl_skel_simpl 10 0.25 180 "geojson"
-			sed -i 's/name_/name:/g' $temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed.geojson
-			run_alg_dissolve ${t}_buffered_buffered_simpl_skel_simpl_smoothed "id" "geojson"
-			convert2spatialite "$temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed_dissolved.geojson" "$work_dir/${t}_names.sqlite"
-			set_projection "$work_dir/${t}_names.sqlite"
+			if [[ -f "$temp_dir/${t}_buffered_buffered_simpl_skel.geojson" ]] ; then
+				run_alg_simplifygeometries ${t}_buffered_buffered_simpl_skel "geojson" 0 0.002
+				sed -i 's/name_/name:/g' $temp_dir/${t}_buffered_buffered_simpl_skel_simpl.geojson
+				run_alg_smoothgeometry ${t}_buffered_buffered_simpl_skel_simpl 10 0.25 180 "geojson"
+				sed -i 's/name_/name:/g' $temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed.geojson
+				run_alg_dissolve ${t}_buffered_buffered_simpl_skel_simpl_smoothed "id" "geojson"
+				convert2spatialite "$temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed_dissolved.geojson" "$work_dir/${t}_names.sqlite"
+				set_projection "$work_dir/${t}_names.sqlite"
+			else
+				echo -e "\033[93mv.voronoi algorithm returned no data\033[0m"
+			fi
 			rm $work_dir/$t.osm
 			rm $temp_dir/*.*
 			;;

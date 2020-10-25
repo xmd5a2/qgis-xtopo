@@ -90,6 +90,7 @@ def format_water_name(name, feature, parent):
 
     if "(залив)" in n.lower(): n = re.sub("(залив)","",n, flags=re.IGNORECASE)
     if "(пролив)" in n.lower(): n = re.sub("(пролив)","",n, flags=re.IGNORECASE)
+
     if n.lower().startswith('большой') and " " in n: n = re.sub("большой","Бол.", n, flags=re.IGNORECASE)
     if n.lower().startswith('большие') and " " in n: n = re.sub("большие","Бол.", n, flags=re.IGNORECASE)
     if n.lower().startswith('большое') and " " in n: n = re.sub("большое","Бол.", n, flags=re.IGNORECASE)

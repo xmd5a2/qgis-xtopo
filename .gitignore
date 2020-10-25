@@ -6,8 +6,8 @@ config_debug.ini1
 docker_prepare_data.ini
 docker_run.ini
 prepare_files_for_github.sh
-update_local_configdir.sh
-update_local_configdir.sh1
+update_local_config_dir.sh
+update_local_config_dir.sh1
 queries/bak/
 QGIS3/profiles/default/python/expressions/
 expressions/__pycache__
