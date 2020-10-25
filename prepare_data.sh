@@ -762,7 +762,7 @@ index=1
 if [[ ${#array_queries[@]} -ge 1 ]] ; then
 	case $overpass_instance in
 		"docker")
-			echo -e "\e[100mUsing internal (docker) overpass instance\e[49m"
+			echo -e "\e[100mUsing docker overpass instance\e[49m"
 			;;
 		"local")
 			echo -e "\e[100mUsing local overpass instance $overpass_endpoint_local\e[49m"

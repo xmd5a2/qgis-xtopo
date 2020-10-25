@@ -2,8 +2,8 @@
 if [[ -f "docker_run.ini" ]] ; then
 	. docker_run.ini
 fi
-if [[ -f "update_local_extdir.sh" ]] ; then
-	. update_local_extdir.sh
+if [[ -f "update_local_configdir.sh" ]] ; then
+	. update_local_configdir.sh
 fi
 if [[ -f "config.ini" ]] ; then
 	. config.ini
