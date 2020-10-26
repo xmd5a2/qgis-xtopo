@@ -4,7 +4,9 @@ author.txt
 config_debug.ini
 config_debug.ini1
 docker_prepare_data.ini
+docker_prepare_data.ini1
 docker_run.ini
+docker_run.ini1
 prepare_files_for_github.sh
 update_local_config_dir.sh
 update_local_config_dir.sh1
