@@ -10,6 +10,7 @@ def format_peak_pass_name(name, feature, parent):
     if n.lower() == 'пик': n = ""
     if n.lower() == 'скала': n = ""
     if n.lower() == 'гора': n = ""
+    if n.lower().startswith('в.') and (n[3]).isdigit(): n = re.sub("^в.","", n, flags=re.IGNORECASE)
     if n.lower().startswith('пик '): n = re.sub("^пик ","", n, flags=re.IGNORECASE)
     if n.lower().endswith(' пик'): n = re.sub(" пик$","", n, flags=re.IGNORECASE)
     if ' пик ' in n.lower(): n = re.sub(" пик "," ", n, flags=re.IGNORECASE)

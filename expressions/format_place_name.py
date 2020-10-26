@@ -6,6 +6,8 @@ import re
 def format_place_name(name, population, name_pref_suf_lang, feature, parent):
     n = name
 
+    if "name" == n.lower(): n = ""
+    if "name ?" == n.lower(): n = ""
     if "санатория" in n.lower(): n = re.sub("санатория","сан.", n, flags=re.IGNORECASE)
     if "санаторий" in n.lower(): n = re.sub("санаторий","сан.", n, flags=re.IGNORECASE)
     if "лесничества" in n.lower(): n = re.sub("лесничества","леснич.", n, flags=re.IGNORECASE)

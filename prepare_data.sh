@@ -186,15 +186,15 @@ if [[ $generate_terrain == "true" ]] ; then
 		for tile in "${tiles_list[@]}"
 		do
 			if [[ -f "$source_dem_dir/${tile}.tif" ]] ; then
-				echo "${tile}.tif found"
+				echo -e "\033[92m$tile.tif found\033[0m"
 				cp $source_dem_dir/${tile}.tif $dem_dir
 				continue
 			elif [[ -f "$source_dem_dir/${tile}.zip" ]] ; then
-				echo "${tile}.zip found"
+				echo -e "\033[92m$tile.zip found\033[0m"
 				cp $source_dem_dir/${tile}.zip $dem_dir
 				continue
 			elif [[ -f "$source_dem_dir/${tile}.hgt" ]] ; then
-				echo "${tile}.hgt found"
+				echo -e "\033[92m$tile.hgt found\033[0m"
 				cp $source_dem_dir/${tile}.hgt $dem_dir
 				continue
 			else
