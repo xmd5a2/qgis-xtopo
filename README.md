@@ -13,13 +13,14 @@ QGIS-topo это набор инструментов, предназначенн
 
 ### 1. Установка
   1. Установить [docker](https://docs.docker.com/get-docker/)
-  2. Получить образ docker с dockerhub
+     * Если у вас Linux то нужно настроить запуск docker не из под root. Все дальнейшие действия не требуют прав суперпользователя.
+  2. Скачать образ docker с dockerhub
    ```
    docker pull xmd5a2/qgis-topo:latest
    ```
   3. _**Этот шаг нужен только для удобства запуска. Его можно пропустить если вы хотите запускать docker из командной строки**_.
 
-     Скачать [репозиторий qgis-topo с github одним файлом](https://github.com/xmd5a2/qgis-topo/archive/master.zip) и распаковать.
+     Скачать [репозиторий qgis-topo с github](https://github.com/xmd5a2/qgis-topo/archive/master.zip) и распаковать.
      Либо клонировать репозиторий:
      ```
      git clone https://github.com/xmd5a2/qgis-topo
@@ -31,7 +32,7 @@ QGIS-topo это набор инструментов, предназначенн
 ### 2. Инициализация
    1. Первичная инициализация (2 варианта)
       1. Через `docker_run`:
-         1. Настроить пути к каталогу проекта **{qgis_projects_dir}** (обязательно) и к источнику данных рельефа **{terrain_src_dir}** (опционально) в скрипте `docker_run`
+         1. Настроить пути к каталогу проекта **{qgis_projects_dir}** (обязательно) и к источнику данных рельефа **{terrain_src_dir}** (опционально) в скрипте `docker_run`. Пути не должны содержать пробелов!
          2. Запустить начальную инициализацию проекта через `docker_run`.
          Если не существует каталог **{qgis_projects_dir}**, указанный в шаге **a**, то он будет создан.
       2. Вручную. Каталоги должны существовать.
@@ -106,4 +107,4 @@ QGIS-topo это набор инструментов, предназначенн
     * Вручную: `xhost +local:docker && docker exec -it --user user qgis-topo qgis`
     
       Далее **Project - Open - /home/user/qgis_projects/{project_name}/{project_name}.qgz**
-  * Локальной установленной QGIS
+  * Локально установленной QGIS
