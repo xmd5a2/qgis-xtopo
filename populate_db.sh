@@ -21,6 +21,10 @@ if [[ ! -d $osm_tmp_dir ]] ; then
 else
     rm -f $osm_tmp_dir/*.*
 fi
+if [[ ! -d /mnt/qgis_projects/overpass_db ]] ; then
+	mkdir -p /mnt/qgis_projects/overpass_db
+fi
+
 osm_data_is_present=""
 # Determine input file list
 shopt -s nullglob

@@ -1,5 +1,6 @@
 #!/bin/bash
 first_launch=
+mkdir -p /mnt/qgis_projects/qgistopo-config/
 if [[ -f /mnt/qgis_projects/qgistopo-config/config.ini ]] ; then
 	. /mnt/qgis_projects/qgistopo-config/config.ini
 	if [[ -f /mnt/qgis_projects/qgistopo-config/config_debug.ini ]] ; then
@@ -12,7 +13,6 @@ if [[ -f /mnt/qgis_projects/qgistopo-config/config.ini ]] ; then
 	mkdir -p "$terrain_input_dir"
 	mkdir -p "$osm_data_dir"
 	mkdir -p "$temp_dir"
-
 	if [[ -f /app/automap.qgs ]] ; then
 		if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 			cd /app

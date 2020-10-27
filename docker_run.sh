@@ -16,12 +16,6 @@ if [[ ! -z $qgis_projects_dir ]] ; then
 else
 	echo -e "\033[91mqgis_projects_dir is not defined. Stopping.\033[0m" && exit 1;
 fi
-if [[ ! -z $qgistopo_config_dir ]] ; then
-	mkdir -p $qgis_projects_dir/qgistopo-config
-fi
-if [[ ! -z $qgis_projects_dir/overpass_db ]] ; then
-	mkdir -p $qgis_projects_dir/overpass_db
-fi
 if [[ -d $terrain_src_dir ]] ; then
 	terrain_mount_str="--mount type=bind,source=$terrain_src_dir,target=/mnt/terrain"
 fi
