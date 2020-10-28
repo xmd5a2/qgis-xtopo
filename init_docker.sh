@@ -57,7 +57,7 @@ if [[ ! -L /home/user/qgis_projects ]] || [[ ! -e /home/user/qgis_projects ]] ; 
 	rm -f /home/user/qgis_projects/qgis_projects
 fi
 if [[ ! -L /home/user/terrain ]] || [[ ! -e /home/user/terrain ]] ; then
-	ln -s /mnt/terrain/ /home/user/terrain
+	ln -s /mnt/terrain/ /home/user/terrain > /dev/null 2>&1
 	rm -f /home/user/terrain/terrain
 fi
 

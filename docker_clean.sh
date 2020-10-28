@@ -1,4 +1,3 @@
 #!/bin/bash
-docker stop $(docker ps -a -q)
-docker rm $(docker ps -a -q)
-docker rmi $(docker images -a -q)
+docker stop qgis-topo
+docker rmi xmd5a2/qgis-topo || docker rmi qgis-topo
