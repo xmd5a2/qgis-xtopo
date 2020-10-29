@@ -1,5 +1,6 @@
 QGIS-topo v0.1.20201027
 ================
+![GitHub Logo](/docs/splash.png)!
 
 Topographic rendering style for QGIS and data preparation scripts
 
