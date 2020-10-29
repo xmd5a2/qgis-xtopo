@@ -180,7 +180,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		if [[ ! -d $terrain_src_dir ]] ; then
 			echo -e "\033[91mterrain_src_dir "$terrain_src_dir" don't exist but get_terrain_tiles=true. Turn it off or check path. Stopping.\033[0m"
 			if [[ $running_in_container == true ]] ; then
-				echo -e "\033[93mCheck terrain_src_dir in docker_run script\033[0m"
+				echo -e "\033[93mCheck terrain_src_dir variable passed to docker_run script\033[0m"
 			fi
 			exit 1;
 		fi
@@ -306,6 +306,9 @@ if [[ $generate_terrain == "true" ]] ; then
 		fi
 	else
 		echo -e "\033[93mWarning! No DEM data found. Hillshade, slopes and isolines are not generated.\033[0m"
+		if ls $terrain_src_dir/*.tif 1> /dev/null 2>&1 ; then
+			echo -e "\033[93mLooks like you attached terrain_src_dir with world terrain data but forgot to set get_terrain_tiles=true in config.ini\033[0m"
+		fi
 		sleep 5;
 	fi
 fi
