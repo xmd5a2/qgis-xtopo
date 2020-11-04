@@ -27,14 +27,23 @@ QGIS-topo это набор инструментов, предназначенн
 
 Всё необходимое для работы находится в контейнере *docker*, размещённом на [DockerHub](https://hub.docker.com/repository/docker/xmd5a2/qgis-topo). В нём запускаются скрипты для подготовки данных. Также возможно запустить QGIS прямо из контейнера. Скрипты получают данные OSM через Overpass API. Рекомендуется использовать Overpass сервер, встроенный в *docker* контейнер.
 
+### Содержание
+   1. [Установка](https://github.com/xmd5a2/qgis-topo#1-%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0)
+   2. [Инициализация](https://github.com/xmd5a2/qgis-topo#2-%D0%B8%D0%BD%D0%B8%D1%86%D0%B8%D0%B0%D0%BB%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D1%8F)
+   3. [Подготовка данных](https://github.com/xmd5a2/qgis-topo#3-%D0%BF%D0%BE%D0%B4%D0%B3%D0%BE%D1%82%D0%BE%D0%B2%D0%BA%D0%B0-%D0%B4%D0%B0%D0%BD%D0%BD%D1%8B%D1%85)
+   4. [Настройка](https://github.com/xmd5a2/qgis-topo#4-%D0%BD%D0%B0%D1%81%D1%82%D1%80%D0%BE%D0%B9%D0%BA%D0%B0)
+   5. [Получение и обработка данных OSM, обработка рельефа](https://github.com/xmd5a2/qgis-topo#5-%D0%BF%D0%BE%D0%BB%D1%83%D1%87%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B0-%D0%B4%D0%B0%D0%BD%D0%BD%D1%8B%D1%85-osm-%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B0-%D1%80%D0%B5%D0%BB%D1%8C%D0%B5%D1%84%D0%B0)
+   6. [Запуск QGIS](https://github.com/xmd5a2/qgis-topo#6-%D0%B7%D0%B0%D0%BF%D1%83%D1%81%D0%BA-qgis)
+   7. [Работа с QGIS](link)
+   8. [Удаление QGIS-topo](https://github.com/xmd5a2/qgis-topo#8-%D1%83%D0%B4%D0%B0%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-qgis-topo)
+
 ### 1. Установка
   1. [Установить docker](https://docs.docker.com/get-docker/)
      * Если у вас Linux то нужно настроить запуск *docker* из под обычного пользователя. Все дальнейшие действия **не требуют прав суперпользователя (root)**.
   2. _**Этот шаг нужен только для удобства запуска. Его можно пропустить если вы хотите запускать docker из командной строки**_. Требуется **wget**.
 
      ```
-     mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&command -v wget >/dev/null 2>&1&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done
-     cd qgis-topo && chmod +x *.sh
+     mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&command -v wget >/dev/null 2>&1&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done&&cd qgis-topo && chmod +x *.sh     
      ```
      В текущем каталоге будет создан каталог **qgis-topo**, откуда необходимо запускать все последующие скрипты, либо использовать команды прямого запуска *docker* (приведены в справке как альтернативный вариант).
      
@@ -158,8 +167,10 @@ QGIS-topo это набор инструментов, предназначенн
     
       Далее в меню **Project - Open - /home/user/qgis_projects/имя_проекта/имя_проекта.qgz**
   * Локально установленной QGIS
-  
-## Удаление QGIS-topo
+
+### 7. Работа с QGIS
+
+### 8. Удаление QGIS-topo
    1. Остановка контейнера *docker* и удаление образа
       ```
       ./docker_clean.sh
