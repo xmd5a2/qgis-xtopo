@@ -97,7 +97,7 @@ RUN mkdir /app \
    && mkdir /app/QGIS3/ \
    && mkdir /app/osm-3s/
 
-RUN chown user /app && chmod +x /app/*.sh
+RUN chown user /app
 
 COPY --from=builder /app /app/osm-3s/
 
@@ -115,6 +115,8 @@ COPY queries/ /app/queries/
 
 COPY config.ini prepare_data.sh calc_srtm_tiles_list.py query_srtm_tiles_list.sh README.md \
    init_docker.sh populate_db.sh run_alg.py automap.qgs /app/
+
+RUN chmod +x /app/*.sh
 
 # Disable deprecation warnings in utils.py
 RUN sed -i "s/warnings.simplefilter('default')/warnings.simplefilter('ignore')/g" /usr/lib/python3/dist-packages/qgis/utils.py
