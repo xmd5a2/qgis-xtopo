@@ -97,7 +97,7 @@ RUN mkdir /app \
    && mkdir /app/QGIS3/ \
    && mkdir /app/osm-3s/
 
-RUN chown user /app
+RUN chown user /app && chmod +x /app/*.sh
 
 COPY --from=builder /app /app/osm-3s/
 
