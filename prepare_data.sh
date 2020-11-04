@@ -1,6 +1,6 @@
 #!/bin/bash
 # Get and prepare OSM / terrain data for QGIS-topo project
-# Requirements: qgis >=3.16 with grass plugin, osmtogeojson, gdal, osmctools, osmium, jq
+# Requirements: qgis >=3.16 with grass plugin, osmtogeojson, gdal, osmctools, osmium, jq, eio (pip elevation)
 # Place DEM tiles (GeoTIFF/HGT) to project_dir/input_terrain or use get_terrain_tiles and terrain_src_dir variables
 #read -rsp $'Press any key to continue...\n' -n1 key
 if [[ -f /.dockerenv ]] ; then
@@ -45,6 +45,9 @@ if [[ ! -d "$project_dir" ]] && [[ $running_in_container == true ]] ; then
 fi
 if [[ ! -d "$project_dir" ]] && [[ $running_in_container == false ]] ; then
 	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Stopping.\033[0m" && exit 1;
+fi
+if [[ $get_terrain_tiles == "true" ]] && [[ $download_terrain_tiles == "true" ]] ; then
+	echo -e "\033[91mget_terrain_tiles and download_terrain_tiles are incompatible with each other. Use only one of them. Check config.ini. Stopping.\033[0m" && exit 1;
 fi
 case $overpass_instance in
 	"docker")
@@ -104,6 +107,7 @@ if (( $(echo "$lon_min > $lon_max" | bc -l) )) || (( $(echo "$lat_min > $lat_max
 	echo -e "\033[91mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max)\033[0m" && exit 1;
 fi
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
+bbox_eio_query="$lon_min $lat_min $lon_max $lat_max"
 
 command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m" && exit 1;}
 command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[91mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m" && exit 1;}
@@ -112,6 +116,7 @@ command -v osmfilter >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmfilter is requ
 command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmconvert is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && exit 1;}
 command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmium is required but not installed. If you are using Ubuntu please install 'osmium-tool' package.\033[0m" && exit 1;}
 command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[91mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m" && exit 1;}
+command -v eio >/dev/null 2>&1 || { echo >&2 -e "\033[91meio is required but not installed. Please install python 'elevation' pip (https://github.com/bopen/elevation).\033[0m" && exit 1;}
 
 function run_alg_linestopolygons {
 	case $2 in
@@ -172,6 +177,19 @@ if [[ $generate_terrain == "true" ]] ; then
 	rm -f "$merged_dem"
 	IFS=' ' read -r -a tiles_list <<< $(python3 $(pwd)/calc_srtm_tiles_list.py -bbox "$bbox")
 	echo -e "\e[100mDEM tiles list: ${tiles_list[@]}\e[49m"
+	if [[ $download_terrain_tiles == "true" ]] ; then
+		rm -f $terrain_input_dir/*.*
+		echo -e "\e[104m=== Downloading terrain tiles...\e[49m"
+		eio clip -o $terrain_input_dir/srtm.tif --bounds $bbox_eio_query
+		if [[ $? != 0 ]] ; then
+			echo -e "\033[91mError downloading terrain. Stopping.\033[0m" && exit 1;
+		elif [[ $(gdalinfo $terrain_input_dir/srtm.tif | grep "Band 1") ]] ; then
+			echo -e "\033[92mTerrain downloaded\033[0m"
+		else
+			echo -e "\033[91mError downloading terrain. Stopping.\033[0m" && exit 1;
+		fi
+		eio clean
+	fi
 	if [[ $get_terrain_tiles == "true" ]] ; then
 		rm -f $terrain_input_dir/*.*
 		echo -e "\e[104m=== Copying DEM tiles from $terrain_src_dir...\e[49m"
@@ -215,7 +233,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		[ -e "$f" ] && gdalwarp -of GTiff $f ${f%.*}.tif && rm $f
 	done
 	for f in "$terrain_input_dir"/*.tif; do
-		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Add them manually or use get_terrain_tiles=true option. Stopping.\033[0m" && exit 1;
+		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Add them manually or use get_terrain_tiles=true or download_terrain_tiles=true option. Stopping.\033[0m" && exit 1;
 		break;
 	done
 	shopt -u nullglob
@@ -307,10 +325,11 @@ if [[ $generate_terrain == "true" ]] ; then
 		fi
 	else
 		echo -e "\033[93mWarning! No DEM data found. Hillshade, slopes and isolines are not generated.\033[0m"
-		if ls $terrain_src_dir/*.tif 1> /dev/null 2>&1 ; then
-			echo -e "\033[93mLooks like you attached terrain_src_dir with world terrain data but forgot to set get_terrain_tiles=true in config.ini\033[0m"
-		fi
+		echo -e "\033[93mCheck get_terrain_tiles=true or download_terrain_tiles=true options in config.ini\033[0m"
 		sleep 5;
+	fi
+	if [[ $download_terrain_tiles == "true" ]] ; then
+		rm -f $terrain_input_dir/*.*
 	fi
 fi
 

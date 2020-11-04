@@ -63,6 +63,9 @@ RUN apt-get update && \
     && add-apt-repository "deb http://qgis.org/ubuntu focal main"
 
 RUN apt-get install --no-install-recommends --no-install-suggests -y \
+    make \
+    curl \
+    unzip \
     zip \
     bc \
     jq \
@@ -106,6 +109,10 @@ COPY --from=builder /usr/bin/osmconvert /usr/bin/osmfilter /usr/bin/
 COPY --from=builder /tmp/refFunctions-master /app/QGIS3/profiles/default/python/plugins/refFunctions/
 
 COPY startup.py /app/QGIS3/profiles/default/python/
+
+COPY elevation-1.0.6.tar.gz /app/
+
+RUN cd /app && tar -xvf elevation-1.0.6.tar.gz && cd elevation-1.0.6 && python3 setup.py install
 
 COPY QGIS3/ /app/QGIS3/
 

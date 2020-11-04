@@ -1,5 +1,5 @@
 #!/bin/bash
-while getopts ":n:d:b:t:e:" opt; do
+while getopts ":n:d:b:t:s:e:" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
@@ -9,13 +9,15 @@ while getopts ":n:d:b:t:e:" opt; do
     ;;
     t) terrain_src_dir="$OPTARG"
     ;;
+    s) DOWNLOAD_TERRAIN_DATA=true
+    ;;
     e) OVERPASS_INSTANCE_EXTERNAL=true
     ;;
     \?) echo "Invalid option -$OPTARG" >&2
     ;;
   esac
 done
-usage_str="Usage: ./docker_run.sh -n project_name -d /path/to/projects/dir [ -b lon_min,lat_min,lon_max,lat_max -t /path/to/terrain/dir ]"
+usage_str="Usage: ./docker_run.sh -n project_name -d /path/to/projects/dir [ -b lon_min,lat_min,lon_max,lat_max -e true -s true -t /path/to/terrain/dir ] { -e : use external Overpass server, -s : automatically download SRTM30m terrain data }"
 if [[ -f "docker_run.ini" ]] ; then
 	. docker_run.ini
 fi
@@ -71,13 +73,16 @@ if [[ ! -z $qgis_projects_dir ]] ; then
 	if [[ ! -z $OVERPASS_INSTANCE_EXTERNAL ]] ; then
 		echo -e "\e[100moverpass_instance_external=true\e[49m"
 	fi	
+	if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
+		echo -e "\e[100mdownload_terrain_data=true\e[49m"
+	fi
 fi
 
 if [[ $(docker container ls | grep qgis-topo) ]] ; then
 	docker stop qgis-topo
 fi
 if [[ -d "$qgis_projects_dir" ]] ; then
-	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE_EXTERNAL=$OVERPASS_INSTANCE_EXTERNAL -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --name qgis-topo \
+	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE_EXTERNAL=$OVERPASS_INSTANCE_EXTERNAL -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --name qgis-topo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \
 		$terrain_mount_str \
 		$docker_image

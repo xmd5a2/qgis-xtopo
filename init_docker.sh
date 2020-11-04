@@ -7,6 +7,10 @@ fi
 if [[ ! -z $OVERPASS_INSTANCE_EXTERNAL ]] ; then
 	sed -i "s/overpass_instance=docker/overpass_instance=external/g" /app/config.ini
 fi
+if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
+	sed -i "s/generate_terrain=false/generate_terrain=true/g" /app/config.ini
+	sed -i "s/download_terrain_tiles=false/download_terrain_tiles=true/g" /app/config.ini
+fi
 
 if [[ ! -f /mnt/qgis_projects/qgistopo-config/config.ini ]] ; then
 	cp /app/config.ini /mnt/qgis_projects/qgistopo-config/config.ini
