@@ -1,5 +1,5 @@
 (
-node["man_made"="adit"];
-node["man_made"="mineshaft"];
-node["historic"="mine"];
+nwr["man_made"="adit"]["abandoned"!="yes"]["disused"!="yes"];
+nwr["man_made"="mineshaft"]["abandoned"!="yes"]["disused"!="yes"];
+nwr["historic"="mine"]["abandoned"!="yes"]["disused"!="yes"];
 );

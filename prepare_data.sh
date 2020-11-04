@@ -1,6 +1,6 @@
 #!/bin/bash
 # Get and prepare OSM / terrain data for QGIS-topo project
-# Requirements: qgis >=3.14 with grass plugin, osmtogeojson, gdal
+# Requirements: qgis >=3.16 with grass plugin, osmtogeojson, gdal, osmctools, osmium, jq
 # Place DEM tiles (GeoTIFF/HGT) to project_dir/input_terrain or use get_terrain_tiles and terrain_src_dir variables
 #read -rsp $'Press any key to continue...\n' -n1 key
 if [[ -f /.dockerenv ]] ; then
@@ -92,8 +92,6 @@ if [[ -d "$temp_dir" ]] ; then
 fi
 rm -f $vector_data_dir/*.sqlite_tmp
 rm -f $vector_data_dir/*.sqlite_tmp-journal
-# rm -f $project_dir/log.txt
-# exec > >(tee -a $project_dir/log.txt)
 
 IFS=',' read -r -a array_bbox <<< "$bbox"
 lon_min=${array_bbox[0]}
@@ -103,8 +101,7 @@ lat_max=${array_bbox[3]}
 
 if (( $(echo "$lon_min > $lon_max" | bc -l) )) || (( $(echo "$lat_min > $lat_max" | bc -l) )) || \
 	(( $(echo "$lat_min > 90" | bc -l) )) || (( $(echo "$lat_min < -90" | bc -l) )) ; then
-	echo -e "\033[91mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max)\033[0m"
-	exit 1;
+	echo -e "\033[91mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max)\033[0m" && exit 1;
 fi
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
 
@@ -137,6 +134,10 @@ function osmtogeojson_wrapper {
 	mem=$(echo $(($(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE) / (1024 * 1024))))
 	node_mem=$(bc<<<$mem*2/3)
 	node --max_old_space_size=$node_mem `which osmtogeojson` $1 > $2
+	if [[ $? != 0 ]] ; then
+		echo $?
+		echo -e "\033[91mosmtogeojson error. Try reducing bbox.\033[0m" && exit 1;
+	fi
 }
 function convert2spatialite {
 	if [[ -f $2 ]] ; then
@@ -826,7 +827,7 @@ for t in ${array_queries[@]}; do
 
 	case $t in
 		"railway_all")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_explodelines $t
@@ -837,7 +838,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"ridge" | "railway_all")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_explodelines $t
@@ -854,7 +855,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"water" | "water_intermittent") # "coastline" should be requested after "water" to be correct
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=Polygon" && rm -f $vector_data_dir/$t.geojson && mv $vector_data_dir/${t}_fixed.geojson $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
@@ -867,7 +868,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"allotments")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_dissolve $t
@@ -883,11 +884,11 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"water_without_riverbanks")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			rm $vector_data_dir/$t.osm
 			;;
 		"river" | "river_intermittent") # should be requested after "water_without_riverbanks"
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			if [[ -f $vector_data_dir/water_dissolved.geojson ]] ; then
 				cp $vector_data_dir/water_without_riverbanks.geojson $temp_dir
@@ -903,7 +904,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"stream_intermittent") # should be requested after "water"
-			osmtogeojson $vector_data_dir/$t.osm > $temp_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $temp_dir/$t.geojson
 			if [[ -f $vector_data_dir/water_dissolved.geojson ]] ; then
 				cp $vector_data_dir/water_dissolved.geojson $temp_dir
 				run_alg_difference $t "water_dissolved"
@@ -916,7 +917,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"stream") # should be requested after "water" and "stream_intermittent"
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			cp $vector_data_dir/$t.sqlite $temp_dir
@@ -938,18 +939,19 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"admin_level_2")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_polygonstolines $t
 			run_alg_dissolve ${t}_lines
-			cp $temp_dir/${t}_lines_dissolved.geojson $vector_data_dir/${t}_dissolved.geojson
-			convert2spatialite "$temp_dir/${t}_lines_dissolved.geojson" "$vector_data_dir/${t}_dissolved.sqlite"
+			run_alg_multiparttosingleparts ${t}_lines_dissolved "geojson"
+			cp $temp_dir/${t}_lines_dissolved_parts.geojson $vector_data_dir/${t}_dissolved.geojson
+			convert2spatialite "$temp_dir/${t}_lines_dissolved_parts.geojson" "$vector_data_dir/${t}_dissolved.sqlite"
 			rm $vector_data_dir/$t.geojson
 			rm $vector_data_dir/$t.osm
 #			rm $temp_dir/*.*
 			;;
 		"admin_level_4") # should be requested after "admin_level_2"
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_polygonstolines $t
 			if [[ -f $vector_data_dir/admin_level_2_dissolved.geojson ]] ; then
@@ -958,14 +960,15 @@ for t in ${array_queries[@]}; do
 			else mv $temp_dir/${t}_lines.geojson $temp_dir/${t}_lines_diff.geojson
 			fi
 			run_alg_dissolve ${t}_lines_diff
-			cp "$temp_dir/${t}_lines_diff_dissolved.geojson" "$vector_data_dir/${t}_proc.geojson"
-			convert2spatialite "$temp_dir/${t}_lines_diff_dissolved.geojson" "$vector_data_dir/${t}_proc.sqlite"
+			run_alg_multiparttosingleparts ${t}_lines_diff_dissolved "geojson"
+			cp "$temp_dir/${t}_lines_diff_dissolved_parts.geojson" "$vector_data_dir/${t}_proc.geojson"
+			convert2spatialite "$temp_dir/${t}_lines_diff_dissolved_parts.geojson" "$vector_data_dir/${t}_proc.sqlite"
 			rm $vector_data_dir/$t.geojson
 			rm $vector_data_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
 		"place_admin_centre_6" | "place_admin_centre_4" | "place_admin_centre_2")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_pyfieldcalc $t admin_centre_${t: -1} 2 "value='true'"
 			if [[ -f $vector_data_dir/places_main.geojson ]] ; then
@@ -980,8 +983,8 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
-		"place_of_worship_muslim" | "place_of_worship_hindu" | "place_of_worship_buddhist" | "place_of_worship_shinto" | "place_of_worship_jewish" | "place_of_worship_taoist" | "place_of_worship_sikh" | "place_of_worship_other" | "sinkhole_polygon" | "alpine_hut" | "wilderness_hut" | "memorial" | "monument" | "tower_communication" | "monastery_no_religion" | "barrier_border_control" | "cape" | "chimney" | "water_tower" | "volcano" | "volcano_dirt")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+		"place_of_worship_muslim" | "place_of_worship_hindu" | "place_of_worship_buddhist" | "place_of_worship_shinto" | "place_of_worship_jewish" | "place_of_worship_taoist" | "place_of_worship_sikh" | "place_of_worship_other" | "sinkhole_polygon" | "alpine_hut" | "wilderness_hut" | "memorial" | "monument" | "tower_communication" | "monastery_no_religion" | "barrier_border_control" | "cape" | "chimney" | "water_tower" | "volcano" | "volcano_dirt" | "mineshaft" | "mineshaft_abandoned")
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
 			cp $temp_dir/${t}_centroids.geojson $vector_data_dir/${t}_centroids.geojson
@@ -990,7 +993,7 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			;;
 		"monastery_christian")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
 			run_alg_buffer ${t}_centroids 0.0025
@@ -1000,7 +1003,7 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			;;
 		"place_of_worship_christian" | "place_of_worship_christian_ruins") # should be requested after "monastery_christian" and "prison"
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
 			if [[ -f "$vector_data_dir/prison.geojson" ]] ; then
@@ -1023,7 +1026,7 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			;;
 		"camp_site" | "attraction" | "ruins" | "track_bridge" | "aerodrome" | "castle" | "archaeological_site" | "observatory" | "picnic_site" | "tower_cooling")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
@@ -1032,7 +1035,7 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			;;
 		"waterfall" | "weir")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_polygonstolines $t
@@ -1045,19 +1048,20 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			;;
 		"highway_main_bridge")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
 			run_alg_dissolve $t 'highway'
+			run_alg_multiparttosingleparts ${t}_dissolved "geojson"
 			cp $temp_dir/${t}_centroids.geojson $vector_data_dir/${t}_centroids.geojson
-			cp $temp_dir/${t}_dissolved.geojson $vector_data_dir/${t}_dissolved.geojson
+			cp $temp_dir/${t}_dissolved_parts.geojson $vector_data_dir/${t}_dissolved.geojson
 			convert2spatialite "$temp_dir/${t}_centroids.geojson" "$vector_data_dir/${t}_centroids.sqlite"
-			convert2spatialite "$temp_dir/${t}_dissolved.geojson" "$vector_data_dir/${t}_dissolved.sqlite"
+			convert2spatialite "$temp_dir/${t}_dissolved_parts.geojson" "$vector_data_dir/${t}_dissolved.sqlite"
 			rm $vector_data_dir/$t.osm
 			;;
 		"power_line")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_dissolve $t
 			run_alg_multiparttosingleparts ${t}_dissolved
@@ -1066,7 +1070,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"ford" | "railway_stop_names")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
 			convert2spatialite "$temp_dir/${t}_centroids.geojson" "$vector_data_dir/${t}_centroids.sqlite"
@@ -1079,7 +1083,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"railway_station_icons" | "railway_halt_icons")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_buffer $t 0.004
 			run_alg_dissolve ${t}_buffered 'name'
@@ -1091,7 +1095,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"mountain_pass")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_reprojectlayer $t
 			convert2spatialite "$temp_dir/${t}_reproj.geojson" "$vector_data_dir/${t}_reproj.sqlite"
@@ -1101,7 +1105,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"building_train_station")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_fixgeometries $t "geojson" "" "|geometrytype=Polygon" && rm -f $temp_dir/$t.geojson && mv $temp_dir/${t}_fixed.geojson $temp_dir/$t.geojson
 			run_alg_centroids $t
@@ -1113,12 +1117,13 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"place_locality_node")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			if [[ -f "$vector_data_dir/place_locality_way.geojson" ]] ; then
 				cp $vector_data_dir/place_locality_way.geojson $temp_dir
 				run_alg_difference $t "place_locality_way"
-				convert2spatialite "$temp_dir/${t}_diff.geojson" "$vector_data_dir/${t}_diff.sqlite"
+				run_alg_multiparttosingleparts ${t}_diff "geojson"
+				convert2spatialite "$temp_dir/${t}_diff_parts.geojson" "$vector_data_dir/${t}_diff.sqlite"
 				cp "$temp_dir/${t}_diff.geojson" "$vector_data_dir/${t}_diff.geojson"
 			else
 				convert2spatialite "$temp_dir/$t.geojson" "$vector_data_dir/${t}_diff.sqlite"
@@ -1129,7 +1134,7 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"route_hiking")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_explodelines $t
@@ -1138,17 +1143,18 @@ for t in ${array_queries[@]}; do
 			rm $temp_dir/*.*
 			;;
 		"military")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_dissolve $t
-			cp $temp_dir/${t}_dissolved.geojson $vector_data_dir
-			convert2spatialite "$temp_dir/${t}_dissolved.geojson" "$vector_data_dir/${t}_dissolved.sqlite"
+			run_alg_multiparttosingleparts ${t}_dissolved "geojson"
+			cp $temp_dir/${t}_dissolved_parts.geojson $vector_data_dir
+			convert2spatialite "$temp_dir/${t}_dissolved_parts.geojson" "$vector_data_dir/${t}_dissolved.sqlite"
 			rm $vector_data_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
 		"glacier" | "bay_polygon" | "wetland" | "wood")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=Polygon" && rm -f $vector_data_dir/$t.geojson && mv $vector_data_dir/${t}_fixed.geojson $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
@@ -1182,7 +1188,7 @@ for t in ${array_queries[@]}; do
 			;;
 
 		"strait")
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			if grep -q "type\": \"Polygon" "$vector_data_dir/$t.geojson"; then
@@ -1199,7 +1205,8 @@ for t in ${array_queries[@]}; do
 				sed -i 's/name_/name:/g' $temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed.geojson
 				run_alg_extractbylocation ${t}_buffered_buffered_simpl ${t}_buffered_buffered_simpl_skel 2 "geojson" # Extract glaciers than were not skeletonized and run second pass because of v.voronoi.skeleton specifics
 				run_alg_dissolve ${t}_buffered_buffered_simpl_skel_simpl_smoothed "id" "geojson"
-				convert2spatialite "$temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed_dissolved.geojson" "$vector_data_dir/${t}_skel.sqlite"
+				run_alg_multiparttosingleparts ${t}_buffered_buffered_simpl_skel_simpl_smoothed_dissolved "geojson"
+				convert2spatialite "$temp_dir/${t}_buffered_buffered_simpl_skel_simpl_smoothed_dissolved_parts.geojson" "$vector_data_dir/${t}_skel.sqlite"
 				set_projection "$vector_data_dir/${t}_skel.sqlite"
 				rm $temp_dir/*.*
 			fi
@@ -1207,7 +1214,7 @@ for t in ${array_queries[@]}; do
 			;;
 
 		"island_node") # should be requested after "island"
-			osmtogeojson $vector_data_dir/$t.osm > $vector_data_dir/$t.geojson
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.sqlite $temp_dir
 			if [[ -f "$vector_data_dir/island.sqlite" ]] ; then
@@ -1282,8 +1289,9 @@ for t in ${array_queries[@]}; do
 					merge_vector_layers "sqlite" "Polygon" water_dissolved ocean
 					run_alg_fixgeometries water_dissolved_merged "sqlite"
 					run_alg_dissolve water_dissolved_merged_fixed 'natural' "sqlite"
-					set_projection $temp_dir/water_dissolved_merged_fixed_dissolved.sqlite
-					convert2spatialite "$temp_dir/water_dissolved_merged_fixed_dissolved.sqlite" "$vector_data_dir/water_dissolved.sqlite"
+					run_alg_multiparttosingleparts water_dissolved_merged_fixed_dissolved "sqlite"
+					set_projection $temp_dir/water_dissolved_merged_fixed_dissolved_parts.sqlite
+					convert2spatialite "$temp_dir/water_dissolved_merged_fixed_dissolved_parts.sqlite" "$vector_data_dir/water_dissolved.sqlite"
 				else
 					set_projection "$temp_dir/ocean.sqlite"
 					convert2spatialite "$temp_dir/ocean.sqlite" "$vector_data_dir/water_dissolved.sqlite"
@@ -1298,6 +1306,9 @@ for t in ${array_queries[@]}; do
 			osmfilter $vector_data_dir/$t.osm --keep-ways="layer>0" -o=$vector_data_dir/${t}_layer_1.osm
 			osmfilter $vector_data_dir/$t.osm --keep-ways="layer<0" -o=$vector_data_dir/${t}_layer_-1.osm
 			osmfilter $vector_data_dir/$t.osm --drop-ways="layer>0 or layer<0" -o=$vector_data_dir/${t}_new.osm && rm -f $vector_data_dir/$t.osm && mv $vector_data_dir/${t}_new.osm $vector_data_dir/$t.osm
+			if [[ $? == 139 ]] ; then
+				echo -e "\033[91mSegmentation fault\033[0m" && exit 1;
+			fi
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			osmtogeojson_wrapper $vector_data_dir/${t}_layer_1.osm $vector_data_dir/${t}_layer_1.geojson
 			# Remove orphaned nodes to reduce file size

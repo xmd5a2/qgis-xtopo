@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="place_of_worship_christian_cluster.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.46083856"
+     inkscape:cx="-6.9826608"
+     inkscape:cy="349.7525"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1"
+     inkscape:snap-global="false" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     style="color:#000000;display:inline;overflow:visible;visibility:visible;fill:#000000;fill-opacity:1;stroke:none;stroke-width:21.51408958;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1;marker:none;enable-background:accumulate"
+     d="m 492.63921,223.7073 -0.0834,-0.14041 -188.23637,49.27138 46.3175,-185.394162 -0.12816,-0.08343 H 229.49129 l -0.12816,0.08343 37.88695,185.394162 -179.805869,-49.27138 -0.08343,0.1404 v 132.58519 l 0.08343,0.1404 179.805839,-44.40229 -37.88696,180.52503 0.12816,0.0837 h 121.01746 l 0.12816,-0.0837 -46.31749,-180.52503 188.23636,44.40229 0.0834,-0.1404 V 223.70729 Z"
+     id="rect2987"
+     inkscape:connector-curvature="0"
+     sodipodi:nodetypes="cccccccccccccccccccccc" />
+  <path
+     style="color:#000000;display:inline;overflow:visible;visibility:visible;fill:#000000;fill-opacity:1;stroke:none;stroke-width:21.51408958;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1;marker:none;enable-background:accumulate"
+     d="M 318.88281 29.333984 L 318.76758 29.408203 L 325.05078 60.150391 L 350.50781 60.150391 A 27.213847 27.213847 0 0 1 365.11719 64.404297 L 365.24609 64.486328 A 27.213847 27.213847 0 0 1 377.03711 94.039062 L 352.25 193.25391 L 352.69922 195.44727 L 351.76562 195.19141 L 342.29102 233.11719 L 352.69922 230.54688 L 352.36523 232.13477 L 485.66602 197.24219 A 27.213847 27.213847 0 0 1 516.06055 209.85547 L 516.14258 209.99609 A 27.213847 27.213847 0 0 1 519.84961 223.70703 L 519.84961 262.14258 L 554.48242 270.3125 L 554.55664 270.1875 L 554.55664 151.44531 L 554.48242 151.32031 L 385.89844 195.44727 L 427.38086 29.408203 L 427.26562 29.333984 L 318.88281 29.333984 z M 191.66602 151.32031 L 191.5918 151.44531 L 191.5918 223.89062 L 231.7207 234.88672 L 216.00586 157.99023 L 191.66602 151.32031 z M 341.85742 348.84375 L 353.00586 392.29883 L 427.26562 392.29883 L 427.38086 392.22461 L 421.04297 367.52344 L 341.85742 348.84375 z "
+     id="rect2987-3" />
+</svg>

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="place_of_worship_christian_ruins_cluster.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.16293104"
+     inkscape:cx="-1088.0716"
+     inkscape:cy="647.94068"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1"
+     inkscape:snap-global="false" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     style="color:#000000;display:inline;overflow:visible;visibility:visible;fill:#000000;fill-opacity:1;stroke:none;stroke-width:21.51408958;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1;marker:none;enable-background:accumulate"
+     d="M 233.17578 117.69727 L 264.44922 270.72461 L 62.5 215.38672 L 62.40625 215.54297 L 62.40625 364.45703 L 62.5 364.61328 L 264.44922 314.74414 L 221.89648 517.5 L 222.03906 517.59375 L 357.96094 517.59375 L 358.10352 517.5 L 306.08203 314.74414 L 412.83008 339.92383 C 414.52113 292.90343 405.25392 259.43241 400.66016 245.96875 L 306.08203 270.72461 L 327.0957 186.61523 C 282.61355 174.59598 250.58135 140.71253 233.17578 117.69727 z "
+     id="rect2987" />
+  <path
+     style="color:#000000;display:inline;overflow:visible;visibility:visible;fill:#000000;fill-opacity:1;stroke:none;stroke-width:21.51408958;stroke-linejoin:bevel;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1;marker:none;enable-background:accumulate"
+     d="m 367.6875,95.935547 24.31055,118.955073 0.49414,-0.1289 c 16.35463,-4.27918 33.23903,4.7919 38.69922,20.79101 2.94353,8.62711 7.14041,23.12295 10.19336,42.4336 l 90.79101,21.41601 c 1.5483,-43.05125 -6.9366,-73.69628 -11.14258,-86.02343 l -86.59375,22.66601 19.23828,-77.00976 C 412.95047,148.0305 383.62381,117.008 367.6875,95.935547 Z m 77.44141,222.072263 c 0.22851,7.32697 0.22893,15.027 -0.0606,23.07617 -0.73401,20.31981 -19.85411,34.90244 -39.64453,30.23633 l -27.66602,-6.52539 -11.48828,54.73438 10.91602,42.54492 H 481.9375 l 0.13086,-0.0859 z"
+     id="rect2987-3"
+     inkscape:connector-curvature="0"
+     sodipodi:nodetypes="ccccccccccccccccccc" />
+</svg>

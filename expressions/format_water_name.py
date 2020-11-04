@@ -6,6 +6,7 @@ import re
 def format_water_name(name, feature, parent):
     n = name
     if n.lower() == "водопад" \
+    or n.lower() == "родник" \
     or n.lower() == "бассейн" \
     or n.lower() == "водоем" \
     or n.lower() == "водоём" \
@@ -31,6 +32,12 @@ def format_water_name(name, feature, parent):
     or n.lower() == "речка" \
     or n.lower() == "ручей" \
     or n.lower() == "старица" \
+    or n.lower() == "spring" \
+    or n.lower() == "water" \
+    or n.lower() == "stream" \
+    or n.lower() == "river" \
+    or n.lower() == "drain" \
+    or n.lower() == "canal" \
     or n == "исток": n = ''
     if "озеро" in n.lower(): n = re.sub("озеро","оз.",n, flags=re.IGNORECASE)
     elif n.lower().startswith("озёра "): n = re.sub("^озёра ","оз.",n, flags=re.IGNORECASE)

@@ -1,0 +1,8 @@
+(
+nwr["man_made"="adit"]["abandoned"="yes"];
+nwr["man_made"="adit"]["disused"="yes"];
+nwr["man_made"="mineshaft"]["abandoned"="yes"];
+nwr["man_made"="mineshaft"]["disused"="yes"];
+nwr["historic"="mine"]["abandoned"="yes"];
+nwr["historic"="mine"]["disused"="yes"];
+);
