@@ -94,7 +94,7 @@ RUN apt-get purge -y software-properties-common \
 RUN mkdir /app \
    && mkdir /app/icons/ \
    && mkdir /app/queries/ \
-   && mkdir /app/QGIS3/ \
+   && mkdir -p /app/QGIS3/profiles/default/python/expressions/ \
    && mkdir /app/osm-3s/
 
 RUN chown user /app
@@ -108,6 +108,8 @@ COPY --from=builder /tmp/refFunctions-master /app/QGIS3/profiles/default/python/
 COPY startup.py /app/QGIS3/profiles/default/python/
 
 COPY QGIS3/ /app/QGIS3/
+
+COPY expressions/ /app/QGIS3/profiles/default/python/expressions/
 
 COPY icons/ /app/icons/
 
