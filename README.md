@@ -34,6 +34,7 @@ QGIS-topo это набор инструментов, предназначенн
 
      ```
      mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&command -v wget >/dev/null 2>&1&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done
+     cd qgis-topo && chmod +x *.sh
      ```
      В текущем каталоге будет создан каталог **qgis-topo**, откуда необходимо запускать все последующие скрипты, либо использовать команды прямого запуска *docker* (приведены в справке как альтернативный вариант).
      
