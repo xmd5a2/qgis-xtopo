@@ -1,6 +1,13 @@
 #!/bin/bash
 mkdir -p /mnt/qgis_projects/qgistopo-config/
 sed -i "s/automap/$PROJECT_NAME_EXT/g" /app/config.ini
+if [[ ! -z $BBOX_STR ]] ; then
+	sed -i "s/13.61,50.67,14.25,50.96/$BBOX_STR/g" /app/config.ini
+fi
+if [[ ! -z $OVERPASS_INSTANCE_EXTERNAL ]] ; then
+	sed -i "s/overpass_instance=docker/overpass_instance=external/g" /app/config.ini
+fi
+
 if [[ ! -f /mnt/qgis_projects/qgistopo-config/config.ini ]] ; then
 	cp /app/config.ini /mnt/qgis_projects/qgistopo-config/config.ini
 fi
