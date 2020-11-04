@@ -34,7 +34,7 @@ QGIS-topo это набор инструментов, предназначенн
    4. [Настройка](https://github.com/xmd5a2/qgis-topo#4-%D0%BD%D0%B0%D1%81%D1%82%D1%80%D0%BE%D0%B9%D0%BA%D0%B0)
    5. [Получение и обработка данных OSM, обработка рельефа](https://github.com/xmd5a2/qgis-topo#5-%D0%BF%D0%BE%D0%BB%D1%83%D1%87%D0%B5%D0%BD%D0%B8%D0%B5-%D0%B8-%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B0-%D0%B4%D0%B0%D0%BD%D0%BD%D1%8B%D1%85-osm-%D0%BE%D0%B1%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B0-%D1%80%D0%B5%D0%BB%D1%8C%D0%B5%D1%84%D0%B0)
    6. [Запуск QGIS](https://github.com/xmd5a2/qgis-topo#6-%D0%B7%D0%B0%D0%BF%D1%83%D1%81%D0%BA-qgis)
-   7. [Работа с QGIS](link)
+   7. [Работа с QGIS](https://github.com/xmd5a2/qgis-topo#7-%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%B0-%D1%81-qgis)
    8. [Удаление QGIS-topo](https://github.com/xmd5a2/qgis-topo#8-%D1%83%D0%B4%D0%B0%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-qgis-topo)
 
 ### 1. Установка
