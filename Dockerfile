@@ -62,7 +62,7 @@ RUN apt-get update && \
     && chmod a+r /etc/apt/trusted.gpg.d/qgis-archive.gpg \
     && add-apt-repository "deb http://qgis.org/ubuntu focal main"
 
-RUN apt-get install --no-install-recommends --no-install-suggests -y \
+RUN apt-get install --no-install-recommends --no-install-suggests --fix-missing -y \
     make \
     curl \
     unzip \
