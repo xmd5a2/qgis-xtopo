@@ -30,10 +30,6 @@ RUN apt-get update \
 
 ADD http://dev.overpass-api.de/releases/osm-3s_v0.7.56.3.tar.gz /app/src.tar.gz
 
-ADD https://github.com/enricofer/refFunctions/archive/master.zip /tmp/master.zip
-
-RUN unzip /tmp/master.zip -d /tmp
-
 RUN mkdir -p /app/src \
     && cd /app/src \
     && tar -x -z --strip-components 1 -f ../src.tar.gz \
@@ -106,9 +102,11 @@ COPY --from=builder /app /app/osm-3s/
 
 COPY --from=builder /usr/bin/osmconvert /usr/bin/osmfilter /usr/bin/
 
-COPY --from=builder /tmp/refFunctions-master /app/QGIS3/profiles/default/python/plugins/refFunctions/
-
 COPY startup.py /app/QGIS3/profiles/default/python/
+
+COPY refFunctions.zip /app/QGIS3/profiles/default/python/plugins/
+
+RUN cd /app/QGIS3/profiles/default/python/plugins/ && unzip refFunctions.zip && rm refFunctions.zip
 
 COPY elevation-1.0.6.tar.gz /app/
 
