@@ -73,7 +73,9 @@ QGIS-topo это набор инструментов, предназначенн
 
      ```
      docker run -dti --rm -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --name qgis-topo \
-      -e PROJECT_NAME_EXT=**имя_проекта** -e BBOX_STR=**границы зоны охвата** -e OVERPASS_INSTANCE_EXTERNAL=**использовать_внешний_overpass(true)** \
+      -e PROJECT_NAME_EXT=**имя_проекта** \
+      -e BBOX_STR=**границы зоны охвата** \
+      -e OVERPASS_INSTANCE_EXTERNAL=**использовать_внешний_overpass(true)** \
       -e DOWNLOAD_TERRAIN_DATA=**загрузить_данные_рельефа(true)** \
       --mount type=bind,source=**путь_к_каталогу_с_проектами**,target=/mnt/qgis_projects \
       --mount type=bind,source=**путь_к_каталогу_с_данными_рельефа**,target=/mnt/terrain \
