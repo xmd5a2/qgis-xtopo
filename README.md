@@ -114,6 +114,7 @@ QGIS-topo это набор инструментов, предназначенн
          * `docker exec -it --user user qgis-topo /app/populate_db.sh`
          
    2. Получить данные рельефа (опционально)
+   
       **Если вы хотите использовать рельеф то не забудьте задать опцию **generate_terrain=true** в **config.ini** (раздел [**4**](https://github.com/xmd5a2/qgis-topo#4-%D0%BD%D0%B0%D1%81%D1%82%D1%80%D0%BE%D0%B9%D0%BA%D0%B0)).**
 
       Доступно три варианта использования данных:
