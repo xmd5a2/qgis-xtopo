@@ -133,7 +133,7 @@ function run_alg_linestopolygons {
 	python3 $(pwd)/run_alg.py \
 		-alg "qgis:linestopolygons" \
 		-param1 INPUT -value1 "$temp_dir/$1.$ext$3" \
-		-param2 OUTPUT -value2 "$temp_dir/${1}_polygonized.$ext"
+		-param2 OUTPUT -value2 "$temp_dir/${1}_polygons.$ext"
 }
 function osmtogeojson_wrapper {
 	mem=$(echo $(($(getconf _PHYS_PAGES) * $(getconf PAGE_SIZE) / (1024 * 1024))))
@@ -589,9 +589,23 @@ function run_alg_buffer {
 			ext="geojson"
 			;;
 	esac
+	case $4 in
+		"LineString")
+			geometrytype="|geometrytype=LineString"
+			;;
+		"Polygon")
+			geometrytype="|geometrytype=Polygon"
+			;;
+		"MultiPolygon")
+			geometrytype="|geometrytype=MultiPolygon"
+			;;
+		"Point")
+			geometrytype="|geometrytype=Point"
+			;;
+	esac
 	python3 $(pwd)/run_alg.py \
 		-alg "native:buffer" \
-		-param1 INPUT -value1 $temp_dir/$1.$ext \
+		-param1 INPUT -value1 $temp_dir/$1.$ext$geometrytype \
 		-param2 DISTANCE -value2 $2 \
 		-param3 OUTPUT -value3 $temp_dir/${1}_buffered.$ext
 }
@@ -1172,6 +1186,20 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
+		"mountain_area")
+			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
+			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
+			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=Polygon" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_polygon_fixed.geojson
+			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=LineString" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_line_fixed.geojson
+			run_alg_linestopolygons "${t}_line_fixed" "geojson" "|geometrytype=LineString"
+			merge_vector_layers "geojson" "MultiPolygon" ${t}_polygon_fixed ${t}_line_fixed_polygons
+			mv $temp_dir/${t}_polygon_fixed_merged.geojson $temp_dir/$t.geojson
+			convert2spatialite "$temp_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
+			run_alg_fixgeometries $t "sqlite" "workdir" && rm -f $vector_data_dir/$t.sqlite && mv $vector_data_dir/${t}_fixed.sqlite $vector_data_dir/$t.sqlite # If geojson with intersections processed with run_alg_fixgeometries, is converted to sqlite then it will contain intersections again
+			set_projection $vector_data_dir/$t.sqlite
+			rm $vector_data_dir/$t.osm
+			rm $temp_dir/*.*
+			;;
 		"glacier" | "bay_polygon" | "wetland" | "wood")
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
@@ -1205,7 +1233,6 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
-
 		"strait")
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
@@ -1231,7 +1258,6 @@ for t in ${array_queries[@]}; do
 			fi
 			rm $vector_data_dir/$t.osm
 			;;
-
 		"island_node") # should be requested after "island"
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
@@ -1286,9 +1312,9 @@ for t in ${array_queries[@]}; do
 					cp "$vector_data_dir/$t.sqlite" "$temp_dir/$t.sqlite"
 					run_alg_dissolve "$t" "" "sqlite" "|geometrytype=LineString"
 					run_alg_linestopolygons "${t}_dissolved" "sqlite" "|geometrytype=LineString"
-					run_alg_fixgeometries "${t}_dissolved_polygonized" "sqlite"
-					run_alg_difference "${t}_dissolved_polygonized_fixed" "$t" "sqlite" "|geometrytype=Polygon"
-					mv "$temp_dir/${t}_dissolved_polygonized_fixed_diff.sqlite" "$temp_dir/ocean.sqlite"
+					run_alg_fixgeometries "${t}_dissolved_polygons" "sqlite"
+					run_alg_difference "${t}_dissolved_polygons_fixed" "$t" "sqlite" "|geometrytype=Polygon"
+					mv "$temp_dir/${t}_dissolved_polygons_fixed_diff.sqlite" "$temp_dir/ocean.sqlite"
 				fi
 				if [[ -f $vector_data_dir/island.sqlite ]] ; then
 					cp $vector_data_dir/island.sqlite $temp_dir

@@ -102,12 +102,6 @@ COPY --from=builder /app /app/osm-3s/
 
 COPY --from=builder /usr/bin/osmconvert /usr/bin/osmfilter /usr/bin/
 
-COPY startup.py /app/QGIS3/profiles/default/python/
-
-COPY refFunctions.zip /app/QGIS3/profiles/default/python/plugins/
-
-RUN cd /app/QGIS3/profiles/default/python/plugins/ && unzip refFunctions.zip && rm refFunctions.zip
-
 COPY elevation-1.0.6.tar.gz /app/
 
 RUN cd /app && tar -xvf elevation-1.0.6.tar.gz && cd elevation-1.0.6 && python3 setup.py install
