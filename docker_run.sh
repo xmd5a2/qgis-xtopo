@@ -18,11 +18,19 @@ while getopts ":n:d:b:t:s:e:" opt; do
   esac
 done
 usage_str="Usage: ./docker_run.sh -n project_name -d /path/to/projects/dir [ -b lon_min,lat_min,lon_max,lat_max -e true -s true -t /path/to/terrain/dir ] { -e : use external Overpass server, -s : automatically download SRTM30m terrain data }"
+
+lang_local_str=$(locale | grep LANG=)
+lang=${lang_local_str#LANG=}
+if [[ ! -z $lang ]] ; then
+	lang_str="-e LANG=$lang"
+fi
+
 if [[ -f "docker_run.ini" ]] ; then
 	. docker_run.ini
 fi
 if [[ -z $PROJECT_NAME_EXT ]] ; then
-	echo -e "\033[91mProject name is not specified. $usage_str\033[0m" && exit 1;
+	echo -e "\033[93mProject name is not specified. Use 'automap' by default.\033[0m";
+	PROJECT_NAME_EXT=automap
 fi
 if [[ -z $qgis_projects_dir ]] ; then
 	echo -e "\033[91mQGIS projects dir is not specified. $usage_str\033[0m" && exit 1;
@@ -82,7 +90,7 @@ if [[ $(docker container ls | grep qgis-topo) ]] ; then
 	docker stop qgis-topo
 fi
 if [[ -d "$qgis_projects_dir" ]] ; then
-	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE_EXTERNAL=$OVERPASS_INSTANCE_EXTERNAL -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix --name qgis-topo \
+	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE_EXTERNAL=$OVERPASS_INSTANCE_EXTERNAL -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix $lang_str --name qgis-topo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \
 		$terrain_mount_str \
 		$docker_image
