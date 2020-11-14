@@ -27,7 +27,7 @@ QGIS-topo это набор инструментов, предназначенн
 
 [QGIS](https://ru.wikipedia.org/wiki/QGIS) — свободная кроссплатформенная [геоинформационная система (ГИС)](https://ru.wikipedia.org/wiki/%D0%93%D0%B5%D0%BE%D0%B8%D0%BD%D1%84%D0%BE%D1%80%D0%BC%D0%B0%D1%86%D0%B8%D0%BE%D0%BD%D0%BD%D0%B0%D1%8F_%D1%81%D0%B8%D1%81%D1%82%D0%B5%D0%BC%D0%B0)
 
-[OpenStreetMap](https://ru.wikipedia.org/wiki/OpenStreetMap) — некоммерческий веб-картографический проект по созданию силами сообщества участников — пользователей Интернета подробной свободной и бесплатной географической карты мира
+[OpenStreetMap (OSM)](https://ru.wikipedia.org/wiki/OpenStreetMap) — некоммерческий веб-картографический проект по созданию силами сообщества участников — пользователей Интернета подробной свободной и бесплатной географической карты мира
 
 [Overpass API](https://wiki.openstreetmap.org/wiki/RU:Overpass_API) — доступный только для чтения [API](https://ru.wikipedia.org/wiki/API), который позволяет извлекать выборочные данные из базы OSM по пользовательскому запросу
 
@@ -49,7 +49,7 @@ QGIS-topo это набор инструментов, предназначенн
   2. _**Этот шаг нужен только для удобства запуска. Его можно пропустить если вы хотите запускать docker из командной строки**_. Требуется **wget**.
 
      ```
-     docker pull xmd5a2/qgis-topo:latest&&mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&command -v wget >/dev/null 2>&1&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done&&cd qgis-topo&&chmod +x *.sh     
+     docker pull xmd5a2/qgis-topo:latest&&mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&command -v wget >/dev/null 2>&1&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done&&cd qgis-topo&&chmod +x *.sh
      ```
      В текущем каталоге будет создан каталог **qgis-topo**, откуда необходимо запускать все последующие скрипты, либо использовать команды `прямого запуска docker` (приведены в справке как альтернативный вариант).
      
@@ -191,24 +191,119 @@ QGIS-topo это набор инструментов, предназначенн
   ```
   Он сгенерирует карту затенения рельефа, карту уклонов, изолинии высот. Также сделает необходимые запросы к серверу Overpass и обработает их с помощью алгоритмов QGIS и GRASS. Векторные данные (данные OSM и изолинии высот) находятся в каталоге **путь_к_каталогу_с_проектами/имя_проекта/vector**, а растровые (карта затенения рельефа, карта уклонов) в каталоге **путь_к_каталогу_с_проектами/имя_проекта/raster**
 
-### 6. Запуск QGIS
+### 6. Запуск QGIS, открытие проекта
   Полученный проект QGIS можно открыть двумя способами:
-  * С помощью QGIS, установленной внутри *docker* контейнера (рекомендуется):
+  * С помощью QGIS, установленной внутри *docker* контейнера **(рекомендуется)**:
     * `./docker_exec_qgis.sh`
     
       или
     * `xhost +local:docker && docker exec -it --user user qgis-topo qgis`
-    
-      Далее в меню **Project - Open - /home/user/qgis_projects/имя_проекта/имя_проекта.qgz**
-  * Локально установленной QGIS
+      
+      На стартовом экране появится список недавно использовавшихся проектов. Ваш проект находится в этом списке. Откройте его. Если открытие не удалось (файл не найден), то в строке меню сверху выберите **Проект - Открыть - /home/user/qgis_projects/имя_проекта/имя_проекта.qgz**.
+
+  * Локально установленной QGIS. Требуется QGIS последней версии и GRASS 7.x+.
+
+  QGIS сообщит что не все слои были найдены и предложит вам выбрать что с ними делать (**Handle Unavailable Layers**). Наличие таких слоёв как правило означает что в данной области в базе OSM отсутствуют объекты такого типа. Нужно нажать кнопку **Удалить недоступные слои**, а затем **OK**. Пустые слои будут удалены из проекта и не будут мешать.
 
 ### 7. Работа с QGIS
-   1. Настройка внешнего вида карты
-      1. Слои
+#### 1. Настройка внешнего вида карты
+   1. Слои
+      
+         Проект QGIS состоит из слоёв. Панель с их списком находится в левой части окна QGIS. Каждый слой содержит различные классы объектов (дороги, леса, дома и т.п.). Чем выше слой тем позднее он отрисовывается, т.е. находится "выше" нижележащих слоёв.
+         
+         Чтобы вписать слой целиком на экран, откройте его контекстное меню правой кнопкой мыши и выберите **Увеличить до слоя**.
+
+         Вероятно что вам потребуется выключить либо включить некоторые слои (галочка слева от имени слоя). Это зависит от ваших требований к карте, а также от количества и качества данных OSM в загруженной области. Слоёв больше сотни и визуальный поиск их затруднён, поэтому для поиска проще всего воспользоваться строкой поиска, находящейся под панелью слоёв (**Type to locate**). Наберите часть названия слоя и выберите слой в списке результатов.
          1. Основные слои
+            1. Населённые пункты, места
+               * places main
+               * place locality
+               * island polygon, island point names
+               * cape
+            2. Дороги, транспортные пути
+               * highway main
+                 * highway main bridge
+                 * highway main tunnel
+               * railway all
+                 * railway bridge
+                 * rail tunnel
+                 * railway disused
+               * track
+                 * track bridge
+               * path
+                 * path bridge
+               * steps
+            3. Природные площадные объекты
+               * wood
+               * scrub
+               * grass
+               * wetland
+               * bare rock
+               * scree
+               * shingle
+               * sand
+               * glacier
+            4. Природные линейные объекты
+               * ridge, arete
+               * valley
+               * cliff
+               * earth bank, gully
+            5. Гидрография
+               * water
+               * water intermittent
+               * river
+               * river intermittent
+               * stream
+               * stream intermittent
+               * drystream
+               * dam
+               * weir
+               * waterfall
+               * ford
+               * stait line, strait polygon skel
+               * bay polygon skel, bay point
+               * reef
+               * shoal
+            6. Рукотворные объекты
+               * landuse residential
+               * industrial
+               * quarry
+               * military
+               * building
+               * allotments
+               * orchard
+               * vineyard
+               * farmland
+               * farmyard
+               * plant nursery
+               * greenhouse horticulture
+               * logging
+               * landfill
+               * beach
+               * pier
+               * embankment
+               * cutline
+               
+            
          2. Рельеф
-      2. Переменные
-   2. Подготовка к печати
+            1. Изолинии высот (изогипсы)
+            
+               * Обычные
+               
+                 *[TERRAIN] isolines regular*
+               * На ледниках
+               
+                 *[TERRAIN] isolines glacier*
+            2. Затенение рельефа (отмывка)
+            3. Склоны
+               * Крутые
+               
+                 *[TERRAIN] slope (steep)*
+               * Пологие
+               
+                 *[TERRAIN] slope (slight)*
+   2. Переменные
+#### 2. Подготовка к печати
       1. Настройка макета
       2. Создание атласа
       3. Экспорт
