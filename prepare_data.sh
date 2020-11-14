@@ -157,9 +157,10 @@ function convert2spatialite {
 		layername_string="-nln $3"
 	else layername_string=""
 	fi
-	ogr2ogr -dsco SPATIALITE=YES -lco COMPRESS_GEOM=YES -f SQLite $layername_string $2 $1 # $osm_string
+	OGR_GEOJSON_MAX_OBJ_SIZE=1000MB ogr2ogr -dsco SPATIALITE=YES -lco COMPRESS_GEOM=YES -f SQLite $layername_string $2 $1
 }
-function jsonlines2json { # Convert JSON lines to JSON
+# Convert JSON lines to JSON
+function jsonlines2json {
 	jq -s '.' $1.geojson > ${1}_tmp.geojson
 	mv -f ${1}_tmp.geojson $1.geojson
 	sed -i '1s/\[/{\"type\": \"FeatureCollection\",\"features\":[/' $1.geojson
@@ -500,24 +501,6 @@ function run_alg_extractspecificvertices {
 		-param2 VERTICES -value2 $2 \
 		-param3 OUTPUT -value3 $temp_dir/${1}_vertices.$ext
 }
-# function run_alg_union {
-# 	case $3 in
-# 		"geojson")
-# 			ext="geojson"
-# 			;;
-# 		"sqlite")
-# 			ext="sqlite"
-# 			;;
-# 		*)
-# 			ext="geojson"
-# 			;;
-# 	esac
-# 	python3 $(pwd)/run_alg.py \
-# 		-alg "native:union" \
-# 		-param1 INPUT -value1 $temp_dir/${1}.$ext \
-# 		-param2 OVERLAY -value2 $temp_dir/${2}.$ext$4$5 \
-# 		-param3 OUTPUT -value3 $temp_dir/${1}_union.$ext
-# }
 function run_alg_centroids {
 	python3 $(pwd)/run_alg.py \
 		-alg "native:centroids" \
@@ -636,20 +619,6 @@ function run_alg_singlesidedbuffer {
 		-param4 JOIN_STYLE -value4 0 \
 		-param5 OUTPUT -value5 $temp_dir/${1}_sbuffered.$ext
 }
-# function run_alg_rasterize {
-# 	python3 $(pwd)/run_alg.py \
-# 		-alg "gdal:rasterize" \
-# 		-param1 INPUT -value1 $temp_dir/$1.geojson \
-# 		-param2 WIDTH -value2 $2 \
-# 		-param3 HEIGHT -value3 $3 \
-# 		-param4 DATA_TYPE -value4 1 \
-# 		-param5 UNITS -value5 0 \
-# 		-param6 INVERT -value6 True \
-# 		-param7 INIT -value7 1 \
-# 		-param8 EXTENT -value8 $bbox_rasterize \
-# 		-param9 NODATA -value9 0 \
-# 		-param10 OUTPUT -value10 $temp_dir/${1}_rast.tiff
-# }
 function run_alg_explodelines {
 	python3 $(pwd)/run_alg.py \
 		-alg "native:explodelines" \
@@ -693,15 +662,6 @@ function run_alg_joinattributesbylocation {
 		-param5 METHOD -value5 $5 \
 		-param6 OUTPUT -value6 $temp_dir/${1}_joinattrsloc.geojson
 }
-# function run_alg_extractbyattribute {
-# 	python3 $(pwd)/run_alg.py \
-# 		-alg "native:extractbyattribute" \
-# 		-param1 INPUT -value1 $temp_dir/$1.geojson \
-# 		-param2 FIELD -value2 $2 \
-# 		-param3 OPERATOR -value3 $3 \
-# 		-param4 VALUE -value4 $4 \
-# 		-param5 OUTPUT -value5 $temp_dir/${1}_exploded.geojson
-# }
 function run_alg_extractbylocation {
 	case $4 in
 		"geojson")
