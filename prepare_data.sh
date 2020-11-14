@@ -4,6 +4,7 @@
 # Place DEM tiles (GeoTIFF/HGT) to project_dir/input_terrain or use get_terrain_tiles and terrain_src_dir variables
 #read -rsp $'Press any key to continue...\n' -n1 key
 if [[ -f /.dockerenv ]] ; then
+	scripts_dir=/app
 	qgistopo_config_dir=/mnt/qgis_projects/qgistopo-config
 	if [[ -f $qgistopo_config_dir/config.ini ]] ; then
 		. $qgistopo_config_dir/config.ini
@@ -19,6 +20,7 @@ if [[ -f /.dockerenv ]] ; then
 	Xvfb :99 -ac -noreset &
 	export DISPLAY=:99
 else
+	scripts_dir=$(pwd)
 	qgistopo_config_dir=$(pwd)
 	if [[ -f $qgistopo_config_dir/config.ini ]] ; then
 		. $qgistopo_config_dir/config.ini
@@ -30,7 +32,7 @@ else
 	fi
 fi
 
-echo -e "\e[105mProject: $project_dir\e[49m"
+echo -e "\e[105mProject dir: $project_dir\e[49m"
 if [[ $running_in_container == true ]] ; then
 	echo -e "\e[100mRunning in docker\e[49m"
 fi
@@ -45,6 +47,9 @@ if [[ ! -d "$project_dir" ]] && [[ $running_in_container == true ]] ; then
 fi
 if [[ ! -d "$project_dir" ]] && [[ $running_in_container == false ]] ; then
 	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Stopping.\033[0m" && exit 1;
+fi
+if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
+	echo -e "\033[93m$project_dir/$project_name.qgz not found. Run docker_run to regenerate it.\033[0m"
 fi
 if [[ $get_terrain_tiles == "true" ]] && [[ $download_terrain_tiles == "true" ]] ; then
 	echo -e "\033[91mget_terrain_tiles and download_terrain_tiles are incompatible with each other. Use only one of them. Check config.ini. Stopping.\033[0m" && exit 1;
@@ -171,7 +176,6 @@ sed -i s/{lon_min}/$lon_min/g $project_dir/crop.geojson
 sed -i s/{lon_max}/$lon_max/g $project_dir/crop.geojson
 sed -i s/{lat_min}/$lat_min/g $project_dir/crop.geojson
 sed -i s/{lat_max}/$lat_max/g $project_dir/crop.geojson
-
 
 if [[ $generate_terrain == "true" ]] ; then
 	rm -f "$merged_dem"
@@ -601,6 +605,9 @@ function run_alg_buffer {
 			;;
 		"Point")
 			geometrytype="|geometrytype=Point"
+			;;
+		*)
+			geometrytype=""
 			;;
 	esac
 	python3 $(pwd)/run_alg.py \
@@ -1288,25 +1295,27 @@ for t in ${array_queries[@]}; do
 					cp $vector_data_dir/$t.sqlite $temp_dir/${t}_tmp.sqlite
 					# Prepare coastline
 					run_alg_polygonstolines ${t}_tmp "sqlite" "|geometrytype=Polygon"
-					run_alg_convertgeometrytype ${t}_tmp_lines "sqlite" 2
-					merge_vector_layers "sqlite" "LineString" ${t}_tmp_lines_conv ${t}_tmp
-					rm -f $temp_dir/${t}_tmp.sqlite && mv $temp_dir/${t}_tmp_lines_conv_merged.sqlite $temp_dir/${t}_tmp.sqlite
+					if [[ $(wc -c <"$temp_dir/${t}_tmp_lines.sqlite") -ge 25000 ]] ; then
+						run_alg_convertgeometrytype ${t}_tmp_lines "sqlite" 2
+						merge_vector_layers "sqlite" "LineString" ${t}_tmp_lines_conv ${t}_tmp
+						rm -f $temp_dir/${t}_tmp.sqlite && mv $temp_dir/${t}_tmp_lines_conv_merged.sqlite $temp_dir/${t}_tmp.sqlite
+					fi
 					run_alg_dissolve ${t}_tmp 'natural' "sqlite"
 					run_alg_simplifygeometries ${t}_tmp_dissolved "sqlite" 0 0.00005 "|geometrytype=LineString" && mv $temp_dir/${t}_tmp_dissolved_simpl.sqlite $temp_dir/${t}_dissolved_simpl.sqlite
 					convert2spatialite "$project_dir/crop.geojson" "$temp_dir/crop.sqlite"
-					# Split bbox polygon by coastline
+					# Split bbox polygon by coastline (time consuming process)
 					time run_alg_splitwithlines "crop" ${t}_dissolved_simpl "sqlite"
 					run_alg_fixgeometries crop_split "sqlite" && rm -f $temp_dir/crop_split.sqlite && mv $temp_dir/crop_split_fixed.sqlite $temp_dir/crop_split.sqlite
-					set_projection $temp_dir/crop_split.sqlite
 					# Add single-sided buffer to coastline to determine ocean side
 					run_alg_singlesidedbuffer ${t}_dissolved_simpl 0.000001 1 "sqlite"
 					run_alg_buffer ${t}_dissolved_simpl_sbuffered -0.00000048 "sqlite"
 					run_alg_multiparttosingleparts ${t}_dissolved_simpl_sbuffered_buffered "sqlite"
 					run_alg_intersection ${t}_dissolved_simpl_sbuffered_buffered_parts "crop" "sqlite"
-					# Extract first vertice from each buffer objects
+					# Extract first vertice from each buffer object
 					run_alg_extractspecificvertices ${t}_dissolved_simpl_sbuffered_buffered_parts_intersection 0 "sqlite"
 					# Extract ocean from splitted bbox polygon by comparing it with nodes, obtained from single-sided buffer
 					run_alg_extractbylocation crop_split ${t}_dissolved_simpl_sbuffered_buffered_parts_intersection_vertices [1,4] "sqlite"
+					set_projection $temp_dir/crop_split_extracted.sqlite
 					mv "$temp_dir/crop_split_extracted.sqlite" "$temp_dir/ocean.sqlite"
 				else
 					cp "$vector_data_dir/$t.sqlite" "$temp_dir/$t.sqlite"
@@ -1379,22 +1388,22 @@ for t in ${array_queries[@]}; do
 	esac
 	((index++))
 done
-# Following code is needed to cut artefacts isolines placed on water and split glacier isolines
+# Following code is needed to split glacier isolines
 if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" ]]; then
 	if [[ ! -f $vector_data_dir/isolines_full.sqlite ]] ; then
 		echo -e "\033[91m$vector_data_dir/isolines_full.sqlite not found\033[0m" && exit 1;
 	fi
 	rm -f "$vector_data_dir/isolines_glacier.sqlite"
-	if [[ -f "$vector_data_dir/water.sqlite" ]] && [[ $(stat --printf="%s" "$vector_data_dir/water.sqlite") -ge 70 ]] ; then
-		echo -e "\e[104m=== Substracting water from isolines...\e[49m"
-		cp $vector_data_dir/isolines_full.sqlite $temp_dir/isolines_full.sqlite
-		cp $vector_data_dir/water.sqlite $temp_dir
-		time run_alg_difference isolines_full "water" "sqlite"
-		set_projection $temp_dir/isolines_full_diff.sqlite
-		convert2spatialite "$temp_dir/isolines_full_diff.sqlite" "$temp_dir/isolines_full_tmp.sqlite"
-	else
-		cp $vector_data_dir/isolines_full.sqlite $temp_dir/isolines_full_tmp.sqlite
-	fi
+# 	if [[ -f "$vector_data_dir/water.sqlite" ]] && [[ $(stat --printf="%s" "$vector_data_dir/water.sqlite") -ge 70 ]] ; then
+# 		echo -e "\e[104m=== Substracting water from isolines...\e[49m"
+# 		cp $vector_data_dir/isolines_full.sqlite $temp_dir/isolines_full.sqlite
+# 		cp $vector_data_dir/water.sqlite $temp_dir
+# 		time run_alg_difference isolines_full "water" "sqlite"
+# 		set_projection $temp_dir/isolines_full_diff.sqlite
+# 		convert2spatialite "$temp_dir/isolines_full_diff.sqlite" "$temp_dir/isolines_full_tmp.sqlite"
+# 	else
+	cp $vector_data_dir/isolines_full.sqlite $temp_dir/isolines_full_tmp.sqlite
+# 	fi
 	if [[ -f "$vector_data_dir/glacier.sqlite" ]] && [[ $(stat --printf="%s" "$vector_data_dir/glacier.sqlite") -ge 70 ]] ; then # should be requested after "glacier"
 		echo -e "\e[104m=== Splitting isolines by glaciers...\e[49m"
 		cp $vector_data_dir/glacier.sqlite $temp_dir
@@ -1415,7 +1424,26 @@ if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" 
 fi
 
 rm -f "$temp_dir"/*.*
-rm -f $project_dir/crop.geojson
+
+# Replace project extent by bbox
+if [[ -f "$qgis_projects_dir/$project_name/$project_name.qgz" ]] ; then
+	echo -e "\e[104mUpdating map extent in QGIS project\e[49m"
+	cd $qgis_projects_dir/$project_name
+	unzip -o $project_name.qgz
+	python3 $scripts_dir/replace_bbox_xml.py -bbox $bbox -file $project_name.qgs
+	sed -i "s/automap/${project_name}/" $project_name.qgs
+	if [[ -f $project_name.qgd ]] ; then
+		zip ${project_name}_tmp.qgz $project_name.qgs $project_name.qgd
+	else
+		zip ${project_name}_tmp.qgz $project_name.qgs
+	fi
+	rm -f $project_name.qgs
+	if [[ $(wc -c <${project_name}_tmp.qgz) -ge 8000000 ]] ; then
+		mv -f ${project_name}_tmp.qgz $project_name.qgz
+	else
+		echo -e "\033[91mError replacing project extent by bbox\033[0m" && exit 1;
+	fi
+fi
 
 echo -e "\e[42m====== Data preparation finished\e[49m"
 

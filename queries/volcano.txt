@@ -1,3 +1,5 @@
 (
-nwr["natural"="volcano"]["volcano:type"!="dirt"];
+node["natural"="volcano"]["volcano:type"!="dirt"];
+way["natural"="volcano"]["volcano:type"!="dirt"];
+relation["natural"="volcano"]["volcano:type"!="dirt"];
 );

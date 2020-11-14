@@ -52,6 +52,7 @@ fi
 
 if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 	qgis_config_path=/mnt/qgis_projects/qgistopo-config/QGIS3/profiles/default/QGIS/QGIS3.ini
+	# Modify recent project path in QGIS ini
 	sed -i "s/recentProjects\\\1\\\path=.*/recentProjects\\\1\\\path=\\/home\\/user\\/qgis_projects\\/${project_name}\\/${project_name}.qgz/" $qgis_config_path
 	sed -i "s/recentProjects\\\1\\\title=.*/recentProjects\\\1\\\title=${project_name}/" $qgis_config_path
 	sed -i "s/lastProjectDir=.*/lastProjectDir=\\/home\\/user\\/qgis_projects\\/${project_name}/" $qgis_config_path
@@ -60,7 +61,9 @@ if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 	sed -i "s/lastVectorFileFilterDir=.*/lastVectorFileFilterDir=\\/home\\/user\\/qgis_projects\\/${project_name}/" $qgis_config_path
 	sed -i "s/lastLayoutExportDir=.*/lastLayoutExportDir=\\/home\\/user\\/qgis_projects\\/${project_name}\\/output\\/Detailed.png/" $qgis_config_path
 	cd /app
-	zip "$project_dir/$project_name.qgz" automap.qgs
+	cp automap.qgs $project_name.qgs
+	zip "$project_dir/$project_name.qgz" $project_name.qgs
+	rm -f $project_name.qgs
 	if [[ $? == 0 ]] ; then
 		echo -e "\e[42mInitialization finished\e[49m"
 	else

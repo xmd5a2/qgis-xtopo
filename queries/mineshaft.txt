@@ -1,5 +1,11 @@
 (
-nwr["man_made"="adit"]["abandoned"!="yes"]["disused"!="yes"];
-nwr["man_made"="mineshaft"]["abandoned"!="yes"]["disused"!="yes"];
-nwr["historic"="mine"]["abandoned"!="yes"]["disused"!="yes"];
+node["man_made"="adit"]["abandoned"!="yes"]["disused"!="yes"];
+way["man_made"="adit"]["abandoned"!="yes"]["disused"!="yes"];
+relation["man_made"="adit"]["abandoned"!="yes"]["disused"!="yes"];
+node["man_made"="mineshaft"]["abandoned"!="yes"]["disused"!="yes"];
+way["man_made"="mineshaft"]["abandoned"!="yes"]["disused"!="yes"];
+relation["man_made"="mineshaft"]["abandoned"!="yes"]["disused"!="yes"];
+node["historic"="mine"]["abandoned"!="yes"]["disused"!="yes"];
+way["historic"="mine"]["abandoned"!="yes"]["disused"!="yes"];
+relation["historic"="mine"]["abandoned"!="yes"]["disused"!="yes"];
 );
