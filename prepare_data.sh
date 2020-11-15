@@ -1002,15 +1002,10 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.geojson
 			rm $vector_data_dir/$t.osm
 			;;
-		"place_of_worship_christian" | "place_of_worship_christian_ruins") # should be requested after "monastery_christian" and "prison"
+		"place_of_worship_christian" | "place_of_worship_christian_ruins") # should be requested after "monastery_christian"
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			run_alg_centroids $t
-			if [[ -f "$vector_data_dir/prison.geojson" ]] ; then
-				cp "$vector_data_dir/prison.geojson" $temp_dir
-				run_alg_difference ${t}_centroids "prison"
-				mv $temp_dir/${t}_centroids_diff.geojson $temp_dir/${t}_centroids.geojson
-			fi
 			if [[ -f "$vector_data_dir/monastery_christian_centroids_buffered.geojson" ]] ; then
 				cp $vector_data_dir/monastery_christian_centroids_buffered.geojson $temp_dir/
 				run_alg_difference ${t}_centroids "monastery_christian_centroids_buffered"
@@ -1317,9 +1312,9 @@ for t in ${array_queries[@]}; do
 			;;
 		"highway_main")
 			osmium sort -o $vector_data_dir/${t}_sorted.osm $vector_data_dir/$t.osm && rm -f $vector_data_dir/$t.osm && mv $vector_data_dir/${t}_sorted.osm $vector_data_dir/$t.osm
-			osmfilter $vector_data_dir/$t.osm --keep-ways="layer>0" -o=$vector_data_dir/${t}_layer_1.osm
-			osmfilter $vector_data_dir/$t.osm --keep-ways="layer<0" -o=$vector_data_dir/${t}_layer_-1.osm
-			osmfilter $vector_data_dir/$t.osm --drop-ways="layer>0 or layer<0" -o=$vector_data_dir/${t}_new.osm && rm -f $vector_data_dir/$t.osm && mv $vector_data_dir/${t}_new.osm $vector_data_dir/$t.osm
+			osmfilter $vector_data_dir/$t.osm --keep-ways-relations="layer>0" -o=$vector_data_dir/${t}_layer_1.osm
+			osmfilter $vector_data_dir/$t.osm --keep-ways-relations="layer<0" -o=$vector_data_dir/${t}_layer_-1.osm
+			osmfilter $vector_data_dir/$t.osm --drop-ways-relations="layer>0 or layer<0" -o=$vector_data_dir/${t}_new.osm && rm -f $vector_data_dir/$t.osm && mv $vector_data_dir/${t}_new.osm $vector_data_dir/$t.osm
 			if [[ $? == 139 ]] ; then
 				echo -e "\033[91mSegmentation fault\033[0m" && exit 1;
 			fi

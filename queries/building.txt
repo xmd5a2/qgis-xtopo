@@ -1,6 +1,6 @@
 (
-way["building"];
-relation["building"];
+way["building"]["layer"!="-1"]["layer"!="-2"]["layer"!="-3"]["layer"!="-4"]["layer"!="-5"];
+relation["building"]["layer"!="-1"]["layer"!="-2"]["layer"!="-3"]["layer"!="-4"]["layer"!="-5"];
 way["tower:type"="cooling"];
 relation["tower:type"="cooling"];
 way["man_made"="storage_tank"];

@@ -12,5 +12,6 @@ way["highway"="tertiary_link"]["bridge"]["bridge"!="no"];
 way["highway"="residential"]["bridge"]["bridge"!="no"];
 way["highway"="unclassified"]["bridge"]["bridge"!="no"];
 way["highway"="living_street"]["bridge"]["bridge"!="no"];
+way["highway"="pedestrian"]["bridge"]["bridge"!="no"];
 way["highway"="service"]["bridge"]["bridge"!="no"];
 );

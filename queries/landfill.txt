@@ -1,4 +1,4 @@
 (
-way["landuse"="landfill"]["content"!="manure"];
-relation["landuse"="landfill"]["content"!="manure"];
+way["landuse"="landfill"]["content"!="manure"]["man_made"!="spoil_heap"];
+relation["landuse"="landfill"]["content"!="manure"]["man_made"!="spoil_heap"];
 );

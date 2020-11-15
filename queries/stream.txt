@@ -1,5 +1,10 @@
 (
-way["waterway"="stream"]["intermittent"!="yes"];
-way["waterway"="drain"]["intermittent"!="yes"];
-way["waterway"="ditch"]["intermittent"!="yes"];
+way["waterway"="stream"]["intermittent"!="yes"]["tunnel"!~".*"];
+way["waterway"="drain"]["intermittent"!="yes"]["tunnel"!~".*"];
+way["waterway"="ditch"]["intermittent"!="yes"]["tunnel"!~".*"];
+
+way["waterway"="stream"]["intermittent"!="yes"]["tunnel"="no"];
+way["waterway"="drain"]["intermittent"!="yes"]["tunnel"="no"];
+way["waterway"="ditch"]["intermittent"!="yes"]["tunnel"="no"];
+
 );

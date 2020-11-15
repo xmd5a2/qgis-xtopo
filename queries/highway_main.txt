@@ -12,6 +12,7 @@ way["highway"="tertiary_link"]["tunnel"!~".*"]["bridge"!~".*"];
 way["highway"="residential"]["tunnel"!~".*"]["bridge"!~".*"];
 way["highway"="unclassified"]["tunnel"!~".*"]["bridge"!~".*"];
 way["highway"="living_street"]["tunnel"!~".*"]["bridge"!~".*"];
+way["highway"="pedestrian"]["tunnel"!~".*"]["bridge"!~".*"];
 way["highway"="service"]["tunnel"!~".*"]["bridge"!~".*"];
 
 way["highway"="motorway"]["tunnel"="no"];
@@ -27,6 +28,7 @@ way["highway"="tertiary_link"]["tunnel"="no"];
 way["highway"="residential"]["tunnel"="no"];
 way["highway"="unclassified"]["tunnel"="no"];
 way["highway"="living_street"]["tunnel"="no"];
+way["highway"="pedestrian"]["tunnel"="no"];
 way["highway"="service"]["tunnel"="no"];
 
 way["highway"="motorway"]["bridge"="no"];
@@ -42,5 +44,6 @@ way["highway"="tertiary_link"]["bridge"="no"];
 way["highway"="residential"]["bridge"="no"];
 way["highway"="unclassified"]["bridge"="no"];
 way["highway"="living_street"]["bridge"="no"];
+way["highway"="pedestrian"]["bridge"="no"];
 way["highway"="service"]["bridge"="no"];
 );
