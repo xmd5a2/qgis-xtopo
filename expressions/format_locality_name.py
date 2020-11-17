@@ -6,6 +6,7 @@ import re
 def format_locality_name(name, project_lang, feature, parent):
     n = name
 
+    if n.lower().startswith('развалины '): n = re.sub("^развалины ","разв. ", n, flags=re.IGNORECASE)
     if project_lang == "ru" and \
     "ур." not in n and \
     "хозяйств" not in n.lower() and \
