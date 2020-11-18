@@ -25,7 +25,7 @@ QGIS-topo это набор инструментов, предназначенн
 1. Скрипты для подготовки данных для проекта [QGIS](https://qgis.org/ru/site/) на основе [OpenStreetMap](https://www.openstreetmap.org/) и данных рельефа, локальный [Overpass API](https://wiki.openstreetmap.org/wiki/RU:Overpass_API) сервер.
 2. Проект [QGIS](https://qgis.org/ru/site/) с топографическим картостилем.
 
-Всё необходимое для работы находится в контейнере [Docker](https://ru.wikipedia.org/wiki/Docker), размещённом на [DockerHub](https://hub.docker.com/repository/docker/xmd5a2/qgis-topo). В нём запускаются скрипты для подготовки данных. Также возможно запустить QGIS прямо из контейнера. Скрипты получают данные OSM через Overpass API. Рекомендуется использовать Overpass сервер, встроенный в *docker* контейнер.
+Всё необходимое для работы находится в контейнере [Docker](https://ru.wikipedia.org/wiki/Docker), размещённом на [DockerHub](https://hub.docker.com/repository/docker/xmd5a2/qgis-topo). В нём запускаются скрипты для подготовки данных. Также возможно запустить QGIS прямо из контейнера. Скрипты получают данные OSM через Overpass API.
 
 [Docker](https://ru.wikipedia.org/wiki/Docker) — программное обеспечение для автоматизации развёртывания и управления приложениями в средах с поддержкой контейнеризации
 
