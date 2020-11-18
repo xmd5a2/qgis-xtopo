@@ -113,7 +113,7 @@ lon_max=${array_bbox[2]}
 lat_max=${array_bbox[3]}
 
 # Reconstruct bbox if OSM link is given
-if [[ $(echo $bbox | grep openstreet) ]] ; then
+if [[ $bbox == *"openstreetmap"* ]] ; then
 	bbox=$lon_min,$lat_min,$lon_max,$lat_max
 fi
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max

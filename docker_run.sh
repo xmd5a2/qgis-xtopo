@@ -39,15 +39,28 @@ if [[ ! -z $terrain_src_dir ]] && [[ ! -d $terrain_src_dir ]] ; then
 	echo -e "\033[91mterrain_src_dir doesn't exist. $usage_str\033[0m" && exit 1;
 fi
 
-if [[ ! -z $BBOX_STR ]] ; then
-	IFS=',' read -r -a array_bbox <<< $(python3 $(pwd)/process_bbox.py -bbox_str "$BBOX_STR")
+function echo_bbox_invalid {
+	echo -e "\033[91mInvalid bbox format. Use OpenStreetMap link or left,bottom,right,top (lon_min,lat_min,lon_max,lat_max).\033[0m" && exit 1;
+}
 
-	if [[ $(echo ${array_bbox[0]} | grep Invalid) ]] ; then
-		echo ${array_bbox[0]}
-		exit 1;
-	fi
-	if [[ $(echo $BBOX_STR | grep openstreet) ]] ; then
+if [[ ! -z $BBOX_STR ]] ; then
+	if [[ $BBOX_STR == *","* ]] && [[ $BBOX_STR != *"openstreetmap"* ]] ; then
+		IFS=',' read -r -a array_bbox <<< "$BBOX_STR"
+		lon_min=${array_bbox[0]}
+		lat_min=${array_bbox[1]}
+		lon_max=${array_bbox[2]}
+		lat_max=${array_bbox[3]}
+		if [[ ${#array_bbox[@]} -ne 4 ]] || [[ -z $lon_min ]] || [[ -z $lat_min ]] || [[ -z $lon_max ]] || [[ -z $lat_max ]] ; then echo_bbox_invalid; fi
+
+		if (( $(echo "$lon_min > $lon_max" | bc -l) )) || (( $(echo "$lat_min > $lat_max" | bc -l) )) || \
+			(( $(echo "$lat_max > 90" | bc -l) )) || (( $(echo "$lat_min < -90" | bc -l) )) || \
+			(( $(echo "$lon_min < -179.99" | bc -l) )) || (( $(echo "$lon_max > 179.99" | bc -l) )) ; then
+			echo_bbox_invalid
+		fi
+	elif [[ $BBOX_STR == *"openstreetmap"* ]] ; then
 		BBOX_STR=\"$BBOX_STR\"
+	else
+		echo_bbox_invalid
 	fi
 fi
 if [[ -f "config_debug.ini" ]] ; then
