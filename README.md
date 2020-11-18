@@ -53,7 +53,7 @@ QGIS-topo это набор инструментов, предназначенн
   2. _**Этот шаг нужен только для удобства запуска. Его можно пропустить если вы хотите запускать docker из командной строки**_. Требуется **wget**.
 
      ```
-     docker pull xmd5a2/qgis-topo:latest&&mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&command -v wget >/dev/null 2>&1&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done&&cd qgis-topo&&chmod +x *.sh
+     docker pull xmd5a2/qgis-topo:latest&&mkdir -p qgis-topo&&a=(run prepare_data populate_db query_srtm_tiles_list exec_qgis clean)&&rm -f qgis-topo/*.*&&for f in "${a[@]}";do wget -nv -nc https://github.com/xmd5a2/qgis-topo/raw/master/docker_${f}.sh -P ./qgis-topo;done&&cd qgis-topo&&chmod +x *.sh
      ```
      В текущем каталоге будет создан каталог **qgis-topo**, откуда необходимо запускать все последующие скрипты, либо использовать команды `прямого запуска docker` (приведены в справке как альтернативный вариант).
      
@@ -214,9 +214,7 @@ QGIS-topo это набор инструментов, предназначенн
     * `./docker_exec_qgis.sh`
     
       или
-    * `xhost +local:docker && docker exec -it --user user qgis-topo qgis`
-      
-      На стартовом экране появится список недавно использовавшихся проектов. Ваш проект находится в этом списке. Откройте его. Если открытие не удалось (файл не найден), то в строке меню сверху выберите **Проект - Открыть - /home/user/qgis_projects/имя_проекта/имя_проекта.qgz**.
+    * `xhost +local:docker && docker exec -it --user user qgis-topo /app/exec_qgis.sh`
 
   * Локально установленной QGIS. Требуется QGIS последней версии и GRASS 7.x+.
 
