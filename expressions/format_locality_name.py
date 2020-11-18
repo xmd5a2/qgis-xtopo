@@ -6,7 +6,14 @@ import re
 def format_locality_name(name, project_lang, feature, parent):
     n = name
 
+    if n.lower() == 'сарай' or n.lower() == 'сараи': n = "сар."
     if n.lower().startswith('развалины '): n = re.sub("^развалины ","разв. ", n, flags=re.IGNORECASE)
+    if n.lower().endswith(' развалины'): n = re.sub(" развалины$"," разв.", n, flags=re.IGNORECASE)
+    if n.lower().startswith("водопады "): n = re.sub("водопады ","вдп. ",n, flags=re.IGNORECASE)
+    if n.lower().endswith(" водопады"): n = re.sub(" водопады"," вдп.",n, flags=re.IGNORECASE)
+    if n.lower().startswith("водопад "): n = re.sub("водопад ","вдп. ",n, flags=re.IGNORECASE)
+    if n.lower().endswith(" водопад"): n = re.sub(" водопад"," вдп.",n, flags=re.IGNORECASE)
+
     if project_lang == "ru" and \
     "ур." not in n and \
     "хозяйств" not in n.lower() and \

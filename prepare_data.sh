@@ -101,19 +101,25 @@ fi
 rm -f $vector_data_dir/*.sqlite_tmp
 rm -f $vector_data_dir/*.sqlite_tmp-journal
 
-IFS=',' read -r -a array_bbox <<< "$bbox"
+IFS=',' read -r -a array_bbox <<< $(python3 $(pwd)/process_bbox.py -bbox_str "$bbox")
+
+if [[ $(echo ${array_bbox[0]} | grep Invalid) ]] ; then
+	echo ${array_bbox[0]}
+	exit 1;
+fi
 lon_min=${array_bbox[0]}
 lat_min=${array_bbox[1]}
 lon_max=${array_bbox[2]}
 lat_max=${array_bbox[3]}
 
-if (( $(echo "$lon_min > $lon_max" | bc -l) )) || (( $(echo "$lat_min > $lat_max" | bc -l) )) || \
-	(( $(echo "$lat_min > 90" | bc -l) )) || (( $(echo "$lat_min < -90" | bc -l) )) ; then
-	echo -e "\033[91mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max)\033[0m" && exit 1;
+# Reconstruct bbox if OSM link is given
+if [[ $(echo $bbox | grep openstreet) ]] ; then
+	bbox=$lon_min,$lat_min,$lon_max,$lat_max
 fi
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
 bbox_eio_query="$lon_min $lat_min $lon_max $lat_max"
 
+command -v python3 >/dev/null 2>&1 || { echo >&2 -e "\033[91mpython3 is required but not installed.\033[0m" && exit 1;}
 command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m" && exit 1;}
 command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[91mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m" && exit 1;}
 command -v grass >/dev/null 2>&1 || { echo >&2 -e "\033[91mGRASS > 7.0 is required but not installed.\033[0m" && exit 1;}
@@ -315,6 +321,9 @@ if [[ $generate_terrain == "true" ]] ; then
 			gdal_contour -b 1 -a ELEV -i $isolines_step -f "ESRI Shapefile" -nln "isolines" "$raster_data_dir/$isolines_source" "$temp_dir/isolines_full.shp"
 			# SHP step is needed because of ERROR 1: Cannot insert feature with geometry of type LINESTRINGZ in column GEOMETRY. Type LINESTRING expected
 			#  when exporting directly to spatialite
+			if [[ $(wc -c <"$temp_dir/isolines_full.shp") -le 150 ]] ; then
+				isolines_are_empty=true
+			fi
 			convert2spatialite "$temp_dir/isolines_full.shp" "$vector_data_dir/isolines_full.sqlite"
 			rm -f "$vector_data_dir/isolines_regular.sqlite"
 			cp "$vector_data_dir/isolines_full.sqlite" "$vector_data_dir/isolines_regular.sqlite"
@@ -330,7 +339,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		fi
 	else
 		echo -e "\033[93mWarning! No DEM data found. Hillshade, slopes and isolines are not generated.\033[0m"
-		echo -e "\033[93mCheck get_terrain_tiles=true or download_terrain_tiles=true options in config.ini\033[0m"
+		echo -e "\033[93mCheck download_terrain_tiles=true or get_terrain_tiles=true options in config.ini\033[0m"
 		sleep 5;
 	fi
 	if [[ $download_terrain_tiles == "true" ]] ; then
@@ -1359,7 +1368,7 @@ if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" 
 # 	else
 	cp $vector_data_dir/isolines_full.sqlite $temp_dir/isolines_full_tmp.sqlite
 # 	fi
-	if [[ -f "$vector_data_dir/glacier.sqlite" ]] && [[ $(stat --printf="%s" "$vector_data_dir/glacier.sqlite") -ge 70 ]] ; then # should be requested after "glacier"
+	if [[ -f "$vector_data_dir/glacier.sqlite" ]] && [[ $(stat --printf="%s" "$vector_data_dir/glacier.sqlite") -ge 70 ]] && [[ $isolines_are_empty != "true" ]] ; then # should be requested after "glacier"
 		echo -e "\e[104m=== Splitting isolines by glaciers...\e[49m"
 		cp $vector_data_dir/glacier.sqlite $temp_dir
 		cp $temp_dir/isolines_full_tmp.sqlite $temp_dir/isolines_gl_tmp.sqlite
@@ -1370,7 +1379,7 @@ if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" 
 		set_projection "$temp_dir/isolines_reg_tmp_diff.sqlite"
 		mv "$temp_dir/isolines_gl_tmp_intersection.sqlite" "$temp_dir/isolines_gl_tmp.sqlite"
 		mv "$temp_dir/isolines_reg_tmp_diff.sqlite" "$temp_dir/isolines_reg_tmp.sqlite"
-		if [[ $(stat --printf="%s" "$temp_dir/isolines_gl_tmp.sqlite") != $(stat --printf="%s" "$temp_dir/isolines_reg_tmp.sqlite") ]] ; then # if file sizes are equal
+		if [[ $(stat --printf="%s" "$temp_dir/isolines_gl_tmp.sqlite") != $(stat --printf="%s" "$temp_dir/isolines_reg_tmp.sqlite") ]] ; then # if file sizes are not equal
 			convert2spatialite "$temp_dir/isolines_gl_tmp.sqlite" "$vector_data_dir/isolines_glacier.sqlite" "isolines_glacier"
 		fi
 		rm -f "$vector_data_dir/isolines_regular.sqlite"

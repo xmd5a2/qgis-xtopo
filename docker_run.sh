@@ -1,5 +1,5 @@
 #!/bin/bash
-while getopts ":n:d:b:t:s:e:" opt; do
+while getopts ":n:d:b:t:se" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
@@ -39,24 +39,15 @@ if [[ ! -z $terrain_src_dir ]] && [[ ! -d $terrain_src_dir ]] ; then
 	echo -e "\033[91mterrain_src_dir doesn't exist. $usage_str\033[0m" && exit 1;
 fi
 
-function echo_bbox_invalid {
-	echo -e "\033[91mInvalid bbox format. Use left,bottom,right,top (lon_min,lat_min,lon_max,lat_max).\033[0m" && exit 1;
-}
 if [[ ! -z $BBOX_STR ]] ; then
-	if [[ $BBOX_STR == *","* ]] ; then
-		IFS=',' read -r -a array_bbox <<< "$BBOX_STR"
-		lon_min=${array_bbox[0]}
-		lat_min=${array_bbox[1]}
-		lon_max=${array_bbox[2]}
-		lat_max=${array_bbox[3]}
-		if  [[ -z $lon_min ]] || [[ -z $lat_min ]] || [[ -z $lon_max ]] || [[ -z $lat_max ]] ; then echo_bbox_invalid; fi
+	IFS=',' read -r -a array_bbox <<< $(python3 $(pwd)/process_bbox.py -bbox_str "$BBOX_STR")
 
-		if (( $(echo "$lon_min > $lon_max" | bc -l) )) || (( $(echo "$lat_min > $lat_max" | bc -l) )) || \
-			(( $(echo "$lat_min > 90" | bc -l) )) || (( $(echo "$lat_min < -90" | bc -l) )) ; then
-			echo_bbox_invalid
-		fi
-	else
-		echo_bbox_invalid
+	if [[ $(echo ${array_bbox[0]} | grep Invalid) ]] ; then
+		echo ${array_bbox[0]}
+		exit 1;
+	fi
+	if [[ $(echo $BBOX_STR | grep openstreet) ]] ; then
+		BBOX_STR=\"$BBOX_STR\"
 	fi
 fi
 if [[ -f "config_debug.ini" ]] ; then
@@ -80,7 +71,7 @@ if [[ ! -z $qgis_projects_dir ]] ; then
 	echo -e "\e[100mqgistopo_config_dir=$qgis_projects_dir/qgistopo-config\e[49m"
 	if [[ ! -z $OVERPASS_INSTANCE_EXTERNAL ]] ; then
 		echo -e "\e[100moverpass_instance_external=true\e[49m"
-	fi	
+	fi
 	if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
 		echo -e "\e[100mdownload_terrain_data=true\e[49m"
 	fi
@@ -95,6 +86,7 @@ if [[ -d "$qgis_projects_dir" ]] ; then
 		$terrain_mount_str \
 		$docker_image
 fi
+
 if [[ $(docker container ls | grep qgis-topo) ]] ; then
 	docker exec -it --user user qgis-topo /app/init_docker.sh
 fi

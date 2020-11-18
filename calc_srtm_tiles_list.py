@@ -11,10 +11,10 @@ args = parser.parse_args()
 
 def calc_srtm_tiles_list(bbox):
     bbox_list=bbox.split(',')
-    lon_min = math.floor(float(bbox_list[0]))  # (W,E)   left
-    lat_min = math.ceil(float(bbox_list[1]))  # (N,S)   bottom
-    lon_max = math.ceil(float(bbox_list[2]))  # (W,E)     right
-    lat_max = math.ceil(float(bbox_list[3])) + 1  # (N,S) top
+    lon_min = math.floor(float(bbox_list[0]))  # (W)   left
+    lat_min = math.ceil(float(bbox_list[1]))  # (S)   bottom
+    lon_max = math.ceil(float(bbox_list[2]))  # (E)     right
+    lat_max = math.ceil(float(bbox_list[3])) + 1  # (N) top
     #    print(str(lat_min) + " " + str(lat_max) + " " + str(lon_min) + " " + str(lon_max))
 
     lat_str_ns = "N"
