@@ -26,6 +26,10 @@ if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
 else
 	sed -i "s/download_terrain_tiles=.*/download_terrain_tiles=false/" $config_dir/config.ini
 fi
+if [[ -d /mnt/terrain ]] ; then
+	sed -i "s/generate_terrain=.*/generate_terrain=true/" $config_dir/config.ini
+	sed -i "s/get_terrain_tiles=.*/get_terrain_tiles=true/" $config_dir/config.ini
+fi
 . $config_dir/config.ini
 if [[ -f $config_dir/config_debug.ini ]] ; then
 	. $config_dir/config_debug.ini
