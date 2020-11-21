@@ -13,11 +13,11 @@ if [[ ! -z $BBOX_STR ]] ; then
 	if [[ $(echo $BBOX_STR | grep \& ) ]] ; then
 		BBOX_STR=${BBOX_STR//\&/\\&}
 	fi
-	sed -i "s/bbox=.*/bbox=${BBOX_STR}/" $config_dir/config.ini
+	sed -i "s/^bbox=.*/bbox=${BBOX_STR}/" $config_dir/config.ini
 fi
-if [[ ! -z $OVERPASS_INSTANCE_EXTERNAL ]] ; then
+if [[ $OVERPASS_INSTANCE == "external" ]] || [[ $OVERPASS_INSTANCE == "ext" ]] ; then
 	sed -i "s/overpass_instance=.*/overpass_instance=external/" $config_dir/config.ini
-else
+elif [[ $OVERPASS_INSTANCE == "docker" ]] ; then
 	sed -i "s/overpass_instance=.*/overpass_instance=docker/" $config_dir/config.ini
 fi
 if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
@@ -81,5 +81,11 @@ if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 		echo -e "\033[91mError creating '$project_name.qgz'. Check directory permissions.\033[0m" && exit 1;
 	fi
 else
-	echo -e "\033[93mQGIS project '"$project_dir/$project_name.qgz"' already exists. Usually it's ok.\033[0m" && exit 1;
+	echo -e "\033[93mQGIS project '"$project_dir/$project_name.qgz"' already exists. Usually it's ok.\033[0m"
+fi
+if [[ $RUN_CHAIN == true ]] ; then
+	if [[ $OVERPASS_INSTANCE == docker ]] ; then
+		. /app/populate_db.sh
+	fi
+	. /app/prepare_data.sh
 fi
