@@ -1,8 +1,10 @@
 #!/bin/bash
 # Get and prepare OSM / terrain data for QGIS-topo project
+# https://github.com/xmd5a2/qgis-topo
 # Requirements: qgis >=3.16 with grass plugin, osmtogeojson, gdal, osmctools, osmium, jq, eio (pip elevation)
-# Place DEM tiles (GeoTIFF/HGT) to project_dir/input_terrain or use get_terrain_tiles and terrain_src_dir variables
+# Author: xmd5a (Leonid Barsukov)
 #read -rsp $'Press any key to continue...\n' -n1 key
+
 if [[ -f /.dockerenv ]] ; then
 	scripts_dir=/app
 	qgistopo_config_dir=/mnt/qgis_projects/qgistopo-config
@@ -220,6 +222,17 @@ if [[ $generate_terrain == "true" ]] ; then
 			fi
 		done
 	fi
+	if [[ $get_terrain_tiles == "false" ]] && [[ $download_terrain_tiles == "false" ]] ; then
+		if ! ls $terrain_input_dir/*.tif 1> /dev/null 2>&1 ; then
+			echo -e "\033[93mNo DEM tiles found in '$terrain_input_dir'\nPlease download and manually add tiles from 'DEM tiles list' or restart script with download_terrain_tiles=true or get_terrain_tiles=true variables set in config.ini\033[0m"
+			read -rsp $'\033[93mPress any key to continue...\n\033[0m' -n1 key
+		fi
+		if ! ls $terrain_input_dir/*.tif 1> /dev/null 2>&1 ; then
+			echo -e "\033[93mStill no DEM tiles found"
+			exit 1
+		fi
+	fi
+
 	CUTLINE_STRING="-crop_to_cutline -cutline $project_dir/crop.geojson"
 
 	# Extract and convert *.hgt.zip/*.hgt to GeoTIFF format
@@ -231,12 +244,13 @@ if [[ $generate_terrain == "true" ]] ; then
 		[ -e "$f" ] && gdalwarp -of GTiff $f ${f%.*}.tif && rm $f
 	done
 	for f in "$terrain_input_dir"/*.tif; do
-		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Add them manually or use get_terrain_tiles=true or download_terrain_tiles=true option. Stopping.\033[0m" && exit 1;
+		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Stopping.\033[0m" && exit 1;
 		break;
 	done
 	shopt -u nullglob
-	echo -e "\e[104m=== Merging DEM tiles...\e[49m"
+
 	if ls $terrain_input_dir/*.tif 1> /dev/null 2>&1 ; then
+		echo -e "\e[104m=== Merging DEM tiles...\e[49m"
 		rm -f "$project_dir"/input_terrain.vrt
 		gdalbuildvrt "$project_dir"/input_terrain.vrt $terrain_input_dir/*.tif
 		gdalwarp -of GTiff -co "COMPRESS=LZW" $CUTLINE_STRING "$project_dir"/input_terrain.vrt "$merged_dem"
@@ -327,7 +341,7 @@ if [[ $generate_terrain == "true" ]] ; then
 	else
 		echo -e "\033[93mWarning! No DEM data found. Hillshade, slopes and isolines are not generated.\033[0m"
 		echo -e "\033[93mCheck download_terrain_tiles=true or get_terrain_tiles=true options in config.ini\033[0m"
-		sleep 5;
+		exit 1;
 	fi
 	if [[ $download_terrain_tiles == "true" ]] ; then
 		rm -f $terrain_input_dir/*.*
