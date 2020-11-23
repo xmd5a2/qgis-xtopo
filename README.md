@@ -138,11 +138,13 @@ QGIS-topo это набор инструментов, предназначенн
          * JOSM
       2. Поместить полученные файлы в каталог **путь_к_каталогу_с_проектами/имя_проекта/osm_data/**. Поддерживается несколько экстрактов одновременно.
       3. Заполнить БД Overpass в *docker*.
-       Скрипт попросит вас выполнить пункты **3.1.i (скачать экстракт данных OSM), 3.1.ii (поместить полученные файлы в каталог путь_к_каталогу_с_проектами/имя_проекта/osm_data/)** (Please download OSM extract from https://protomaps.com/extracts or http://download.geofabrik.de and place it into osm_data_dir). Выполните запрос и нажмите любую клавишу для продолжения.
-         * `./docker_populate_db.sh` **(рекомендуемый способ)**
+        ```
+        ./docker_populate_db.sh
+        ```
+        
+         Скрипт попросит вас выполнить пункты **3.1.i (скачать экстракт данных OSM), 3.1.ii (поместить полученные файлы в каталог путь_к_каталогу_с_проектами/имя_проекта/osm_data/)** (Please download OSM extract from https://protomaps.com/extracts or http://download.geofabrik.de and place it into osm_data_dir). Выполните запрос и нажмите любую клавишу для продолжения.
          
-         или
-         * `docker exec -it --user user qgis-topo /app/populate_db.sh`
+         или `docker exec -it --user user qgis-topo /app/populate_db.sh`
          
    2. **Получить данные рельефа (опционально)**
    
