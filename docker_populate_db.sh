@@ -8,4 +8,4 @@ fi
 if [[ -f "config.ini" ]] ; then
 	. config.ini
 fi
-docker exec -it --user user qgis-topo /app/populate_db.sh
+docker exec -it --user user qgis-xtopo /app/populate_db.sh

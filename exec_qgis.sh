@@ -1,7 +1,7 @@
 #!/bin/bash
-qgistopo_config_dir=/mnt/qgis_projects/qgistopo-config
-if [[ -f ${qgistopo_config_dir}/config.ini ]] ; then
-	. ${qgistopo_config_dir}/config.ini
+qgisxtopo_config_dir=/mnt/qgis_projects/qgisxtopo-config
+if [[ -f ${qgisxtopo_config_dir}/config.ini ]] ; then
+	. ${qgisxtopo_config_dir}/config.ini
 else
 	echo -e "\033[91mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 fi

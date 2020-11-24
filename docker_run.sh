@@ -72,9 +72,9 @@ if [[ ! -z $BBOX_STR ]] ; then
 	fi
 fi
 if [[ -f "config_debug.ini" ]] ; then
-	docker_image="qgis-topo"
+	docker_image="qgis-xtopo"
 else
-	docker_image="xmd5a2/qgis-topo:latest"
+	docker_image="xmd5a2/qgis-xtopo:latest"
 fi
 
 if [[ ! -z $qgis_projects_dir ]] && [[ ! -d $qgis_projects_dir ]] ; then
@@ -89,7 +89,7 @@ if [[ ! -z $qgis_projects_dir ]] ; then
 	echo -e "\e[100mbbox=$BBOX_STR\e[49m"
 	echo -e "\e[100mterrain_src_dir=$terrain_src_dir\e[49m"
 	echo -e "\e[100moverpass_db_dir=$qgis_projects_dir/overpass_db\e[49m"
-	echo -e "\e[100mqgistopo_config_dir=$qgis_projects_dir/qgistopo-config\e[49m"
+	echo -e "\e[100mqgisxtopo_config_dir=$qgis_projects_dir/qgisxtopo-config\e[49m"
 	if [[ ! -z $OVERPASS_INSTANCE ]] ; then
 		echo -e "\e[100moverpass_instance=$OVERPASS_INSTANCE\e[49m"
 	fi
@@ -98,20 +98,20 @@ if [[ ! -z $qgis_projects_dir ]] ; then
 	fi
 fi
 
-if [[ $(docker container ls | grep qgis-topo) ]] ; then
-	docker stop qgis-topo
+if [[ $(docker container ls | grep qgis-xtopo) ]] ; then
+	docker stop qgis-xtopo
 fi
 if [[ -d "$qgis_projects_dir" ]] ; then
 	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE=$OVERPASS_INSTANCE \
 		-e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix $lang_str \
-		--name qgis-topo \
+		--name qgis-xtopo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \
 		$terrain_mount_str \
 		$docker_image
 fi
 
-if [[ $(docker container ls | grep qgis-topo) ]] ; then
-	docker exec -it --user user qgis-topo /app/init_docker.sh
+if [[ $(docker container ls | grep qgis-xtopo) ]] ; then
+	docker exec -it --user user qgis-xtopo /app/init_docker.sh
 fi
 if [[ $RUN_CHAIN == true ]] ; then
 	. docker_exec_qgis.sh

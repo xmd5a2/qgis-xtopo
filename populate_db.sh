@@ -1,6 +1,6 @@
 #!/bin/bash
 # Populate Overpass DB from local sources in osm_data_dir
-config_dir=/mnt/qgis_projects/qgistopo-config
+config_dir=/mnt/qgis_projects/qgisxtopo-config
 if [[ ! -f /.dockerenv ]] ; then
 	echo -e "\033[91mThis script is not meant to run outside the docker container. Stopping.\033[0m" && exit 1;
 fi

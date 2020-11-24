@@ -81,7 +81,7 @@ def check_bbox(bbox_str):
 
 def throw_error():
     print(
-        "\033[91mInvalid bbox format. Use openstreetmap.org link or comma separated left bottom right top (see https://github.com/xmd5a2/qgis-topo).\033[0m")
+        "\033[91mInvalid bbox format. Use openstreetmap.org link or comma separated left bottom right top (see https://github.com/xmd5a2/qgis-xtopo).\033[0m")
     exit()
 
 

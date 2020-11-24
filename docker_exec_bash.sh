@@ -1,2 +1,2 @@
 #!/bin/bash
-docker exec -it qgis-topo bash
+docker exec -it qgis-xtopo bash

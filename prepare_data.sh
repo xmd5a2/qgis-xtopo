@@ -1,36 +1,36 @@
 #!/bin/bash
 # Get and prepare OSM / terrain data for QGIS-topo project
-# https://github.com/xmd5a2/qgis-topo
+# https://github.com/xmd5a2/qgis-xtopo
 # Requirements: qgis >=3.16 with grass plugin, osmtogeojson, gdal, osmctools, osmium, jq, eio (pip elevation)
 # Author: xmd5a (Leonid Barsukov)
 #read -rsp $'Press any key to continue...\n' -n1 key
 
 if [[ -f /.dockerenv ]] ; then
 	scripts_dir=/app
-	qgistopo_config_dir=/mnt/qgis_projects/qgistopo-config
-	if [[ -f $qgistopo_config_dir/config.ini ]] ; then
-		. $qgistopo_config_dir/config.ini
+	qgisxtopo_config_dir=/mnt/qgis_projects/qgisxtopo-config
+	if [[ -f $qgisxtopo_config_dir/config.ini ]] ; then
+		. $qgisxtopo_config_dir/config.ini
 		export XDG_RUNTIME_DIR=/mnt/qgis_projects/$project_name/tmp
 	else
 		echo -e "\033[91mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 	fi
 
-	if [[ -f $qgistopo_config_dir/config_debug.ini ]] ; then
-		. $qgistopo_config_dir/config_debug.ini
+	if [[ -f $qgisxtopo_config_dir/config_debug.ini ]] ; then
+		. $qgisxtopo_config_dir/config_debug.ini
 	fi
 	rm -f /tmp/.X99-lock
 	Xvfb :99 -ac -noreset &
 	export DISPLAY=:99
 else
 	scripts_dir=$(pwd)
-	qgistopo_config_dir=$(pwd)
-	if [[ -f $qgistopo_config_dir/config.ini ]] ; then
-		. $qgistopo_config_dir/config.ini
+	qgisxtopo_config_dir=$(pwd)
+	if [[ -f $qgisxtopo_config_dir/config.ini ]] ; then
+		. $qgisxtopo_config_dir/config.ini
 	else
 		echo -e "\031[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 	fi
-	if [[ -f $qgistopo_config_dir/config_debug.ini ]] ; then
-		. $qgistopo_config_dir/config_debug.ini
+	if [[ -f $qgisxtopo_config_dir/config_debug.ini ]] ; then
+		. $qgisxtopo_config_dir/config_debug.ini
 	fi
 fi
 
@@ -38,7 +38,7 @@ echo -e "\e[105mProject dir: $project_dir\e[49m"
 if [[ $running_in_container == true ]] ; then
 	echo -e "\e[100mRunning in docker\e[49m"
 fi
-echo -e "\e[100mconfig: $qgistopo_config_dir/config.ini\e[49m"
+echo -e "\e[100mconfig: $qgisxtopo_config_dir/config.ini\e[49m"
 echo -e "\e[100mterrain dir: $terrain_src_dir\e[49m"
 
 if [[ "$project_name" == "" ]] ; then

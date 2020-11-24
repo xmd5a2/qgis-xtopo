@@ -1,5 +1,5 @@
 #!/bin/bash
-config_dir=/mnt/qgis_projects/qgistopo-config
+config_dir=/mnt/qgis_projects/qgisxtopo-config
 mkdir -p $config_dir/
 
 if [[ ! -f $config_dir/config.ini ]] ; then
@@ -41,8 +41,8 @@ mkdir -p "$raster_data_dir"
 mkdir -p "$terrain_input_dir"
 mkdir -p "$osm_data_dir"
 mkdir -p "$temp_dir"
-rm -f "$project_dir/qgistopo_version.txt"
-sed -n 1p /app/README.md | grep -o '[^v]*$' > "$project_dir/qgistopo_version.txt"
+rm -f "$project_dir/qgisxtopo_version.txt"
+sed -n 1p /app/README.md | grep -o '[^v]*$' > "$project_dir/qgisxtopo_version.txt"
 
 mkdir -p $config_dir/QGIS3
 if [[ -d $config_dir/QGIS3 ]] ; then

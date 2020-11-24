@@ -1,3 +1,3 @@
 #!/bin/bash
-docker stop qgis-topo
-docker rmi xmd5a2/qgis-topo || docker rmi qgis-topo
+docker stop qgis-xtopo
+docker rmi xmd5a2/qgis-xtopo || docker rmi qgis-xtopo
