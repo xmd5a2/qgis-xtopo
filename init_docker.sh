@@ -20,7 +20,7 @@ if [[ $OVERPASS_INSTANCE == "external" ]] || [[ $OVERPASS_INSTANCE == "ext" ]] ;
 elif [[ $OVERPASS_INSTANCE == "docker" ]] ; then
 	sed -i "s/overpass_instance=.*/overpass_instance=docker/" $config_dir/config.ini
 fi
-if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
+if [[ $DOWNLOAD_TERRAIN_DATA == "true" ]] || [[ $DOWNLOAD_TERRAIN_DATA == "True" ]] ; then
 	sed -i "s/generate_terrain=.*/generate_terrain=true/" $config_dir/config.ini
 	sed -i "s/download_terrain_tiles=.*/download_terrain_tiles=true/" $config_dir/config.ini
 else

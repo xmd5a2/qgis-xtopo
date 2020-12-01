@@ -227,10 +227,10 @@ if [[ $generate_terrain == "true" ]] ; then
 			echo -e "\033[93mNo DEM tiles found in '$terrain_input_dir'\nPlease download and manually add tiles from 'DEM tiles list' or restart script with download_terrain_tiles=true or get_terrain_tiles=true variables set in config.ini\033[0m"
 			read -rsp $'\033[93mPress any key to continue...\n\033[0m' -n1 key
 		fi
-		if ! ls $terrain_input_dir/*.tif 1> /dev/null 2>&1 ; then
-			echo -e "\033[93mStill no DEM tiles found"
-			exit 1
-		fi
+# 		if ! ls $terrain_input_dir/*.tif 1> /dev/null 2>&1 ; then
+# 			echo -e "\033[93mStill no DEM tiles found"
+# 			exit 1
+# 		fi
 	fi
 
 	CUTLINE_STRING="-crop_to_cutline -cutline $project_dir/crop.geojson"
