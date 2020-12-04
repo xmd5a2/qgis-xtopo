@@ -1,0 +1,619 @@
+#!/usr/bin/python3
+import PySimpleGUI as sg
+import subprocess
+import sys
+import webbrowser
+import locale
+import os
+import configparser
+import pyperclip
+
+
+def main():
+    osm_logo = b'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAyJpVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+IDx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IkFkb2JlIFhNUCBDb3JlIDUuMy1jMDExIDY2LjE0NTY2MSwgMjAxMi8wMi8wNi0xNDo1NjoyNyAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENTNiAoV2luZG93cykiIHhtcE1NOkluc3RhbmNlSUQ9InhtcC5paWQ6OTE5Q0NCRjgzMzBEMTFFQjk1NjhFQTJERDIzOUJCMkUiIHhtcE1NOkRvY3VtZW50SUQ9InhtcC5kaWQ6OTE5Q0NCRjkzMzBEMTFFQjk1NjhFQTJERDIzOUJCMkUiPiA8eG1wTU06RGVyaXZlZEZyb20gc3RSZWY6aW5zdGFuY2VJRD0ieG1wLmlpZDo5MTlDQ0JGNjMzMEQxMUVCOTU2OEVBMkREMjM5QkIyRSIgc3RSZWY6ZG9jdW1lbnRJRD0ieG1wLmRpZDo5MTlDQ0JGNzMzMEQxMUVCOTU2OEVBMkREMjM5QkIyRSIvPiA8L3JkZjpEZXNjcmlwdGlvbj4gPC9yZGY6UkRGPiA8L3g6eG1wbWV0YT4gPD94cGFja2V0IGVuZD0iciI/PhubL60AAAlDSURBVHjafFZZjFzF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'
+    klokantech_logo = b'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAADrElEQVRIia1WO4/cVBT+zvW1vTOTnSEPQbQbiAQSmw0QJAqQIiGoaahIgSj4AVAgRJMOEVHQULN1KhASTdiGIgoCKUgRilgpu2FACRDQZLPv2Z2Hfc9HYXvG9sxuJo9TWPbxPd933rbgwrciCK0HAAQEqRBDEUwqzFAEThk5tQCePXzo6vuvT4wxqSz8evv85RsWgCdypBI8doKq7wEwIEDe9/RDCmkhyOf7859uNtfbSRInRgFASGrw0avPvfRkffDSltz/vtn6+e+19CGxIe/DN0AQAXBufiYlIEHace6MWBbaq5TSvL5kn0RQVqYPp44eOnVseujaAXUS6cVusdkaRc8Ixsk7p2c/fWN+X9CitHZ7M18ucpwfZkKIiaSILoA8EMGDNrMPnaIbQxAwrmjkU/NKJS9e/2uzGx2AWGNscmXow0QQU2UcMs6jB6CVQmjbvejC5ZUvflz6ePHa72s7iTJy2otSJwScYtQVz6czWaQe1EAtqZKjFZAkAWbKzW506Wbr4vU/7mzv3uv0rCcfvDY3d7T+w5+t9U7/vZdPJscMaekMdNBLQnikdWScy64SjgQwSFDgeSfqtacq4b87uxud/qWV/6yYpxu1q3fWn2lUBwQAhK4wRSCphgALBHTIuQFUfPPKTOPDs/MvHD8SeObeXu+75X8WrjWv3Lrb7g9LEpNaNCSggGWxORQgSZHh/APTgXn79Im2c1/9snJjdevubi+FyM6QiEkZ2SgKGAe6IocDHMniWIYe333x5Jnjh0NrCCipxTMEFHQcOpxk25a6m1mNS/pYubK6dWuz3Ykcs6VTyjggRTNyzLIDQAWJ3ByQaHfjz64sNde266Gth+kOboR+kYFZMAAgEAEsQKiOoDM/uCJ4oup/fe5sKSzJZ5wO5WQo1VnEcd5ZqBb4cmLkwK+CMl26+dKPT9FDCqEj2+oAgm+Wbv/W2pwQuxe7/Vahre7zYnl1a3l1ywIVkkBbBECNMGBXJL/zDFBllp9cWQKgQtph8YdxFR5IqKRKImn+4hc0yTqHtwMYArZThHxrbvb5Y3U8gszWq8lNBHQBa4sze/7NM4+CnhdDeKSpaGGmHqP4ZFVpSarqxl4P2c9JEs+E/10Dk9IVwF4UG1IanyyIIPA8AG1BBegDERACAUHQZFxKmqxJEidiQQRMEbuCaWJHUCO6Ah/wiQ7ZcWp3EhPnQqddz3Qye0d2CRXxya5JcQMtDw6BPaBjpAf4qhtiVBCSEdOPwf9p8DEyjKNFWAAAAABJRU5ErkJggg=='
+    logo_icon = b'iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAA2ZpVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+IDx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IkFkb2JlIFhNUCBDb3JlIDUuMy1jMDExIDY2LjE0NTY2MSwgMjAxMi8wMi8wNi0xNDo1NjoyNyAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wTU09Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8iIHhtbG5zOnN0UmVmPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvc1R5cGUvUmVzb3VyY2VSZWYjIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8iIHhtcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDoxRjhBMzVCN0VEMTlFQjExOTQ0REQzRURFMDFEMDEyRCIgeG1wTU06RG9jdW1lbnRJRD0ieG1wLmRpZDoyRTUwN0EyMjM2MTcxMUVCQUUwMDkzMDk5QkRFRTE1NyIgeG1wTU06SW5zdGFuY2VJRD0ieG1wLmlpZDoyRTUwN0EyMTM2MTcxMUVCQUUwMDkzMDk5QkRFRTE1NyIgeG1wOkNyZWF0b3JUb29sPSJBZG9iZSBQaG90b3Nob3AgQ1M2IChXaW5kb3dzKSI+IDx4bXBNTTpEZXJpdmVkRnJvbSBzdFJlZjppbnN0YW5jZUlEPSJ4bXAuaWlkOjhFODI4MjdFMEYzM0VCMTFBQkFGQTQ5MTY3NEUxNzcxIiBzdFJlZjpkb2N1bWVudElEPSJ4bXAuZGlkOjFGOEEzNUI3RUQxOUVCMTE5NDRERDNFREUwMUQwMTJEIi8+IDwvcmRmOkRlc2NyaXB0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'
+    r_keys = ['docker', 'external']
+    if os.name == "posix":
+        slash_str = "/"
+        default_locale = locale.getlocale()[0][:2]
+    else:
+        if os.name == "nt":
+            import ctypes
+            windll = ctypes.windll.kernel32
+            default_locale = locale.windows_locale[windll.GetUserDefaultUILanguage()][:2]
+            slash_str = "\\"
+        else:
+            default_locale = "en"
+    translations = get_translations(default_locale)
+    #    default_locale = "en"
+    #    print(is_tool("docker"))
+    if not is_tool("docker"):
+        sg.Popup(translations.get('docker_not_installed_error', 'Docker is not installed. Nothing will work.'),
+                 title=translations.get('error', 'Error'))
+        docker_installed = False
+    else:
+        docker_installed = True
+    #    docker_container_ls = 'docker container ls'
+    #    print("Locale: "+default_locale)
+
+    layout = [
+        [sg.Text('QGIS-xtopo', font='Any 20')] +
+        [sg.Text(
+            '                                                                                                                            ')] +
+        [sg.Column(
+            [
+                [sg.Button('RU', key="button_ru", visible=True)] +
+                [sg.Button('EN', key="button_en", visible=False)]
+            ]
+            , justification='left')
+        ],
+        [sg.Text(translations.get('qgis_projects_dir', 'QGIS projects directory'), key="qgis_projects_dir_text",
+                 size=(20, 1), justification='l',
+                 tooltip=translations.get('qgis_projects_dir_tooltip', 'Directory with your projects')),
+         sg.Input(key='qgis_projects_dir', default_text=str(str(os.path.expanduser('~'))) + slash_str + "qgis_projects",
+                  size=(60, 1),
+                  tooltip=translations.get('qgis_projects_dir_tooltip', 'Directory with your projects'),
+                  change_submits=True)] +
+        [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='qgis_projects_dir_browse',
+                         tooltip=translations.get('qgis_projects_dir_browse_tooltip', 'Select projects directory'))],
+        [sg.Text(translations.get('project_name', 'Project name'), key='project_name_text', size=(20, 1),
+                 justification='l', tooltip=translations.get('project_name_tooltip', 'Enter project name')),
+         sg.Input(default_text='automap', key='project_name', size=(60, 1),
+                  tooltip=translations.get('project_name_tooltip', 'Enter project name'))],
+        [sg.Text(translations.get('bounding_box', 'Bounding box'), key='bbox_text', size=(20, 1), justification='l',
+                 tooltip=translations.get('bounding_box_tooltip', 'Bounding box or OSM url')),
+         sg.Input(default_text='', key='bbox', size=(60, 1),
+                  tooltip=translations.get('bounding_box_tooltip', 'Bounding box or OSM url'),
+                  right_click_menu=['&Right', ['Paste bbox', 'Clear']])] +
+        [sg.Button(key="open_osm", image_data=osm_logo, size=(32, 32),
+                   tooltip=translations.get('open_osm_tooltip',
+                                            'Press button, find a location and copy URL. Then paste it to text field to the left.'))
+         ] +
+        [sg.Button(key="open_klokantech", image_data=klokantech_logo, size=(32, 32),
+                   tooltip=translations.get('open_klokantech_tooltip',
+                                            'Draw a rectangle and copy bounding box in CSV format. Then paste it to text field to the left.'))
+         ]
+        ,
+        [sg.Text(translations.get('terrain_src_dir', 'Terrain source directory'), key='terrain_src_dir_text', size=(20, 1),
+                 justification='l',
+                 tooltip=translations.get('terrain_src_dir_tooltip', 'Directory with world/continent terrain')),
+         sg.Input(default_text='', key='terrain_src_dir', size=(60, 1),
+                  tooltip=translations.get('terrain_src_dir_tooltip', 'Directory with world/continent terrain'))] +
+        [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='terrain_src_dir_browse',
+                         tooltip=translations.get('terrain_src_dir_browse_tooltip',
+                                                  'Select directory with world/continent terrain'))],
+        [sg.Text(translations.get('overpass_instance', 'Overpass instance'), key='overpass_instance_text', size=(22, 1),
+                 justification='l',
+                 tooltip=translations.get('overpass_instance_tooltip',
+                                          'Select the type of server for receiving OSM data'))] +
+        [sg.Radio('docker', "RADIO1", key=r_keys[0], default=True, size=(5, 1)),
+         sg.Radio('external', "RADIO1", key=r_keys[1])],
+        [sg.Text(translations.get('download_terrain_tiles', 'Download terrain data'), key='download_terrain_tiles_text',
+                 size=(22, 1), justification='l',
+                 tooltip=translations.get('download_terrain_tiles_tooltip',
+                                          'Automatically download SRTM30m terrain data for chosen area'))] +
+        [sg.Checkbox('', key="download_terrain_tiles", size=(10, 1), default=False, change_submits=True)]
+    ]
+    layout += [[sg.Text(translations.get('constructed_command_line', 'Command line') + ":",
+                        key='constructed_command_line_text')],
+               [sg.Text(size=(93, 6), key='command_line', text_color='yellow', font='Courier 8', right_click_menu=['&Right', ['Copy']])]
+               # [sg.Button(button_text=translations.get('copy', 'Copy'), key="copy_command_line",
+               #            tooltip=translations.get('copy_command_line_tooltip', 'Copy command line to clipboard'))
+               #  ]
+                ,
+               [sg.MLine(size=(90, 10), reroute_stdout=True, reroute_stderr=True, reroute_cprint=True, write_only=True,
+                         font='Courier 8', autoscroll=True, key='-ML-')],
+               [sg.Frame(layout=[
+                   # [sg.Text(translations.get('sequential_launch', 'Sequential launch'), key='sequential_launch_text',
+                   #          size=(14, 1), justification='l',
+                   #          tooltip=translations.get('sequential_launch_tooltip',
+                   #                                   'Automatically launch data preparation steps and QGIS'))] +
+                   [sg.Checkbox('', key="run_chain", size=(1, 1), default=True, visible=False)] +
+                   [sg.Button(translations.get('start', 'Run everything'), button_color=('white', '#05710F'),
+                              key="start",
+                              tooltip=translations.get('start_tooltip', 'Initialize project'))
+                    ]], title='', element_justification="left",
+                   border_width=1,
+                   relief=sg.RELIEF_SUNKEN)] +
+               [sg.Frame(layout=[
+                   [sg.Button(translations.get('populate_db', 'Populate DB'), key="populate_db",
+                              tooltip=translations.get('populate_db_tooltip',
+                                                       'Populate Overpass database (populate_db)'), disabled=False),
+                    sg.Button(translations.get('prepare_data', 'Prepare data'), key="prepare_data",
+                              tooltip=translations.get('prepare_data_tooltip',
+                                                       'Prepare data for project (prepare_data)'), disabled=False),
+                    sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis",
+                              tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
+                              disabled=False)
+                    ]], title='', element_justification="left",
+                   border_width=1,
+                   relief=sg.RELIEF_SUNKEN)] +
+               [sg.Button(translations.get('exit', 'Exit'), key="exit")]
+               ]
+    window = sg.Window('QGIS-xtopo', layout, finalize=True, icon=logo_icon)
+
+    if default_locale == 'ru':
+        window.Elem('button_ru').update(visible=False)
+        window.Elem('button_en').update(visible=True)
+    if default_locale == 'en':
+        window.Elem('button_ru').update(visible=True)
+        window.Elem('button_en').update(visible=False)
+
+    timer_running, counter = True, 0
+    i = 0
+
+    while True:
+        event, values = window.read(timeout=300)
+        if i == 0:
+            read_config_update_ui(window, values, slash_str, translations)
+            i += 1
+        if event in (sg.WIN_CLOSED, 'exit'):
+            break
+
+        if timer_running:
+            parameters_tuple = (
+                values["project_name"], values["bbox"], values["download_terrain_tiles"], values["run_chain"],
+                values["qgis_projects_dir"], values["terrain_src_dir"])
+            params = compose_params(parameters_tuple, r_keys, values)
+            command = command_to_run + params
+            window['command_line'].update(command)
+            # if docker_installed:
+            #     if "qgis-xtopo" in str(subprocess.check_output('docker container ls', shell=True)):
+            #         if ([key for key in r_keys if values[key]][0]) == 'docker':
+            #             window.Elem('populate_db').update(disabled=False)
+            #         elif ([key for key in r_keys if values[key]][0]) == 'external':
+            #             window.Elem('populate_db').update(disabled=True)
+            #         window.Elem('prepare_data').update(disabled=False)
+            #         window.Elem('open_qgis').update(disabled=False)
+            #     else:
+            #         window.Elem('populate_db').update(disabled=True)
+            #         window.Elem('prepare_data').update(disabled=True)
+            #         window.Elem('open_qgis').update(disabled=True)
+            # else:
+            #     window.Elem('start').update(disabled=True)
+        if event == 'button_ru':
+            translations = get_translations("ru")
+            update_layout_translations(translations, window)
+            window.Elem('button_ru').update(visible=False)
+            window.Elem('button_en').update(visible=True)
+        if event == 'button_en':
+            translations = get_translations("en")
+            update_layout_translations(translations, window)
+            window.Elem('button_ru').update(visible=True)
+            window.Elem('button_en').update(visible=False)
+        if event == 'Paste bbox':
+            window.Elem('bbox').update(pyperclip.paste())
+        if event == 'Clear':
+            window.Elem('bbox').update('')
+        if event == 'qgis_projects_dir':
+            read_config_update_ui(window, values, slash_str, translations)
+        if event == 'open_osm':
+            webbrowser.open(r'https://www.openstreetmap.org')
+        if event == 'open_klokantech':
+            webbrowser.open(r'https://boundingbox.klokantech.com')
+        if event == 'download_terrain_tiles':
+            if values["download_terrain_tiles"]:
+                window.Elem('terrain_src_dir').update(value='', disabled=True)
+                window.Elem('terrain_src_dir_browse').update(disabled=True)
+            else:
+                window.Elem('terrain_src_dir').update(disabled=False)
+                window.Elem('terrain_src_dir_browse').update(disabled=False)
+        if event == 'Copy':
+            pyperclip.copy(command)
+        if event == 'populate_db':
+            parameters_check_tuple = (
+                values['qgis_projects_dir'], values['terrain_src_dir'], values["bbox"], values["project_name"])
+            if check_parameters(parameters_check_tuple, translations) is False:
+                continue
+            start(docker_installed, values, r_keys, window, False)
+            osm_data_is_present = False
+            project_dir = values["qgis_projects_dir"] + slash_str + values["project_name"]
+            osm_data_dir = project_dir + slash_str + "osm_data"
+            for filename in os.listdir(osm_data_dir):
+                if filename.endswith('.osm'):
+                    osm_data_is_present = True
+                    continue
+                if filename.endswith('.o5m'):
+                    osm_data_is_present = True
+                    continue
+                if filename.endswith('.osm.bz2'):
+                    osm_data_is_present = True
+                    continue
+                if filename.endswith('.pbf'):
+                    osm_data_is_present = True
+                    continue
+            if not osm_data_is_present:
+                webbrowser.open(os.path.realpath(osm_data_dir))
+            if os.name == "posix":
+                terminal_command_params_list = get_terminal_command_params_list(
+                    'docker exec -it --user user qgis-xtopo /app/populate_db.sh', '', True)
+                subprocess.Popen(terminal_command_params_list).wait()
+                # subprocess.Popen(
+                #     ['xfce4-terminal', '-H', '-e', 'docker exec -it --user user qgis-xtopo /app/populate_db.sh'])
+            else:
+                if os.name == "nt":
+                    subprocess.Popen(
+                        ['cmd', '/c start cmd /k docker exec -it --user user qgis-xtopo /app/populate_db.sh'],
+                        shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if event == 'prepare_data':
+            parameters_check_tuple = (
+                values['qgis_projects_dir'], values['terrain_src_dir'], values["bbox"], values["project_name"])
+            if check_parameters(parameters_check_tuple, translations) is False:
+                continue
+            start(docker_installed, values, r_keys, window, False)
+            if os.name == "posix":
+                terminal_command_params_list = get_terminal_command_params_list(
+                    'docker exec -it --user user qgis-xtopo /app/prepare_data.sh', '', True)
+                subprocess.Popen(terminal_command_params_list).wait()
+                # subprocess.Popen(
+                #     ['xfce4-terminal', '-H', '-e', 'docker exec -it --user user qgis-xtopo /app/prepare_data.sh'])
+            else:
+                if os.name == "nt":
+                    subprocess.Popen(
+                        ['cmd', '/c start cmd /c docker exec -it --user user qgis-xtopo /app/prepare_data.sh'],
+                        shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if event == 'open_qgis':
+            start(docker_installed, values, r_keys, window, False)
+            run_qgis(window)
+        if event == 'start':
+            parameters_check_tuple = (
+                values['qgis_projects_dir'], values['terrain_src_dir'], values["bbox"], values["project_name"])
+            if check_parameters(parameters_check_tuple, translations) is False:
+                continue
+            start(docker_installed, values, r_keys, window, values["run_chain"])
+
+    window.close()
+
+
+command_to_run = r'docker '
+
+
+def run_qgis(window):
+    if os.name == "posix":
+        runCommand(cmd="xhost +local:docker", window=window)
+        runCommand(cmd="docker exec --user user qgis-xtopo /app/exec_qgis.sh", window=window)
+    else:
+        if os.name == "nt":
+            if "vcxsrv.exe" not in str(
+                    subprocess.check_output('tasklist', stdin=subprocess.PIPE, stderr=subprocess.STDOUT)):
+                subprocess.Popen(
+                    ["c:\\Program Files\\VcXsrv\\vcxsrv.exe", "-multiwindow", "-clipboard", "-wgl"], shell=True,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if "vcxsrv.exe" in str(
+                    subprocess.check_output('tasklist', stdin=subprocess.PIPE, stderr=subprocess.STDOUT)):
+                runCommand(
+                    cmd="docker exec -e DISPLAY=host.docker.internal:0.0 --user user qgis-xtopo /app/exec_qgis.sh",
+                    window=window)
+
+
+def start(docker_installed, values, r_keys, window, run_chain):
+    if docker_installed:
+        if "qgis-xtopo" in str(
+                subprocess.check_output(['docker', 'ps'], stdin=subprocess.PIPE, stderr=subprocess.STDOUT)):
+            runCommand(cmd="docker stop qgis-xtopo", window=window)
+    parameters_tuple = (
+        values["project_name"], values["bbox"], values["download_terrain_tiles"], run_chain,
+        values["qgis_projects_dir"], values["terrain_src_dir"])
+    params = compose_params(parameters_tuple, r_keys, values)
+    command = command_to_run + params
+    runCommand(cmd=command, window=window)
+    if docker_installed:
+        if "qgis-xtopo" in str(
+                subprocess.check_output(['docker', 'ps'], stdin=subprocess.PIPE, stderr=subprocess.STDOUT)):
+            if os.name == "posix":
+                run_chain_filename = ''
+                if run_chain:
+                    run_chain_filename = 'run_chain.sh'
+                    try:
+                        os.remove(run_chain_filename)
+                    except OSError:
+                        pass
+                    f = open(run_chain_filename, "w+")
+                    f.write("#!/bin/bash\n")
+                    f.write("docker exec --user user qgis-xtopo /app/init_docker.sh\n")
+                    f.write("xhost +local:docker\n")
+                    f.write("docker exec -it --user user qgis-xtopo /app/exec_qgis.sh\n")
+                    f.close()
+                    os.chmod(run_chain_filename, 0o755)
+                terminal_command_params_list = get_terminal_command_params_list(
+                    "docker exec --user user qgis-xtopo /app/init_docker.sh", run_chain_filename, False)
+                subprocess.Popen(terminal_command_params_list).wait()
+                try:
+                    os.remove(run_chain_filename)
+                except OSError:
+                    pass
+            else:
+                if os.name == "nt":
+                    subprocess.Popen(
+                        ['cmd', '/c start /wait cmd /c docker exec --user user qgis-xtopo /app/init_docker.sh'],
+                        shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).wait()
+                    if run_chain:
+                        run_qgis(window)
+
+
+def get_terminal_command_params_list(cmd, run_chain_filename, hold):
+    get_terminal_name()
+    terminal_command_params_list = []
+    if is_tool('xterm'):
+        if run_chain_filename:
+            terminal_command_params_list = ['xterm', '-hold', '-e', './' + run_chain_filename]
+        else:
+            if hold:
+                terminal_command_params_list = ['xterm', '-hold', '-e', cmd]
+            else:
+                terminal_command_params_list = ['xterm', '-e', cmd]
+    if get_terminal_name() == 'xfce4-terminal':
+        if run_chain_filename:
+            terminal_command_params_list = ['xfce4-terminal', '-H', '-e', './' + run_chain_filename]
+        else:
+            if hold:
+                terminal_command_params_list = ['xfce4-terminal', '-H', '-e', cmd]
+            else:
+                terminal_command_params_list = ['xfce4-terminal', '-e', cmd]
+    else:
+        if get_terminal_name() == 'gnome-terminal':
+            if run_chain_filename:
+                terminal_command_params_list = ['gnome-terminal', '--', 'bash', '-c',
+                                                './' + run_chain_filename + '; bash']
+            else:
+                if hold:
+                    terminal_command_params_list = ['gnome-terminal', '--', 'bash', '-c',
+                                                    cmd + '; bash']
+                else:
+                    terminal_command_params_list = ['gnome-terminal', '--', 'bash', '-c',
+                                                    cmd]
+        else:
+            if get_terminal_name() == 'konsole':
+                if run_chain_filename:
+                    terminal_command_params_list = ['konsole', '--hold', '-e', './' + run_chain_filename]
+                else:
+                    if hold:
+                        terminal_command_params_list = ['konsole', '--hold', '-e', cmd]
+                    else:
+                        terminal_command_params_list = ['konsole', '-e', cmd]
+            else:
+                if get_terminal_name() == 'terminator':
+                    if run_chain_filename or hold:
+                        terminal_command_params_list = ['terminator', '-e', './' + run_chain_filename]
+                    else:
+                        terminal_command_params_list = ['terminator', '-e', cmd]
+                else:
+                    if get_terminal_name() == 'lxterminal':
+                        if run_chain_filename:
+                            terminal_command_params_list = ['lxterminal',
+                                                            '--command="/bin/bash -c \'./' + run_chain_filename + '; /bin/bash\'"']
+                        else:
+                            if hold:
+                                terminal_command_params_list = ['lxterminal',
+                                                                '--command="/bin/bash -c \'' + cmd + '; /bin/bash\'"']
+                            else:
+                                terminal_command_params_list = ['lxterminal', '--command="' + cmd + '"']
+
+    list_terminals = "gnome-terminal, xfce4-terminal, konsole, terminator, lxterminal, xterm"
+    if not terminal_command_params_list:
+        sg.Popup(translations.get('no_terminal_found_error',
+                                  'Terminal emulator is not found. Please install something from this list') + list_terminals,
+                 title=translations.get('error', 'Error'))
+    return terminal_command_params_list
+
+
+def get_terminal_name():
+    if is_tool('xfce4-terminal'):
+        return 'xfce4-terminal'
+    if is_tool('gnome-terminal'):
+        return 'gnome-terminal'
+    if is_tool('konsole'):
+        return 'konsole'
+    if is_tool('lxterminal'):
+        return 'lxterminal'
+    if is_tool('terminator'):
+        return 'terminator'
+    if is_tool('xterm'):
+        return 'xterm'
+
+
+def read_config_update_ui(window, values, slash_str, translations):
+    config = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "config.ini"
+    if os.path.isfile(config):
+        print(translations.get('reading_config_from', 'Reading config from') + " " + config)
+        window.Elem('bbox').update(get_setting(config, "bbox"))
+        window.Elem('project_name').update(get_setting(config, "project_name"))
+        overpass_instance_config = get_setting(config, "overpass_instance")
+        if overpass_instance_config == "docker":
+            window.Elem('docker').update(value=True)
+            window.Elem('external').update(value=False)
+        if overpass_instance_config == "external":
+            window.Elem('external').update(value=True)
+            window.Elem('docker').update(value=False)
+        download_terrain_tiles_config = get_setting(config, "download_terrain_tiles")
+        if download_terrain_tiles_config == "true":
+            window.Elem('download_terrain_tiles').update(value=True)
+        else:
+            window.Elem('download_terrain_tiles').update(value=False)
+
+
+def update_layout_translations(translations, window):
+    window.Elem('qgis_projects_dir_text').update(translations.get('qgis_projects_dir', 'QGIS projects directory'))
+    window.Elem('project_name_text').update(translations.get('project_name', 'Project name'))
+    window.Elem('bbox_text').update(translations.get('bounding_box', 'Bounding box'))
+    window.Elem('terrain_src_dir_text').update(translations.get('terrain_src_dir', 'Terrain source directory'))
+    window.Elem('overpass_instance_text').update(translations.get('overpass_instance', 'Overpass instance'))
+    window.Elem('download_terrain_tiles_text').update(
+        translations.get('download_terrain_tiles', 'Download terrain data'))
+    window.Elem('constructed_command_line_text').update(
+        translations.get('constructed_command_line', 'Сommand line') + ":")
+    window.Elem('start').update(text=translations.get('start', 'Run everything'))
+    window.Elem('populate_db').update(text=translations.get('populate_db', 'Populate DB'))
+    window.Elem('prepare_data').update(text=translations.get('prepare_data', 'Prepare data'))
+    window.Elem('open_qgis').update(text=translations.get('open_qgis', 'Open QGIS'))
+    window.Elem('exit').update(text=translations.get('exit', 'Exit'))
+
+
+def get_setting(path, setting):
+    with open(path) as f:
+        for num, line in enumerate(f, 1):
+            value = None
+            if setting + "=" in line:
+                line = line.strip()
+                value = line[len(setting) + 1:].replace('"', "").replace("'", "").lower()
+                break
+    return str(value)
+
+
+def compose_params(parameters, r_keys, values):
+    project_name = parameters[0]
+    bbox = parameters[1]
+    download_terrain_tiles = parameters[2]
+    run_chain = parameters[3]
+    qgis_projects_dir = parameters[4]
+    terrain_src_dir = parameters[5]
+
+    params = 'run -dti --rm '
+    if project_name:
+        params += f"-e PROJECT_NAME_EXT={project_name} "
+    if bbox:
+        params += f'-e BBOX_STR="{bbox}" '
+    params += f"-e OVERPASS_INSTANCE={([key for key in r_keys if values[key]][0])} "
+    if download_terrain_tiles:
+        params += f"-e download_terrain_tiles={str(download_terrain_tiles).lower()} "
+    if run_chain:
+        params += f"-e RUN_CHAIN={str(run_chain).lower()} "
+    lang = locale.getlocale(locale.LC_CTYPE)
+    params += f"-e DISPLAY "
+    if os.name == "posix":
+        params += f"-v /tmp/.X11-unix:/tmp/.X11-unix "
+        params += f"-e LANG={lang[0]}.{lang[1]} "
+    if os.name == "nt":
+        import ctypes
+        windll = ctypes.windll.kernel32
+        params += f"-e LANG={locale.windows_locale[windll.GetUserDefaultUILanguage()]} "
+    params += f"--name qgis-xtopo "
+    if qgis_projects_dir:
+        params += f"--mount type=bind,source={qgis_projects_dir},target=/mnt/qgis_projects "
+    if terrain_src_dir:
+        params += f"--mount type=bind,source={terrain_src_dir},target=/mnt/terrain "
+    if os.path.isfile('config_debug.ini'):
+        params += 'qgis-xtopo'
+    else:
+        params += 'xmd5a2/qgis-xtopo:latest'
+    return params
+
+
+def check_parameters(parameters, translations):
+    qgis_projects_dir = parameters[0]
+    terrain_src_dir = parameters[1]
+    bbox = parameters[2]
+    project_name = parameters[3]
+    if len(qgis_projects_dir) < 5:
+        sg.Popup(translations.get('projects_directory_empty_error', 'Projects directory path is empty'),
+                 title=translations.get('error', 'Error'))
+        return False
+    if " " in qgis_projects_dir:
+        sg.Popup(
+            translations.get('projects_directory_spaces_error', 'Projects directory path should not contain spaces'),
+            title=translations.get('error', 'Error'))
+        return False
+    if not os.path.isdir(qgis_projects_dir):
+        try:
+            os.makedirs(qgis_projects_dir, exist_ok=True)
+        except OSError:
+            sg.Popup(translations.get('directory', 'Directory') + " " + qgis_projects_dir + " " + translations.get(
+                'can_not_be_created', 'can not be created'))
+            return False
+    if len(project_name) == 0:
+        sg.Popup(translations.get('project_name_empty_error', 'Project name is empty'),
+                 title=translations.get('error', 'Error'))
+        return False
+    if " " in project_name:
+        sg.Popup(translations.get('project_name_spaces_error', 'Project name should not contain spaces'),
+                 title=translations.get('error', 'Error'))
+        return False
+    if len(terrain_src_dir) != 0:
+        if not os.path.isdir(terrain_src_dir):
+            sg.Popup(translations.get('terrain_src_dir_doesnt_exists_error', 'Terrain source directory does not exist'),
+                     title=translations.get('error', 'Error'))
+            return False
+    if " " in terrain_src_dir:
+        sg.Popup(translations.get('terrain_src_dir_spaces_error', 'Terrain source directory should not contain spaces'),
+                 title=translations.get('error', 'Error'))
+        return False
+    if len(bbox) == 0:
+        sg.Popup(translations.get('bounding_box_empty_error', 'Bounding box is empty'),
+                 title=translations.get('error', 'Error'))
+        return False
+    if len(bbox) >= 7:
+        if "openstreetmap" not in bbox:
+            if check_bbox(bbox) is False:
+                throw_bbox_error(translations)
+                return False
+    else:
+        throw_bbox_error(translations)
+        return False
+    if " " in bbox:
+        sg.Popup(translations.get('bounding_box_spaces_error', 'Bounding box should not contain spaces'),
+                 title=translations.get('error', 'Error'))
+        return False
+    return True
+
+
+def num(s):
+    try:
+        return float(s)
+    except ValueError:
+        return False
+
+
+def check_bbox(bbox_str):
+    bbox_list = bbox_str.replace(" ", "").split(',')
+    if len(bbox_list) != 4:
+        return False
+    else:
+        lon_min = bbox_list[0]  # (W) left
+        lat_min = bbox_list[1]  # (S) bottom
+        lon_max = bbox_list[2]  # (E) right
+        lat_max = bbox_list[3]  # (N) top
+        if num(lon_min) > num(lon_max) or num(lat_min) > num(lat_max) or num(lat_max) >= 90 or num(lat_min) <= -90 or \
+                num(lon_min) <= -180 or num(lon_max) >= 180:
+            return False
+    return True
+
+
+def throw_bbox_error(translations):
+    sg.Popup(translations.get('invalid_bbox_error',
+                              'Invalid bbox format. Use openstreetmap.org link or comma separated left,bottom,right,top'),
+             title=translations.get('error', 'Error'))
+
+
+def runCommand(cmd, timeout=None, window=None):
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = ''
+    for line in p.stdout:
+        line = line.decode(errors='replace' if (sys.version_info) < (3, 5) else 'backslashreplace').rstrip()
+        output += line
+        print(line)
+        window.refresh() if window else None
+
+    retval = p.wait(timeout)
+    return retval, output
+
+
+def get_translations(lang):
+    path = 'translations_' + lang + '.txt'
+    config = configparser.ConfigParser(delimiters='=')
+    if os.path.isfile(path):
+        config.read(path, encoding='utf-8')
+        translations = {k: v for k, v in config.items('main')}
+    else:
+        return {'': ''}
+    return translations
+
+
+def is_tool(name):
+    from shutil import which
+    return which(name) is not None
+
+
+if __name__ == '__main__':
+    sg.theme('DarkGreen6')
+    main()

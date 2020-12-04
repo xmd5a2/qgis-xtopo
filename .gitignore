@@ -1,5 +1,6 @@
 .stfolder/
 .stversions/
+.idea/
 author.txt
 config_debug.ini
 config_debug.ini1
@@ -15,3 +16,6 @@ QGIS3/profiles/default/python/expressions/
 expressions/__pycache__
 *.pyc
 processing/
+gui/__pycache__/
+gui/build/
+gui/dist/
