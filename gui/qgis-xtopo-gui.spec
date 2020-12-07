@@ -6,7 +6,12 @@ block_cipher = None
 a = Analysis(['qgis-xtopo-gui.py'],
              pathex=['Z:\\src'],
              binaries=[],
-             datas=[],
+             datas=[
+	     ('/src/translations_en.txt', '.'),
+	     ('/src/translations_ru.txt', '.'),
+	     ('/src/calc_srtm_tiles_list.py', '.'),
+	     ('/src/process_bbox.py', '.')
+	     ],
              hiddenimports=[],
              hookspath=[],
              runtime_hooks=[],

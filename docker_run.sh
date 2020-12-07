@@ -1,11 +1,13 @@
 #!/bin/bash
-while getopts ":n:d:b:t:o:sx" opt; do
+while getopts ":n:d:b:t:o:sxg" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
     d) qgis_projects_dir="$OPTARG"
     ;;
     b) BBOX_STR="$OPTARG"
+    ;;
+    g) generate_terrain="$OPTARG"
     ;;
     t) terrain_src_dir="$OPTARG"
     ;;
@@ -103,7 +105,8 @@ if [[ $(docker container ls | grep qgis-xtopo) ]] ; then
 fi
 if [[ -d "$qgis_projects_dir" ]] ; then
 	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE=$OVERPASS_INSTANCE \
-		-e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix $lang_str \
+		-e GENERATE_TERRAIN=$generate_terrain -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN -e DISPLAY \
+		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str \
 		--name qgis-xtopo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \
 		$terrain_mount_str \
