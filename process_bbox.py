@@ -21,7 +21,10 @@ def parse_link(link):
     if "map=" not in link:
         throw_error()
     map_str = link[link.find('map=') + 4:len(link)]
-    location = map_str[0:map_str.find('&')].split("/")
+    if map_str.find('&') > 0:
+        location = map_str[0:map_str.find('&')].split("/")
+    else:
+        location = map_str.split("/")
     try:
         calc_bbox = bbox_from_location(location[1], location[2], location[0])
     except IndexError:

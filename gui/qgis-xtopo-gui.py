@@ -24,7 +24,6 @@ except Exception:
         import process_bbox
         import calc_srtm_tiles_list
 
-
 if os.name == "nt":
     import winapps
 if os.name == "posix":
@@ -128,18 +127,24 @@ def main():
             [sg.Text(translations.get('generate_terrain', 'Process terrain'),
                      key='generate_terrain_text', size=(22, 1), justification='l')] +
             [sg.Checkbox('', key="generate_terrain", size=(10, 1), default=False, change_submits=True)],
-            [sg.Text(translations.get('download_terrain_tiles', 'Automatically download terrain'),
+            [sg.Text(translations.get('download_terrain_tiles', 'Download terrain automatically'),
                      key='download_terrain_tiles_text', text_color="#B6B4C3",
                      size=(30, 1), justification='l',
                      tooltip=translations.get('download_terrain_tiles_tooltip',
                                               'Automatically download SRTM30m terrain data for chosen area'))] +
             [sg.Radio('', "RADIO2", key=terrain_radio_keys[1], change_submits=True, default=True, size=(1, 1))],
-            [sg.Text(translations.get('download_terrain_tiles_manually', 'Manually download terrain'),
+            [sg.Text(translations.get('download_terrain_tiles_manually', 'Download terrain manually'),
                      key='download_terrain_tiles_manually_text', text_color="#B6B4C3",
                      size=(30, 1), justification='l',
                      tooltip=translations.get('download_terrain_tiles_manually_tooltip',
                                               'Please manually download terrain data for chosen area'))] +
-            [sg.Radio('', "RADIO2", key=terrain_radio_keys[2], change_submits=True, default=True, size=(1, 1))],
+            [sg.Radio('', "RADIO2", key=terrain_radio_keys[2], change_submits=True, default=True, size=(1, 1))] +
+            [sg.Input(key='terrain_input_dir',
+                      size=(45, 1), readonly=True)] +
+            [sg.Button(key="open_terrain_input_dir", size=(10, 1), button_text=translations.get('open', 'Open'),
+                       disabled=True, tooltip=translations.get('open_terrain_input_dir_tooltip',
+                                                               'Open directory where downloaded terrain tiles should be located'))
+             ],
             [sg.Text(translations.get('use_terrain_src_dir', 'Use terrain source directory'),
                      key='use_terrain_src_dir_text',
                      size=(30, 1), text_color="#B6B4C3",
@@ -251,19 +256,23 @@ def main():
             window.Elem('total_tiles_value').update('')
         if event == 'qgis_projects_dir':
             read_config_update_ui(window, values, translations)
+            window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
         if event == 'open_osm':
             webbrowser.open(r'https://www.openstreetmap.org')
         if event == 'open_klokantech':
             webbrowser.open(r'https://boundingbox.klokantech.com')
         if event == 'generate_terrain':
             switch_layout_terrain(values['generate_terrain'], window)
-            if values['generate_terrain'] and values['get_terrain_tiles']:
+            if values['generate_terrain'] and values[terrain_radio_keys[0]]: #'get_terrain_tiles'
                 window.Elem('terrain_src_dir').update(disabled=False)
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
-        if event == 'get_terrain_tiles':
-            if values['get_terrain_tiles']:
+            if values['generate_terrain'] and values[terrain_radio_keys[2]]: # download_terrain_tiles_manually
+                window.Elem('open_terrain_input_dir').update(disabled=False)
+        if event == terrain_radio_keys[0]:  # 'get_terrain_tiles':
+            if values[terrain_radio_keys[0]]:
                 window.Elem('terrain_src_dir').update(disabled=False)
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
+                window.Elem('open_terrain_input_dir').update(disabled=True)
                 # window.Elem('download_terrain_tiles_text').update(text_color="#B6B4C3")
                 # window.Elem('download_terrain_tiles').update(disabled=True)
             else:
@@ -271,19 +280,26 @@ def main():
                 window.Elem('terrain_src_dir_browse').update(disabled=True)
                 # window.Elem('download_terrain_tiles_text').update(text_color="white")
                 # window.Elem('download_terrain_tiles').update(disabled=False)
-        if event == 'download_terrain_tiles' or event == terrain_radio_keys[2]:
-            if values["download_terrain_tiles"] or values[terrain_radio_keys[2]]:
+        if event == terrain_radio_keys[1] or event == terrain_radio_keys[2]:  # 'download_terrain_tiles' or download_terrain_tiles_manually
+            if values[terrain_radio_keys[1]] or values[terrain_radio_keys[2]]:
                 # window.Elem('use_terrain_src_dir_text').update(text_color="#B6B4C3")
                 window.Elem('terrain_src_dir').update(value='', disabled=True)
                 window.Elem('terrain_src_dir_browse').update(disabled=True)
+                window.Elem('open_terrain_input_dir').update(disabled=True)
                 # window.Elem('get_terrain_tiles').update(disabled=True)
             else:
                 # window.Elem('use_terrain_src_dir_text').update(text_color="white")
                 window.Elem('terrain_src_dir').update(disabled=False)
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
                 # window.Elem('get_terrain_tiles').update(disabled=False)
-
-
+        if event == terrain_radio_keys[2]: # download_terrain_tiles_manually
+            if values[terrain_radio_keys[2]]:
+                window.Elem('open_terrain_input_dir').update(disabled=False)
+            else:
+                window.Elem('open_terrain_input_dir').update(disabled=True)
+        if event == 'open_terrain_input_dir':
+            terrain_input_dir = get_terrain_input_dir(values)
+            webbrowser.open(os.path.realpath(terrain_input_dir))
         if event == 'Copy':
             if command:
                 pyperclip.copy(command)
@@ -339,6 +355,10 @@ def main():
 command_to_run = r'docker '
 
 
+def get_terrain_input_dir(values):
+    return values["qgis_projects_dir"] + slash_str + values["project_name"] + slash_str + "input_terrain"
+
+
 def update_layout_calc_tiles_list(bbox, translations, window):
     with redirect_stdout(None):
         bbox_c = process_bbox.prepare_bbox(bbox)
@@ -348,7 +368,8 @@ def update_layout_calc_tiles_list(bbox, translations, window):
     if srtm_tiles_list:
         window.Elem('total_tiles_value').update(srtm_tiles_list_size)
     else:
-        window.Elem('calc_tiles_list').update(translations.get('invalid_bbox_error', 'Invalid bbox format. Use openstreetmap.org link or comma separated left,bottom,right,top'))
+        window.Elem('calc_tiles_list').update(translations.get('invalid_bbox_error',
+                                                               'Invalid bbox format. Use openstreetmap.org link or comma separated left,bottom,right,top'))
         window.Elem('total_tiles_value').update("")
     if srtm_tiles_list_size >= 8:
         window.Elem('total_tiles_value').update(text_color='red')
@@ -371,6 +392,17 @@ def check_osm_data_is_present(osm_data_dir):
         if filename.endswith('.osm.bz2'):
             return True
         if filename.endswith('.pbf'):
+            return True
+    return False
+
+
+def check_terrain_data_is_present(terrain_dir):
+    for filename in os.listdir(terrain_dir):
+        if filename.endswith('.tif'):
+            return True
+        if filename.endswith('.zip'):
+            return True
+        if filename.endswith('.hgt'):
             return True
     return False
 
@@ -553,6 +585,7 @@ def read_config_update_ui(window, values, translations):
         window.Elem('bbox').update(get_setting(config, "bbox"))
         update_layout_calc_tiles_list(get_setting(config, "bbox"), translations, window)
         window.Elem('project_name').update(get_setting(config, "project_name"))
+        window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
         overpass_instance_config = get_setting(config, "overpass_instance")
         if overpass_instance_config == "docker":
             window.Elem('docker').update(value=True)
@@ -618,7 +651,7 @@ def switch_layout_terrain(generate_terrain, window):
         window.Elem('download_terrain_tiles_text').update(text_color="white")
         window.Elem('download_terrain_tiles_manually').update(disabled=False)
         window.Elem('download_terrain_tiles_manually_text').update(text_color="white")
-
+        window.Elem('open_terrain_input_dir').update(disabled=True)
     else:
         window.Elem('use_terrain_src_dir_text').update(text_color="#B6B4C3")
         window.Elem('terrain_src_dir').update(disabled=True)
@@ -628,6 +661,7 @@ def switch_layout_terrain(generate_terrain, window):
         window.Elem('download_terrain_tiles_text').update(text_color="#B6B4C3")
         window.Elem('download_terrain_tiles_manually').update(disabled=True)
         window.Elem('download_terrain_tiles_manually_text').update(text_color="#B6B4C3")
+    window.Elem('open_terrain_input_dir').update(disabled=True)
 
 
 def get_setting(path, setting):
@@ -638,7 +672,7 @@ def get_setting(path, setting):
                 line = str(line).strip()
                 if line[0:1] != "#":
                     value = line[len(setting) + 1:].replace('"', "").replace("'", "").replace("\n", "")
-                    if value.rfind("#") > 0:
+                    if value.rfind("#") > 0 and value.rfind(" #") > 0:
                         value = value[0:value.rfind(" #")]
                 break
     return value.lower().strip()
@@ -686,10 +720,11 @@ def compose_params(values, run_chain):
 
 def check_parameters(values, translations, osm_data_dir):
     qgis_projects_dir = values['qgis_projects_dir']
-    use_terrain_src_dir = values['terrain_src_dir']
+    terrain_src_dir = values['terrain_src_dir']
     bbox = values["bbox"]
     project_name = values["project_name"]
     osm_files = values["osm_files"]
+    terrain_input_dir = get_terrain_input_dir(values)
     if len(qgis_projects_dir) < 5:
         sg.Popup(translations.get('projects_directory_empty_error', 'Projects directory path is empty'),
                  title=translations.get('error', 'Error'))
@@ -714,15 +749,30 @@ def check_parameters(values, translations, osm_data_dir):
         sg.Popup(translations.get('project_name_spaces_error', 'Project name should not contain spaces'),
                  title=translations.get('error', 'Error'))
         return False
-    if len(use_terrain_src_dir) != 0:
-        if not os.path.isdir(use_terrain_src_dir):
-            sg.Popup(translations.get('terrain_src_dir_doesnt_exists_error', 'Terrain source directory does not exist'),
+
+    if values['generate_terrain'] and values[terrain_radio_keys[0]]:
+        if " " in terrain_src_dir:
+            sg.Popup(
+                translations.get('terrain_src_dir_spaces_error', 'Terrain source directory should not contain spaces'),
+                title=translations.get('error', 'Error'))
+            return False
+        if len(terrain_src_dir) != 0:
+            if not os.path.isdir(terrain_src_dir):
+                sg.Popup(
+                    translations.get('terrain_src_dir_doesnt_exists_error', 'Terrain source directory does not exist'),
+                    title=translations.get('error', 'Error'))
+                return False
+            else:
+                if not check_terrain_data_is_present(terrain_src_dir):
+                    sg.Popup(translations.get('terrain_src_dir_empty_error',
+                                              'Terrain source directory is empty'),
+                             title=translations.get('error', 'Error'))
+                    return False
+        else:
+            sg.Popup(translations.get('terrain_src_dir_path_empty_error', 'Terrain source directory path is empty'),
                      title=translations.get('error', 'Error'))
             return False
-    if " " in use_terrain_src_dir:
-        sg.Popup(translations.get('terrain_src_dir_spaces_error', 'Terrain source directory should not contain spaces'),
-                 title=translations.get('error', 'Error'))
-        return False
+
     if len(bbox) == 0:
         sg.Popup(translations.get('bounding_box_empty_error', 'Bounding box is empty'),
                  title=translations.get('error', 'Error'))
@@ -748,6 +798,15 @@ def check_parameters(values, translations, osm_data_dir):
                      translations.get('or_use_external_overpass_instance', 'or use external Overpass instance'),
                      title=translations.get('error', 'Error'))
             return False
+    if values['generate_terrain'] and values[
+        terrain_radio_keys[2]] and not check_terrain_data_is_present(terrain_input_dir):
+        sg.Popup(translations.get('terrain_input_dir_empty_error', 'You have selected "Download terrain manually" but '
+                                                                   'terrain directory is empty. Download the data and'
+                                                                   ' place it in the following directory.'
+                                  ),
+                 title=translations.get('error', 'Error'))
+        webbrowser.open(os.path.realpath(terrain_input_dir))
+        return False
 
 
 def num(s):
