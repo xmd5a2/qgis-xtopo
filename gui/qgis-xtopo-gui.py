@@ -76,7 +76,7 @@ project_name_default = 'automap'
 if not is_tool("docker"):
     sg.Popup(translations.get('docker_not_installed_error', 'Docker is not installed. Nothing will work.'),
              title=translations.get('error', 'Error'))
-    docker_installed = False
+    exit(1)
 else:
     docker_installed = True
 
