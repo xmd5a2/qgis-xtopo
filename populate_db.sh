@@ -6,6 +6,9 @@ if [[ ! -f /.dockerenv ]] ; then
 fi
 if [[ -f $config_dir/config.ini ]] ; then
 	. $config_dir/config.ini
+	if [[ -f $config_dir/set_dirs.ini ]] ; then
+		. $config_dir/set_dirs.ini
+	fi
 else
 	echo -e "\033[91mconfig.ini not found. Check project installation integrity. Stopping.\033[0m" && exit 1;
 fi
@@ -51,7 +54,7 @@ function determine_input_file_list {
 
 function merge_populate {
 	determine_input_file_list
-	if [[ $osm_data_is_present == "true" ]]; then
+	if [[ $osm_data_is_present == "true" ]] ; then
 		echo -e "\e[104mMerging and converting OSM files in osm_data_dir\e[49m"
 		if [[ $overpass_endpoint_docker_use_bbox == true ]] ; then
 			osmium cat $pbf_str $osm_str $osmbz2_str $o5m_str -o $osm_tmp_dir/input_tmp.pbf -f pbf
@@ -63,6 +66,9 @@ function merge_populate {
 			cd $osm_tmp_dir
 			echo -e "\e[104mCropping extract by bbox\033[0m"
 			osmconvert -b=$bbox --complex-ways --complete-ways $osm_tmp_dir/input.pbf --out-osm | lbzip2 > $osm_tmp_dir/input.osm.bz2
+			if [[ $(wc -c <"$osm_tmp_dir/input.osm.bz2") -le 400 ]] ; then
+				echo -e "\033[91mError. Cropped extract is empty. Check that bbox parameter matches the OSM data area or turn off 'overpass_endpoint_docker_use_bbox' option.\033[0m" && exit 1;
+			fi
 		else
 			osmium cat $pbf_str $osm_str $osmbz2_str $o5m_str -o $osm_tmp_dir/input_tmp.pbf -f pbf
 			echo -e "\e[104mSorting extract\033[0m"
@@ -75,6 +81,10 @@ function merge_populate {
 			echo -e "\e[42mOverpass database is ready\e[49m"
 			rm -f $osm_data_dir/tmp/input.*
 			rmdir $osm_data_dir/tmp --ignore-fail-on-non-empty
+			rm -f $osm_data_dir/*.pbf
+			rm -f $osm_data_dir/*.o5m
+			rm -f $osm_data_dir/*.osm
+			rm -f $osm_data_dir/*.osm.bz2
 		else
 			echo -e "\033[91mError populating Overpass database\033[0m" && exit 1;
 		fi

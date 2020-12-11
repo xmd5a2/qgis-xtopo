@@ -5,37 +5,41 @@ mkdir -p $config_dir/
 if [[ ! -f $config_dir/config.ini ]] ; then
 	cp /app/config.ini $config_dir/config.ini
 fi
-sed -i "s/project_name=.*/project_name=\"$PROJECT_NAME_EXT\"/" $config_dir/config.ini
+if [[ ! -f $config_dir/set_dirs.ini ]] ; then
+	cp /app/set_dirs.ini $config_dir/set_dirs.ini
+fi
+
+if [[ ! -z $config_dir ]] ; then
+	string_list="config_dir==${config_dir}|"
+fi
+if [[ ! -z $PROJECT_NAME_EXT ]] ; then
+	string_list+="project_name==\"${PROJECT_NAME_EXT}\"|"
+fi
 if [[ ! -z $BBOX_STR ]] ; then
-	if [[ $(echo $BBOX_STR | grep \/ ) ]] ; then
-		BBOX_STR=${BBOX_STR//\//\\/}
-	fi
-	if [[ $(echo $BBOX_STR | grep \& ) ]] ; then
-		BBOX_STR=${BBOX_STR//\&/\\&}
-	fi
-	sed -i "s/^bbox=.*/bbox=${BBOX_STR}/" $config_dir/config.ini
+	string_list+="bbox==\"${BBOX_STR}\"|"
 fi
-if [[ $OVERPASS_INSTANCE == "external" ]] || [[ $OVERPASS_INSTANCE == "ext" ]] ; then
-	sed -i "s/overpass_instance=.*/overpass_instance=external/" $config_dir/config.ini
-elif [[ $OVERPASS_INSTANCE == "docker" ]] ; then
-	sed -i "s/overpass_instance=.*/overpass_instance=docker/" $config_dir/config.ini
+if [[ ! -z $OVERPASS_INSTANCE ]] ; then
+	string_list+="overpass_instance==${OVERPASS_INSTANCE}|"
 fi
-if [[ $GENERATE_TERRAIN == "true" ]] || [[ $GENERATE_TERRAIN == "True" ]] ; then
-	sed -i "s/generate_terrain=.*/generate_terrain=true/" $config_dir/config.ini
-else
-	sed -i "s/generate_terrain=.*/generate_terrain=false/" $config_dir/config.ini
+if [[ ! -z $OVERPASS_ENDPOINT_EXTERNAL ]] ; then
+	string_list+="overpass_endpoint_external==\"${OVERPASS_ENDPOINT_EXTERNAL}\"|"
 fi
-if [[ $DOWNLOAD_TERRAIN_DATA == "true" ]] || [[ $DOWNLOAD_TERRAIN_DATA == "True" ]] ; then
-	sed -i "s/download_terrain_tiles=.*/download_terrain_tiles=true/" $config_dir/config.ini
-else
-	sed -i "s/download_terrain_tiles=.*/download_terrain_tiles=false/" $config_dir/config.ini
+if [[ ! -z $GENERATE_TERRAIN ]] ; then
+	string_list+="generate_terrain==${GENERATE_TERRAIN}|"
+fi
+if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
+	string_list+="download_terrain_tiles==${DOWNLOAD_TERRAIN_DATA}|"
 fi
 if [[ -d /mnt/terrain ]] ; then
-	sed -i "s/get_terrain_tiles=.*/get_terrain_tiles=true/" $config_dir/config.ini
+	string_list+="get_terrain_tiles==true"
 else
-	sed -i "s/get_terrain_tiles=.*/get_terrain_tiles=false/" $config_dir/config.ini
+	string_list+="get_terrain_tiles==false"
 fi
+
+python3 /app/update_config.py -str_in "$string_list"
+
 . $config_dir/config.ini
+. $config_dir/set_dirs.ini
 if [[ -f $config_dir/config_debug.ini ]] ; then
 	. $config_dir/config_debug.ini
 	mkdir -p "/mnt/qgis_projects/$override_dir"

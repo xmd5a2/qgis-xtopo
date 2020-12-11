@@ -10,6 +10,9 @@ if [[ -f /.dockerenv ]] ; then
 	qgisxtopo_config_dir=/mnt/qgis_projects/qgisxtopo-config
 	if [[ -f $qgisxtopo_config_dir/config.ini ]] ; then
 		. $qgisxtopo_config_dir/config.ini
+		if [[ -f $qgisxtopo_config_dir/set_dirs.ini ]] ; then
+			. $qgisxtopo_config_dir/set_dirs.ini
+		fi
 		export XDG_RUNTIME_DIR=/mnt/qgis_projects/$project_name/tmp
 	else
 		echo -e "\033[91mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
@@ -26,6 +29,9 @@ else
 	qgisxtopo_config_dir=$(pwd)
 	if [[ -f $qgisxtopo_config_dir/config.ini ]] ; then
 		. $qgisxtopo_config_dir/config.ini
+		if [[ -f $qgisxtopo_config_dir/set_dirs.ini ]] ; then
+			. $qgisxtopo_config_dir/set_dirs.ini
+		fi
 	else
 		echo -e "\031[93mconfig.ini not found. Executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
 	fi
@@ -199,7 +205,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		if [[ ! -d $terrain_src_dir ]] ; then
 			echo -e "\033[91mterrain_src_dir "$terrain_src_dir" don't exist but get_terrain_tiles=true. Turn it off or check path. Stopping.\033[0m"
 			if [[ $running_in_container == true ]] ; then
-				echo -e "\033[93mCheck terrain_src_dir variable passed to docker_run script\033[0m"
+				echo -e "\033[93mCheck /mnt/terrain docker mount\033[0m"
 			fi
 			exit 1;
 		fi

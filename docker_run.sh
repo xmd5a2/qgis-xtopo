@@ -1,13 +1,11 @@
 #!/bin/bash
-while getopts ":n:d:b:t:o:sxg" opt; do
+while getopts ":n:d:b:t:o:sxgv:" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
     d) qgis_projects_dir="$OPTARG"
     ;;
     b) BBOX_STR="$OPTARG"
-    ;;
-    g) generate_terrain="$OPTARG"
     ;;
     t) terrain_src_dir="$OPTARG"
     ;;
@@ -23,7 +21,11 @@ while getopts ":n:d:b:t:o:sxg" opt; do
     ;;
     x) RUN_CHAIN=true
     ;;
-    \?)  echo -e "\033[91mInvalid option -$OPTARG\033[0m" >&2
+    g) generate_terrain="$OPTARG"
+    ;;
+    v) OVERPASS_ENDPOINT_EXTERNAL="$OPTARG"
+    ;;
+    \?) echo -e "\033[91mInvalid option -$OPTARG\033[0m" >&2
     ;;
   esac
 done
@@ -53,6 +55,9 @@ function echo_bbox_invalid {
 	echo -e "\033[91mInvalid bbox format. Use OpenStreetMap link or left,bottom,right,top (lon_min,lat_min,lon_max,lat_max).\033[0m" && exit 1;
 }
 
+function overpass_endpoint_invalid {
+	echo -e "\033[91mInvalid Overpass endpoint format\033[0m" && exit 1;
+}
 if [[ ! -z $BBOX_STR ]] ; then
 	if [[ $BBOX_STR == *","* ]] && [[ $BBOX_STR != *"openstreetmap"* ]] ; then
 		IFS=',' read -r -a array_bbox <<< "$BBOX_STR"
@@ -73,6 +78,12 @@ if [[ ! -z $BBOX_STR ]] ; then
 		echo_bbox_invalid
 	fi
 fi
+if [[ $OVERPASS_ENDPOINT_EXTERNAL == *"interpreter"* ]] ; then
+	OVERPASS_ENDPOINT_EXTERNAL=\"$OVERPASS_ENDPOINT_EXTERNAL\"
+else
+	overpass_endpoint_invalid
+fi
+
 if [[ -f "config_debug.ini" ]] ; then
 	docker_image="qgis-xtopo"
 else
@@ -105,8 +116,9 @@ if [[ $(docker container ls | grep qgis-xtopo) ]] ; then
 fi
 if [[ -d "$qgis_projects_dir" ]] ; then
 	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE=$OVERPASS_INSTANCE \
-		-e GENERATE_TERRAIN=$generate_terrain -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN -e DISPLAY \
-		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str \
+		-e GENERATE_TERRAIN=$generate_terrain -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN \
+		-e OVERPASS_ENDPOINT_EXTERNAL=$OVERPASS_ENDPOINT_EXTERNAL \
+		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str -e DISPLAY \
 		--name qgis-xtopo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \
 		$terrain_mount_str \

@@ -115,8 +115,8 @@ COPY icons/ /app/icons/
 
 COPY queries/ /app/queries/
 
-COPY config.ini automap.qgz init_docker.sh prepare_data.sh populate_db.sh exec_qgis.sh get_bbox.sh README.md \
-	run_alg.py replace_bbox_xml.py process_bbox.py calc_srtm_tiles_list.py /app/
+COPY config.ini set_dirs.ini automap.qgz init_docker.sh prepare_data.sh populate_db.sh exec_qgis.sh get_bbox.sh README.md \
+	run_alg.py replace_bbox_xml.py process_bbox.py calc_srtm_tiles_list.py update_config.py /app/
 
 RUN cd /app && unzip -j automap.qgz && rm automap.qgd
 

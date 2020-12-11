@@ -7,5 +7,8 @@ if [[ -f "update_local_config_dir.sh" ]] ; then
 fi
 if [[ -f "config.ini" ]] ; then
 	. config.ini
+	if [[ -f "set_dirs.ini" ]] ; then
+		. set_dirs.ini
+	fi
 fi
 docker exec -it --user user qgis-xtopo /app/populate_db.sh
