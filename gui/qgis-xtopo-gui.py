@@ -15,6 +15,7 @@ import ntpath
 import time
 import tempfile
 import appdirs
+import psutil
 
 try:
     sys.path.append('../')
@@ -92,10 +93,19 @@ reset_img = b'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiA
 sg.theme('DarkGreen6')
 layout = [
     [sg.Text('QGIS-xtopo', font='Any 20 bold', text_color="#CAF1C1")] +
-    [sg.Column([[]], size=(446, 50), pad=(0, 0))] +
+    [sg.Column([[]], size=(320, 50), pad=(0, 0))] +
+    [sg.Column([
+        [sg.Text(translations.get('free', 'Free') + ":", key="free_space_text", justification='right', text_color='#9BFF80',
+                 size=(10, 1), pad=(0, 0),
+                 tooltip=translations.get('free_space_tooltip', 'Free space on selected disk drive')),
+         sg.Text('', key="free_space", text_color='#9BFF80',
+                 size=(12, 1), pad=(0, 0))
+         ]
+    ], size=(160, 35), pad=(5, 5))] +
     [sg.Column(
         [
-            [sg.Button('', key="reset", image_data=reset_img, tooltip=translations.get('reset_tooltip', 'Reset settings'), visible=True)] +
+            [sg.Button('', key="reset", image_data=reset_img,
+                       tooltip=translations.get('reset_tooltip', 'Reset settings'), visible=True)] +
             [sg.Button('RU', key="button_ru", font='Any 13', button_color=('white', '#497E90'), visible=True)] +
             [sg.Button('EN', key="button_en", font='Any 13', button_color=('white', '#497E90'), visible=False)]
         ], size=(135, 40))
@@ -143,15 +153,15 @@ layout = [
         [sg.Button(key="open_geofabrik", image_data=geofabrik_logo, size=(32, 32), disabled=True,
                    tooltip=translations.get('open_geofabrik_tooltip',
                                             'Download already prepared OSM extract(s) and select it with button to the right.'))
-         ,
+            ,
          sg.Button(key="open_extract_bbike", image_data=extract_bbike_logo, size=(32, 32), disabled=True,
                    tooltip=translations.get('open_extract_bbike_tooltip',
                                             'Download selected area and select it with button to the right.'))
-         ,
+            ,
          sg.Button(key="open_osm_sbin", image_data=osm_sbin_logo, size=(32, 32), disabled=True,
                    tooltip=translations.get('open_osm_sbin_tooltip',
                                             'Data for Russia and surroundings'))
-         ,
+            ,
          sg.Button(key="open_protomaps", image_data=protomaps_logo, size=(32, 32), disabled=True,
                    tooltip=translations.get('open_protomaps_tooltip',
                                             'Draw a rectangle, download OSM extract and select it with button to the right.'))
@@ -302,6 +312,9 @@ def main():
                     window.Elem('prepare_data').update(disabled=False)
                     window.Elem('open_qgis').update(disabled=False)
             read_config_update_ui(values, config_dir, True)
+            window.Elem('free_space').update(
+                str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
+            update_free_text_color(values)
             i += 1
         if event in (sg.WIN_CLOSED, 'exit'):
             break
@@ -328,12 +341,12 @@ def main():
             read_config_update_ui(values, values["qgis_projects_dir"] + slash_str + "qgisxtopo-config", False)
         if event == 'button_ru':
             translations = get_translations("ru")
-            update_layout_translations()
+            update_layout_translations(values)
             window.Elem('button_ru').update(visible=False)
             window.Elem('button_en').update(visible=True)
         if event == 'button_en':
             translations = get_translations("en")
-            update_layout_translations()
+            update_layout_translations(values)
             window.Elem('button_ru').update(visible=True)
             window.Elem('button_en').update(visible=False)
         if event == 'bbox':
@@ -347,9 +360,19 @@ def main():
             window.Elem('calc_tiles_list').update('')
             window.Elem('total_tiles_value').update('')
         if event == 'qgis_projects_dir':
+            try:
+                os.mkdir(values['qgis_projects_dir'] + slash_str + "test")
+                os.rmdir(values['qgis_projects_dir'] + slash_str + "test")
+            except Exception:
+                window.Elem('qgis_projects_dir').update('')
+                sg.Popup(translations.get('qgis_projects_dir_not_writable', 'QGIS projects directory is not writable. Choose another directory.'), title=translations.get('Error', 'Error'))
+                continue
             update_user_config('qgis_projects_dir', values['qgis_projects_dir'])
             config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
             read_config_update_ui(values, config_dir, True)
+            window.Elem('free_space').update(
+                str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
+            update_free_text_color(values)
             window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
         if event == 'open_osm':
             webbrowser.open(r'https://www.openstreetmap.org')
@@ -456,6 +479,23 @@ def main():
 
 
 command_to_run = r'docker '
+
+
+def update_free_text_color(values):
+    if get_free_space(values["qgis_projects_dir"]) > 10:
+        window.Elem('free_space').update(text_color='#9BFF80')
+        window.Elem('free_space_text').update(text_color='#9BFF80')
+    else:
+        if 5 <= get_free_space(values["qgis_projects_dir"]) <= 10:
+            window.Elem('free_space').update(text_color='yellow')
+            window.Elem('free_space_text').update(text_color='yellow')
+        else:
+            window.Elem('free_space').update(text_color='red')
+            window.Elem('free_space_text').update(text_color='red')
+
+
+def get_free_space(dir):
+    return round((psutil.disk_usage(dir).free) / 1024 / 1024 / 1024, 1)
 
 
 def update_user_config(setting, value):
@@ -841,7 +881,7 @@ def copy_config_original(config_original_path):
         file.write(config_original_new_filedata)
 
 
-def update_layout_translations():
+def update_layout_translations(values):
     window.Elem('qgis_projects_dir_text').update(translations.get('qgis_projects_dir', 'QGIS projects directory'))
     window.Elem('project_name_text').update(translations.get('project_name', 'Project name'))
     window.Elem('bbox_text').update(translations.get('bounding_box', 'Bounding box'))
@@ -867,6 +907,9 @@ def update_layout_translations():
         translations.get('osm_data_source', 'OSM data source') + ": " + translations.get('overpass_instance',
                                                                                          'Overpass instance'))
     window.Elem('terrain').update(translations.get('terrain', 'Terrain'))
+    window.Elem('free_space_text').update(translations.get('free', 'Free') + ":")
+    window.Elem('free_space').update(
+        str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
 
 
 def switch_layout_terrain(generate_terrain):
