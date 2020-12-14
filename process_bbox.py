@@ -19,12 +19,38 @@ def num(s):
 
 def parse_link(link):
     if "map=" not in link:
-        throw_error()
-    map_str = link[link.find('map=') + 4:len(link)]
-    if map_str.find('&') > 0:
-        location = map_str[0:map_str.find('&')].split("/")
+        link = link.split("&")
+        link[0] = str(link[0])[link[0].rfind("?")+1:]
+        lat = ''
+        lon = ''
+        zoom = ''
+        for i in range(len(link)):
+            if link[i].startswith("lat"):
+                try:
+                    lat = str(link[i]).split("=")[1]
+                except IndexError:
+                    throw_error()
+            else:
+                if link[i].startswith("lon"):
+                    try:
+                        lon = str(link[i]).split("=")[1]
+                    except IndexError:
+                        throw_error()
+                else:
+                    if link[i].startswith("zoom"):
+                        try:
+                            zoom = str(link[i]).split("=")[1]
+                        except IndexError:
+                            throw_error()
+        if (not zoom) or (not lat) or (not lon):
+            throw_error()
+        location = [zoom, lat, lon]
     else:
-        location = map_str.split("/")
+        map_str = link[link.find('map=') + 4:len(link)]
+        if map_str.find('&') > 0:
+            location = map_str[0:map_str.find('&')].split("/")
+        else:
+            location = map_str.split("/")
     try:
         calc_bbox = bbox_from_location(location[1], location[2], location[0])
     except IndexError:
@@ -95,7 +121,8 @@ def check_bbox(bbox_str):
 
 def throw_error():
     print(
-        "\033[91mInvalid bbox format. Use openstreetmap.org link or comma separated left bottom right top (see https://github.com/xmd5a2/qgis-xtopo).\033[0m")
+        "\033[91mInvalid bbox format. Use openstreetmap.org link or comma separated left bottom right top (see "
+        "https://github.com/xmd5a2/qgis-xtopo).\033[0m")
     return 1
 
 

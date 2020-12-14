@@ -30,9 +30,9 @@ def main(str_in):
     settings_dict = {k: v for k, v in zip(k_list, v_list)}
     if settings_dict.get("bbox"):
         amp_bbox_pos = settings_dict.get("bbox").rfind("&")
-        if amp_bbox_pos > 1:
+        if amp_bbox_pos > 1 and "map=" in settings_dict.get("bbox"):
             settings_dict.update({"bbox": str(settings_dict.get("bbox"))[0:amp_bbox_pos]})
-            if settings_dict.get("bbox")[0] == "\"":
+            if "\"" in settings_dict.get("bbox")[0] and "\"" not in settings_dict.get("bbox")[-1]:
                 settings_dict.update({"bbox": str(settings_dict.get("bbox") + "\"")})
     config_path = settings_dict.get("config_dir") + "/config.ini"
     settings_dict.pop("config_dir", None)
