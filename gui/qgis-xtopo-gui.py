@@ -361,15 +361,20 @@ def main():
             window.Elem('total_tiles_value').update('')
         if event == 'qgis_projects_dir':
             try:
-                os.mkdir(values['qgis_projects_dir'] + slash_str + "test")
-                os.rmdir(values['qgis_projects_dir'] + slash_str + "test")
+                os.mkdir(values['qgis_projects_dir'] + slash_str + "test764451")
+                os.rmdir(values['qgis_projects_dir'] + slash_str + "test764451")
             except Exception:
                 window.Elem('qgis_projects_dir').update('')
                 sg.Popup(translations.get('qgis_projects_dir_not_writable', 'QGIS projects directory is not writable. Choose another directory.'), title=translations.get('Error', 'Error'))
                 continue
             update_user_config('qgis_projects_dir', values['qgis_projects_dir'])
             config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
+            first_start = False
+            if not os.path.isfile(config_dir + slash_str + "config.ini"):
+                first_start = True
             read_config_update_ui(values, config_dir, True)
+            if first_start:
+                window.Elem('bbox').update('')
             window.Elem('free_space').update(
                 str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
             update_free_text_color(values)
