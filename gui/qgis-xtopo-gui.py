@@ -65,6 +65,7 @@ else:
 if default_locale.startswith("ua") or default_locale.startswith("by"):
     default_locale = "ru"
 remote_repo_name = 'xmd5a2/qgis-xtopo:latest'
+local_repo_name = 'qgis-xtopo'
 user_config_dir = appdirs.user_config_dir() + slash_str + "qgisxtopo"
 user_config_filename = "settings.ini"
 user_config_path = user_config_dir + slash_str + user_config_filename
@@ -95,7 +96,8 @@ layout = [
     [sg.Text('QGIS-xtopo', font='Any 20 bold', text_color="#CAF1C1")] +
     [sg.Column([[]], size=(320, 50), pad=(0, 0))] +
     [sg.Column([
-        [sg.Text(translations.get('free', 'Free') + ":", key="free_space_text", justification='right', text_color='#9BFF80',
+        [sg.Text(translations.get('free', 'Free') + ":", key="free_space_text", justification='right',
+                 text_color='#9BFF80',
                  size=(10, 1), pad=(0, 0),
                  tooltip=translations.get('free_space_tooltip', 'Free space on selected disk drive')),
          sg.Text('', key="free_space", text_color='#9BFF80',
@@ -167,7 +169,7 @@ layout = [
                                             'Draw a rectangle, download OSM extract and select it with button to the right.'))
          ] +
         [sg.Input(key='osm_files', disabled=True,
-                  tooltip=translations.get('osm_data_files_tooltip', 'OSM data files list'), size=(37, 1)),
+                  tooltip=translations.get('osm_data_files_tooltip', 'OSM data files list'), size=(37, 1), change_submits=True),
          sg.FilesBrowse(
              file_types=(("pbf", "*.pbf"), ("o5m", "*.o5m"), ("osm xml", "*.osm"), ("osm xml in bz2", "*.osm.bz2")),
              key='select_osm_files', button_text=translations.get('browse', 'Browse'), size=(10, 1),
@@ -339,6 +341,7 @@ def main():
             if os.path.isfile(temp_dir + slash_str + "config.original"):
                 copyfile(temp_dir + slash_str + "config.original", config_path)
             read_config_update_ui(values, values["qgis_projects_dir"] + slash_str + "qgisxtopo-config", False)
+            window.Elem('terrain_input_dir').update(get_terrain_input_dir({'qgis_projects_dir': qgis_projects_dir_default, 'project_name': project_name_default}))
         if event == 'button_ru':
             translations = get_translations("ru")
             update_layout_translations(values)
@@ -360,12 +363,15 @@ def main():
             window.Elem('calc_tiles_list').update('')
             window.Elem('total_tiles_value').update('')
         if event == 'qgis_projects_dir':
+            convert_slash_update_ui(values, event)
             try:
                 os.mkdir(values['qgis_projects_dir'] + slash_str + "test764451")
                 os.rmdir(values['qgis_projects_dir'] + slash_str + "test764451")
             except Exception:
                 window.Elem('qgis_projects_dir').update('')
-                sg.Popup(translations.get('qgis_projects_dir_not_writable', 'QGIS projects directory is not writable. Choose another directory.'), title=translations.get('Error', 'Error'))
+                sg.Popup(translations.get('qgis_projects_dir_not_writable',
+                                          'QGIS projects directory is not writable. Choose another directory.'),
+                         title=translations.get('Error', 'Error'))
                 continue
             update_user_config('qgis_projects_dir', values['qgis_projects_dir'])
             config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
@@ -379,6 +385,8 @@ def main():
                 str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
             update_free_text_color(values)
             window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
+        if event == 'osm_files':
+            convert_slash_update_ui(values, event)
         if event == 'open_osm':
             webbrowser.open(r'https://www.openstreetmap.org')
         if event == 'open_klokantech':
@@ -422,6 +430,8 @@ def main():
                 window.Elem('open_terrain_input_dir').update(disabled=True)
         if event == 'open_terrain_input_dir':
             terrain_input_dir = get_terrain_input_dir(values)
+            if not os.path.isdir(terrain_input_dir):
+                os.makedirs(terrain_input_dir, exist_ok=True)
             webbrowser.open(os.path.realpath(terrain_input_dir))
         if event == 'Copy':
             if command:
@@ -484,6 +494,12 @@ def main():
 
 
 command_to_run = r'docker '
+
+
+def convert_slash_update_ui(values, element):
+    if os.name == "nt":
+        values[element] = values[element].replace('/', '\\')
+        window.Elem(element).update(values[element].replace('/', '\\'))
 
 
 def update_free_text_color(values):
@@ -861,14 +877,21 @@ def read_config_update_ui(values, config_dir, init):
             window.Elem('terrain_src_dir').update(terrain_src_dir_gui_setting)
 
 
+def get_working_repo_name():
+    if os.path.isfile('config_debug.ini') or os.path.isfile('./../config_debug.ini'):
+        if os.name == "posix": # Debug with local docker image is only for Linux
+            return 'qgis-xtopo'
+        else:
+            return remote_repo_name
+    else:
+        return remote_repo_name
+
+
 def copy_config_original(config_original_path):
     command = "docker rm -f qgis-xtopo"
     runCommand(command, window)
     command = "docker run -dti --name qgis-xtopo"
-    if os.path.isfile('config_debug.ini') or os.path.isfile('./../config_debug.ini'):
-        command += ' ' + 'qgis-xtopo'
-    else:
-        command += ' ' + remote_repo_name
+    command += ' ' + get_working_repo_name()
     runCommand(command, window)
     config_original = subprocess.check_output(['docker', 'exec', 'qgis-xtopo', 'cat', '/app/config.ini'],
                                               stdin=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -996,10 +1019,7 @@ def init_config(path, values):
         params += f"-e PROJECT_NAME_EXT={project_name} "
     if qgis_projects_dir:
         params += f"--mount type=bind,source={qgis_projects_dir},target=/mnt/qgis_projects "
-    if os.path.isfile('config_debug.ini') or os.path.isfile('./../config_debug.ini'):
-        params += 'qgis-xtopo'
-    else:
-        params += remote_repo_name
+    params += get_working_repo_name()
     command = command_to_run + params
     runCommand(cmd=command, window=window)
     init_docker(False)
@@ -1040,10 +1060,7 @@ def compose_params(values, run_chain):
         params += f"--mount type=bind,source={qgis_projects_dir},target=/mnt/qgis_projects "
     if use_terrain_src_dir and values['terrain_src_dir']:
         params += f"--mount type=bind,source={values['terrain_src_dir']},target=/mnt/terrain "
-    if os.path.isfile('config_debug.ini') or os.path.isfile('./../config_debug.ini'):
-        params += 'qgis-xtopo'
-    else:
-        params += remote_repo_name
+    params += get_working_repo_name()
     return params
 
 
