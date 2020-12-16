@@ -108,8 +108,8 @@ layout = [
         [
             [sg.Button('', key="reset", image_data=reset_img,
                        tooltip=translations.get('reset_tooltip', 'Reset settings'), visible=True)] +
-            [sg.Button('RU', key="button_ru", font='Any 13', button_color=('white', '#497E90'), visible=True)] +
-            [sg.Button('EN', key="button_en", font='Any 13', button_color=('white', '#497E90'), visible=False)]
+            [sg.Button('RU', key="button_ru", font='Any 13', button_color=('white', '#497E90'), visible=True, tooltip=translations.get('switch_language', 'Switch language'))] +
+            [sg.Button('EN', key="button_en", font='Any 13', button_color=('white', '#497E90'), visible=False, tooltip=translations.get('switch_language', 'Switch language'))]
         ], size=(135, 40))
     ],
     [sg.Text(translations.get('qgis_projects_dir', 'QGIS projects directory'), key="qgis_projects_dir_text",
@@ -235,7 +235,7 @@ layout = [
          # sg.Checkbox('', key="get_terrain_tiles", size=(1, 1), default=False, change_submits=True),
          sg.Input(default_text='', key='terrain_src_dir', size=(45, 1),
                   tooltip=translations.get('use_terrain_src_dir_tooltip',
-                                           'Use directory with world/continent terrain'), disabled=True)] +
+                                           'Use directory with world/continent terrain'), change_submits=True, disabled=True)] +
         [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='terrain_src_dir_browse',
                          size=(10, 1), disabled=True,
                          tooltip=translations.get('terrain_src_dir_browse_tooltip',
@@ -385,7 +385,7 @@ def main():
                 str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
             update_free_text_color(values)
             window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
-        if event == 'osm_files':
+        if event == 'osm_files' or event == 'terrain_src_dir':
             convert_slash_update_ui(values, event)
         if event == 'open_osm':
             webbrowser.open(r'https://www.openstreetmap.org')

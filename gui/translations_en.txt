@@ -58,6 +58,7 @@ open_extract_bbike_tooltip=Download selected area and select it with button to t
 free=Free
 free_space_tooltip=Free space on selected disk drive
 gb=Gb
+switch_language=Switch language
 
 error=Error
 warning=Warning
