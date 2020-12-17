@@ -64,7 +64,7 @@ function merge_populate {
 			cd /app
 			. /app/get_bbox.sh
 			cd $osm_tmp_dir
-			echo -e "\e[104mCropping extract by bbox\033[0m"
+			echo -e "\e[104mCropping extract by bbox $bbox\033[0m"
 			osmconvert -b=$bbox --complex-ways --complete-ways $osm_tmp_dir/input.pbf --out-osm | lbzip2 > $osm_tmp_dir/input.osm.bz2
 			if [[ $(wc -c <"$osm_tmp_dir/input.osm.bz2") -le 400 ]] ; then
 				echo -e "\033[91mError. Cropped extract is empty. Check that bbox parameter matches the OSM data area or turn off 'overpass_endpoint_docker_use_bbox' option.\033[0m" && exit 1;

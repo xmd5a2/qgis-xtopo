@@ -532,9 +532,9 @@ def update_user_config(setting, value):
             with open(user_config_path, 'w') as file:
                 file.write(filedata)
     else:
-        if os.path.isfile(user_config_filename):
+        if os.path.isfile(user_config_path):
             try:
-                with open(user_config_filename, 'r') as fil:
+                with open(user_config_path, 'r') as fil:
                     filedata = fil.read().splitlines()
             except FileNotFoundError:
                 pass
@@ -545,7 +545,7 @@ def update_user_config(setting, value):
                 if i == len(filedata) - 1:
                     filedata.append(setting + "=" + value)
             filedata = list_to_string_file(filedata)
-            with open(user_config_filename, 'w') as file:
+            with open(user_config_path, 'w') as file:
                 file.write(filedata)
 
 

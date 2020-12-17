@@ -80,8 +80,9 @@ if [[ ! -z $BBOX_STR ]] ; then
 fi
 if [[ $OVERPASS_ENDPOINT_EXTERNAL == *"interpreter"* ]] ; then
 	OVERPASS_ENDPOINT_EXTERNAL=\"$OVERPASS_ENDPOINT_EXTERNAL\"
-else
-	overpass_endpoint_invalid
+elif [[ ! -z $OVERPASS_ENDPOINT_EXTERNAL ]] ; then
+		overpass_endpoint_invalid
+	fi
 fi
 
 if [[ -f "config_debug.ini" ]] ; then
