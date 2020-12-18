@@ -19,3 +19,4 @@ processing/
 gui/__pycache__/
 gui/build/
 gui/dist/
+gui/run_chain.sh

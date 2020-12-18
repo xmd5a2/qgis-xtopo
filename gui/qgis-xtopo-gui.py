@@ -701,6 +701,11 @@ def start(values, run_chain):
     runCommand(cmd=command, window=window)
 
     osm_data_dir = values["qgis_projects_dir"] + slash_str + values["project_name"] + slash_str + "osm_data"
+    if not os.path.isdir(osm_data_dir):
+        try:
+            os.makedirs(osm_data_dir, exist_ok=True)
+        except Exception:
+            print("Can't create " + osm_data_dir)
     osm_files_list = str(values['osm_files']).split(";")
     if values[r_keys[0]] and osm_files_list[0]:
         print(translations.get('copying_files', 'Copying file(s)') + " " + str(osm_files_list) + " " + translations.get(
