@@ -817,7 +817,26 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
                                                       'Terrain data not found. Check that terrain covered area matches bounding box.'),
                                      title=translations.get('error', 'Error'))
                         else:
-                            sg.Popup(translations.get('data_preparation_error', 'Data preparation error. Check parameters.'), title=translations.get('error', 'Error'))
+                            if int(prepare_data_error_code) == 5:
+                                sg.Popup(translations.get('terrain_download_error',
+                                                          'Terrain downloading failed'),
+                                         title=translations.get('error', 'Error'))
+                            else:
+                                if int(prepare_data_error_code) == 6:
+                                    sg.Popup(translations.get('terrain_input_dir_empty_error',
+                                                              'You have selected "Download terrain manually" but terrain directory is empty. Download the data and place it in the following directory.'),
+                                             title=translations.get('error', 'Error'))
+                                else:
+                                    if int(prepare_data_error_code) == 7:
+                                        sg.Popup(translations.get('slope_generation_error', 'Slope generation failed'),
+                                                 title=translations.get('error', 'Error'))
+                                    else:
+                                        if int(prepare_data_error_code) == 8:
+                                            sg.Popup(
+                                                translations.get('replacing_extent_error', 'Error replacing project extent by bbox'),
+                                                title=translations.get('error', 'Error'))
+                                        else:
+                                            sg.Popup(translations.get('data_preparation_error', 'Data preparation error. Check parameters.'), title=translations.get('error', 'Error'))
         if os.name == "posix":
             try:
                 os.remove(prepare_data_flag_path)

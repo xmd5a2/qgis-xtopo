@@ -93,3 +93,6 @@ data_preparation_error=Data preparation error. Check parameters.
 vector_data_incomplete_error=Vector data is incomplete. It looks like Overpass server has interrupted the transmission. Try again or use another instance.
 overpass_server_error=Overpass server error. Try again or use another instance.
 terrain_data_not_found_error=Terrain data not found. Check that terrain covered area matches bounding box.
+terrain_download_error=Terrain downloading failed
+slope_generation_error=Slope generation failed
+replacing_extent_error=Error replacing project extent by bbox

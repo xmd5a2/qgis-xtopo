@@ -215,13 +215,13 @@ if [[ $generate_terrain == "true" ]] ; then
 		eio clip -o $terrain_input_dir/srtm.tif --bounds $bbox_eio_query
 		if [[ $? != 0 ]] ; then
 			echo -e "\033[91mError downloading terrain. Stopping.\033[0m"
-			make_error_flag
+			make_error_flag 5
 			exit 1
 		elif [[ $(gdalinfo $terrain_input_dir/srtm.tif | grep "Band 1") ]] ; then
 			echo -e "\033[92mTerrain downloaded\033[0m"
 		else
 			echo -e "\033[91mError downloading terrain. Stopping.\033[0m"
-			make_error_flag
+			make_error_flag 5
 			exit 1
 		fi
 		eio clean
@@ -284,7 +284,7 @@ if [[ $generate_terrain == "true" ]] ; then
 	done
 	for f in "$terrain_input_dir"/*.tif; do
 		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Stopping.\033[0m"
-		make_error_flag
+		make_error_flag 6
 		exit 1
 		break;
 	done
@@ -318,7 +318,7 @@ if [[ $generate_terrain == "true" ]] ; then
 				echo -e "\033[92mSlopes generated\033[0m"
 			else
 				echo -e "\033[91mError. $raster_data_dir/slope_upscaled.tif is empty. Stopping.\033[0m"
-				make_error_flag
+				make_error_flag 7
 				exit 1
 			fi
 			rm -f "$raster_data_dir"/slope.tif
@@ -1463,7 +1463,7 @@ if [[ -f "$qgis_projects_dir/$project_name/$project_name.qgz" ]] ; then
 		mv -f ${project_name}_tmp.qgz $project_name.qgz
 	else
 		echo -e "\033[91mError replacing project extent by bbox\033[0m"
-		make_error_flag
+		make_error_flag 8
 		exit 1
 	fi
 fi
