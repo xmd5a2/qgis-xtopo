@@ -302,7 +302,7 @@ def main():
         event, values = window.read(timeout=300)
         config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
         populate_db_flag_path = config_dir + slash_str + "err_populate_db.flag"
-        prepare_data_flag_path = config_dir + slash_str + "err_populate_db.flag"
+        prepare_data_flag_path = config_dir + slash_str + "err_prepare_data.flag"
         if os.name == "nt":
             if os.path.isfile(populate_db_flag_path):
                 raise_docker_errors(populate_db_flag_path, '')
@@ -333,6 +333,14 @@ def main():
             window.Elem('free_space').update(
                 str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
             update_free_text_color(values)
+            try:
+                os.remove(populate_db_flag_path)
+            except Exception:
+                pass
+            try:
+                os.remove(prepare_data_flag_path)
+            except Exception:
+                pass
             i += 1
         if event in (sg.WIN_CLOSED, 'exit'):
             try:
@@ -346,7 +354,7 @@ def main():
             params = compose_params(values, values['run_chain'])
             command = command_to_run + params
             window['command_line'].update(command)
-            if len(values['osm_files']) > 0:
+            if values[r_keys[0]] and len(values['osm_files']) > 0:
                 window.Elem('populate_db').update(disabled=False)
             else:
                 window.Elem('populate_db').update(disabled=True)
