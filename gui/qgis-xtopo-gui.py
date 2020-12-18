@@ -801,6 +801,7 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
                                                   'Overpass server error. Try again or use another Overpass instance '
                                                   'or Overpass server inside docker.'),
                                  title=translations.get('error', 'Error'))
+                    else:
                         if int(prepare_data_error_code) == 4:
                             sg.Popup(translations.get('terrain_data_not_found_error',
                                                       'Terrain data not found. Check that terrain covered area matches bounding box.'),
