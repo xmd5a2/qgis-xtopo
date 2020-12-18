@@ -344,8 +344,10 @@ def main():
             i += 1
         if event in (sg.WIN_CLOSED, 'exit'):
             try:
-                os.remove(values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_populate_db.flag")
-                os.remove(values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_prepare_data.flag")
+                if os.path.isfile(populate_db_flag_path):
+                    os.remove(populate_db_flag_path)
+                if os.path.isfile(prepare_data_flag_path):
+                    os.remove(prepare_data_flag_path)
             except Exception:
                 pass
             break
