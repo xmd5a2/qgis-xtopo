@@ -283,9 +283,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		[ -e "$f" ] && gdalwarp -of GTiff $f ${f%.*}.tif && rm $f
 	done
 	for f in "$terrain_input_dir"/*.tif; do
-		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Stopping.\033[0m"
-		make_error_flag 6
-		exit 1
+		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Stopping.\033[0m" && make_error_flag 6 && exit 1;
 		break;
 	done
 	shopt -u nullglob

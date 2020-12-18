@@ -20,3 +20,5 @@ gui/__pycache__/
 gui/build/
 gui/dist/
 gui/run_chain.sh
+err_prepare_data.flag
+err_populate_db.flag
