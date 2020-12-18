@@ -300,8 +300,24 @@ def main():
     i = 0
     while True:
         event, values = window.read(timeout=300)
+        config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
+        populate_db_flag_path = config_dir + slash_str + "err_populate_db.flag"
+        prepare_data_flag_path = config_dir + slash_str + "err_populate_db.flag"
+        if os.name == "nt":
+            if os.path.isfile(populate_db_flag_path):
+                raise_docker_errors(populate_db_flag_path, '')
+                try:
+                    os.remove(populate_db_flag_path)
+                except Exception:
+                    print("Error removing " + populate_db_flag_path)
+            if os.path.isfile(prepare_data_flag_path):
+                raise_docker_errors('', prepare_data_flag_path)
+                try:
+                    os.remove(prepare_data_flag_path)
+                except Exception:
+                    print("Error removing " + prepare_data_flag_path)
         if i == 0:
-            config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
+
             if docker_installed:
                 print(translations.get("pulling_image", "Pulling image from DockerHub"))
                 runCommand(cmd="docker pull " + remote_repo_name, window=window)
@@ -319,6 +335,11 @@ def main():
             update_free_text_color(values)
             i += 1
         if event in (sg.WIN_CLOSED, 'exit'):
+            try:
+                os.remove(values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_populate_db.flag")
+                os.remove(values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_prepare_data.flag")
+            except Exception:
+                pass
             break
 
         if timer_running:
@@ -464,6 +485,7 @@ def main():
                 terminal_command_params_list = get_terminal_command_params_list(
                     'docker exec -it --user user qgis-xtopo /app/populate_db.sh', '', True)
                 subprocess.Popen(terminal_command_params_list).wait()
+                raise_docker_errors(populate_db_flag_path, '')
             else:
                 if os.name == "nt":
                     subprocess.Popen(
@@ -477,6 +499,7 @@ def main():
                 terminal_command_params_list = get_terminal_command_params_list(
                     'docker exec -it --user user qgis-xtopo /app/prepare_data.sh', '', True)
                 subprocess.Popen(terminal_command_params_list).wait()
+                raise_docker_errors('', prepare_data_flag_path)
             else:
                 if os.name == "nt":
                     subprocess.Popen(
@@ -681,7 +704,7 @@ def start(values, run_chain):
         sg.Popup(translations.get('bounding_box_too_large', 'Bounding box is too large. Creating a map will take a '
                                                             'long time'), title=translations.get('warning', 'Warning'))
 
-    init_docker(run_chain)
+    init_docker(run_chain, values)
     config = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "config.ini"
     if values['terrain_src_dir']:
         for v in range(0, 5):
@@ -703,10 +726,12 @@ def start(values, run_chain):
             file.write(filedata)
 
 
-def init_docker(run_chain):
+def init_docker(run_chain, values):
     if docker_installed:
         if "qgis-xtopo" in str(
                 subprocess.check_output(['docker', 'ps'], stdin=subprocess.PIPE, stderr=subprocess.STDOUT)):
+            populate_db_flag_path = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_populate_db.flag"
+            prepare_data_flag_path = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_prepare_data.flag"
             if os.name == "posix":
                 run_chain_filename = ''
                 if run_chain:
@@ -718,8 +743,11 @@ def init_docker(run_chain):
                     f = open(run_chain_filename, "w+")
                     f.write("#!/bin/bash\n")
                     f.write("docker exec --user user qgis-xtopo /app/init_docker.sh\n")
+                    f.write("if [[ ! -f " + populate_db_flag_path + " ]] && [[ ! -f " + prepare_data_flag_path + " ]] ; "
+                                                                                                                "then\n")
                     f.write("xhost +local:docker\n")
                     f.write("docker exec -it --user user qgis-xtopo /app/exec_qgis.sh\n")
+                    f.write("fi\n")
                     f.close()
                     os.chmod(run_chain_filename, 0o755)
                 terminal_command_params_list = get_terminal_command_params_list(
@@ -729,13 +757,61 @@ def init_docker(run_chain):
                     os.remove(run_chain_filename)
                 except OSError:
                     pass
+                raise_docker_errors(populate_db_flag_path, prepare_data_flag_path)
             else:
                 if os.name == "nt":
                     subprocess.Popen(
                         ['cmd', '/c start /wait cmd /c docker exec --user user qgis-xtopo /app/init_docker.sh'],
                         shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).wait()
-                    if run_chain:
+                    if run_chain and (not os.path.isfile(populate_db_flag_path) and not os.path.isfile(prepare_data_flag_path)):
                         run_qgis()
+
+
+def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
+    if os.path.isfile(populate_db_flag_path):
+        f = open(populate_db_flag_path, "r")
+        populate_db_error_code = f.read(1)
+        if populate_db_error_code:
+            if int(populate_db_error_code) == 1:
+                sg.Popup(translations.get('cropped_extract_is_empty_error', 'Cropped extract is empty. Check that bounding box matches the OSM data area.'), title=translations.get('error', 'Error'))
+            else:
+                sg.Popup(translations.get('populating_db_error', 'Error populating Overpass database'), title=translations.get('error', 'Error'))
+        if os.name == "posix":
+            try:
+                os.remove(populate_db_flag_path)
+            except Exception:
+                print("Error removing " + populate_db_flag_path)
+    if os.path.isfile(prepare_data_flag_path):
+        f = open(prepare_data_flag_path, "r")
+        prepare_data_error_code = f.read(1)
+        if prepare_data_error_code:
+            if int(prepare_data_error_code) == 1:
+                sg.Popup(translations.get('osmtogeojson_error', 'osmtogeojson error. Try reducing bbox.'), title=translations.get('error', 'Error'))
+            else:
+                if int(prepare_data_error_code) == 2:
+                    sg.Popup(translations.get('vector_data_incomplete_error', 'Vector data is incomplete. It looks '
+                                                                              'like overpass server has interrupted '
+                                                                              'the transmission. Try again or use '
+                                                                              'another Overpass instance or Overpass '
+                                                                              'server inside docker.'),
+                             title=translations.get('error', 'Error'))
+                else:
+                    if int(prepare_data_error_code) == 3:
+                        sg.Popup(translations.get('overpass_server_error',
+                                                  'Overpass server error. Try again or use another Overpass instance '
+                                                  'or Overpass server inside docker.'),
+                                 title=translations.get('error', 'Error'))
+                        if int(prepare_data_error_code) == 4:
+                            sg.Popup(translations.get('terrain_data_not_found_error',
+                                                      'Terrain data not found. Check that terrain covered area matches bounding box.'),
+                                     title=translations.get('error', 'Error'))
+                        else:
+                            sg.Popup(translations.get('data_preparation_error', 'Data preparation error. Check parameters.'), title=translations.get('error', 'Error'))
+        if os.name == "posix":
+            try:
+                os.remove(prepare_data_flag_path)
+            except Exception:
+                print("Error removing " + prepare_data_flag_path)
 
 
 def get_terminal_command_params_list(cmd, run_chain_filename, hold):
@@ -1022,7 +1098,7 @@ def init_config(path, values):
     params += get_working_repo_name()
     command = command_to_run + params
     runCommand(cmd=command, window=window)
-    init_docker(False)
+    init_docker(False, values)
     # start(values, False)
 
 

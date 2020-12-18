@@ -130,5 +130,7 @@ if [[ $(docker container ls | grep qgis-xtopo) ]] ; then
 	docker exec -it --user user qgis-xtopo /app/init_docker.sh
 fi
 if [[ $RUN_CHAIN == true ]] ; then
-	. docker_exec_qgis.sh
+	if [[ ! -f $config_dir/err_prepare_data.flag ]] && [[ ! -f $config_dir/err_populate_db.flag ]] ; then
+		. docker_exec_qgis.sh
+	fi
 fi

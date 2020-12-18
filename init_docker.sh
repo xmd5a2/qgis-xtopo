@@ -96,9 +96,13 @@ if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 else
 	echo -e "\033[93mQGIS project '"$project_dir/$project_name.qgz"' already exists. Usually it's ok.\033[0m"
 fi
+rm -f $config_dir/err_populate_db.flag
+rm -f $config_dir/err_prepare_data.flag
 if [[ $RUN_CHAIN == true ]] ; then
 	if [[ $OVERPASS_INSTANCE == docker ]] ; then
 		. /app/populate_db.sh
 	fi
-	. /app/prepare_data.sh
+	if [[ ! -f $config_dir/err_populate_db.flag ]] ; then
+		. /app/prepare_data.sh
+	fi
 fi

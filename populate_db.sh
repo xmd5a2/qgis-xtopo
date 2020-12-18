@@ -1,8 +1,18 @@
 #!/bin/bash
 # Populate Overpass DB from local sources in osm_data_dir
 config_dir=/mnt/qgis_projects/qgisxtopo-config
+err_flag_name=err_populate_db.flag
+rm -f $config_dir/$err_flag_name
+
+function make_error_flag {
+	touch $config_dir/$err_flag_name
+	if [[ $1 ]] ; then
+		echo $1 > $config_dir/$err_flag_name
+	fi
+}
+
 if [[ ! -f /.dockerenv ]] ; then
-	echo -e "\033[91mThis script is not meant to run outside the docker container. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mThis script is not meant to run outside the docker container. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 if [[ -f $config_dir/config.ini ]] ; then
 	. $config_dir/config.ini
@@ -10,7 +20,7 @@ if [[ -f $config_dir/config.ini ]] ; then
 		. $config_dir/set_dirs.ini
 	fi
 else
-	echo -e "\033[91mconfig.ini not found. Check project installation integrity. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mconfig.ini not found. Check project installation integrity. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 if [[ -f $config_dir/config_debug.ini ]] ; then
 	. $config_dir/config_debug.ini
@@ -19,7 +29,7 @@ fi
 overpass_db_dir=$qgis_projects_dir/overpass_db
 osm_tmp_dir=$osm_data_dir/tmp
 if [[ ! -d $osm_data_dir ]] ; then
-	echo -e "\033[91mosm_data_dir in project_dir does not exist. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mosm_data_dir in project_dir does not exist. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 if [[ ! -d $osm_tmp_dir ]] ; then
 	mkdir $osm_tmp_dir
@@ -67,7 +77,7 @@ function merge_populate {
 			echo -e "\e[104mCropping extract by bbox $bbox\033[0m"
 			osmconvert -b=$bbox --complex-ways --complete-ways $osm_tmp_dir/input.pbf --out-osm | lbzip2 > $osm_tmp_dir/input.osm.bz2
 			if [[ $(wc -c <"$osm_tmp_dir/input.osm.bz2") -le 400 ]] ; then
-				echo -e "\033[91mError. Cropped extract is empty. Check that bbox parameter matches the OSM data area or turn off 'overpass_endpoint_docker_use_bbox' option.\033[0m" && exit 1;
+				echo -e "\033[91mError. Cropped extract is empty. Check that bbox parameter matches the OSM data area or turn off 'overpass_endpoint_docker_use_bbox' option.\033[0m" && make_error_flag 1 && exit 1;
 			fi
 		else
 			osmium cat $pbf_str $osm_str $osmbz2_str $o5m_str -o $osm_tmp_dir/input_tmp.pbf -f pbf
@@ -86,10 +96,10 @@ function merge_populate {
 			rm -f $osm_data_dir/*.osm
 			rm -f $osm_data_dir/*.osm.bz2
 		else
-			echo -e "\033[91mError populating Overpass database\033[0m" && exit 1;
+			echo -e "\033[91mError populating Overpass database\033[0m" && make_error_flag 2 && exit 1;
 		fi
 	else
-		echo -e "\033[91mError. No OSM data files found in $osm_data_dir.\033[0m" && exit 1;
+		echo -e "\033[91mError. No OSM data files found in $osm_data_dir.\033[0m" && make_error_flag && exit 1;
 	fi
 }
 

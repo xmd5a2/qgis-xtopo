@@ -39,7 +39,14 @@ else
 		. $qgisxtopo_config_dir/config_debug.ini
 	fi
 fi
-
+err_flag_name=err_prepare_data.flag
+rm -f $err_flag_name
+function make_error_flag {
+	touch $config_dir/$err_flag_name
+	if [[ $1 ]] ; then
+		echo $1 > $config_dir/$err_flag_name
+	fi
+}
 echo -e "\e[105mProject dir: $project_dir\e[49m"
 if [[ $running_in_container == true ]] ; then
 	echo -e "\e[100mRunning in docker\e[49m"
@@ -48,26 +55,26 @@ echo -e "\e[100mconfig: $qgisxtopo_config_dir/config.ini\e[49m"
 echo -e "\e[100mterrain dir: $terrain_src_dir\e[49m"
 
 if [[ "$project_name" == "" ]] ; then
-	echo -e "\033[91mproject_name not defined. Please define it in config.ini. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mproject_name not defined. Please define it in config.ini. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 if [[ ! -d "$project_dir" ]] && [[ $running_in_container == true ]] ; then
-	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Also executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Also executing of initialization script (docker_run) can solve this. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 if [[ ! -d "$project_dir" ]] && [[ $running_in_container == false ]] ; then
-	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mproject_dir $project_dir not found. Please check config.ini (project_name and project_dir variables) and directory itself. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 	echo -e "\033[93m$project_dir/$project_name.qgz not found. Run docker_run to regenerate it.\033[0m"
 fi
 if [[ $get_terrain_tiles == "true" ]] && [[ $download_terrain_tiles == "true" ]] ; then
-	echo -e "\033[91mget_terrain_tiles and download_terrain_tiles are incompatible with each other. Use only one of them. Check config.ini. Stopping.\033[0m" && exit 1;
+	echo -e "\033[91mget_terrain_tiles and download_terrain_tiles are incompatible with each other. Use only one of them. Check config.ini. Stopping.\033[0m" && make_error_flag && exit 1;
 fi
 case $overpass_instance in
 	"docker")
 		if [[ $running_in_container == true ]] ; then
 			req_path_string="/app/osm-3s/bin/osm3s_query --quiet --db-dir=/mnt/qgis_projects/overpass_db"
 		else
-			echo -e "\033[91moverpass_instance=docker can't be started outside of container. Please use overpass_instance=external/local/ssh. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91moverpass_instance=docker can't be started outside of container. Please use overpass_instance=external/local/ssh. Stopping.\033[0m" && make_error_flag && exit 1;
 		fi
 		;;
 	"local")
@@ -76,17 +83,17 @@ case $overpass_instance in
 			if [[ -f "${array_bbox[0]}" ]] ; then
 				req_path_string=$overpass_endpoint_local
 			else
-				echo -e "\033[91m${array_bbox[0]} not found. Check overpass_endpoint_local. Stopping.\033[0m" && exit 1;
+				echo -e "\033[91m${array_bbox[0]} not found. Check overpass_endpoint_local. Stopping.\033[0m" && make_error_flag && exit 1;
 			fi
 		else
-			echo -e "\033[91moverpass_instance=local can't be started inside a container. Please use overpass_instance=external/docker/ssh. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91moverpass_instance=local can't be started inside a container. Please use overpass_instance=external/docker/ssh. Stopping.\033[0m" && make_error_flag && exit 1;
 		fi
 		;;
 	"ssh")
 		if [[ $running_in_container == false ]] ; then
 			req_path_string="$overpass_endpoint_ssh --quiet"
 		else
-			echo -e "\033[91moverpass_instance=ssh can't be started inside a container. Please use overpass_instance=docker/external/local. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91moverpass_instance=ssh can't be started inside a container. Please use overpass_instance=docker/external/local. Stopping.\033[0m" && make_error_flag && exit 1;
 		fi
 		;;
 esac
@@ -114,15 +121,15 @@ rm -f $vector_data_dir/*.sqlite_tmp-journal
 bbox_query=$lat_min,$lon_min,$lat_max,$lon_max
 bbox_eio_query="$lon_min $lat_min $lon_max $lat_max"
 
-command -v python3 >/dev/null 2>&1 || { echo >&2 -e "\033[91mpython3 is required but not installed.\033[0m" && exit 1;}
-command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m" && exit 1;}
-command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[91mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m" && exit 1;}
-command -v grass >/dev/null 2>&1 || { echo >&2 -e "\033[91mGRASS > 7.0 is required but not installed.\033[0m" && exit 1;}
-command -v osmfilter >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmfilter is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && exit 1;}
-command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmconvert is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && exit 1;}
-command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmium is required but not installed. If you are using Ubuntu please install 'osmium-tool' package.\033[0m" && exit 1;}
-command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[91mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m" && exit 1;}
-command -v eio >/dev/null 2>&1 || { echo >&2 -e "\033[91meio is required but not installed. Please install python 'elevation' pip (https://github.com/bopen/elevation).\033[0m" && exit 1;}
+command -v python3 >/dev/null 2>&1 || { echo >&2 -e "\033[91mpython3 is required but not installed.\033[0m" && make_error_flag && exit 1;}
+command -v osmtogeojson >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmtogeojson is required but not installed. Follow installation instructions at https://github.com/tyrasd/osmtogeojson\033[0m" && make_error_flag && exit 1;}
+command -v gdalwarp >/dev/null 2>&1 || { echo >&2 -e "\033[91mGDAL is required but not installed. If you are using Ubuntu please install 'gdal-bin' package.\033[0m" && make_error_flag && exit 1;}
+command -v grass >/dev/null 2>&1 || { echo >&2 -e "\033[91mGRASS > 7.0 is required but not installed.\033[0m" && make_error_flag && exit 1;}
+command -v osmfilter >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmfilter is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && make_error_flag && exit 1;}
+command -v osmconvert >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmconvert is required but not installed. If you are using Ubuntu please install 'osmctools' package.\033[0m" && make_error_flag && exit 1;}
+command -v osmium >/dev/null 2>&1 || { echo >&2 -e "\033[91mosmium is required but not installed. If you are using Ubuntu please install 'osmium-tool' package.\033[0m" && make_error_flag && exit 1;}
+command -v jq >/dev/null 2>&1 || { echo >&2 -e "\033[91mjq is required but not installed. If you are using Ubuntu please install 'jq' package.\033[0m" && make_error_flag && exit 1;}
+command -v eio >/dev/null 2>&1 || { echo >&2 -e "\033[91meio is required but not installed. Please install python 'elevation' pip (https://github.com/bopen/elevation).\033[0m" && make_error_flag && exit 1;}
 
 function run_alg_linestopolygons {
 	case $2 in
@@ -147,7 +154,7 @@ function osmtogeojson_wrapper {
 	node --max_old_space_size=$node_mem `which osmtogeojson` $1 > $2
 	if [[ $? != 0 ]] ; then
 		echo $?
-		echo -e "\033[91mosmtogeojson error. Try reducing bbox.\033[0m" && exit 1;
+		echo -e "\033[91mosmtogeojson error. Try reducing bbox.\033[0m" && make_error_flag 1 && exit 1;
 	fi
 }
 function convert2spatialite {
@@ -188,11 +195,11 @@ if [[ $generate_terrain == "true" ]] ; then
 		echo -e "\e[104m=== Downloading terrain tiles...\e[49m"
 		eio clip -o $terrain_input_dir/srtm.tif --bounds $bbox_eio_query
 		if [[ $? != 0 ]] ; then
-			echo -e "\033[91mError downloading terrain. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91mError downloading terrain. Stopping.\033[0m" && make_error_flag && exit 1;
 		elif [[ $(gdalinfo $terrain_input_dir/srtm.tif | grep "Band 1") ]] ; then
 			echo -e "\033[92mTerrain downloaded\033[0m"
 		else
-			echo -e "\033[91mError downloading terrain. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91mError downloading terrain. Stopping.\033[0m" && make_error_flag && exit 1;
 		fi
 		eio clean
 	fi
@@ -200,13 +207,14 @@ if [[ $generate_terrain == "true" ]] ; then
 		rm -f $terrain_input_dir/*.*
 		echo -e "\e[104m=== Copying DEM tiles from $terrain_src_dir...\e[49m"
 		if [[ $terrain_src_dir == "" ]] ; then
-			echo -e "\033[91mterrain_src_dir "$terrain_src_dir" not defined in config but get_terrain_tiles=true. Stopping.\033[0m" && exit 1;
+			echo -e "\033[91mterrain_src_dir "$terrain_src_dir" not defined in config but get_terrain_tiles=true. Stopping.\033[0m" && make_error_flag && exit 1;
 		fi
 		if [[ ! -d $terrain_src_dir ]] ; then
 			echo -e "\033[91mterrain_src_dir "$terrain_src_dir" don't exist but get_terrain_tiles=true. Turn it off or check path. Stopping.\033[0m"
 			if [[ $running_in_container == true ]] ; then
 				echo -e "\033[93mCheck /mnt/terrain docker mount\033[0m"
 			fi
+			make_error_flag
 			exit 1;
 		fi
 		for tile in "${tiles_list[@]}"
@@ -250,7 +258,7 @@ if [[ $generate_terrain == "true" ]] ; then
 		[ -e "$f" ] && gdalwarp -of GTiff $f ${f%.*}.tif && rm $f
 	done
 	for f in "$terrain_input_dir"/*.tif; do
-		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Stopping.\033[0m" && exit 1;
+		[ ! -e "$f" ] && echo -e "\033[91mNo DEM tiles (GeoTIFF/HGT) found in "$terrain_input_dir". Stopping.\033[0m" && make_error_flag && exit 1;
 		break;
 	done
 	shopt -u nullglob
@@ -282,7 +290,7 @@ if [[ $generate_terrain == "true" ]] ; then
 				gdaladdo -ro --config COMPRESS_OVERVIEW LZW "$raster_data_dir/slope_upscaled.tif" 512 256 128 64 32 16 8 4 2
 				echo -e "\033[92mSlopes generated\033[0m"
 			else
-				echo -e "\033[91mError. $raster_data_dir/slope_upscaled.tif is empty. Stopping.\033[0m" && exit 1;
+				echo -e "\033[91mError. $raster_data_dir/slope_upscaled.tif is empty. Stopping.\033[0m" && make_error_flag && exit 1;
 			fi
 			rm -f "$raster_data_dir"/slope.tif
 			rm -f "$raster_data_dir"/slope_cut.tif
@@ -345,9 +353,10 @@ if [[ $generate_terrain == "true" ]] ; then
 			fi
 		fi
 	else
-		echo -e "\033[93mWarning! No DEM data found. Hillshade, slopes and isolines are not generated.\033[0m"
+		echo -e "\033[93mError. No DEM data found. Hillshade, slopes and isolines are not generated.\033[0m"
 		echo -e "\033[93mCheck download_terrain_tiles=true or get_terrain_tiles=true options in config.ini\033[0m"
-		exit 1;
+		make_error_flag 4
+		exit 1
 	fi
 	if [[ $download_terrain_tiles == "true" ]] ; then
 		rm -f $terrain_input_dir/*.*
@@ -817,7 +826,7 @@ for t in ${array_queries[@]}; do
 		echo "$req_string" | $req_path_string > $vector_data_dir/$t.osm
 	fi
 	if [[ $? != 0 ]] ; then
-		echo -e "\033[91mOverpass server error. Stopping.\033[0m" && exit 1;
+		echo -e "\033[91mOverpass server error. Stopping.\033[0m" && make_error_flag 3 && exit 1;
 	fi
 	if ! grep -q "tag k" "$vector_data_dir/$t.osm" || ( ( [[ $t == "admin_level_2" ]] || [[ $t == "admin_level_4" ]] ) && ! grep -q "way id" "$vector_data_dir/$t.osm" ); then
 		echo -e "\033[93mResult is empty!\033[0m"
@@ -827,7 +836,7 @@ for t in ${array_queries[@]}; do
 			if [[ -f "$override_dir/$t.osm" ]] ; then
 				cp $override_dir/$t.osm $vector_data_dir/$t.osm
 			else
-				echo -e "\033[91m$override_dir/$t.osm not found. Stopping.\033[0m" && exit 1;
+				echo -e "\033[91m$override_dir/$t.osm not found. Stopping.\033[0m" && make_error_flag && exit 1;
 			fi
 		else
 			((index++))
@@ -838,7 +847,7 @@ for t in ${array_queries[@]}; do
 	if grep -q \</osm\> "$vector_data_dir/$t.osm" ; then
 		echo -e "\033[92mOK\033[0m"
 	else
-		echo -e "\033[91m$vector_data_dir/$t.osm is incomplete. It looks like overpass server has interrupted the transmission. Try again or use another server (overpass_instance and overpass_endpoint_* variables in config.ini). Stopping.\033[0m" && exit 1;
+		echo -e "\033[91m$vector_data_dir/$t.osm is incomplete. It looks like Overpass server has interrupted the transmission. Try again or use another server (overpass_instance and overpass_endpoint_* variables in config.ini). Stopping.\033[0m" && make_error_flag 2 && exit 1;
 	fi
 
 	case $t in
@@ -990,7 +999,7 @@ for t in ${array_queries[@]}; do
 			if [[ -f $vector_data_dir/places_main.geojson ]] ; then
 				cp $vector_data_dir/places_main.geojson $temp_dir
 			else
-				echo -e "\033[91m$vector_data_dir/places_main.geojson not found. Please request places_main before $t. Stopping.\033[0m" && exit 1;
+				echo -e "\033[91m$vector_data_dir/places_main.geojson not found. Please request places_main before $t. Stopping.\033[0m" && make_error_flag && exit 1;
 			fi
 			run_alg_joinattributesbylocation places_main ${t}_pyfieldcalc 2 "admin_centre_${t: -1}" 0
 			cp -f $temp_dir/places_main_joinattrsloc.geojson $vector_data_dir/places_main.geojson
@@ -1332,7 +1341,7 @@ for t in ${array_queries[@]}; do
 			osmfilter $vector_data_dir/$t.osm --keep-ways-relations="layer<0" -o=$vector_data_dir/${t}_layer_-1.osm
 			osmfilter $vector_data_dir/$t.osm --drop-ways-relations="layer>0 or layer<0" -o=$vector_data_dir/${t}_new.osm && rm -f $vector_data_dir/$t.osm && mv $vector_data_dir/${t}_new.osm $vector_data_dir/$t.osm
 			if [[ $? == 139 ]] ; then
-				echo -e "\033[91mSegmentation fault\033[0m" && exit 1;
+				echo -e "\033[91mSegmentation fault\033[0m" && make_error_flag && exit 1;
 			fi
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			osmtogeojson_wrapper $vector_data_dir/${t}_layer_1.osm $vector_data_dir/${t}_layer_1.geojson
@@ -1362,7 +1371,7 @@ done
 # Following code is needed to split glacier isolines
 if [[ $generate_terrain == "true" ]] && [[ $generate_terrain_isolines == "true" ]]; then
 	if [[ ! -f $vector_data_dir/isolines_full.sqlite ]] ; then
-		echo -e "\033[91m$vector_data_dir/isolines_full.sqlite not found\033[0m" && exit 1;
+		echo -e "\033[91m$vector_data_dir/isolines_full.sqlite not found\033[0m" && make_error_flag && exit 1;
 	fi
 	rm -f "$vector_data_dir/isolines_glacier.sqlite"
 # 	if [[ -f "$vector_data_dir/water.sqlite" ]] && [[ $(stat --printf="%s" "$vector_data_dir/water.sqlite") -ge 70 ]] ; then
@@ -1412,7 +1421,7 @@ if [[ -f "$qgis_projects_dir/$project_name/$project_name.qgz" ]] ; then
 	if [[ $(wc -c <${project_name}_tmp.qgz) -ge 8000000 ]] ; then
 		mv -f ${project_name}_tmp.qgz $project_name.qgz
 	else
-		echo -e "\033[91mError replacing project extent by bbox\033[0m" && exit 1;
+		echo -e "\033[91mError replacing project extent by bbox\033[0m" && make_error_flag && exit 1;
 	fi
 fi
 
