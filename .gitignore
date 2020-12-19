@@ -20,5 +20,7 @@ gui/__pycache__/
 gui/build/
 gui/dist/
 gui/run_chain.sh
+gui/calc_srtm_tiles_list.py
+gui/process_bbox.py
 err_prepare_data.flag
 err_populate_db.flag

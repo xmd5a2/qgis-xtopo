@@ -461,6 +461,7 @@ def main():
                 window.Elem('open_terrain_input_dir').update(disabled=False)
             else:
                 window.Elem('open_terrain_input_dir').update(disabled=True)
+            window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
         if event == 'open_terrain_input_dir':
             terrain_input_dir = get_terrain_input_dir(values)
             if not os.path.isdir(terrain_input_dir):
@@ -515,7 +516,7 @@ def main():
             else:
                 if os.name == "nt":
                     subprocess.Popen(
-                        ['cmd', '/c start cmd /c docker exec -it --user user qgis-xtopo /app/prepare_data.sh'],
+                        ['cmd', '/c start cmd /k docker exec -it --user user qgis-xtopo /app/prepare_data.sh'],
                         shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if event == 'open_qgis':
             start(values, False)
@@ -582,6 +583,13 @@ def update_user_config(setting, value):
             filedata = list_to_string_file(filedata)
             with open(user_config_path, 'w') as file:
                 file.write(filedata)
+        else:
+            if value:
+                filedata = []
+                filedata.append(setting + "=" + value)
+                filedata = list_to_string_file(filedata)
+                with open(user_config_path, 'w') as file:
+                    file.write(filedata)
 
 
 def read_user_config(setting):
