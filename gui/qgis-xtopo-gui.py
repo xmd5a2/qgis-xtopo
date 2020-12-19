@@ -437,6 +437,8 @@ def main():
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
             if values['generate_terrain'] and values[terrain_radio_keys[2]]:  # 'download_terrain_tiles_manually'
                 window.Elem('open_terrain_input_dir').update(disabled=False)
+            if not values[terrain_radio_keys[0]] and not values[terrain_radio_keys[1]] and not values[terrain_radio_keys[2]]:
+                window.Elem(terrain_radio_keys[1]).update(True)
         if event == terrain_radio_keys[0]:  # 'get_terrain_tiles':
             if values[terrain_radio_keys[0]]:
                 window.Elem('terrain_src_dir').update(disabled=False)
