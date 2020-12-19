@@ -112,6 +112,10 @@ layout = [
             [sg.Button('EN', key="button_en", font='Any 13', button_color=('white', '#497E90'), visible=False, tooltip=translations.get('switch_language', 'Switch language'))]
         ], size=(135, 40))
     ],
+    [sg.Text(translations.get('project_name', 'Project name'), key='project_name_text', size=(22, 1),
+             justification='l', tooltip=translations.get('project_name_tooltip', 'Enter project name')),
+     sg.Input(default_text=project_name_default, key='project_name', size=(60, 1),
+              tooltip=translations.get('project_name_tooltip', 'Enter project name'))],
     [sg.Text(translations.get('qgis_projects_dir', 'QGIS projects directory'), key="qgis_projects_dir_text",
              size=(22, 1), justification='l',
              tooltip=translations.get('qgis_projects_dir_tooltip', 'Directory with your projects')),
@@ -121,10 +125,6 @@ layout = [
               change_submits=True, disabled=True)] +
     [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='qgis_projects_dir_browse', size=(10, 1),
                      tooltip=translations.get('qgis_projects_dir_browse_tooltip', 'Select projects directory'))],
-    [sg.Text(translations.get('project_name', 'Project name'), key='project_name_text', size=(22, 1),
-             justification='l', tooltip=translations.get('project_name_tooltip', 'Enter project name')),
-     sg.Input(default_text=project_name_default, key='project_name', size=(60, 1),
-              tooltip=translations.get('project_name_tooltip', 'Enter project name'))],
     [sg.Text(translations.get('bounding_box', 'Bounding box'), key='bbox_text', size=(22, 1), justification='l',
              tooltip=translations.get('bounding_box_tooltip', 'Bounding box or OSM url')),
      sg.Input(default_text='', key='bbox', size=(60, 1),
@@ -301,6 +301,7 @@ def main():
     while True:
         event, values = window.read(timeout=300)
         config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
+        config_path = config_dir + slash_str + "config.ini"
         populate_db_flag_path = config_dir + slash_str + "err_populate_db.flag"
         prepare_data_flag_path = config_dir + slash_str + "err_prepare_data.flag"
         if os.name == "nt":
@@ -317,7 +318,6 @@ def main():
                 except Exception:
                     print("Error removing " + prepare_data_flag_path)
         if i == 0:
-
             if docker_installed:
                 print(translations.get("pulling_image", "Pulling image from DockerHub"))
                 runCommand(cmd="docker pull " + remote_repo_name, window=window)
@@ -363,7 +363,6 @@ def main():
         if event == 'reset':
             window.Elem('qgis_projects_dir').update(qgis_projects_dir_default)
             window.Elem('project_name').update(project_name_default)
-            config_path = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "config.ini"
             try:
                 os.remove(config_path)
             except FileNotFoundError:
@@ -409,7 +408,8 @@ def main():
             first_start = False
             if not os.path.isfile(config_dir + slash_str + "config.ini"):
                 first_start = True
-            read_config_update_ui(values, config_dir, True)
+            if os.path.isfile(config_path):
+                read_config_update_ui(values, config_dir, True)
             if first_start:
                 window.Elem('bbox').update('')
             window.Elem('free_space').update(

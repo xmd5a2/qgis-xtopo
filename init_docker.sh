@@ -94,7 +94,7 @@ if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 		echo -e "\033[91mError creating '$project_name.qgz'. Check directory permissions.\033[0m" && exit 1;
 	fi
 else
-	echo -e "\033[93mQGIS project '"$project_dir/$project_name.qgz"' already exists. Usually it's ok.\033[0m"
+	echo -e "\033[93mQGIS project '"$project_dir/$project_name.qgz"' already exists. OK.\033[0m"
 fi
 rm -f $config_dir/err_populate_db.flag
 rm -f $config_dir/err_prepare_data.flag
