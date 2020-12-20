@@ -168,7 +168,7 @@ layout = [
                    tooltip=translations.get('open_protomaps_tooltip',
                                             'Draw a rectangle, download OSM extract and select it with button to the right.'))
          ] +
-        [sg.Input(key='osm_files', disabled=True,
+        [sg.Input( key='osm_files', disabled=True,
                   tooltip=translations.get('osm_data_files_tooltip', 'OSM data files list'), size=(37, 1), change_submits=True),
          sg.FilesBrowse(
              file_types=(("pbf", "*.pbf"), ("o5m", "*.o5m"), ("osm xml", "*.osm"), ("osm xml in bz2", "*.osm.bz2")),
@@ -195,7 +195,7 @@ layout = [
         [sg.Text(translations.get('calc_tiles_list', 'List of required terrain tiles'), key="calc_tiles_list_text",
                  size=(21, 1), justification='l', text_color='#D1D4C6'),
          sg.Input(key='calc_tiles_list',
-                  size=(60, 1), tooltip=translations.get('calc_tiles_list_tooltip',
+                  size=(60, 1), text_color='white', disabled_readonly_background_color='#5C715E', tooltip=translations.get('calc_tiles_list_tooltip',
                                                          'Automatically calculated list of required terrain tiles'),
                   readonly=True)] +
         [sg.Text(translations.get('total', 'Total') + ": ", key="total_text", text_color="#D1D4C6",
@@ -220,7 +220,7 @@ layout = [
                                           'Please manually download terrain data for chosen area'))] +
         [sg.Radio('', "RADIO2", key=terrain_radio_keys[2], change_submits=True, size=(1, 1))] +
         [sg.Input(key='terrain_input_dir',
-                  size=(45, 1), readonly=True)] +
+                  size=(45, 1), readonly=True, text_color='white', disabled_readonly_background_color='#5C715E')] +
         [sg.Button(key="open_terrain_input_dir", size=(10, 1), button_text=translations.get('open', 'Open'),
                    disabled=True, tooltip=translations.get('open_terrain_input_dir_tooltip',
                                                            'Open directory where downloaded terrain tiles should be located'))
