@@ -310,13 +310,13 @@ def main():
                 try:
                     os.remove(populate_db_flag_path)
                 except Exception:
-                    print("Error removing " + populate_db_flag_path)
+                    print(translations.get("error_removing", "Error removing") + " " + populate_db_flag_path)
             if os.path.isfile(prepare_data_flag_path):
                 raise_docker_errors('', prepare_data_flag_path)
                 try:
                     os.remove(prepare_data_flag_path)
                 except Exception:
-                    print("Error removing " + prepare_data_flag_path)
+                    print(translations.get("error_removing", "Error removing") + " " + prepare_data_flag_path)
         if i == 0:
             if docker_installed:
                 print(translations.get("pulling_image", "Pulling image from DockerHub"))
@@ -560,17 +560,17 @@ def update_user_config(setting, value):
         try:
             os.mkdir(user_config_dir)
         except Exception:
-            print("Can't create user config directory " + user_config_dir)
+            print(translations.get('cant_create_user_config_error', 'Can not create user config directory') + ' ' + user_config_dir)
         if value:
             filedata = []
             filedata.append(setting + "=" + value)
             filedata = list_to_string_file(filedata)
-            with open(user_config_path, 'w') as file:
+            with open(user_config_path, 'w', encoding='utf8') as file:
                 file.write(filedata)
     else:
         if os.path.isfile(user_config_path):
             try:
-                with open(user_config_path, 'r') as fil:
+                with open(user_config_path, 'r', encoding='utf8') as fil:
                     filedata = fil.read().splitlines()
             except FileNotFoundError:
                 pass
@@ -581,14 +581,14 @@ def update_user_config(setting, value):
                 if i == len(filedata) - 1:
                     filedata.append(setting + "=" + value)
             filedata = list_to_string_file(filedata)
-            with open(user_config_path, 'w') as file:
+            with open(user_config_path, 'w', encoding='utf8') as file:
                 file.write(filedata)
         else:
             if value:
                 filedata = []
                 filedata.append(setting + "=" + value)
                 filedata = list_to_string_file(filedata)
-                with open(user_config_path, 'w') as file:
+                with open(user_config_path, 'w', encoding='utf8') as file:
                     file.write(filedata)
 
 
@@ -596,10 +596,10 @@ def read_user_config(setting):
     value = ''
     if os.path.isfile(user_config_dir + slash_str + user_config_filename):
         try:
-            with open(user_config_path, 'r') as fil:
+            with open(user_config_path, 'r', encoding='utf8') as fil:
                 filedata = fil.read().splitlines()
         except Exception:
-            print("Can't read user config " + user_config_path)
+            print(translations.get('cant_read_user_config_error', 'Can not read user config') + ' ' + user_config_path)
 
         for i in range(len(filedata)):
             if setting in filedata[i]:
@@ -715,7 +715,7 @@ def start(values, run_chain):
         try:
             os.makedirs(osm_data_dir, exist_ok=True)
         except Exception:
-            print("Can't create " + osm_data_dir)
+            print(translations.get('cant_create_error', "Can't create") + " " + osm_data_dir)
     osm_files_list = str(values['osm_files']).split(";")
     if values[r_keys[0]] and osm_files_list[0]:
         print(translations.get('copying_files', 'Copying file(s)') + " " + str(osm_files_list) + " " + translations.get(
@@ -734,7 +734,7 @@ def start(values, run_chain):
     if values['terrain_src_dir']:
         for v in range(0, 5):
             try:
-                with open(config, 'r') as fil:
+                with open(config, 'r', encoding='utf8') as fil:
                     filedata = fil.read().splitlines()
             except FileNotFoundError:
                 time.sleep(1)
@@ -747,7 +747,7 @@ def start(values, run_chain):
                 filedata.append("terrain_src_dir_gui=" + values['terrain_src_dir'])
 
         filedata = list_to_string_file(filedata)
-        with open(config, 'w') as file:
+        with open(config, 'w', encoding='utf8') as file:
             file.write(filedata)
 
 
@@ -765,7 +765,7 @@ def init_docker(run_chain, values):
                         os.remove(run_chain_filename)
                     except OSError:
                         pass
-                    f = open(run_chain_filename, "w+")
+                    f = open(run_chain_filename, "w+", encoding='utf8')
                     f.write("#!/bin/bash\n")
                     f.write("docker exec --user user qgis-xtopo /app/init_docker.sh\n")
                     f.write("if [[ ! -f " + populate_db_flag_path + " ]] && [[ ! -f " + prepare_data_flag_path + " ]] ; "
@@ -805,7 +805,7 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
             try:
                 os.remove(populate_db_flag_path)
             except Exception:
-                print("Error removing " + populate_db_flag_path)
+                print(translations.get("error_removing", "Error removing") + " " + populate_db_flag_path)
     if os.path.isfile(prepare_data_flag_path):
         f = open(prepare_data_flag_path, "r")
         prepare_data_error_code = f.read(1)
@@ -856,7 +856,7 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
             try:
                 os.remove(prepare_data_flag_path)
             except Exception:
-                print("Error removing " + prepare_data_flag_path)
+                print(translations.get("error_removing", "Error removing") + " " + prepare_data_flag_path)
 
 
 def get_terminal_command_params_list(cmd, run_chain_filename, hold):
@@ -1026,7 +1026,7 @@ def copy_config_original(config_original_path):
     for i in range(len(config_original_filedata)):
         config_original_new_filedata.append(config_original_filedata[i])
     config_original_new_filedata = list_to_string_file(config_original_new_filedata)
-    with open(config_original_path + slash_str + "config.original", 'w') as file:
+    with open(config_original_path + slash_str + "config.original", 'w', encoding='utf8') as file:
         file.write(config_original_new_filedata)
 
 
@@ -1089,7 +1089,7 @@ def get_setting(config_path, setting, config_original_path):
     if setting != 'terrain_src_dir_gui':
         if not value:
             if setting != 'bbox':
-                print(setting + " " + "not found in" + " " + config_path + ". " + "Go back to the default setting.")
+                print(setting + " " + translations.get("not_found_in", "not found in") + " " + config_path + ". " + translations.get("go_back_default_setting", "Go back to the default setting."))
                 return read_setting(config_original_path, setting).lower().strip()
             else:
                 return ''
@@ -1101,7 +1101,7 @@ def get_setting(config_path, setting, config_original_path):
 
 def read_setting(path, setting):
     value = ''
-    with open(path) as f:
+    with open(path, encoding='utf8') as f:
         for number, line in enumerate(f, 1):
             value = None
             if setting + "=" in line:
