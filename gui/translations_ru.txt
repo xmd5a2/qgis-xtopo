@@ -59,6 +59,7 @@ free=Свободно
 free_space_tooltip=Свободное место на выбранном диске
 gb=Гб
 switch_language=Переключить язык
+extended_settings_tooltip=Расширенные настройки. Использовать с осторожностью!
 
 error=Ошибка
 warning=Предупреждение

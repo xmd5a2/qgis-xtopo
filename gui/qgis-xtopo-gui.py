@@ -94,7 +94,7 @@ reset_img = b'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiA
 sg.theme('DarkGreen6')
 layout = [
     [sg.Text('QGIS-xtopo', font='Any 20 bold', text_color="#CAF1C1")] +
-    [sg.Column([[]], size=(320, 50), pad=(0, 0))] +
+    [sg.Column([[]], size=(220, 50), pad=(0, 0))] +
     [sg.Column([
         [sg.Text(translations.get('free', 'Free') + ":", key="free_space_text", justification='right',
                  text_color='#9BFF80',
@@ -103,14 +103,19 @@ layout = [
          sg.Text('', key="free_space", text_color='#9BFF80',
                  size=(12, 1), pad=(0, 0))
          ]
-    ], size=(160, 35), pad=(5, 5))] +
+    ], size=(200, 35), pad=(5, 5))] +
     [sg.Column(
         [
+            [sg.Checkbox('', key="extended_settings", size=(1, 1), default=False,
+                         tooltip=translations.get('extended_settings_tooltip', 'Extended settings. Use with caution!'),
+                         change_submits=True)] +
             [sg.Button('', key="reset", image_data=reset_img,
                        tooltip=translations.get('reset_tooltip', 'Reset settings'), visible=True)] +
-            [sg.Button('RU', key="button_ru", font='Any 13', button_color=('white', '#497E90'), visible=True, tooltip=translations.get('switch_language', 'Switch language'))] +
-            [sg.Button('EN', key="button_en", font='Any 13', button_color=('white', '#497E90'), visible=False, tooltip=translations.get('switch_language', 'Switch language'))]
-        ], size=(135, 40))
+            [sg.Button('RU', key="button_ru", font='Any 13', button_color=('white', '#497E90'), visible=True,
+                       tooltip=translations.get('switch_language', 'Switch language'))] +
+            [sg.Button('EN', key="button_en", font='Any 13', button_color=('white', '#497E90'), visible=False,
+                       tooltip=translations.get('switch_language', 'Switch language'))]
+        ], size=(150, 40))
     ],
     [sg.Text(translations.get('project_name', 'Project name'), key='project_name_text', size=(22, 1),
              justification='l', tooltip=translations.get('project_name_tooltip', 'Enter project name')),
@@ -168,22 +173,27 @@ layout = [
                    tooltip=translations.get('open_protomaps_tooltip',
                                             'Draw a rectangle, download OSM extract and select it with button to the right.'))
          ] +
-        [sg.Input( key='osm_files', disabled=True,
-                  tooltip=translations.get('osm_data_files_tooltip', 'OSM data files list'), size=(37, 1), change_submits=True),
+        [sg.Input(key='osm_files', disabled=True,
+                  tooltip=translations.get('osm_data_files_tooltip', 'OSM data files list'), size=(37, 1),
+                  change_submits=True),
          sg.FilesBrowse(
              file_types=(("pbf", "*.pbf"), ("o5m", "*.o5m"), ("osm xml", "*.osm"), ("osm xml in bz2", "*.osm.bz2")),
              key='select_osm_files', button_text=translations.get('browse', 'Browse'), size=(10, 1),
              tooltip=translations.get('select_osm_data_files_tooltip',
                                       'Select OSM data files you want to use as source data'))],
-        [sg.Text(translations.get('external', 'External'), key="external_text",
-                 tooltip=translations.get('external_tooltip',
-                                          'Located in Internet'),
-                 size=(16, 1), justification='l')] +
-        [sg.Radio('', "RADIO1", key=r_keys[1], change_submits=True)] +
-        [sg.Input(key='overpass_endpoint_external', default_text="https://overpass.kumi.systems/api/interpreter",
-                  size=(60, 1), tooltip=translations.get('overpass_endpoint_external_tooltip',
-                                                         'External Overpass endpoint'),
-                  disabled=True)]
+        [sg.Frame(layout=[
+            [sg.Text(translations.get('external', 'External'), key="external_text",
+                     tooltip=translations.get('external_tooltip',
+                                              'Located in Internet'),
+                     size=(16, 1), justification='l')] +
+
+            [sg.Radio('', "RADIO1", key=r_keys[1], change_submits=True)] +
+            [sg.Input(key='overpass_endpoint_external', default_text="https://overpass.kumi.systems/api/interpreter",
+                      size=(60, 1), tooltip=translations.get('overpass_endpoint_external_tooltip',
+                                                             'External Overpass endpoint'),
+                      disabled=True)]
+        ], title='', key='overpass_external_frame', visible=False, pad=(0, 0), border_width=0
+        )]
     ], title='', element_justification="left",
         border_width=1,
         relief=sg.RELIEF_SUNKEN)],
@@ -191,12 +201,13 @@ layout = [
         [sg.Text(
             translations.get('terrain', 'Terrain'),
             key="terrain",
-            font="default 11 bold", text_color="#CAF1C1", justification='l')],
+            font="default 11 bold", text_color="#CAF1C1", justification='l', size=(71, 1))],
         [sg.Text(translations.get('calc_tiles_list', 'List of required terrain tiles'), key="calc_tiles_list_text",
                  size=(21, 1), justification='l', text_color='#D1D4C6'),
          sg.Input(key='calc_tiles_list',
-                  size=(60, 1), text_color='white', disabled_readonly_background_color='#5C715E', tooltip=translations.get('calc_tiles_list_tooltip',
-                                                         'Automatically calculated list of required terrain tiles'),
+                  size=(60, 1), text_color='white', disabled_readonly_background_color='#5C715E',
+                  tooltip=translations.get('calc_tiles_list_tooltip',
+                                           'Automatically calculated list of required terrain tiles'),
                   readonly=True)] +
         [sg.Text(translations.get('total', 'Total') + ": ", key="total_text", text_color="#D1D4C6",
                  size=(5, 1), justification='l'),
@@ -213,72 +224,81 @@ layout = [
                  tooltip=translations.get('download_terrain_tiles_tooltip',
                                           'Automatically download SRTM30m terrain data for chosen area'))] +
         [sg.Radio('', "RADIO2", key=terrain_radio_keys[1], change_submits=True, size=(1, 1))],
-        [sg.Text(translations.get('download_terrain_tiles_manually', 'Download terrain manually'),
-                 key='download_terrain_tiles_manually_text', text_color="#B6B4C3",
-                 size=(30, 1), justification='l',
-                 tooltip=translations.get('download_terrain_tiles_manually_tooltip',
-                                          'Please manually download terrain data for chosen area'))] +
-        [sg.Radio('', "RADIO2", key=terrain_radio_keys[2], change_submits=True, size=(1, 1))] +
-        [sg.Input(key='terrain_input_dir',
-                  size=(45, 1), readonly=True, text_color='white', disabled_readonly_background_color='#5C715E')] +
-        [sg.Button(key="open_terrain_input_dir", size=(10, 1), button_text=translations.get('open', 'Open'),
-                   disabled=True, tooltip=translations.get('open_terrain_input_dir_tooltip',
-                                                           'Open directory where downloaded terrain tiles should be located'))
-         ],
-        [sg.Text(translations.get('use_terrain_src_dir', 'Use terrain source directory'),
-                 key='use_terrain_src_dir_text',
-                 size=(30, 1), text_color="#B6B4C3",
-                 justification='l',
-                 tooltip=translations.get('use_terrain_src_dir_tooltip',
-                                          'Use directory with world/continent terrain')),
-         sg.Radio('', "RADIO2", key=terrain_radio_keys[0], change_submits=True, size=(1, 1)),
-         # sg.Checkbox('', key="get_terrain_tiles", size=(1, 1), default=False, change_submits=True),
-         sg.Input(default_text='', key='terrain_src_dir', size=(45, 1),
-                  tooltip=translations.get('use_terrain_src_dir_tooltip',
-                                           'Use directory with world/continent terrain'), change_submits=True, disabled=True)] +
-        [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='terrain_src_dir_browse',
-                         size=(10, 1), disabled=True,
-                         tooltip=translations.get('terrain_src_dir_browse_tooltip',
-                                                  'Select directory'))]
-
+        [sg.Frame(layout=[
+            [sg.Text(translations.get('download_terrain_tiles_manually', 'Download terrain manually'),
+                     key='download_terrain_tiles_manually_text', text_color="#B6B4C3",
+                     size=(30, 1), justification='l',
+                     tooltip=translations.get('download_terrain_tiles_manually_tooltip',
+                                              'Please manually download terrain data for chosen area'))] +
+            [sg.Radio('', "RADIO2", key=terrain_radio_keys[2], change_submits=True, size=(1, 1))] +
+            [sg.Input(key='terrain_input_dir',
+                      size=(45, 1), readonly=True, text_color='white', disabled_readonly_background_color='#5C715E')] +
+            [sg.Button(key="open_terrain_input_dir", size=(10, 1), button_text=translations.get('open', 'Open'),
+                       disabled=True, tooltip=translations.get('open_terrain_input_dir_tooltip',
+                                                               'Open directory where downloaded terrain tiles should be located'))
+             ],
+            [sg.Text(translations.get('use_terrain_src_dir', 'Use terrain source directory'),
+                     key='use_terrain_src_dir_text',
+                     size=(30, 1), text_color="#B6B4C3",
+                     justification='l',
+                     tooltip=translations.get('use_terrain_src_dir_tooltip',
+                                              'Use directory with world/continent terrain')),
+             sg.Radio('', "RADIO2", key=terrain_radio_keys[0], change_submits=True, size=(1, 1)),
+             sg.Input(default_text='', key='terrain_src_dir', size=(45, 1),
+                      tooltip=translations.get('use_terrain_src_dir_tooltip',
+                                               'Use directory with world/continent terrain'), change_submits=True,
+                      disabled=True)] +
+            [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='terrain_src_dir_browse',
+                             size=(10, 1), disabled=True,
+                             tooltip=translations.get('terrain_src_dir_browse_tooltip',
+                                                      'Select directory'))]
+        ], title='', key='terrain_extended_frame', visible=False, pad=(0, 0), border_width=0
+        )]
         # [sg.Checkbox('', key="download_terrain_tiles", size=(10, 1), default=False, disabled=True,
         #              change_submits=True)]
     ], title='', element_justification="left",
         border_width=1,
         relief=sg.RELIEF_SUNKEN)]
 ]
-layout += [[sg.Text(translations.get('constructed_command_line', 'Command line') + ":",
-                    key='constructed_command_line_text')],
-           [sg.Text(size=(105, 6), key='command_line', text_color='yellow', font='Courier 8',
-                    right_click_menu=['&Right', ['Copy']])],
-           [sg.MLine(size=(105, 10), reroute_stdout=True, reroute_stderr=True, reroute_cprint=True, write_only=True,
-                     font='Courier 8', autoscroll=True, key='-ML-')],
-           [sg.Frame(layout=[
-               [sg.Checkbox('', key="run_chain", size=(1, 1), default=True, visible=False)] +
-               [sg.Button(translations.get('start', 'Run everything'), button_color=('white', '#05710F'),
-                          key="start",
-                          tooltip=translations.get('start_tooltip', 'Initialize project'), disabled=True,
-                          size=(13, 1))
-                ]], title='', element_justification="left",
-               border_width=1,
-               relief=sg.RELIEF_SUNKEN)] +
-           [sg.Frame(layout=[
-               [sg.Button(translations.get('populate_db', 'Populate DB'), key="populate_db",
-                          tooltip=translations.get('populate_db_tooltip',
-                                                   'Populate Overpass database (populate_db)'), size=(13, 1),
-                          disabled=True),
-                sg.Button(translations.get('prepare_data', 'Prepare data'), key="prepare_data",
-                          tooltip=translations.get('prepare_data_tooltip',
-                                                   'Prepare data for project (prepare_data)'), size=(16, 1),
-                          disabled=True),
-                sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis", disabled=True,
-                          tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
-                          size=(13, 1))
-                ]], title='', element_justification="left",
-               border_width=1,
-               relief=sg.RELIEF_SUNKEN)] +
-           [sg.Button(translations.get('exit', 'Exit'), key="exit", size=(10, 1))]
-           ]
+layout += [
+    [sg.Frame(layout=[
+        [sg.Text(translations.get('constructed_command_line', 'Command line') + ":",
+                 key='constructed_command_line_text')],
+        [sg.Text(size=(105, 6), key='command_line', text_color='yellow', font='Courier 8',
+                 right_click_menu=['&Right', ['Copy']])],
+    ], title='', key='command_line_frame', visible=False, pad=(0, 0), border_width=0
+    )],
+    [sg.MLine(size=(105, 10), reroute_stdout=True, reroute_stderr=True, reroute_cprint=True, write_only=True,
+              font='Courier 8', autoscroll=True, key='-ML-')],
+    [sg.Frame(layout=[
+        [sg.Checkbox('', key="run_chain", size=(1, 1), default=True, visible=False)] +
+        [sg.Button(translations.get('start', 'Run everything'), button_color=('white', '#05710F'),
+                   key="start",
+                   tooltip=translations.get('start_tooltip', 'Initialize project'), disabled=True,
+                   size=(13, 1))
+         ]], title='', element_justification="left",
+        border_width=1,
+        relief=sg.RELIEF_SUNKEN)] +
+    [sg.Frame(layout=[
+            [sg.Frame(layout=[
+                [sg.Button(translations.get('populate_db', 'Populate DB'), key="populate_db",
+                           tooltip=translations.get('populate_db_tooltip',
+                                                    'Populate Overpass database (populate_db)'), size=(13, 1),
+                           disabled=True),
+                 sg.Button(translations.get('prepare_data', 'Prepare data'), key="prepare_data",
+                           tooltip=translations.get('prepare_data_tooltip',
+                                                    'Prepare data for project (prepare_data)'), size=(16, 1),
+                           disabled=True)
+                 ]
+                ], title='', key='process_buttons_frame', visible=False, pad=(0, 0), border_width=0)]+
+            [sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis", disabled=True,
+                  tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
+                  size=(13, 1))]
+    ], title='', element_justification="left",
+        border_width=1,
+        relief=sg.RELIEF_SUNKEN)] +
+    [sg.Button(translations.get('exit', 'Exit'), key="exit", size=(10, 1))]
+]
 
 window = sg.Window('QGIS-xtopo-GUI', layout, finalize=True, icon=logo_icon, location=(200, 100))
 
@@ -293,17 +313,24 @@ def main():
         window.Elem('button_en').update(visible=False)
 
     qgis_projects_dir_read = read_user_config("qgis_projects_dir")
+    extended_settings = read_user_config("extended_settings")
     if qgis_projects_dir_read:
         window.Elem('qgis_projects_dir').update(qgis_projects_dir_read)
+    if extended_settings == "True":
+        window.Elem('extended_settings').update(value=extended_settings)
+        switch_layout_extended_settings(extended_settings)
 
     timer_running, counter = True, 0
     i = 0
     while True:
         event, values = window.read(timeout=300)
-        config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
-        config_path = config_dir + slash_str + "config.ini"
-        populate_db_flag_path = config_dir + slash_str + "err_populate_db.flag"
-        prepare_data_flag_path = config_dir + slash_str + "err_prepare_data.flag"
+        if values:
+            config_dir = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config"
+            config_path = config_dir + slash_str + "config.ini"
+            populate_db_flag_path = config_dir + slash_str + "err_populate_db.flag"
+            prepare_data_flag_path = config_dir + slash_str + "err_prepare_data.flag"
+        else:
+            break
         if os.name == "nt":
             if os.path.isfile(populate_db_flag_path):
                 raise_docker_errors(populate_db_flag_path, '')
@@ -371,7 +398,8 @@ def main():
             if os.path.isfile(temp_dir + slash_str + "config.original"):
                 copyfile(temp_dir + slash_str + "config.original", config_path)
             read_config_update_ui(values, values["qgis_projects_dir"] + slash_str + "qgisxtopo-config", False)
-            window.Elem('terrain_input_dir').update(get_terrain_input_dir({'qgis_projects_dir': qgis_projects_dir_default, 'project_name': project_name_default}))
+            window.Elem('terrain_input_dir').update(get_terrain_input_dir(
+                {'qgis_projects_dir': qgis_projects_dir_default, 'project_name': project_name_default}))
         if event == 'button_ru':
             translations = get_translations("ru")
             update_layout_translations(values)
@@ -382,6 +410,9 @@ def main():
             update_layout_translations(values)
             window.Elem('button_ru').update(visible=True)
             window.Elem('button_en').update(visible=False)
+        if event == 'extended_settings':
+            update_user_config('extended_settings', str(values['extended_settings']))
+            switch_layout_extended_settings(values['extended_settings'])
         if event == 'bbox':
             update_layout_calc_tiles_list(values['bbox'])
         if event == 'Paste bbox':
@@ -437,7 +468,8 @@ def main():
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
             if values['generate_terrain'] and values[terrain_radio_keys[2]]:  # 'download_terrain_tiles_manually'
                 window.Elem('open_terrain_input_dir').update(disabled=False)
-            if not values[terrain_radio_keys[0]] and not values[terrain_radio_keys[1]] and not values[terrain_radio_keys[2]]:
+            if not values[terrain_radio_keys[0]] and not values[terrain_radio_keys[1]] and not values[
+                terrain_radio_keys[2]]:
                 window.Elem(terrain_radio_keys[1]).update(True)
         if event == terrain_radio_keys[0]:  # 'get_terrain_tiles':
             if values[terrain_radio_keys[0]]:
@@ -560,7 +592,8 @@ def update_user_config(setting, value):
         try:
             os.mkdir(user_config_dir)
         except Exception:
-            print(translations.get('cant_create_user_config_error', 'Can not create user config directory') + ' ' + user_config_dir)
+            print(translations.get('cant_create_user_config_error',
+                                   'Can not create user config directory') + ' ' + user_config_dir)
         if value:
             filedata = []
             filedata.append(setting + "=" + value)
@@ -755,8 +788,10 @@ def init_docker(run_chain, values):
     if docker_installed:
         if "qgis-xtopo" in str(
                 subprocess.check_output(['docker', 'ps'], stdin=subprocess.PIPE, stderr=subprocess.STDOUT)):
-            populate_db_flag_path = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_populate_db.flag"
-            prepare_data_flag_path = values["qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_prepare_data.flag"
+            populate_db_flag_path = values[
+                                        "qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_populate_db.flag"
+            prepare_data_flag_path = values[
+                                         "qgis_projects_dir"] + slash_str + "qgisxtopo-config" + slash_str + "err_prepare_data.flag"
             if os.name == "posix":
                 run_chain_filename = ''
                 if run_chain:
@@ -768,8 +803,9 @@ def init_docker(run_chain, values):
                     f = open(run_chain_filename, "w+", encoding='utf8')
                     f.write("#!/bin/bash\n")
                     f.write("docker exec --user user qgis-xtopo /app/init_docker.sh\n")
-                    f.write("if [[ ! -f " + populate_db_flag_path + " ]] && [[ ! -f " + prepare_data_flag_path + " ]] ; "
-                                                                                                                "then\n")
+                    f.write(
+                        "if [[ ! -f " + populate_db_flag_path + " ]] && [[ ! -f " + prepare_data_flag_path + " ]] ; "
+                                                                                                             "then\n")
                     f.write("xhost +local:docker\n")
                     f.write("docker exec -it --user user qgis-xtopo /app/exec_qgis.sh\n")
                     f.write("fi\n")
@@ -788,7 +824,8 @@ def init_docker(run_chain, values):
                     subprocess.Popen(
                         ['cmd', '/c start /wait cmd /c docker exec --user user qgis-xtopo /app/init_docker.sh'],
                         shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).wait()
-                    if run_chain and (not os.path.isfile(populate_db_flag_path) and not os.path.isfile(prepare_data_flag_path)):
+                    if run_chain and (
+                            not os.path.isfile(populate_db_flag_path) and not os.path.isfile(prepare_data_flag_path)):
                         run_qgis()
 
 
@@ -798,9 +835,12 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
         populate_db_error_code = f.read(1)
         if populate_db_error_code:
             if int(populate_db_error_code) == 1:
-                sg.Popup(translations.get('cropped_extract_is_empty_error', 'Cropped extract is empty. Check that bounding box matches the OSM data area.'), title=translations.get('error', 'Error'))
+                sg.Popup(translations.get('cropped_extract_is_empty_error',
+                                          'Cropped extract is empty. Check that bounding box matches the OSM data area.'),
+                         title=translations.get('error', 'Error'))
             else:
-                sg.Popup(translations.get('populating_db_error', 'Error populating Overpass database'), title=translations.get('error', 'Error'))
+                sg.Popup(translations.get('populating_db_error', 'Error populating Overpass database'),
+                         title=translations.get('error', 'Error'))
         if os.name == "posix":
             try:
                 os.remove(populate_db_flag_path)
@@ -811,7 +851,8 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
         prepare_data_error_code = f.read(1)
         if prepare_data_error_code:
             if int(prepare_data_error_code) == 1:
-                sg.Popup(translations.get('osmtogeojson_error', 'osmtogeojson error. Try reducing bbox.'), title=translations.get('error', 'Error'))
+                sg.Popup(translations.get('osmtogeojson_error', 'osmtogeojson error. Try reducing bbox.'),
+                         title=translations.get('error', 'Error'))
             else:
                 if int(prepare_data_error_code) == 2:
                     sg.Popup(translations.get('vector_data_incomplete_error', 'Vector data is incomplete. It looks '
@@ -848,10 +889,13 @@ def raise_docker_errors(populate_db_flag_path, prepare_data_flag_path):
                                     else:
                                         if int(prepare_data_error_code) == 8:
                                             sg.Popup(
-                                                translations.get('replacing_extent_error', 'Error replacing project extent by bbox'),
+                                                translations.get('replacing_extent_error',
+                                                                 'Error replacing project extent by bbox'),
                                                 title=translations.get('error', 'Error'))
                                         else:
-                                            sg.Popup(translations.get('data_preparation_error', 'Data preparation error. Check parameters.'), title=translations.get('error', 'Error'))
+                                            sg.Popup(translations.get('data_preparation_error',
+                                                                      'Data preparation error. Check parameters.'),
+                                                     title=translations.get('error', 'Error'))
         if os.name == "posix":
             try:
                 os.remove(prepare_data_flag_path)
@@ -1000,7 +1044,7 @@ def read_config_update_ui(values, config_dir, init):
 
 def get_working_repo_name():
     if os.path.isfile('config_debug.ini') or os.path.isfile('./../config_debug.ini'):
-        if os.name == "posix": # Debug with local docker image is only for Linux
+        if os.name == "posix":  # Debug with local docker image is only for Linux
             return 'qgis-xtopo'
         else:
             return remote_repo_name
@@ -1084,12 +1128,28 @@ def switch_layout_terrain(generate_terrain):
     window.Elem('open_terrain_input_dir').update(disabled=True)
 
 
+def switch_layout_extended_settings(extended_settings):
+    if extended_settings:
+        window.Elem('overpass_external_frame').update(visible=True)
+        window.Elem('terrain_extended_frame').update(visible=True)
+        window.Elem('command_line_frame').update(visible=True)
+        window.Elem('process_buttons_frame').update(visible=True)
+
+    else:
+        window.Elem('overpass_external_frame').update(visible=False)
+        window.Elem('terrain_extended_frame').update(visible=False)
+        window.Elem('command_line_frame').update(visible=False)
+        window.Elem('process_buttons_frame').update(visible=False)
+
+
 def get_setting(config_path, setting, config_original_path):
     value = read_setting(config_path, setting)
     if setting != 'terrain_src_dir_gui':
         if not value:
             if setting != 'bbox':
-                print(setting + " " + translations.get("not_found_in", "not found in") + " " + config_path + ". " + translations.get("go_back_default_setting", "Go back to the default setting."))
+                print(setting + " " + translations.get("not_found_in",
+                                                       "not found in") + " " + config_path + ". " + translations.get(
+                    "go_back_default_setting", "Go back to the default setting."))
                 return read_setting(config_original_path, setting).lower().strip()
             else:
                 return ''
