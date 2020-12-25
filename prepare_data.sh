@@ -322,7 +322,7 @@ if [[ $generate_terrain == "true" ]] ; then
 			rm -f "$raster_data_dir"/slope.tif
 			rm -f "$raster_data_dir"/slope_cut.tif
 
-			echo -e "\e[104m=== Generating hillshade...\e[49m"
+			echo -e "\e[104m=== Generating hillshade using terrain_resample_method=$terrain_resample_method\e[49m"
 			size_str=$(gdalinfo "$raster_data_dir"/merged_dem.tif | grep "Size is" | sed 's/Size is //g')
 			width=$(echo $size_str | sed 's/,.*//')
 			height=$(echo $size_str | sed 's/.*,//')
@@ -354,7 +354,7 @@ if [[ $generate_terrain == "true" ]] ; then
 
 		if [[ $generate_terrain_isolines == "true" ]] ; then
 			rm -f "$vector_data_dir"/isolines_full.sqlite
-			echo -e "\e[104m=== Generating isolines...\e[49m"
+			echo -e "\e[104m=== Generating isolines using isolines_step=$isolines_step\e[49m"
 			if [[ $smooth_isolines == "true" ]] ; then
 				isolines_source="merged_dem_upscaled.tif"
 			else
