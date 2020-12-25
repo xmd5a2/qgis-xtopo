@@ -1,5 +1,5 @@
 #!/bin/bash
-while getopts ":n:d:b:t:o:sxgv:" opt; do
+while getopts ":n:d:b:t:o:sxgv:im" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
@@ -21,9 +21,13 @@ while getopts ":n:d:b:t:o:sxgv:" opt; do
     ;;
     x) RUN_CHAIN=true
     ;;
-    g) generate_terrain="$OPTARG"
+    g) generate_terrain=true
     ;;
     v) OVERPASS_ENDPOINT_EXTERNAL="$OPTARG"
+    ;;
+    i) generate_terrain_isolines=true
+    ;;
+    m) smooth_isolines=true
     ;;
     \?) echo -e "\033[91mInvalid option -$OPTARG\033[0m" >&2
     ;;
@@ -118,6 +122,7 @@ fi
 if [[ -d "$qgis_projects_dir" ]] ; then
 	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE=$OVERPASS_INSTANCE \
 		-e GENERATE_TERRAIN=$generate_terrain -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN \
+		-e GENERATE_TERRAIN_ISOLINES=$generate_terrain_isolines -e SMOOTH_ISOLINES=$smooth_isolines \
 		-e OVERPASS_ENDPOINT_EXTERNAL=$OVERPASS_ENDPOINT_EXTERNAL \
 		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str -e DISPLAY \
 		--name qgis-xtopo \

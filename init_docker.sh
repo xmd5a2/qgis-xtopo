@@ -35,6 +35,12 @@ if [[ -d /mnt/terrain ]] ; then
 else
 	string_list+="get_terrain_tiles==false"
 fi
+if [[ ! -z $GENERATE_TERRAIN_ISOLINES ]] ; then
+	string_list+="generate_terrain_isolines==${GENERATE_TERRAIN_ISOLINES}|"
+fi
+if [[ ! -z $SMOOTH_ISOLINES ]] ; then
+	string_list+="smooth_isolines==${SMOOTH_ISOLINES}|"
+fi
 
 python3 /app/update_config.py -str_in "$string_list"
 

@@ -60,6 +60,8 @@ free_space_tooltip=Free space on selected disk drive
 gb=Gb
 switch_language=Switch language
 extended_settings_tooltip=Extended settings. Use with caution!
+generate_terrain_isolines=Generate terrain isolines
+smooth_isolines=Smooth isolines
 
 error=Error
 warning=Warning

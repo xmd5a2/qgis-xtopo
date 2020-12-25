@@ -251,7 +251,17 @@ layout = [
             [sg.FolderBrowse(button_text=translations.get('browse', 'Browse'), key='terrain_src_dir_browse',
                              size=(10, 1), disabled=True,
                              tooltip=translations.get('terrain_src_dir_browse_tooltip',
-                                                      'Select directory'))]
+                                                      'Select directory'))],
+            [sg.Frame(layout=[
+                [sg.Text(translations.get('generate_terrain_isolines', 'Generate terrain isolines'),
+                         key='generate_terrain_isolines_text', size=(21, 1), justification='l', text_color="#B6B4C3")] +
+                [sg.Checkbox('', key="generate_terrain_isolines", size=(10, 1), default=True, disabled=True, change_submits=True)],
+                [sg.Text(translations.get('smooth_isolines', 'Smooth isolines'),
+                         key='smooth_isolines_text', size=(21, 1), justification='l', text_color="#B6B4C3")] +
+                [sg.Checkbox('', key="smooth_isolines", size=(10, 1), default=False, disabled=True, change_submits=True)]
+            ], title='', size=(650, 0), key='isolines_frame'
+            )],
+
         ], title='', key='terrain_extended_frame', visible=False, pad=(0, 0), border_width=0
         )]
         # [sg.Checkbox('', key="download_terrain_tiles", size=(10, 1), default=False, disabled=True,
@@ -280,20 +290,20 @@ layout += [
         border_width=1,
         relief=sg.RELIEF_SUNKEN)] +
     [sg.Frame(layout=[
-            [sg.Frame(layout=[
-                [sg.Button(translations.get('populate_db', 'Populate DB'), key="populate_db",
-                           tooltip=translations.get('populate_db_tooltip',
-                                                    'Populate Overpass database (populate_db)'), size=(13, 1),
-                           disabled=True),
-                 sg.Button(translations.get('prepare_data', 'Prepare data'), key="prepare_data",
-                           tooltip=translations.get('prepare_data_tooltip',
-                                                    'Prepare data for project (prepare_data)'), size=(16, 1),
-                           disabled=True)
-                 ]
-                ], title='', key='process_buttons_frame', visible=False, pad=(0, 0), border_width=0)]+
-            [sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis", disabled=True,
-                  tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
-                  size=(13, 1))]
+        [sg.Frame(layout=[
+            [sg.Button(translations.get('populate_db', 'Populate DB'), key="populate_db",
+                       tooltip=translations.get('populate_db_tooltip',
+                                                'Populate Overpass database (populate_db)'), size=(13, 1),
+                       disabled=True),
+             sg.Button(translations.get('prepare_data', 'Prepare data'), key="prepare_data",
+                       tooltip=translations.get('prepare_data_tooltip',
+                                                'Prepare data for project (prepare_data)'), size=(16, 1),
+                       disabled=True)
+             ]
+        ], title='', key='process_buttons_frame', visible=False, pad=(0, 0), border_width=0)] +
+        [sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis", disabled=True,
+                   tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
+                   size=(13, 1))]
     ], title='', element_justification="left",
         border_width=1,
         relief=sg.RELIEF_SUNKEN)] +
@@ -462,7 +472,7 @@ def main():
         if event == 'open_osm_sbin':
             webbrowser.open(r'http://osm.sbin.ru/osm_dump/')
         if event == 'generate_terrain':
-            switch_layout_terrain(values['generate_terrain'])
+            switch_layout_terrain(values['generate_terrain'], values['generate_terrain_isolines'])
             if values['generate_terrain'] and values[terrain_radio_keys[0]]:  # 'get_terrain_tiles'
                 window.Elem('terrain_src_dir').update(disabled=False)
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
@@ -499,6 +509,13 @@ def main():
             if not os.path.isdir(terrain_input_dir):
                 os.makedirs(terrain_input_dir, exist_ok=True)
             webbrowser.open(os.path.realpath(terrain_input_dir))
+        if event == 'generate_terrain_isolines':
+            if values['generate_terrain_isolines']:
+                window.Elem('smooth_isolines').update(disabled=False)
+                window.Elem('smooth_isolines_text').update(text_color="white")
+            else:
+                window.Elem('smooth_isolines').update(disabled=True)
+                window.Elem('smooth_isolines_text').update(text_color="#B6B4C3")
         if event == 'Copy':
             if command:
                 pyperclip.copy(command)
@@ -1019,15 +1036,26 @@ def read_config_update_ui(values, config_dir, init):
                 window.Elem('overpass_endpoint_external').update(disabled=False)
         if get_setting(config_path, "generate_terrain", config_original_path) == "true":
             window.Elem('generate_terrain').update(value=True)
-            switch_layout_terrain(True)
+            switch_layout_terrain(True, '')
             if get_setting(config_path, "download_terrain_tiles", config_original_path) == "false" and get_setting(
                     config_path,
                     "get_terrain_tiles",
                     config_original_path) == "false":
                 window.Elem('download_terrain_tiles_manually').update(value=True)
+            if get_setting(config_path, "generate_terrain_isolines", config_original_path) == "true":
+                window.Elem('smooth_isolines').update(disabled=False)
+                window.Elem('smooth_isolines_text').update(text_color="white")
         else:
             window.Elem('generate_terrain').update(value=False)
-            switch_layout_terrain(False)
+            switch_layout_terrain(False, '')
+        if get_setting(config_path, "generate_terrain_isolines", config_original_path) == "true":
+            window.Elem('generate_terrain_isolines').update(value=True)
+        else:
+            window.Elem('generate_terrain_isolines').update(value=False)
+        if get_setting(config_path, "smooth_isolines", config_original_path) == "true":
+            window.Elem('smooth_isolines').update(value=True)
+        else:
+            window.Elem('smooth_isolines').update(value=False)
         if get_setting(config_path, "get_terrain_tiles", config_original_path) == "true":
             window.Elem('get_terrain_tiles').update(value=True)
             window.Elem('terrain_src_dir').update(disabled=False)
@@ -1083,6 +1111,10 @@ def update_layout_translations(values):
     window.Elem('calc_tiles_list_text').update(translations.get('calc_tiles_list', 'List of required terrain tiles'))
     window.Elem('total_text').update(translations.get('total', 'Total') + ": ")
     window.Elem('generate_terrain_text').update(translations.get('generate_terrain', 'Process terrain'))
+    window.Elem('generate_terrain_isolines_text').update(
+        translations.get('generate_terrain_isolines', 'Generate terrain isolines'))
+    window.Elem('smooth_isolines_text').update(
+        translations.get('smooth_isolines', 'Smooth isolines'))
     window.Elem('download_terrain_tiles_manually_text').update(
         translations.get('download_terrain_tiles_manually', 'Manually download terrain'))
     window.Elem('download_terrain_tiles_text').update(
@@ -1105,7 +1137,7 @@ def update_layout_translations(values):
         str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
 
 
-def switch_layout_terrain(generate_terrain):
+def switch_layout_terrain(generate_terrain, generate_terrain_isolines):
     if generate_terrain:
         window.Elem('use_terrain_src_dir_text').update(text_color="white")
         window.Elem('terrain_src_dir').update(disabled=True)
@@ -1116,6 +1148,11 @@ def switch_layout_terrain(generate_terrain):
         window.Elem('download_terrain_tiles_manually').update(disabled=False)
         window.Elem('download_terrain_tiles_manually_text').update(text_color="white")
         window.Elem('open_terrain_input_dir').update(disabled=True)
+        window.Elem('generate_terrain_isolines_text').update(text_color="white")
+        window.Elem('generate_terrain_isolines').update(disabled=False)
+        if generate_terrain_isolines:
+            window.Elem('smooth_isolines_text').update(text_color="white")
+            window.Elem('smooth_isolines').update(disabled=False)
     else:
         window.Elem('use_terrain_src_dir_text').update(text_color="#B6B4C3")
         window.Elem('terrain_src_dir').update(disabled=True)
@@ -1125,6 +1162,10 @@ def switch_layout_terrain(generate_terrain):
         window.Elem('download_terrain_tiles_text').update(text_color="#B6B4C3")
         window.Elem('download_terrain_tiles_manually').update(disabled=True)
         window.Elem('download_terrain_tiles_manually_text').update(text_color="#B6B4C3")
+        window.Elem('generate_terrain_isolines_text').update(text_color="#B6B4C3")
+        window.Elem('generate_terrain_isolines').update(disabled=True)
+        window.Elem('smooth_isolines_text').update(text_color="#B6B4C3")
+        window.Elem('smooth_isolines').update(disabled=True)
     window.Elem('open_terrain_input_dir').update(disabled=True)
 
 
@@ -1214,6 +1255,8 @@ def compose_params(values, run_chain):
     download_terrain_tiles = values['download_terrain_tiles']
     qgis_projects_dir = values['qgis_projects_dir']
     use_terrain_src_dir = values['get_terrain_tiles']
+    generate_terrain_isolines = values['generate_terrain_isolines']
+    smooth_isolines = values['smooth_isolines']
 
     params = 'run -dti --rm '
     if project_name:
@@ -1224,6 +1267,8 @@ def compose_params(values, run_chain):
     if values[r_keys[1]]:
         params += f"-e OVERPASS_ENDPOINT_EXTERNAL=\"{values['overpass_endpoint_external']}\" "
     params += f"-e GENERATE_TERRAIN={str(generate_terrain).lower()} "
+    params += f"-e GENERATE_TERRAIN_ISOLINES={str(generate_terrain_isolines).lower()} "
+    params += f"-e SMOOTH_ISOLINES={str(smooth_isolines).lower()} "
     params += f"-e DOWNLOAD_TERRAIN_DATA={str(download_terrain_tiles).lower()} "
     if run_chain:
         params += f"-e RUN_CHAIN={str(run_chain).lower()} "
