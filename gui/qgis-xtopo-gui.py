@@ -69,11 +69,13 @@ local_repo_name = 'qgis-xtopo'
 user_config_dir = appdirs.user_config_dir() + slash_str + "qgisxtopo"
 user_config_filename = "settings.ini"
 user_config_path = user_config_dir + slash_str + user_config_filename
+temp_dir = tempfile.gettempdir()
+config_original_path = temp_dir + slash_str + "config.original"
 r_keys = ['docker', 'external']
 terrain_radio_keys = ['get_terrain_tiles', 'download_terrain_tiles', 'download_terrain_tiles_manually']
 translations = get_translations(default_locale)
 qgis_projects_dir_default = str(str(os.path.expanduser('~'))) + slash_str + "qgis_projects"
-temp_dir = tempfile.gettempdir()
+
 project_name_default = 'automap'
 if not is_tool("docker"):
     sg.Popup(translations.get('docker_not_installed_error', 'Docker is not installed. Nothing will work.'),
@@ -216,7 +218,7 @@ layout = [
                  size=(3, 1), justification='l'),
          ],
         [sg.Text(translations.get('generate_terrain', 'Process terrain'),
-                 key='generate_terrain_text', size=(22, 1), justification='l')] +
+                 key='generate_terrain_text', size=(22, 1), font="default 10 bold",  justification='l')] +
         [sg.Checkbox('', key="generate_terrain", size=(10, 1), default=False, change_submits=True)],
         [sg.Text(translations.get('download_terrain_tiles', 'Download terrain automatically'),
                  key='download_terrain_tiles_text', text_color="#B6B4C3",
@@ -254,18 +256,19 @@ layout = [
                                                       'Select directory'))],
             [sg.Frame(layout=[
                 [sg.Text(translations.get('generate_terrain_isolines', 'Generate terrain isolines'),
-                         key='generate_terrain_isolines_text', size=(21, 1), justification='l', text_color="#B6B4C3")] +
+                         key='generate_terrain_isolines_text', tooltip=translations.get('generate_terrain_isolines_tooltip', 'Create contours of heights (isohypses)'),
+                         size=(21, 1), justification='l', font="default 10 bold", text_color="#B6B4C3")] +
                 [sg.Checkbox('', key="generate_terrain_isolines", size=(10, 1), default=True, disabled=True, change_submits=True)],
-                [sg.Text(translations.get('smooth_isolines', 'Smooth isolines'),
-                         key='smooth_isolines_text', size=(21, 1), justification='l', text_color="#B6B4C3")] +
-                [sg.Checkbox('', key="smooth_isolines", size=(10, 1), default=False, disabled=True, change_submits=True)]
+                [sg.Text(translations.get('smooth_isolines', 'Smooth isolines'), tooltip=translations.get('smooth_isolines_tooltip', 'Smooth contours to make them less angular'),
+                         key='smooth_isolines_text', size=(29, 1), justification='l', text_color="#B6B4C3")] +
+                [sg.Checkbox('', key="smooth_isolines", size=(10, 1), default=False, disabled=True, change_submits=True)],
+                [sg.Text(translations.get('isolines_step', 'Isolines step'), tooltip=translations.get('isolines_step_tooltip', 'Used at the generation stage. This is the smallest step that can be displayed.'),
+                         key='isolines_step_text', size=(30, 1), justification='l', text_color="#B6B4C3")] +
+                [sg.Combo(('5', '10', '25', '50', '100'), key='isolines_step', default_value='10', disabled=True, size=(4, 1))]
             ], title='', size=(650, 0), key='isolines_frame'
             )],
-
         ], title='', key='terrain_extended_frame', visible=False, pad=(0, 0), border_width=0
         )]
-        # [sg.Checkbox('', key="download_terrain_tiles", size=(10, 1), default=False, disabled=True,
-        #              change_submits=True)]
     ], title='', element_justification="left",
         border_width=1,
         relief=sg.RELIEF_SUNKEN)]
@@ -404,9 +407,9 @@ def main():
                 os.remove(config_path)
             except FileNotFoundError:
                 pass
-            copy_config_original(temp_dir)
-            if os.path.isfile(temp_dir + slash_str + "config.original"):
-                copyfile(temp_dir + slash_str + "config.original", config_path)
+            copy_config_original(config_original_path)
+            if os.path.isfile(config_original_path):
+                copyfile(config_original_path, config_path)
             read_config_update_ui(values, values["qgis_projects_dir"] + slash_str + "qgisxtopo-config", False)
             window.Elem('terrain_input_dir').update(get_terrain_input_dir(
                 {'qgis_projects_dir': qgis_projects_dir_default, 'project_name': project_name_default}))
@@ -513,9 +516,13 @@ def main():
             if values['generate_terrain_isolines']:
                 window.Elem('smooth_isolines').update(disabled=False)
                 window.Elem('smooth_isolines_text').update(text_color="white")
+                window.Elem('isolines_step').update(disabled=False)
+                window.Elem('isolines_step_text').update(text_color="white")
             else:
                 window.Elem('smooth_isolines').update(disabled=True)
                 window.Elem('smooth_isolines_text').update(text_color="#B6B4C3")
+                window.Elem('isolines_step').update(disabled=True)
+                window.Elem('isolines_step_text').update(text_color="#B6B4C3")
         if event == 'Copy':
             if command:
                 pyperclip.copy(command)
@@ -1003,7 +1010,6 @@ def get_terminal_name():
 
 def read_config_update_ui(values, config_dir, init):
     config_path = config_dir + slash_str + "config.ini"
-    config_original_path = temp_dir
     if not os.path.isfile(config_original_path) or os.stat(config_original_path).st_size < 1:
         copy_config_original(config_original_path)
     if not os.path.isfile(config_path):
@@ -1018,6 +1024,11 @@ def read_config_update_ui(values, config_dir, init):
         overpass_instance_config = get_setting(config_path, "overpass_instance", config_original_path)
         overpass_endpoint_external = get_setting(config_path, "overpass_endpoint_external", config_original_path)
         terrain_src_dir_gui_setting = get_setting(config_path, 'terrain_src_dir_gui', config_original_path)
+        try:
+            isolines_step = int(get_setting(config_path, "isolines_step", config_original_path))
+        except ValueError:
+            isolines_step = 10
+
         if overpass_instance_config == "docker":
             window.Elem('docker').update(value=True)
             window.Elem('external').update(value=False)
@@ -1045,6 +1056,12 @@ def read_config_update_ui(values, config_dir, init):
             if get_setting(config_path, "generate_terrain_isolines", config_original_path) == "true":
                 window.Elem('smooth_isolines').update(disabled=False)
                 window.Elem('smooth_isolines_text').update(text_color="white")
+                window.Elem('isolines_step').update(disabled=False)
+                window.Elem('isolines_step_text').update(text_color="white")
+            if get_setting(config_path, "smooth_isolines", config_original_path) == "true":
+                window.Elem('smooth_isolines').update(value=True)
+            else:
+                window.Elem('smooth_isolines').update(value=False)
         else:
             window.Elem('generate_terrain').update(value=False)
             switch_layout_terrain(False, '')
@@ -1052,10 +1069,8 @@ def read_config_update_ui(values, config_dir, init):
             window.Elem('generate_terrain_isolines').update(value=True)
         else:
             window.Elem('generate_terrain_isolines').update(value=False)
-        if get_setting(config_path, "smooth_isolines", config_original_path) == "true":
-            window.Elem('smooth_isolines').update(value=True)
-        else:
-            window.Elem('smooth_isolines').update(value=False)
+
+        window.Elem('isolines_step').update(value=isolines_step)
         if get_setting(config_path, "get_terrain_tiles", config_original_path) == "true":
             window.Elem('get_terrain_tiles').update(value=True)
             window.Elem('terrain_src_dir').update(disabled=False)
@@ -1089,8 +1104,8 @@ def copy_config_original(config_original_path):
     config_original = subprocess.check_output(['docker', 'exec', 'qgis-xtopo', 'cat', '/app/config.ini'],
                                               stdin=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
-        if os.path.isfile(config_original_path + slash_str + "config.original"):
-            os.remove(config_original_path + slash_str + "config.original")
+        if os.path.isfile(config_original_path):
+            os.remove(config_original_path)
     except FileNotFoundError:
         pass
     config_original_filedata = config_original.decode("utf-8").splitlines()
@@ -1098,7 +1113,7 @@ def copy_config_original(config_original_path):
     for i in range(len(config_original_filedata)):
         config_original_new_filedata.append(config_original_filedata[i])
     config_original_new_filedata = list_to_string_file(config_original_new_filedata)
-    with open(config_original_path + slash_str + "config.original", 'w', encoding='utf8') as file:
+    with open(config_original_path, 'w', encoding='utf8') as file:
         file.write(config_original_new_filedata)
 
 
@@ -1153,6 +1168,8 @@ def switch_layout_terrain(generate_terrain, generate_terrain_isolines):
         if generate_terrain_isolines:
             window.Elem('smooth_isolines_text').update(text_color="white")
             window.Elem('smooth_isolines').update(disabled=False)
+            window.Elem('isolines_step_text').update(text_color="white")
+            window.Elem('isolines_step').update(disabled=False)
     else:
         window.Elem('use_terrain_src_dir_text').update(text_color="#B6B4C3")
         window.Elem('terrain_src_dir').update(disabled=True)
@@ -1166,6 +1183,8 @@ def switch_layout_terrain(generate_terrain, generate_terrain_isolines):
         window.Elem('generate_terrain_isolines').update(disabled=True)
         window.Elem('smooth_isolines_text').update(text_color="#B6B4C3")
         window.Elem('smooth_isolines').update(disabled=True)
+        window.Elem('isolines_step_text').update(text_color="#B6B4C3")
+        window.Elem('isolines_step').update(disabled=True)
     window.Elem('open_terrain_input_dir').update(disabled=True)
 
 
@@ -1202,17 +1221,21 @@ def get_setting(config_path, setting, config_original_path):
 
 def read_setting(path, setting):
     value = ''
-    with open(path, encoding='utf8') as f:
-        for number, line in enumerate(f, 1):
-            value = None
-            if setting + "=" in line:
-                if str(line).strip().startswith(setting) and not str(line).startswith('#'):
-                    line = str(line).strip()
-                    if line[0:1] != "#":
-                        value = line[len(setting) + 1:].replace('"', "").replace("'", "").replace("\n", "")
-                        if value.rfind("#") > 0 and value.rfind(" #") > 0:
-                            value = value[0:value.rfind(" #")]
-                    break
+    try:
+        with open(path, encoding='utf8') as f:
+            for number, line in enumerate(f, 1):
+                value = None
+                if setting + "=" in line:
+                    if str(line).strip().startswith(setting) and not str(line).startswith('#'):
+                        line = str(line).strip()
+                        if line[0:1] != "#":
+                            value = line[len(setting) + 1:].replace('"', "").replace("'", "").replace("\n", "")
+                            if value.rfind("#") > 0 and value.rfind(" #") > 0:
+                                value = value[0:value.rfind(" #")]
+                        break
+    except FileNotFoundError:
+        print(translations.get('config', "Config") + " " + translations.get('not_found_in', "not found in") + " " + path)
+        return None
     if not value:
         return None
     else:
@@ -1257,6 +1280,7 @@ def compose_params(values, run_chain):
     use_terrain_src_dir = values['get_terrain_tiles']
     generate_terrain_isolines = values['generate_terrain_isolines']
     smooth_isolines = values['smooth_isolines']
+    isolines_step = values['isolines_step']
 
     params = 'run -dti --rm '
     if project_name:
@@ -1269,6 +1293,8 @@ def compose_params(values, run_chain):
     params += f"-e GENERATE_TERRAIN={str(generate_terrain).lower()} "
     params += f"-e GENERATE_TERRAIN_ISOLINES={str(generate_terrain_isolines).lower()} "
     params += f"-e SMOOTH_ISOLINES={str(smooth_isolines).lower()} "
+    if isolines_step:
+        params += f"-e ISOLINES_STEP={isolines_step} "
     params += f"-e DOWNLOAD_TERRAIN_DATA={str(download_terrain_tiles).lower()} "
     if run_chain:
         params += f"-e RUN_CHAIN={str(run_chain).lower()} "
@@ -1298,6 +1324,7 @@ def check_parameters(values, osm_data_dir):
     osm_files = values["osm_files"]
     terrain_input_dir = get_terrain_input_dir(values)
     overpass_endpoint_external = values['overpass_endpoint_external']
+    isolines_step = values['isolines_step']
     if len(qgis_projects_dir) < 5:
         sg.Popup(translations.get('projects_directory_empty_error', 'Projects directory path is empty'),
                  title=translations.get('error', 'Error'))
@@ -1386,6 +1413,12 @@ def check_parameters(values, osm_data_dir):
                                   ),
                  title=translations.get('error', 'Error'))
         webbrowser.open(os.path.realpath(terrain_input_dir))
+        return False
+    try:
+        isolines_step = int(isolines_step)
+    except ValueError:
+        sg.Popup(translations.get('isolines_step_error', 'Invalid isolines step value. Use integer numbers.'),
+                 title=translations.get('error', 'Error'))
         return False
 
 

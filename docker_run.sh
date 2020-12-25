@@ -1,5 +1,6 @@
 #!/bin/bash
-while getopts ":n:d:b:t:o:sxgv:im" opt; do
+re_integer='^[0-9]+$'
+while getopts ":n:d:b:t:o:sxgv:iml:" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
@@ -11,23 +12,30 @@ while getopts ":n:d:b:t:o:sxgv:im" opt; do
     ;;
     s) DOWNLOAD_TERRAIN_DATA=true
     ;;
-    o) if [[ "$OPTARG" == "external" ]] || [[ "$OPTARG" == "ext" ]] ; then
-	 OVERPASS_INSTANCE=external
-       elif [[ "$OPTARG" == "docker" ]] ; then
-	 OVERPASS_INSTANCE=docker
-       else
-	 echo -e "\033[91mInvalid -o value. Use [ external (ext) | docker ]\033[0m"
-       fi
+    o)  if [[ "$OPTARG" == "external" ]] || [[ "$OPTARG" == "ext" ]] ; then
+		OVERPASS_INSTANCE=external
+	elif [[ "$OPTARG" == "docker" ]] ; then
+		OVERPASS_INSTANCE=docker
+	else
+		echo -e "\033[91mInvalid -o value. Use [ external (ext) | docker ]\033[0m"
+	fi
     ;;
     x) RUN_CHAIN=true
     ;;
     g) generate_terrain=true
     ;;
-    v) OVERPASS_ENDPOINT_EXTERNAL="$OPTARG"
+    v) overpass_endpoint_external="$OPTARG"
     ;;
     i) generate_terrain_isolines=true
     ;;
     m) smooth_isolines=true
+    ;;
+    l)  if [[ "$OPTARG" =~ $re_integer ]] ; then
+		isolines_step="$OPTARG"
+	else
+		echo -e "\033[91mInvalid -l value. Isolines step is not an integer.\033[0m"
+		exit 1
+	fi
     ;;
     \?) echo -e "\033[91mInvalid option -$OPTARG\033[0m" >&2
     ;;
@@ -82,9 +90,9 @@ if [[ ! -z $BBOX_STR ]] ; then
 		echo_bbox_invalid
 	fi
 fi
-if [[ $OVERPASS_ENDPOINT_EXTERNAL == *"interpreter"* ]] ; then
-	OVERPASS_ENDPOINT_EXTERNAL=\"$OVERPASS_ENDPOINT_EXTERNAL\"
-elif [[ ! -z $OVERPASS_ENDPOINT_EXTERNAL ]] ; then
+if [[ $overpass_endpoint_external == *"interpreter"* ]] ; then
+	overpass_endpoint_external=\"$overpass_endpoint_external\"
+elif [[ ! -z $overpass_endpoint_external ]] ; then
 		overpass_endpoint_invalid
 	fi
 fi
@@ -123,7 +131,7 @@ if [[ -d "$qgis_projects_dir" ]] ; then
 	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE=$OVERPASS_INSTANCE \
 		-e GENERATE_TERRAIN=$generate_terrain -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN \
 		-e GENERATE_TERRAIN_ISOLINES=$generate_terrain_isolines -e SMOOTH_ISOLINES=$smooth_isolines \
-		-e OVERPASS_ENDPOINT_EXTERNAL=$OVERPASS_ENDPOINT_EXTERNAL \
+		-e ISOLINES_STEP=$isolines_step -e OVERPASS_ENDPOINT_EXTERNAL=$overpass_endpoint_external \
 		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str -e DISPLAY \
 		--name qgis-xtopo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \

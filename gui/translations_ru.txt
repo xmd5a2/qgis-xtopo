@@ -62,6 +62,10 @@ switch_language=Переключить язык
 extended_settings_tooltip=Расширенные настройки. Использовать с осторожностью!
 generate_terrain_isolines=Создать изолинии высот
 smooth_isolines=Сгладить изолинии
+isolines_step=Шаг изолиний
+generate_terrain_isolines_tooltip=Создавать изолинии высот (изогипсы)
+smooth_isolines_tooltip=Сгладить изолинии чтобы они были менее угловатыми
+isolines_step_tooltip=Используется на этапе генерации. Это минимальный шаг, который можно будет отрисовать.
 
 error=Ошибка
 warning=Предупреждение
@@ -105,3 +109,5 @@ error_removing=Ошибка удаления
 cant_create_user_config_error=Создать каталог настроек пользователя не удалось
 cant_read_user_config_error=Прочитать настройки пользователя не удалось
 cant_create_error=Не удалось создать
+isolines_step_error=Неверное значение шага изолиний. Используйте только целые числа.
+config=Конфигурация

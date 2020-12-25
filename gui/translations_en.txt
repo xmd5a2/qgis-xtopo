@@ -62,6 +62,10 @@ switch_language=Switch language
 extended_settings_tooltip=Extended settings. Use with caution!
 generate_terrain_isolines=Generate terrain isolines
 smooth_isolines=Smooth isolines
+isolines_step=Isolines step
+generate_terrain_isolines_tooltip=Create contours of heights (isohypses)
+smooth_isolines_tooltip=Smooth contours to make them less angular
+isolines_step_tooltip=Used at the generation stage. This is the smallest step that can be rendered.
 
 error=Error
 warning=Warning
@@ -105,3 +109,5 @@ error_removing=Error removing
 cant_create_user_config_error=Can not create user config directory
 cant_read_user_config_error=Can not read user config
 cant_create_error=Can not create
+isolines_step_error=Invalid isolines step value. Use integer numbers only.
+config=Config

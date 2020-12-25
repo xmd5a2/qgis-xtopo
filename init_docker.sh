@@ -30,18 +30,20 @@ fi
 if [[ ! -z $DOWNLOAD_TERRAIN_DATA ]] ; then
 	string_list+="download_terrain_tiles==${DOWNLOAD_TERRAIN_DATA}|"
 fi
-if [[ -d /mnt/terrain ]] ; then
-	string_list+="get_terrain_tiles==true"
-else
-	string_list+="get_terrain_tiles==false"
-fi
 if [[ ! -z $GENERATE_TERRAIN_ISOLINES ]] ; then
 	string_list+="generate_terrain_isolines==${GENERATE_TERRAIN_ISOLINES}|"
 fi
 if [[ ! -z $SMOOTH_ISOLINES ]] ; then
 	string_list+="smooth_isolines==${SMOOTH_ISOLINES}|"
 fi
-
+if [[ ! -z $ISOLINES_STEP ]] ; then
+	string_list+="isolines_step==${ISOLINES_STEP}|"
+fi
+if [[ -d /mnt/terrain ]] ; then
+	string_list+="get_terrain_tiles==true"
+else
+	string_list+="get_terrain_tiles==false"
+fi
 python3 /app/update_config.py -str_in "$string_list"
 
 . $config_dir/config.ini
