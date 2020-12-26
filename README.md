@@ -1,4 +1,4 @@
-QGIS-xtopo v0.2.6
+QGIS-xtopo v0.3
 ================
 ![GitHub Logo](/docs/splash.png)
 
