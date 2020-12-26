@@ -127,7 +127,7 @@ function check_merge_populate {
 }
 
 if [[ -f $overpass_db_dir/nodes.map ]] ; then
-	if [[ $overpass_endpoint_docker_clean_db == "true" ]] ; then
+	if [[ $overpass_endpoint_docker_clear_db == "true" ]] ; then
 		rm -f $overpass_db_dir/*.*
 		check_merge_populate
 	else

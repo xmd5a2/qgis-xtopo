@@ -39,6 +39,18 @@ fi
 if [[ ! -z $ISOLINES_STEP ]] ; then
 	string_list+="isolines_step==${ISOLINES_STEP}|"
 fi
+if [[ ! -z $OVERPASS_ENDPOINT_DOCKER_USE_BBOX ]] ; then
+	string_list+="overpass_endpoint_docker_use_bbox==${OVERPASS_ENDPOINT_DOCKER_USE_BBOX}|"
+fi
+if [[ ! -z $OVERPASS_ENDPOINT_DOCKER_CLEAR_DB ]] ; then
+	string_list+="overpass_endpoint_docker_clear_db==${OVERPASS_ENDPOINT_DOCKER_CLEAR_DB}|"
+fi
+if [[ ! -z $GENERATE_TERRAIN_HILLSHADE_SLOPE ]] ; then
+	string_list+="generate_terrain_hillshade_slope==${GENERATE_TERRAIN_HILLSHADE_SLOPE}|"
+fi
+if [[ ! -z $TERRAIN_RESAMPLE_METHOD ]] ; then
+	string_list+="terrain_resample_method==${TERRAIN_RESAMPLE_METHOD}|"
+fi
 if [[ -d /mnt/terrain ]] ; then
 	string_list+="get_terrain_tiles==true"
 else

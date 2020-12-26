@@ -73,6 +73,7 @@ temp_dir = tempfile.gettempdir()
 config_original_path = temp_dir + slash_str + "config.original"
 r_keys = ['docker', 'external']
 terrain_radio_keys = ['get_terrain_tiles', 'download_terrain_tiles', 'download_terrain_tiles_manually']
+terrain_resample_method_radio_keys = ['cubicspline', 'lanczos']
 translations = get_translations(default_locale)
 qgis_projects_dir_default = str(str(os.path.expanduser('~'))) + slash_str + "qgis_projects"
 
@@ -184,6 +185,15 @@ layout = [
              tooltip=translations.get('select_osm_data_files_tooltip',
                                       'Select OSM data files you want to use as source data'))],
         [sg.Frame(layout=[
+            [sg.Column([[]], size=(160, 10), pad=(0, 0))] +
+            [sg.Text(translations.get('overpass_endpoint_docker_use_bbox', 'Use bbox'),
+                     tooltip=translations.get('overpass_endpoint_docker_use_bbox_tooltip', 'Use bbox to crop extract. Speeds up processing.'),
+                     key='overpass_endpoint_docker_use_bbox_text', size=(19, 1), justification='l', text_color="#B6B4C3")] +
+            [sg.Checkbox('', key="overpass_endpoint_docker_use_bbox", size=(2, 1), default=True, tooltip=translations.get('overpass_endpoint_docker_use_bbox_tooltip', 'Use bbox to crop extract. Speeds up processing.'), disabled=True, change_submits=True)] +
+            [sg.Text(translations.get('overpass_endpoint_docker_clear_db', 'Clear Overpass database'),
+                     tooltip=translations.get('overpass_endpoint_docker_clear_db_tooltip', 'This can be useful to populate the database multiple times'),
+                     key='overpass_endpoint_docker_clear_db_text', size=(12, 1), justification='l', text_color="#B6B4C3")] +
+            [sg.Checkbox('', key="overpass_endpoint_docker_clear_db", tooltip=translations.get('overpass_endpoint_docker_clear_db_tooltip', 'This can be useful to populate the database multiple times'), size=(2, 1), default=True, disabled=True, change_submits=True)],
             [sg.Text(translations.get('external', 'External'), key="external_text",
                      tooltip=translations.get('external_tooltip',
                                               'Located in Internet'),
@@ -218,7 +228,7 @@ layout = [
                  size=(3, 1), justification='l'),
          ],
         [sg.Text(translations.get('generate_terrain', 'Process terrain'),
-                 key='generate_terrain_text', size=(22, 1), font="default 10 bold",  justification='l')] +
+                 key='generate_terrain_text', size=(22, 1), font="default 11 bold",  justification='l')] +
         [sg.Checkbox('', key="generate_terrain", size=(10, 1), default=False, change_submits=True)],
         [sg.Text(translations.get('download_terrain_tiles', 'Download terrain automatically'),
                  key='download_terrain_tiles_text', text_color="#B6B4C3",
@@ -234,7 +244,7 @@ layout = [
                                               'Please manually download terrain data for chosen area'))] +
             [sg.Radio('', "RADIO2", key=terrain_radio_keys[2], change_submits=True, size=(1, 1))] +
             [sg.Input(key='terrain_input_dir',
-                      size=(45, 1), readonly=True, text_color='white', disabled_readonly_background_color='#5C715E')] +
+                      size=(45, 1), readonly=True, text_color='#B6B4C3', disabled_readonly_background_color='#5C715E')] +
             [sg.Button(key="open_terrain_input_dir", size=(10, 1), button_text=translations.get('open', 'Open'),
                        disabled=True, tooltip=translations.get('open_terrain_input_dir_tooltip',
                                                                'Open directory where downloaded terrain tiles should be located'))
@@ -258,15 +268,33 @@ layout = [
                 [sg.Text(translations.get('generate_terrain_isolines', 'Generate terrain isolines'),
                          key='generate_terrain_isolines_text', tooltip=translations.get('generate_terrain_isolines_tooltip', 'Create contours of heights (isohypses)'),
                          size=(21, 1), justification='l', font="default 10 bold", text_color="#B6B4C3")] +
-                [sg.Checkbox('', key="generate_terrain_isolines", size=(10, 1), default=True, disabled=True, change_submits=True)],
+                [sg.Checkbox('', key="generate_terrain_isolines", size=(1, 1), default=True, disabled=True, change_submits=True)],
                 [sg.Text(translations.get('smooth_isolines', 'Smooth isolines'), tooltip=translations.get('smooth_isolines_tooltip', 'Smooth contours to make them less angular'),
                          key='smooth_isolines_text', size=(29, 1), justification='l', text_color="#B6B4C3")] +
-                [sg.Checkbox('', key="smooth_isolines", size=(10, 1), default=False, disabled=True, change_submits=True)],
+                [sg.Checkbox('', key="smooth_isolines", size=(1, 1), default=False, disabled=True, change_submits=True)],
                 [sg.Text(translations.get('isolines_step', 'Isolines step'), tooltip=translations.get('isolines_step_tooltip', 'Used at the generation stage. This is the smallest step that can be displayed.'),
                          key='isolines_step_text', size=(30, 1), justification='l', text_color="#B6B4C3")] +
                 [sg.Combo(('5', '10', '25', '50', '100'), key='isolines_step', default_value='10', disabled=True, size=(4, 1))]
             ], title='', size=(650, 0), key='isolines_frame'
-            )],
+            )] +
+            [sg.Frame(layout=[
+                [sg.Text(translations.get('generate_terrain_hillshade_slope', 'Generate hillshade and slopes'),
+                         key='generate_terrain_hillshade_slope_text',
+                         tooltip=translations.get('generate_terrain_hillshade_slope_tooltip',
+                                                  'Generate hillshade and slope rasters'),
+                         size=(35, 1), justification='l', font="default 10 bold", text_color="#B6B4C3")] +
+                [sg.Checkbox('', key="generate_terrain_hillshade_slope", size=(1, 1), default=True, disabled=True,
+                             change_submits=True)],
+                [sg.Text(translations.get('terrain_resample_method', 'Terrain resample method'),
+                         tooltip=translations.get('terrain_resample_method_tooltip',
+                                                  'Affects render quality of hillshade and slopes'),
+                         key='terrain_resample_method_text', size=(23, 1), justification='l', text_color="#B6B4C3")] +
+                [sg.Radio('cubicspline', "RADIO3", key=terrain_resample_method_radio_keys[0], disabled=True, default=True, size=(9, 1), tooltip=translations.get('cubicspline', 'Smoother but less details'))] +
+                [sg.Radio('lanczos', "RADIO3", key=terrain_resample_method_radio_keys[1], disabled=True, size=(6, 1), tooltip=translations.get('lanczos', 'Sharper but with artefacts'))],
+                [sg.Text('')]
+
+            ], title='', size=(650, 0), key='terrain_options_frame'
+            )]
         ], title='', key='terrain_extended_frame', visible=False, pad=(0, 0), border_width=0
         )]
     ], title='', element_justification="left",
@@ -313,7 +341,7 @@ layout += [
     [sg.Button(translations.get('exit', 'Exit'), key="exit", size=(10, 1))]
 ]
 
-window = sg.Window('QGIS-xtopo-GUI', layout, finalize=True, icon=logo_icon, location=(200, 100))
+window = sg.Window('QGIS-xtopo-GUI', layout, finalize=True, icon=logo_icon, location=(200, 50))
 
 
 def main():
@@ -475,7 +503,8 @@ def main():
         if event == 'open_osm_sbin':
             webbrowser.open(r'http://osm.sbin.ru/osm_dump/')
         if event == 'generate_terrain':
-            switch_layout_terrain(values['generate_terrain'], values['generate_terrain_isolines'])
+            switch_layout_terrain(values['generate_terrain'], values['generate_terrain_isolines'],
+                                  values['generate_terrain_hillshade_slope'])
             if values['generate_terrain'] and values[terrain_radio_keys[0]]:  # 'get_terrain_tiles'
                 window.Elem('terrain_src_dir').update(disabled=False)
                 window.Elem('terrain_src_dir_browse').update(disabled=False)
@@ -523,6 +552,15 @@ def main():
                 window.Elem('smooth_isolines_text').update(text_color="#B6B4C3")
                 window.Elem('isolines_step').update(disabled=True)
                 window.Elem('isolines_step_text').update(text_color="#B6B4C3")
+        if event == 'generate_terrain_hillshade_slope':
+            if values['generate_terrain_hillshade_slope']:
+                window.Elem('terrain_resample_method_text').update(text_color="white")
+                window.Elem(terrain_resample_method_radio_keys[0]).update(disabled=False)
+                window.Elem(terrain_resample_method_radio_keys[1]).update(disabled=False)
+            else:
+                window.Elem('terrain_resample_method_text').update(text_color="#B6B4C3")
+                window.Elem(terrain_resample_method_radio_keys[0]).update(disabled=True)
+                window.Elem(terrain_resample_method_radio_keys[1]).update(disabled=True)
         if event == 'Copy':
             if command:
                 pyperclip.copy(command)
@@ -534,6 +572,10 @@ def main():
             window.Elem('open_osm_sbin').update(disabled=False)
             window.Elem('populate_db').update(disabled=False)
             window.Elem('overpass_endpoint_external').update(disabled=True)
+            window.Elem('overpass_endpoint_docker_clear_db').update(disabled=False)
+            window.Elem('overpass_endpoint_docker_clear_db_text').update(text_color='white')
+            window.Elem('overpass_endpoint_docker_use_bbox').update(disabled=False)
+            window.Elem('overpass_endpoint_docker_use_bbox_text').update(text_color='white')
         if event == r_keys[1]:
             window.Elem('select_osm_files').update(disabled=True)
             window.Elem('open_protomaps').update(disabled=True)
@@ -542,6 +584,10 @@ def main():
             window.Elem('open_osm_sbin').update(disabled=True)
             window.Elem('populate_db').update(disabled=True)
             window.Elem('overpass_endpoint_external').update(disabled=False)
+            window.Elem('overpass_endpoint_docker_clear_db').update(disabled=True)
+            window.Elem('overpass_endpoint_docker_clear_db_text').update(text_color="#B6B4C3")
+            window.Elem('overpass_endpoint_docker_use_bbox').update(disabled=True)
+            window.Elem('overpass_endpoint_docker_use_bbox_text').update(text_color="#B6B4C3")
         project_dir = values["qgis_projects_dir"] + slash_str + values["project_name"]
         osm_data_dir = project_dir + slash_str + "osm_data"
         if event == 'populate_db':
@@ -1023,6 +1069,8 @@ def read_config_update_ui(values, config_dir, init):
         window.Elem('terrain_input_dir').update(get_terrain_input_dir(values))
         overpass_instance_config = get_setting(config_path, "overpass_instance", config_original_path)
         overpass_endpoint_external = get_setting(config_path, "overpass_endpoint_external", config_original_path)
+        generate_terrain_hillshade_slope = get_setting(config_path, "generate_terrain_hillshade_slope", config_original_path)
+        terrain_resample_method = get_setting(config_path, "terrain_resample_method", config_original_path)
         terrain_src_dir_gui_setting = get_setting(config_path, 'terrain_src_dir_gui', config_original_path)
         try:
             isolines_step = int(get_setting(config_path, "isolines_step", config_original_path))
@@ -1037,39 +1085,63 @@ def read_config_update_ui(values, config_dir, init):
             window.Elem('open_geofabrik').update(disabled=False)
             window.Elem('open_extract_bbike').update(disabled=False)
             window.Elem('open_osm_sbin').update(disabled=False)
+            window.Elem('overpass_endpoint_docker_clear_db').update(disabled=False)
+            window.Elem('overpass_endpoint_docker_clear_db_text').update(text_color='white')
+            window.Elem('overpass_endpoint_docker_use_bbox').update(disabled=False)
+            window.Elem('overpass_endpoint_docker_use_bbox_text').update(text_color='white')
         if overpass_instance_config == "external":
             window.Elem('external').update(value=True)
             window.Elem('docker').update(value=False)
             window.Elem('select_osm_files').update(disabled=True)
+            window.Elem('overpass_endpoint_docker_clear_db').update(disabled=True)
+            window.Elem('overpass_endpoint_docker_clear_db_text').update(text_color="#B6B4C3")
+            window.Elem('overpass_endpoint_docker_use_bbox').update(disabled=True)
+            window.Elem('overpass_endpoint_docker_use_bbox_text').update(text_color="#B6B4C3")
         if overpass_endpoint_external:
             window.Elem('overpass_endpoint_external').update(overpass_endpoint_external)
             if overpass_instance_config == "external":
                 window.Elem('overpass_endpoint_external').update(disabled=False)
         if get_setting(config_path, "generate_terrain", config_original_path) == "true":
             window.Elem('generate_terrain').update(value=True)
-            switch_layout_terrain(True, '')
-            if get_setting(config_path, "download_terrain_tiles", config_original_path) == "false" and get_setting(
-                    config_path,
-                    "get_terrain_tiles",
-                    config_original_path) == "false":
-                window.Elem('download_terrain_tiles_manually').update(value=True)
+            switch_layout_terrain(True, '', '')
             if get_setting(config_path, "generate_terrain_isolines", config_original_path) == "true":
                 window.Elem('smooth_isolines').update(disabled=False)
                 window.Elem('smooth_isolines_text').update(text_color="white")
                 window.Elem('isolines_step').update(disabled=False)
                 window.Elem('isolines_step_text').update(text_color="white")
-            if get_setting(config_path, "smooth_isolines", config_original_path) == "true":
-                window.Elem('smooth_isolines').update(value=True)
-            else:
-                window.Elem('smooth_isolines').update(value=False)
+            if generate_terrain_hillshade_slope == "true":
+                window.Elem('generate_terrain_hillshade_slope_text').update(text_color='white')
+                window.Elem('terrain_resample_method_text').update(text_color='white')
+                window.Elem(terrain_resample_method_radio_keys[0]).update(disabled=False)
+                window.Elem(terrain_resample_method_radio_keys[1]).update(disabled=False)
         else:
             window.Elem('generate_terrain').update(value=False)
-            switch_layout_terrain(False, '')
+            switch_layout_terrain(False, '', '')
+        if generate_terrain_hillshade_slope == "true":
+            window.Elem('generate_terrain_hillshade_slope').update(value=True)
+        else:
+            window.Elem('generate_terrain_hillshade_slope').update(value=False)
+        if get_setting(config_path, "download_terrain_tiles", config_original_path) == "false" and get_setting(
+                config_path,
+                "get_terrain_tiles",
+                config_original_path) == "false":
+            window.Elem('download_terrain_tiles_manually').update(value=True)
+        if get_setting(config_path, "smooth_isolines", config_original_path) == "true":
+            window.Elem('smooth_isolines').update(value=True)
+        else:
+            window.Elem('smooth_isolines').update(value=False)
         if get_setting(config_path, "generate_terrain_isolines", config_original_path) == "true":
             window.Elem('generate_terrain_isolines').update(value=True)
         else:
             window.Elem('generate_terrain_isolines').update(value=False)
-
+        if get_setting(config_path, "generate_terrain_isolines", config_original_path) == "true":
+            window.Elem('smooth_isolines').update(disabled=False)
+            window.Elem('isolines_step').update(disabled=False)
+        if terrain_resample_method == 'cubicspline':
+            window.Elem(terrain_resample_method_radio_keys[0]).update(value=True)
+        else:
+            if terrain_resample_method == 'lanczos':
+                window.Elem(terrain_resample_method_radio_keys[1]).update(value=True)
         window.Elem('isolines_step').update(value=isolines_step)
         if get_setting(config_path, "get_terrain_tiles", config_original_path) == "true":
             window.Elem('get_terrain_tiles').update(value=True)
@@ -1130,6 +1202,12 @@ def update_layout_translations(values):
         translations.get('generate_terrain_isolines', 'Generate terrain isolines'))
     window.Elem('smooth_isolines_text').update(
         translations.get('smooth_isolines', 'Smooth isolines'))
+    window.Elem('isolines_step_text').update(
+        translations.get('isolines_step', 'Isolines step'))
+    window.Elem('overpass_endpoint_docker_clear_db_text').update(
+        translations.get('overpass_endpoint_docker_clear_db', 'Clear database'))
+    window.Elem('overpass_endpoint_docker_use_bbox_text').update(
+        translations.get('overpass_endpoint_docker_use_bbox', 'Use bbox'))
     window.Elem('download_terrain_tiles_manually_text').update(
         translations.get('download_terrain_tiles_manually', 'Manually download terrain'))
     window.Elem('download_terrain_tiles_text').update(
@@ -1150,9 +1228,11 @@ def update_layout_translations(values):
     window.Elem('free_space_text').update(translations.get('free', 'Free') + ":")
     window.Elem('free_space').update(
         str(get_free_space(values["qgis_projects_dir"])) + " " + translations.get('gb', 'Gb'))
+    window.Elem('generate_terrain_hillshade_slope_text').update(translations.get('generate_terrain_hillshade_slope', 'Generate hillshade and slopes'))
+    window.Elem('terrain_resample_method_text').update(translations.get('terrain_resample_method', 'Terrain resample method'))
 
 
-def switch_layout_terrain(generate_terrain, generate_terrain_isolines):
+def switch_layout_terrain(generate_terrain, generate_terrain_isolines, generate_terrain_hillshade_slope):
     if generate_terrain:
         window.Elem('use_terrain_src_dir_text').update(text_color="white")
         window.Elem('terrain_src_dir').update(disabled=True)
@@ -1165,6 +1245,12 @@ def switch_layout_terrain(generate_terrain, generate_terrain_isolines):
         window.Elem('open_terrain_input_dir').update(disabled=True)
         window.Elem('generate_terrain_isolines_text').update(text_color="white")
         window.Elem('generate_terrain_isolines').update(disabled=False)
+        window.Elem('generate_terrain_hillshade_slope_text').update(text_color="white")
+        window.Elem('generate_terrain_hillshade_slope').update(disabled=False)
+        if generate_terrain_hillshade_slope:
+            window.Elem('terrain_resample_method_text').update(text_color="white")
+            window.Elem(terrain_resample_method_radio_keys[0]).update(disabled=False)
+            window.Elem(terrain_resample_method_radio_keys[1]).update(disabled=False)
         if generate_terrain_isolines:
             window.Elem('smooth_isolines_text').update(text_color="white")
             window.Elem('smooth_isolines').update(disabled=False)
@@ -1181,10 +1267,15 @@ def switch_layout_terrain(generate_terrain, generate_terrain_isolines):
         window.Elem('download_terrain_tiles_manually_text').update(text_color="#B6B4C3")
         window.Elem('generate_terrain_isolines_text').update(text_color="#B6B4C3")
         window.Elem('generate_terrain_isolines').update(disabled=True)
+        window.Elem('generate_terrain_hillshade_slope_text').update(text_color="#B6B4C3")
+        window.Elem('generate_terrain_hillshade_slope').update(disabled=True)
         window.Elem('smooth_isolines_text').update(text_color="#B6B4C3")
         window.Elem('smooth_isolines').update(disabled=True)
         window.Elem('isolines_step_text').update(text_color="#B6B4C3")
         window.Elem('isolines_step').update(disabled=True)
+        window.Elem('terrain_resample_method_text').update(text_color="#B6B4C3")
+        window.Elem(terrain_resample_method_radio_keys[0]).update(disabled=True)
+        window.Elem(terrain_resample_method_radio_keys[1]).update(disabled=True)
     window.Elem('open_terrain_input_dir').update(disabled=True)
 
 
@@ -1274,6 +1365,7 @@ def init_config(path, values):
 def compose_params(values, run_chain):
     project_name = values['project_name']
     bbox = values['bbox']
+    overpass_endpoint_external = values['overpass_endpoint_external']
     generate_terrain = values['generate_terrain']
     download_terrain_tiles = values['download_terrain_tiles']
     qgis_projects_dir = values['qgis_projects_dir']
@@ -1281,6 +1373,9 @@ def compose_params(values, run_chain):
     generate_terrain_isolines = values['generate_terrain_isolines']
     smooth_isolines = values['smooth_isolines']
     isolines_step = values['isolines_step']
+    generate_terrain_hillshade_slope = values['generate_terrain_hillshade_slope']
+    overpass_endpoint_docker_use_bbox = values['overpass_endpoint_docker_use_bbox']
+    overpass_endpoint_docker_clear_db = values['overpass_endpoint_docker_clear_db']
 
     params = 'run -dti --rm '
     if project_name:
@@ -1289,7 +1384,9 @@ def compose_params(values, run_chain):
         params += f'-e BBOX_STR="{bbox}" '
     params += f"-e OVERPASS_INSTANCE={([key for key in r_keys if values[key]][0])} "
     if values[r_keys[1]]:
-        params += f"-e OVERPASS_ENDPOINT_EXTERNAL=\"{values['overpass_endpoint_external']}\" "
+        params += f"-e OVERPASS_ENDPOINT_EXTERNAL=\"{overpass_endpoint_external}\" "
+    params += f"-e OVERPASS_ENDPOINT_DOCKER_USE_BBOX={str(overpass_endpoint_docker_use_bbox).lower()} "
+    params += f"-e OVERPASS_ENDPOINT_DOCKER_CLEAR_DB={str(overpass_endpoint_docker_clear_db).lower()} "
     params += f"-e GENERATE_TERRAIN={str(generate_terrain).lower()} "
     params += f"-e GENERATE_TERRAIN_ISOLINES={str(generate_terrain_isolines).lower()} "
     params += f"-e SMOOTH_ISOLINES={str(smooth_isolines).lower()} "
@@ -1298,6 +1395,8 @@ def compose_params(values, run_chain):
     params += f"-e DOWNLOAD_TERRAIN_DATA={str(download_terrain_tiles).lower()} "
     if run_chain:
         params += f"-e RUN_CHAIN={str(run_chain).lower()} "
+    params += f"-e GENERATE_TERRAIN_HILLSHADE_SLOPE={str(generate_terrain_hillshade_slope).lower()} "
+    params += f"-e TERRAIN_RESAMPLE_METHOD={([key for key in terrain_resample_method_radio_keys if values[key]][0])} "
     lang = locale.getlocale(locale.LC_CTYPE)
     params += f"-e DISPLAY "
     if os.name == "posix":

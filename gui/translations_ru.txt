@@ -66,6 +66,16 @@ isolines_step=Шаг изолиний
 generate_terrain_isolines_tooltip=Создавать изолинии высот (изогипсы)
 smooth_isolines_tooltip=Сгладить изолинии чтобы они были менее угловатыми
 isolines_step_tooltip=Используется на этапе генерации. Это минимальный шаг, который можно будет отрисовать.
+overpass_endpoint_docker_use_bbox=Обрезать по границам
+overpass_endpoint_docker_use_bbox_tooltip=Обрезать исходные файлы по границам зоны охвата перед заполнением БД. Сильно ускоряет процесс.
+overpass_endpoint_docker_clear_db=Очистить БД
+overpass_endpoint_docker_clear_db_tooltip=Очистить БД Overpass. Может быть полезным для заполнения БД в несколько заходов.
+generate_terrain_hillshade_slope=Создавать затенения рельефа и уклоны
+generate_terrain_hillshade_slope_tooltip=Создавать карту затенения рельефа (отмывку) и карту уклонов
+terrain_resample_method=Метод масштабирования
+terrain_resample_method_tooltip=Влияет на детальность отображения затенения рельефа и уклонов
+cubicspline=Менее детальная картинка без артефактов
+lanczos=Более детальная картинка, но с артефактами
 
 error=Ошибка
 warning=Предупреждение

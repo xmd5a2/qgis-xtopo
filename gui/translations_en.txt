@@ -66,6 +66,16 @@ isolines_step=Isolines step
 generate_terrain_isolines_tooltip=Create contours of heights (isohypses)
 smooth_isolines_tooltip=Smooth contours to make them less angular
 isolines_step_tooltip=Used at the generation stage. This is the smallest step that can be rendered.
+overpass_endpoint_docker_use_bbox=Use bbox
+overpass_endpoint_docker_use_bbox_tooltip=Use bbox to crop extract. Speeds up processing.
+overpass_endpoint_docker_clear_db=Clear database
+overpass_endpoint_docker_clear_db_tooltip=This can be useful to populate the database multiple times
+generate_terrain_hillshade_slope=Generate hillshade and slopes
+generate_terrain_hillshade_slope_tooltip=Generate hillshade and slope rasters
+terrain_resample_method=Terrain resample method
+terrain_resample_method_tooltip=Affects render quality of hillshade and slopes
+cubicspline=Smoother but less details
+lanczos=Sharper but with artefacts
 
 error=Error
 warning=Warning

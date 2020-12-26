@@ -1,6 +1,6 @@
 #!/bin/bash
 re_integer='^[0-9]+$'
-while getopts ":n:d:b:t:o:sxgv:iml:" opt; do
+while getopts ":n:d:b:t:o:sxgv:iml:ucz:e" opt; do
   case $opt in
     n) PROJECT_NAME_EXT="$OPTARG"
     ;;
@@ -35,6 +35,20 @@ while getopts ":n:d:b:t:o:sxgv:iml:" opt; do
 	else
 		echo -e "\033[91mInvalid -l value. Isolines step is not an integer.\033[0m"
 		exit 1
+	fi
+    ;;
+    u) overpass_endpoint_docker_use_bbox=true
+    ;;
+    c) overpass_endpoint_docker_clear_db=true
+    ;;
+    e) generate_terrain_hillshade_slope=true
+    ;;
+    z)  if [[ "$OPTARG" == "cubicspline" ]] ; then
+		terrain_resample_method=cubicspline
+	elif [[ "$OPTARG" == "lanczos" ]] ; then
+		terrain_resample_method=lanczos
+	else
+		echo -e "\033[91mInvalid -z value. Use [ cubicspline | lanczos ]\033[0m"
 	fi
     ;;
     \?) echo -e "\033[91mInvalid option -$OPTARG\033[0m" >&2
@@ -131,7 +145,13 @@ if [[ -d "$qgis_projects_dir" ]] ; then
 	docker run -dti --rm -e PROJECT_NAME_EXT=$PROJECT_NAME_EXT -e BBOX_STR=$BBOX_STR -e OVERPASS_INSTANCE=$OVERPASS_INSTANCE \
 		-e GENERATE_TERRAIN=$generate_terrain -e DOWNLOAD_TERRAIN_DATA=$DOWNLOAD_TERRAIN_DATA -e RUN_CHAIN=$RUN_CHAIN \
 		-e GENERATE_TERRAIN_ISOLINES=$generate_terrain_isolines -e SMOOTH_ISOLINES=$smooth_isolines \
-		-e ISOLINES_STEP=$isolines_step -e OVERPASS_ENDPOINT_EXTERNAL=$overpass_endpoint_external \
+		-e OVERPASS_ENDPOINT_DOCKER_USE_BBOX=$overpass_endpoint_docker_use_bbox \
+		-e OVERPASS_ENDPOINT_DOCKER_CLEAR_DB=$overpass_endpoint_docker_clear_db \
+		-e ISOLINES_STEP=$isolines_step \
+		-e GENERATE_TERRAIN_HILLSHADE_SLOPE=$generate_terrain_hillshade_slope \
+		-e TERRAIN_RESAMPLE_METHOD=$terrain_resample_method \
+		-e OVERPASS_ENDPOINT_EXTERNAL=$overpass_endpoint_external \
+		
 		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str -e DISPLAY \
 		--name qgis-xtopo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \
