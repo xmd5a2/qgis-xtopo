@@ -331,13 +331,13 @@ layout += [
                                                 'Prepare data for project (prepare_data)'), size=(16, 1),
                        disabled=True)
              ]
-        ], title='', key='process_buttons_frame', visible=False, pad=(0, 0), border_width=0)] +
-        [sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis", disabled=True,
-                   tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
-                   size=(13, 1))]
+        ], title='', key='process_buttons_frame', visible=False, pad=(0, 0), border_width=0)]
     ], title='', element_justification="left",
         border_width=1,
         relief=sg.RELIEF_SUNKEN)] +
+        [sg.Button(translations.get('open_qgis', 'Open QGIS'), key="open_qgis", disabled=True,
+                   tooltip=translations.get('open_qgis_tooltip', 'Open QGIS with your project (exec_qgis)'),
+                   size=(13, 1))] +
     [sg.Button(translations.get('exit', 'Exit'), key="exit", size=(10, 1))]
 ]
 
