@@ -106,6 +106,9 @@ if [[ ! -f "$project_dir/$project_name.qgz" ]] ; then
 	sed -i "s/lastLayoutExportDir=.*/lastLayoutExportDir=\\/home\\/user\\/qgis_projects\\/${project_name}\\/output\\/Detailed.png/" $qgis_config_path
 	cd /app
 	cp automap.qgs $project_name.qgs
+	if [[ ${LANG:2} == "ru" ]] ; then # Set name_pref_suf_lang variable to 'ru'. Risky but should work.
+		sed -i 's/<value>en<\/value>/<value>ru<\/value>/' $project_name.qgs
+	fi
 	zip "$project_dir/$project_name.qgz" $project_name.qgs
 	rm -f $project_name.qgs
 	if [[ $? == 0 ]] ; then
