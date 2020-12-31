@@ -1214,8 +1214,13 @@ for t in ${array_queries[@]}; do
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=Polygon" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_polygon_fixed.geojson
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=LineString" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_line_fixed.geojson
 			run_alg_linestopolygons "${t}_line_fixed" "geojson" "|geometrytype=LineString"
-			merge_vector_layers "geojson" "MultiPolygon" ${t}_polygon_fixed ${t}_line_fixed_polygons
-			mv $temp_dir/${t}_polygon_fixed_merged.geojson $temp_dir/$t.geojson
+			if [[ $(wc -c <"$temp_dir/${t}_line_fixed_polygons.geojson") -ge 220 ]] ; then
+				merge_vector_layers "geojson" "MultiPolygon" ${t}_polygon_fixed ${t}_line_fixed_polygons
+				mv $temp_dir/${t}_polygon_fixed_merged.geojson $temp_dir/$t.geojson
+			else
+				mv $temp_dir/${t}_polygon_fixed.geojson $temp_dir/$t.geojson
+			fi
+
 			convert2spatialite "$temp_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			run_alg_fixgeometries $t "sqlite" "workdir" && rm -f $vector_data_dir/$t.sqlite && mv $vector_data_dir/${t}_fixed.sqlite $vector_data_dir/$t.sqlite # If geojson with intersections processed with run_alg_fixgeometries, is converted to sqlite then it will contain intersections again
 			set_projection $vector_data_dir/$t.sqlite
