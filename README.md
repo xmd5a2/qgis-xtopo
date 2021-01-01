@@ -6,6 +6,15 @@ Topographic rendering style for QGIS and data preparation scripts
 
 QGIS-xtopo это набор инструментов, предназначенных для создания карт, пригодных для печати. Цель проекта **не** в автоматическом создании готовых карт, а в попытке максимально упростить этот процесс.
 
+**Примеры:**
+* Крым: [1](/docs/sample_images/crimea1.png), [2](/docs/sample_images/crimea2.png), [3](/docs/sample_images/crimea3.png)
+* Кавказ: [1](/docs/sample_images/elbrus1.png), [2](/docs/sample_images/elbrus2.png), [3](/docs/sample_images/teberda.png)
+* Камчатка: [1](/docs/sample_images/kamchatka1.png)
+* Владимирская область: [1](/docs/sample_images/klz.png), [2](/docs/sample_images/radyzhniy.png)
+* Урал: [1](/docs/sample_images/kusa.png), [2](/docs/sample_images/miass.png), [3](/docs/sample_images/turgoyak.png), [4](/docs/sample_images/ural.png)
+* Италия: [1](/docs/sample_images/italy1.png), [2](/docs/sample_images/italy2.png)
+* Пуэрто-Рико: [1](/docs/sample_images/puerto-rico1.png), [2](/docs/sample_images/puerto-rico2.png)
+
 ### Системные требования
 
   Сильно зависят от объёма загружаемых данных. Для области размером 20х20 км в среднем будет достаточно ПК, удовлетворяющего минимальным требованиям.
