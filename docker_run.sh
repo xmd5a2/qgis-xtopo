@@ -107,8 +107,7 @@ fi
 if [[ $overpass_endpoint_external == *"interpreter"* ]] ; then
 	overpass_endpoint_external=\"$overpass_endpoint_external\"
 elif [[ ! -z $overpass_endpoint_external ]] ; then
-		overpass_endpoint_invalid
-	fi
+	overpass_endpoint_invalid
 fi
 
 if [[ -f "config_debug.ini" ]] ; then
@@ -151,7 +150,6 @@ if [[ -d "$qgis_projects_dir" ]] ; then
 		-e GENERATE_TERRAIN_HILLSHADE_SLOPE=$generate_terrain_hillshade_slope \
 		-e TERRAIN_RESAMPLE_METHOD=$terrain_resample_method \
 		-e OVERPASS_ENDPOINT_EXTERNAL=$overpass_endpoint_external \
-		
 		-v /tmp/.X11-unix:/tmp/.X11-unix $lang_str -e DISPLAY \
 		--name qgis-xtopo \
 		--mount type=bind,source=$qgis_projects_dir,target=/mnt/qgis_projects \

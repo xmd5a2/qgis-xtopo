@@ -124,3 +124,5 @@ RUN chmod +x /app/*.sh
 
 # Disable deprecation warnings in utils.py
 RUN sed -i "s/warnings.simplefilter('default')/warnings.simplefilter('ignore')/g" /usr/lib/python3/dist-packages/qgis/utils.py
+
+USER user
