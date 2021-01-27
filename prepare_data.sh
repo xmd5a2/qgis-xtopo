@@ -5,6 +5,8 @@
 # Author: xmd5a (Leonid Barsukov)
 #read -rsp $'Press any key to continue...\n' -n1 key
 
+export QT_LOGGING_RULES="qt5ct.debug=false"
+
 if [[ -f /.dockerenv ]] ; then
 	scripts_dir=/app
 	qgisxtopo_config_dir=/mnt/qgis_projects/qgisxtopo-config
@@ -204,6 +206,8 @@ sed -i s/{lon_min}/$lon_min/g $project_dir/crop.geojson
 sed -i s/{lon_max}/$lon_max/g $project_dir/crop.geojson
 sed -i s/{lat_min}/$lat_min/g $project_dir/crop.geojson
 sed -i s/{lat_max}/$lat_max/g $project_dir/crop.geojson
+
+mkdir -p $terrain_input_dir
 
 if [[ $generate_terrain == "true" ]] ; then
 	rm -f "$merged_dem"

@@ -36,6 +36,7 @@ def format_place_name(name, population, name_pref_suf_lang, feature, parent):
     if n.lower().startswith('посёлок'): n = re.sub("^посёлок","пос.", n, flags=re.IGNORECASE)
     if n.lower().startswith('рабочий поселок'): n = re.sub("^рабочий поселок","раб. пос.", n, flags=re.IGNORECASE)
     if n.lower().startswith('рабочий посёлок'): n = re.sub("^рабочий посёлок","раб. пос.", n, flags=re.IGNORECASE)
+    if n.lower().startswith('жилой комплекс'): n = re.sub("^жилой комплекс","Ж/к", n, flags=re.IGNORECASE)
     if n.lower().startswith('дом отдыха'): n = re.sub("^дом отдыха","д.о.", n, flags=re.IGNORECASE)
     if "база отдыха" in n.lower(): n = re.sub("база отдыха","б.о.", n, flags=re.IGNORECASE)
     if "турбаза" in n.lower(): n = re.sub("турбаза","т/б", n, flags=re.IGNORECASE)
