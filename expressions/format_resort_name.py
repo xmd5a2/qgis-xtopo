@@ -1,6 +1,5 @@
 from qgis.core import *
 from qgis.gui import *
-import re
 
 @qgsfunction(args='auto', group='Custom')
 def format_resort_name(name, resort, abandoned, feature, parent):

@@ -1,0 +1,4 @@
+(
+way["natural"="plateau"];
+relation["natural"="plateau"];
+);

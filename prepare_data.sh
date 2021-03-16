@@ -1084,7 +1084,7 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.geojson
 			rm $vector_data_dir/$t.osm
 			;;
-		"camp_site" | "attraction" | "ruins" | "track_bridge" | "aerodrome" | "castle" | "archaeological_site" | "observatory" | "picnic_site" | "tower_cooling")
+		"camp_site" | "attraction" | "ruins" | "track_bridge" | "aerodrome" | "castle" | "archaeological_site" | "observatory" | "picnic_site" | "tower_cooling" | "power_plant" | "power_substation")
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/$t.sqlite"
 			cp $vector_data_dir/$t.geojson $temp_dir
@@ -1212,7 +1212,7 @@ for t in ${array_queries[@]}; do
 			rm $vector_data_dir/$t.osm
 			rm $temp_dir/*.*
 			;;
-		"mountain_area")
+		"mountain_area" | "plateau")
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=Polygon" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_polygon_fixed.geojson

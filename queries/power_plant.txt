@@ -1,0 +1,4 @@
+(
+way["power"="plant"];
+relation["power"="plant"];
+);
