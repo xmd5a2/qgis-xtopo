@@ -949,7 +949,7 @@ for t in ${array_queries[@]}; do
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			rm $vector_data_dir/$t.osm
 			;;
-		"river" | "river_intermittent") # should be requested after "water_without_riverbanks"
+		"river" | "river_intermittent" | "canal" | "canal_intermittent") # should be requested after "water_without_riverbanks"
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
 			cp $vector_data_dir/$t.geojson $temp_dir
 			if [[ -f $vector_data_dir/water_dissolved.geojson ]] ; then

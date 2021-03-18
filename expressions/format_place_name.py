@@ -29,6 +29,8 @@ def format_place_name(name, population, name_pref_suf_lang, feature, parent):
     if "микрорайон" in n.lower(): n = re.sub("микрорайон","мкр.", n, flags=re.IGNORECASE)
     if n.lower().startswith('квартал '): n = re.sub("^квартал ","кв. ", n, flags=re.IGNORECASE)
     if n.lower().endswith(' квартал'): n = re.sub(" квартал$"," кв.", n, flags=re.IGNORECASE)
+    if n.lower().startswith('кутан '): n = re.sub("^кутан ","кут. ", n, flags=re.IGNORECASE)
+    if n.lower().endswith(' кутан'): n = re.sub(" кутан$"," кут.", n, flags=re.IGNORECASE)
     if "район" in n.lower(): n = re.sub("район","р-н", n, flags=re.IGNORECASE)
     if " станция" in n.lower(): n = re.sub(" станция"," ст.", n, flags=re.IGNORECASE)
     if n.lower().startswith('станция '): n = re.sub("^станция ","ст. ", n, flags=re.IGNORECASE)
