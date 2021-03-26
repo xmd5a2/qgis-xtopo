@@ -94,6 +94,8 @@ def format_water_name(name, feature, parent):
     elif n.lower().endswith("карьер"): n = re.sub("карьер$","кар.",n, flags=re.IGNORECASE)
     elif n.lower().endswith("карьера"): n = re.sub("карьера$","кар.",n, flags=re.IGNORECASE)
     elif "земснаряд " in n.lower(): n = ""
+    elif n.lower().startswith("канал "): n = re.sub("канал ","кан. ",n, flags=re.IGNORECASE)
+    elif n.lower().endswith(" канал"): n = re.sub(" канал"," кан.",n, flags=re.IGNORECASE)
 
     if "(залив)" in n.lower(): n = re.sub("(залив)","",n, flags=re.IGNORECASE)
     if "(пролив)" in n.lower(): n = re.sub("(пролив)","",n, flags=re.IGNORECASE)

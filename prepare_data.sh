@@ -1214,6 +1214,7 @@ for t in ${array_queries[@]}; do
 			;;
 		"mountain_area" | "plateau")
 			osmtogeojson_wrapper $vector_data_dir/$t.osm $vector_data_dir/$t.geojson
+			convert2spatialite "$vector_data_dir/$t.geojson" "$vector_data_dir/${t}_original.sqlite"
 			sed -i 's/name_/name:/g' $vector_data_dir/$t.geojson
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=Polygon" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_polygon_fixed.geojson
 			run_alg_fixgeometries $t "geojson" "workdir" "|geometrytype=LineString" && mv $vector_data_dir/${t}_fixed.geojson $temp_dir/${t}_line_fixed.geojson

@@ -1,4 +1,8 @@
 (
+node["natural"="plateau"];
 way["natural"="plateau"];
 relation["natural"="plateau"];
+node["natural"="mesa"];
+way["natural"="mesa"];
+relation["natural"="mesa"];
 );
