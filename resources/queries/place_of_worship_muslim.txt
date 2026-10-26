@@ -1,0 +1,8 @@
+(
+node["amenity"="place_of_worship"]["religion"="muslim"]["ruins"!~".*"]["abandoned"!~".*"];
+way["amenity"="place_of_worship"]["religion"="muslim"]["ruins"!~".*"]["abandoned"!~".*"];
+relation["amenity"="place_of_worship"]["religion"="muslim"]["ruins"!~".*"]["abandoned"!~".*"];
+node["disused:amenity"="place_of_worship"]["religion"="muslim"]["ruins"!~".*"]["abandoned"!~".*"];
+way["disused:amenity"="place_of_worship"]["religion"="muslim"]["ruins"!~".*"]["abandoned"!~".*"];
+relation["disused:amenity"="place_of_worship"]["religion"="muslim"]["ruins"!~".*"]["abandoned"!~".*"];
+);

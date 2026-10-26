@@ -1,0 +1,8 @@
+(
+way["region:type"="mountain_area"];
+relation["region:type"="mountain_area"];
+way["natural"="massif"];
+relation["natural"="massif"];
+way["natural"="mountain_range"];
+relation["natural"="mountain_range"];
+);

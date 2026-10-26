@@ -1,0 +1,4 @@
+(
+way["building"="train_station"];
+relation["building"="train_station"];
+);

@@ -1,0 +1,4 @@
+(
+way["railway"="rail"]["tunnel"="yes"];
+way["railway"="narrow_gauge"]["tunnel"="yes"];
+);

@@ -1,0 +1,4 @@
+(
+way["natural"="shoal"];
+relation["natural"="shoal"];
+);

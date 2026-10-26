@@ -1,0 +1,3 @@
+(
+node["man_made"="lighthouse"];
+);

@@ -1,0 +1,7 @@
+(
+way["aeroway"="runway"];
+relation["aeroway"="runway"];
+way["aeroway"="taxiway"];
+way["aeroway"="apron"];
+relation["aeroway"="apron"];
+);

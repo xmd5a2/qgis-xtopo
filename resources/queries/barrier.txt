@@ -1,0 +1,4 @@
+(
+way["barrier"];
+relation["barrier"];
+);

@@ -1,0 +1,6 @@
+(
+node["barrier"="border_control"];
+way["barrier"="border_control"];
+node["military"="checkpoint"];
+way["military"="checkpoint"];
+);

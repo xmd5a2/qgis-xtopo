@@ -1,0 +1,4 @@
+(
+node["man_made"="chimney"]["fixme"!~".*"];
+way["man_made"="chimney"]["fixme"!~".*"];
+);

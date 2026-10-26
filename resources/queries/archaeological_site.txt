@@ -1,0 +1,5 @@
+(
+node["historic"="archaeological_site"];
+way["historic"="archaeological_site"];
+relation["historic"="archaeological_site"];
+);

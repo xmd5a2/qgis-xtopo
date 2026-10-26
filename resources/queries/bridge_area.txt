@@ -1,0 +1,4 @@
+(
+way["man_made"="bridge"];
+relation["man_made"="bridge"];
+);

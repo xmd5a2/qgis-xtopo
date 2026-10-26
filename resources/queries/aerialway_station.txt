@@ -1,0 +1,4 @@
+(
+node["aerialway"="station"];
+way["aerialway"="station"];
+);

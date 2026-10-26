@@ -1,0 +1,6 @@
+(
+way[railway=halt]["disused"!~".*"]["abandoned"!~".*"];
+node[railway=halt]["disused"!~".*"]["abandoned"!~".*"];
+way[railway=station]["disused"!~".*"]["abandoned"!~".*"];
+node[railway=station]["disused"!~".*"]["abandoned"!~".*"];
+);

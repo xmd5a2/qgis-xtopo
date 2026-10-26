@@ -1,0 +1,5 @@
+(
+node["natural"="cliff"];
+way["natural"="cliff"];
+relation["natural"="cliff"];
+);

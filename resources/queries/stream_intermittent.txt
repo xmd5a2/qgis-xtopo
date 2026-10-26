@@ -1,0 +1,8 @@
+(
+way["waterway"="stream"]["intermittent"="yes"];
+relation["waterway"="stream"]["intermittent"="yes"];
+way["waterway"="drain"]["intermittent"="yes"];
+relation["waterway"="drain"]["intermittent"="yes"];
+way["waterway"="ditch"]["intermittent"="yes"];
+relation["waterway"="ditch"]["intermittent"="yes"];
+);

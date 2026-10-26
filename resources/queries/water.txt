@@ -1,0 +1,10 @@
+(
+way["natural"="water"]["intermittent"!="yes"];
+relation["natural"="water"]["intermittent"!="yes"];
+way["waterway"="riverbank"];
+relation["waterway"="riverbank"];
+way["landuse"="reservoir"];
+relation["landuse"="reservoir"];
+way["landuse"="basin"];
+relation["landuse"="basin"];
+);

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="place_of_worship_taoist.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.65172414"
+     inkscape:cx="29.142882"
+     inkscape:cy="279.60019"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     inkscape:connector-curvature="0"
+     style="fill:#000000;fill-opacity:1;stroke-width:1"
+     d="M 289.99999,59.51991 C 162.71577,59.51991 59.519715,162.71578 59.519715,290 c 0,127.28422 103.196055,230.48009 230.480275,230.48009 127.28422,0 230.48009,-103.19587 230.48009,-230.48009 l -0.0281,-3.56187 C 518.50366,160.55934 415.89378,59.51991 289.99999,59.51991 Z m 31.49806,29.495196 C 417.75301,103.98069 491.85103,186.4591 493.40554,286.85535 V 290 c 0,112.34479 -91.06075,203.40554 -203.40555,203.40554 -5.26639,0 -10.47278,-0.19126 -15.63792,-0.58411 -0.0188,-0.002 -0.0375,0.002 -0.0563,0 -71.22527,-7.16594 -101.68355,-58.01006 -101.75855,-96.08244 -0.0394,-20.30896 2.94306,-46.12808 19.0329,-67.14304 16.08984,-21.01495 45.32083,-37.36357 98.28013,-38.59461 l 0.75194,-0.0272 c 52.86461,-1.45794 79.48443,-25.89695 92.74278,-52.22893 13.31366,-26.44168 13.30897,-54.77727 13.57899,-63.72087 v -0.0281 c 0.2794,-9.20893 -2.81556,-31.01333 -17.7803,-50.89288 -11.27911,-14.98209 -29.34068,-28.785445 -57.65565,-35.088244 z m -31.49806,57.321124 c 16.35893,0 29.68665,13.10927 29.9398,29.46725 v 0.47254 c 0,16.54082 -13.39992,29.94074 -29.9398,29.94074 -16.54081,0 -29.94073,-13.39992 -29.94073,-29.94074 0,-16.53987 13.39992,-29.93979 29.94073,-29.93979 z m 0,227.44701 c -16.54081,0 -29.94073,13.39992 -29.94073,29.9398 0,16.54082 13.39992,29.94073 29.94073,29.94073 16.53988,0 29.9398,-13.39991 29.9398,-29.94073 v -0.47254 c -0.25315,-16.35799 -13.58087,-29.46726 -29.9398,-29.46726 z"
+     id="path2" />
+</svg>

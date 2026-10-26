@@ -1,7 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Сборка
+dist/
+
+# Локальное окружение
+.idea/
 .stfolder/
 .stversions/
-.idea/
 author.txt
+processing/
+
+# Служебные файлы старого пайплайна
 config_debug.ini
 config_debug.ini1
 docker_prepare_data.ini
@@ -11,16 +23,5 @@ docker_run.ini1
 prepare_files_for_github.sh
 update_local_config_dir.sh
 update_local_config_dir.sh1
-queries/bak/
-QGIS3/profiles/default/python/expressions/
-expressions/__pycache__
-*.pyc
-processing/
-gui/__pycache__/
-gui/build/
-gui/dist/
-gui/run_chain.sh
-gui/calc_srtm_tiles_list.py
-gui/process_bbox.py
 err_prepare_data.flag
 err_populate_db.flag

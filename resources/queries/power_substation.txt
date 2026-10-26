@@ -1,0 +1,4 @@
+(
+way["power"="substation"];
+relation["power"="substation"];
+);

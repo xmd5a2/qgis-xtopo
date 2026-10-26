@@ -1,0 +1,17 @@
+(
+way["highway"="motorway"]["tunnel"]["tunnel"!="no"];
+way["highway"="motorway_link"]["tunnel"]["tunnel"!="no"];
+way["highway"="trunk"]["tunnel"]["tunnel"!="no"];
+way["highway"="trunk_link"]["tunnel"]["tunnel"!="no"];
+way["highway"="primary"]["tunnel"]["tunnel"!="no"];
+way["highway"="primary_link"]["tunnel"]["tunnel"!="no"];
+way["highway"="secondary"]["tunnel"]["tunnel"!="no"];
+way["highway"="secondary_link"]["tunnel"]["tunnel"!="no"];
+way["highway"="tertiary"]["tunnel"]["tunnel"!="no"];
+way["highway"="tertiary_link"]["tunnel"]["tunnel"!="no"];
+way["highway"="residential"]["tunnel"]["tunnel"!="no"];
+way["highway"="unclassified"]["tunnel"]["tunnel"!="no"];
+way["highway"="living_street"]["tunnel"]["tunnel"!="no"];
+way["highway"="pedestrian"]["tunnel"]["tunnel"!="no"];
+way["highway"="service"]["tunnel"]["tunnel"!="no"];
+);

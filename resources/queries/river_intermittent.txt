@@ -1,0 +1,4 @@
+(
+way["waterway"="river"]["intermittent"="yes"];
+relation["waterway"="river"]["intermittent"="yes"];
+);

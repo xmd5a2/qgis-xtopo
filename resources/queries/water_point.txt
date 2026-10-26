@@ -1,0 +1,6 @@
+(
+node["amenity"="drinking_water"]["natural"!="spring"]["access"!="private"];
+node["man_made"="water_well"]["natural"!="spring"]["access"!="private"];
+node["man_made"="water_tap"]["natural"!="spring"]["access"!="private"];
+node["amenity"="water_point"]["natural"!="spring"]["access"!="private"];
+);

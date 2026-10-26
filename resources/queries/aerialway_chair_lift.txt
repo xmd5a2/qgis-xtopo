@@ -1,0 +1,6 @@
+(
+way["aerialway"="chair_lift"];
+way["aerialway"="t-bar"];
+way["aerialway"="j-bar"];
+way["aerialway"="platter"];
+);

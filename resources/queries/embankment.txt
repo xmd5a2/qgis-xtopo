@@ -1,0 +1,4 @@
+(
+way["man_made"="embankment"]["highway"!~".*"]["railway"!~".*"];
+way["embankment"="yes"]["highway"!~".*"]["railway"!~".*"];
+);

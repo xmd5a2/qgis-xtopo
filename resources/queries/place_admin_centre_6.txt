@@ -1,0 +1,7 @@
+rel["admin_level"="6"]->.relations;
+(
+  node(r.relations:"label")["place"="city"];
+  node(r.relations:"admin_centre")["place"="city"];
+  node(r.relations:"label")["place"="town"];
+  node(r.relations:"admin_centre")["place"="town"];
+);

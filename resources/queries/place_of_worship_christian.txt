@@ -1,0 +1,8 @@
+(
+node["amenity"="place_of_worship"]["religion"="christian"]["ruins"!~".*"]["abandoned"!~".*"]["level"!~".*"];
+way["amenity"="place_of_worship"]["religion"="christian"]["ruins"!~".*"]["abandoned"!~".*"];
+relation["amenity"="place_of_worship"]["religion"="christian"]["ruins"!~".*"]["abandoned"!~".*"];
+node["disused:amenity"="place_of_worship"]["religion"="christian"]["ruins"!~".*"]["abandoned"!~".*"]["level"!~".*"];
+way["disused:amenity"="place_of_worship"]["religion"="christian"]["ruins"!~".*"]["abandoned"!~".*"];
+relation["disused:amenity"="place_of_worship"]["religion"="christian"]["ruins"!~".*"]["abandoned"!~".*"];
+);

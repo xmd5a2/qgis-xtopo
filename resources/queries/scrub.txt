@@ -1,0 +1,4 @@
+(
+way["natural"="scrub"];
+relation["natural"="scrub"];
+);

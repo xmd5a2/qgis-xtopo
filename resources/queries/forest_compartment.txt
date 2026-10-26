@@ -1,0 +1,6 @@
+(
+way["boundary"="forest_compartment"];
+relation["boundary"="forest_compartment"];
+way["boundary"="forestry_compartment"];
+relation["boundary"="forestry_compartment"];
+);

@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="picnic_site_cluster.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.65172414"
+     inkscape:cx="-28.873949"
+     inkscape:cy="429.03275"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1"
+     inkscape:snap-global="false" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     sodipodi:type="inkscape:offset"
+     inkscape:radius="0"
+     inkscape:original="M 116.80469 183.94141 L 116.80469 219.76562 L 181.67383 219.76562 L 142.4668 316.10156 L 46.619141 316.10156 L 46.619141 351.91016 L 127.94336 351.91016 L 82.931641 464.23047 L 126.98438 464.23047 L 172.48438 351.91016 L 319.63867 351.91016 L 365.14062 464.23047 L 409.67969 464.23047 L 364.17969 351.91016 L 445.99219 351.91016 L 445.99219 316.10156 L 349.6582 316.10156 L 310.44922 219.76562 L 375.79102 219.76562 L 375.79102 183.94141 L 116.80469 183.94141 z M 221.85547 219.76562 L 262.03906 219.76562 L 301.24609 316.10156 L 182.64844 316.10156 L 221.85547 219.76562 z "
+     style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:40px;line-height:125%;font-family:NPSPICT3;-inkscape-font-specification:NPSPICT3;text-align:start;writing-mode:lr-tb;text-anchor:start;fill:#000000;fill-opacity:0.94690265;stroke:none;stroke-width:15.54061031px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1"
+     id="flowRoot3192"
+     d="m 116.80469,183.94141 v 35.82421 h 64.86914 L 142.4668,316.10156 H 46.619141 v 35.8086 H 127.94336 L 82.931641,464.23047 h 44.052739 l 45.5,-112.32031 h 147.15429 l 45.50195,112.32031 h 44.53907 l -45.5,-112.32031 h 81.8125 v -35.8086 H 349.6582 l -39.20898,-96.33594 h 65.3418 v -35.82421 z m 105.05078,35.82421 h 40.18359 l 39.20703,96.33594 H 182.64844 Z"
+     transform="matrix(0.94499755,0,0,0.94499755,-3.5733991,28.602597)" />
+  <path
+     style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:40px;line-height:125%;font-family:NPSPICT3;-inkscape-font-specification:NPSPICT3;text-align:start;writing-mode:lr-tb;text-anchor:start;fill:#000000;fill-opacity:1;stroke:none;stroke-width:14.6858387px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1"
+     d="m 256.70513,124.58814 v 30.24176 h 54.75818 l -6.63159,16.29567 h 33.92024 l 6.6316,-16.29567 h 33.92024 l 33.09706,81.31962 h -29.55148 v 0.13105 a 31.304242,31.304242 0 0 1 -22.81468,30.0978 h 67.89217 l 38.40899,94.81353 h 37.59872 l -38.40899,-94.81353 h 69.0605 V 236.14952 H 453.26647 L 420.1694,154.8299 h 55.15686 v -30.24176 z"
+     id="flowRoot3192-3"
+     inkscape:connector-curvature="0" />
+</svg>

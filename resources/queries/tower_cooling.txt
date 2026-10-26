@@ -1,0 +1,4 @@
+(
+node["tower:type"="cooling"];
+way["tower:type"="cooling"];
+);

@@ -1,0 +1,4 @@
+(
+way["man_made"="spoil_heap"]["landuse"!="landfill"];
+relation["man_made"="spoil_heap"]["landuse"!="landfill"];
+);

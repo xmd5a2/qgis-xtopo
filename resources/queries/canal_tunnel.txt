@@ -1,0 +1,3 @@
+(
+way["waterway"="canal"]["tunnel"!="no"]["tunnel"~".*"];
+);

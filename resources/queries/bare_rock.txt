@@ -1,0 +1,4 @@
+(
+way["natural"="bare_rock"];
+relation["natural"="bare_rock"];
+);

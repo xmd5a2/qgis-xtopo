@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   version="1.0"
+   width="580"
+   height="580"
+   id="svg2"
+   sodipodi:version="0.32"
+   inkscape:version="0.92.3 (2405546, 2018-03-11)"
+   sodipodi:docname="barrier_lift_gate.svg"
+   inkscape:output_extension="org.inkscape.output.svg.inkscape">
+  <metadata
+     id="metadata2975">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <cc:license
+           rdf:resource="http://web.resource.org/cc/PublicDomain" />
+        <dc:language>en</dc:language>
+        <dc:title />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     inkscape:window-height="1006"
+     inkscape:window-width="1920"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     guidetolerance="10.0"
+     gridtolerance="10.0"
+     objecttolerance="10.0"
+     borderopacity="1.0"
+     bordercolor="#666666"
+     pagecolor="#ffffff"
+     id="base"
+     inkscape:zoom="0.65172414"
+     inkscape:cx="64.4681"
+     inkscape:cy="297.57576"
+     inkscape:window-x="1920"
+     inkscape:window-y="0"
+     inkscape:current-layer="svg2"
+     showgrid="false"
+     inkscape:window-maximized="1" />
+  <defs
+     id="defs4">
+    <inkscape:perspective
+       sodipodi:type="inkscape:persp3d"
+       inkscape:vp_x="0 : 290 : 1"
+       inkscape:vp_y="0 : 1000 : 0"
+       inkscape:vp_z="580 : 290 : 1"
+       inkscape:persp3d-origin="290 : 193.33333 : 1"
+       id="perspective2441" />
+  </defs>
+  <path
+     style="color:#000000;font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:medium;line-height:normal;font-family:sans-serif;font-variant-ligatures:normal;font-variant-position:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-alternates:normal;font-feature-settings:normal;text-indent:0;text-align:start;text-decoration:none;text-decoration-line:none;text-decoration-style:solid;text-decoration-color:#000000;letter-spacing:normal;word-spacing:normal;text-transform:none;writing-mode:lr-tb;direction:ltr;text-orientation:mixed;dominant-baseline:auto;baseline-shift:baseline;text-anchor:start;white-space:normal;shape-padding:0;clip-rule:nonzero;display:inline;overflow:visible;visibility:visible;opacity:1;isolation:auto;mix-blend-mode:normal;color-interpolation:sRGB;color-interpolation-filters:linearRGB;solid-color:#000000;solid-opacity:1;vector-effect:none;fill:#000000;fill-opacity:1;fill-rule:nonzero;stroke:none;stroke-width:54.68502426;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;color-rendering:auto;image-rendering:auto;shape-rendering:auto;text-rendering:auto;enable-background:accumulate"
+     d="m 77.578123,119.01562 c -4.638711,1.7e-4 -9.251186,1.90744 -12.53125,5.1875 -3.280064,3.28007 -5.187328,7.89254 -5.1875,12.53125 v 306.53125 c 1.72e-4,4.63871 1.907436,9.25118 5.1875,12.53125 3.280064,3.28006 7.892539,5.18733 12.53125,5.1875 h 44.843757 c 4.63871,-1.7e-4 9.25118,-1.90744 12.53125,-5.1875 3.28006,-3.28007 5.18733,-7.89254 5.1875,-12.53125 V 288.79687 c -22.41541,6.88237 -49.301105,0.78606 -63.781257,-18.25 -21.960654,-26.26887 -10.755335,-72.68933 21.625,-84.9375 14.049577,-3.25379 28.104057,-6.47794 42.156257,-9.71875 v -39.15625 c -1.7e-4,-4.63871 -1.90744,-9.25118 -5.1875,-12.53125 -3.28007,-3.28006 -7.89254,-5.18733 -12.53125,-5.1875 z m 413.876957,7.375 a 27.345246,27.345246 0 0 0 -7.32031,0.72266 l -369.5293,82.38085 a 27.345246,27.345246 0 1 0 11.89844,53.375 l 369.5293,-82.38085 a 27.345246,27.345246 0 0 0 -4.57813,-54.09766 z m -37.37695,135.625 c -3.72291,-0.002 -7.42219,1.52961 -10.05469,4.16211 -2.6325,2.6325 -4.16571,6.33373 -4.16406,10.05664 v 170.53125 c -0.002,3.72291 1.53156,7.42414 4.16406,10.05664 2.6325,2.6325 6.33178,4.16376 10.05469,4.16211 h 51.84375 c 3.72291,0.002 7.42414,-1.52961 10.05664,-4.16211 2.6325,-2.6325 4.16376,-6.33373 4.16211,-10.05664 V 276.23437 c 0.002,-3.72291 -1.52961,-7.42414 -4.16211,-10.05664 -2.6325,-2.6325 -6.33373,-4.16376 -10.05664,-4.16211 z"
+     id="path3732"
+     inkscape:connector-curvature="0" />
+</svg>

@@ -1,0 +1,4 @@
+(
+way["aerialway"="cable_car"];
+way["aerialway"="gondola"];
+);

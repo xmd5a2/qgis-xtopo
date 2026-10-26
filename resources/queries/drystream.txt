@@ -1,0 +1,4 @@
+(
+way["waterway"="drystream"];
+relation["waterway"="drystream"];
+);

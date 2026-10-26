@@ -1,0 +1,8 @@
+(
+relation["natural"="ridge"]["name"];
+relation["natural"="ridge"]["name:en"];
+relation["natural"="ridge"]["name:ru"];
+way["natural"="ridge"]["name"];
+way["natural"="ridge"]["name:en"];
+way["natural"="ridge"]["name:ru"];
+);

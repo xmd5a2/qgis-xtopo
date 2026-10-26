@@ -1,0 +1,8 @@
+(
+way["natural"="water"]["waterway"!="riverbank"]["water"!="riverbank"]["water"!="river"]["intermittent"!="yes"];
+relation["natural"="water"]["waterway"!="riverbank"]["water"!="riverbank"]["water"!="river"]["intermittent"!="yes"];
+way["landuse"="reservoir"]["intermittent"!="yes"];
+relation["landuse"="reservoir"]["intermittent"!="yes"];
+way["landuse"="basin"]["intermittent"!="yes"];
+relation["landuse"="basin"]["intermittent"!="yes"];
+);

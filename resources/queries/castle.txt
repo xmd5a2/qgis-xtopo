@@ -1,0 +1,5 @@
+(
+node["historic"="castle"];
+way["historic"="castle"];
+relation["historic"="castle"];
+);

@@ -1,0 +1,4 @@
+(
+way["landuse"="industrial"];
+relation["landuse"="industrial"];
+);

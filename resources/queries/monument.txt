@@ -1,0 +1,5 @@
+(
+node["historic"="monument"];
+way["historic"="monument"];
+relation["historic"="monument"];
+);

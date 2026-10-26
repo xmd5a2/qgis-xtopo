@@ -1,0 +1,8 @@
+(
+node["amenity"="place_of_worship"]["religion"="taoist"];
+way["amenity"="place_of_worship"]["religion"="taoist"];
+relation["amenity"="place_of_worship"]["religion"="taoist"];
+node["disused:amenity"="place_of_worship"]["religion"="taoist"];
+way["disused:amenity"="place_of_worship"]["religion"="taoist"];
+relation["disused:amenity"="place_of_worship"]["religion"="taoist"];
+);

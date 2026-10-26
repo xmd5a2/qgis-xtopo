@@ -1,0 +1,4 @@
+(
+node["tourism"="wilderness_hut"];
+way["tourism"="wilderness_hut"];
+);

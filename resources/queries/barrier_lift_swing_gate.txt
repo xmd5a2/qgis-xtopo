@@ -1,0 +1,4 @@
+(
+node["barrier"="lift_gate"];
+node["barrier"="swing_gate"];
+);
