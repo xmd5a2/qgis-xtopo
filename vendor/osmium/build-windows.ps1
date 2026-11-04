@@ -52,15 +52,19 @@ $packages = @(
 $Installed = Join-Path $VcpkgDir "installed\$Triplet"
 
 function Find-VcpkgLib {
-    <#  Ищет библиотеку в дереве vcpkg. Имена у портов разные:
-        zlib даёт z.lib, bzip2 — bzip2.lib. #>
-    param([string[]]$Names)
+    <#  Имена файлов у портов разные: zlib даёт z.lib, у остальных
+        своя схема.  Ищем по шаблонам, при неудаче печатаем содержимое
+        каталога — так видно, что именно собрал vcpkg. #>
+    param([string]$Label, [string[]]$Patterns)
     $libDir = Join-Path $Installed "lib"
-    foreach ($name in $Names) {
-        $hit = Get-ChildItem -Path $libDir -Filter "$name.lib" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+    foreach ($pattern in $Patterns) {
+        $hit = Get-ChildItem -Path $libDir -Filter $pattern -ErrorAction SilentlyContinue |
+            Sort-Object Name | Select-Object -First 1
         if ($hit) { return $hit.FullName }
     }
+    Write-Host "==> Содержимое $libDir :"
+    Get-ChildItem -Path $libDir -Filter "*.lib" -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "    $($_.Name)" }
     return $null
 }
 
@@ -87,10 +91,10 @@ if (-Not (Test-Path (Join-Path $protozeroDir ".git"))) {
 
 # Пути к зависимостям задаются явно: так не зависит от того, как
 # CMake ищет библиотеки в дереве vcpkg.
-$zlib = Find-VcpkgLib @("zlib", "z")
-$expat = Find-VcpkgLib @("expat")
-$bzip2 = Find-VcpkgLib @("bzip2")
-$lz4 = Find-VcpkgLib @("lz4")
+$zlib = Find-VcpkgLib "zlib" @("z.lib", "zlib.lib")
+$expat = Find-VcpkgLib "expat" @("expat*.lib", "libexpat*.lib")
+$bzip2 = Find-VcpkgLib "bzip2" @("bzip2*.lib", "bz2*.lib", "libbz2*.lib")
+$lz4 = Find-VcpkgLib "lz4" @("lz4*.lib", "liblz4*.lib")
 foreach ($pair in @(
     @("zlib", $zlib), @("expat", $expat),
     @("bzip2", $bzip2), @("lz4", $lz4))) {
