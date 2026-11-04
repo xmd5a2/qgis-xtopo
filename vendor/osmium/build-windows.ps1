@@ -118,7 +118,6 @@ cmake -S (Join-Path $WorkDir "osmium-tool-$OsmiumToolVersion") -B $buildDir `
     -DBUILD_SHARED_LIBS=OFF `
     -DBUILD_TESTING=OFF `
     -DCMAKE_TOOLCHAIN_FILE="$VcpkgDir\scripts\buildsystems\vcpkg.cmake" `
-    -DVCPKG_TARGET_TRIPLET=$Triplet `
     -DBoost_DIR="$Installed\share\boost" `
     -DOSMIUM_INCLUDE_DIR="$WorkDir\libosmium-$LibosmiumVersion\include" `
     -DPROTOZERO_INCLUDE_DIR="$protozeroDir\include" `
@@ -127,7 +126,8 @@ cmake -S (Join-Path $WorkDir "osmium-tool-$OsmiumToolVersion") -B $buildDir `
     -DEXPAT_INCLUDE_DIR="$includeDir" `
     -DEXPAT_LIBRARY_RELEASE="$expat" `
     -DBZIP2_INCLUDE_DIR="$includeDir" `
-    -DBZIP2_LIBRARIES_RELEASE="$bzip2" `
+    -DBZIP2_LIBRARIES="$bzip2" `
+    -DBZIP2_LIBRARY_RELEASE="$bzip2" `
     -DLZ4_INCLUDE_DIR="$includeDir" `
     -DLZ4_LIBRARY="$lz4" `
     -DCMAKE_INSTALL_PREFIX="$WorkDir\install" *>&1 |
@@ -149,6 +149,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "cmake вернул код $LASTEXITCODE"
 }
 
+# Триплет vcpkg задаётся самой toolchain: для Windows x64 это
+# x64-windows.  Проверяем, что он совпал с тем, куда ставились
+# зависимости: иначе библиотеки ищутся не в том дереве.
+$cache = Join-Path $buildDir "CMakeCache.txt"
+$usedTriplet = (Get-Content $cache |
+    Select-String "^VCPKG_TARGET_TRIPLET:" |
+    Select-Object -First 1).Line -replace "^VCPKG_TARGET_TRIPLET:.*=", ""
+if ($usedTriplet -ne $Triplet) {
+    throw "Триплет CMake ($usedTriplet) не совпадает с триплетом vcpkg ($Triplet)"
+}
+
 Write-Host "==> Собираем"
 cmake --build $buildDir --config Release
 if ($LASTEXITCODE -ne 0) { throw "Сборка не удалась" }
@@ -165,6 +176,12 @@ if (-Not $exe) {
     throw "osmium.exe не найден в $buildDir"
 }
 Copy-Item $exe.FullName (Join-Path $DestDir "osmium.exe") -Force
+# Сборка динамическая: рядом с бинарником нужны DLL из vcpkg, иначе
+# он не запустится.  vcpkg кладёт их в каталог бинарника (APPLOCAL).
+Get-ChildItem -Path $exe.Directory -Filter "*.dll" -ErrorAction SilentlyContinue |
+    Copy-Item -Destination $DestDir -Force
+Write-Host "==> Содержимое $DestDir :"
+Get-ChildItem -Path $DestDir | ForEach-Object { Write-Host "    $($_.Name)" }
 
 Write-Host "==> Проверка"
 & (Join-Path $DestDir "osmium.exe") --version
