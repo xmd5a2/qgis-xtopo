@@ -72,7 +72,7 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 ## Ограничения
 
 - **Git**: после каждой законченной feature делать коммит с осмысленным комментарием
-  на английском. Без явной просьбы не делать `checkout`, `reset --hard`, `stash`.
+  на английском. Без явной просьбы не делать `push`, `checkout`, `reset --hard`, `stash`.
 - **Стиль — только в `automap.qgz`**. Инструментов правки шаблона и переноса
   стиля в готовые проекты нет (не возвращать `tools/patch_template_*.py`).
   `core/project.py: repair_project` при открытии лишь убирает пустые слои,
