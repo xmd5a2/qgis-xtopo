@@ -40,11 +40,26 @@ jobs:
       - name: Сборка инсталлятора
         shell: pwsh
         run: |
-          # Имя каталога с «(x86)» PowerShell читает только в фигурных
-          # скобках: без них `$env:ProgramFiles(x86)` — ошибка разбора.
-          $inno = "${env:ProgramFiles(x86)}\Inno Setup 6"
-          if (Test-Path $inno) { $env:Path += ";$inno" }
-          ./installer/build-installer.ps1
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'build-installer.log'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          try {
+            # Имя каталога с «(x86)» PowerShell читает только в фигурных
+            # скобках: без них `$env:ProgramFiles(x86)` — ошибка разбора.
+            $inno = "${env:ProgramFiles(x86)}\Inno Setup 6"
+            if (Test-Path $inno) { $env:Path += ";$inno" }
+            "python: $(python --version 2>&1)" | Tee-Object -FilePath $log
+            "ISCC: $((Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source)" |
+              Tee-Object -FilePath $log -Append
+            & ./installer/build-installer.ps1 *>&1 | Tee-Object -FilePath $log -Append
+            if ($LASTEXITCODE -ne 0) { throw "build-installer.ps1: код $LASTEXITCODE" }
+          }
+          catch {
+            $_ | Out-String | Tee-Object -FilePath $log -Append
+            "### Сборка инсталлятора`n```" + (Get-Content $log -Raw) + "```" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 1
+          }
 
       - name: Проверка результата
         shell: pwsh
