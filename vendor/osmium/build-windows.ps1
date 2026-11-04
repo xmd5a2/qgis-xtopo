@@ -31,8 +31,12 @@ Write-Host "==> Устанавливаем vcpkg"
 & (Join-Path $VcpkgDir "bootstrap-vcpkg.bat") -disableMetrics
 
 Write-Host "==> Ставим зависимости"
+# vcpkg-boost — meta-пакет с файлами find_package(Boost).  Без него
+# CMake ищет BoostConfig.cmake в дереве x64-windows, а собираем мы
+# статическую сборку из x64-windows-static, и поиск не проходит.
 $packages = @(
     "boost-program-options",
+    "vcpkg-boost",
     "bzip2",
     "expat",
     "lz4",
@@ -67,6 +71,7 @@ cmake -S (Join-Path $WorkDir "osmium-tool-$OsmiumToolVersion") -B $buildDir `
     -DBUILD_TESTING=OFF `
     -DCMAKE_TOOLCHAIN_FILE="$VcpkgDir\scripts\buildsystems\vcpkg.cmake" `
     -DVCPKG_TARGET_TRIPLET=$Triplet `
+    -DBoost_DIR="$VcpkgDir\installed\$Triplet\share\boost" `
     -DOSMIUM_INCLUDE_DIR="$WorkDir\libosmium-$LibosmiumVersion\include" `
     -DCMAKE_INSTALL_PREFIX="$WorkDir\install"
 
