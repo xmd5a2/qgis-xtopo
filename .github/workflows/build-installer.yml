@@ -57,7 +57,10 @@ jobs:
           }
           catch {
             $_ | Out-String | Tee-Object -FilePath $log -Append
-            "### Сборка инсталлятора`n```" + (Get-Content $log -Raw) + "```" |
+            # Обратная кавычка в PowerShell — escape-символ, поэтому
+            # ограда для markdown собирается из символов кода.
+            $fence = -join (([string][char]96) * 3)
+            @('### Сборка инсталлятора', $fence, (Get-Content $log -Raw), $fence) |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
             exit 1
           }
