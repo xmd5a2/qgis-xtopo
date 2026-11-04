@@ -12,6 +12,7 @@ QGIS каталог называется `qgis_xtopo`, поэтому в арх�
 
 import argparse
 import shutil
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -52,6 +53,20 @@ def plugin_version():
         if line.startswith("version="):
             return line.split("=", 1)[1].strip()
     raise SystemExit("metadata.txt: не найдена строка version=")
+
+
+def _use_utf8_output():
+    """Переводит вывод в UTF-8.
+
+    Консоль Windows по умолчанию отдаёт cp1252, и русские сообщения
+    обрывают сборку с UnicodeEncodeError.  Перенастраиваем потоки:
+    непредставимый символ заменяется, а не роняет скрипт.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def _iter_files(source):
@@ -150,6 +165,7 @@ def install(archive):
 
 
 def main():
+    _use_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--install", action="store_true", help="обновить плагин в профиле QGIS"

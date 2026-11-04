@@ -48,6 +48,7 @@ jobs:
             # скобках: без них `$env:ProgramFiles(x86)` — ошибка разбора.
             $inno = "${env:ProgramFiles(x86)}\Inno Setup 6"
             if (Test-Path $inno) { $env:Path += ";$inno" }
+            $env:PYTHONIOENCODING = "utf-8"
             "python: $(python --version 2>&1)" | Tee-Object -FilePath $log
             "ISCC: $((Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source)" |
               Tee-Object -FilePath $log -Append

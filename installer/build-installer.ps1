@@ -14,6 +14,8 @@ $Payload = Join-Path $PSScriptRoot "payload"
 Push-Location $Root
 try {
     Write-Host "== Сборка плагина =="
+    # Консоль Windows отдаёт cp1252: Python должен печатать в UTF-8.
+    $env:PYTHONIOENCODING = "utf-8"
     python tools/build_plugin.py
     if ($LASTEXITCODE -ne 0) { throw "Сборка плагина не удалась" }
 
