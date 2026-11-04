@@ -28,9 +28,9 @@ jobs:
     name: инсталлятор для Windows
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -40,7 +40,10 @@ jobs:
       - name: Сборка инсталлятора
         shell: pwsh
         run: |
-          $env:Path += ";$env:ProgramFiles(x86)\Inno Setup 6"
+          # Имя каталога с «(x86)» PowerShell читает только в фигурных
+          # скобках: без них `$env:ProgramFiles(x86)` — ошибка разбора.
+          $inno = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          if (Test-Path $inno) { $env:Path += ";$inno" }
           ./installer/build-installer.ps1
 
       - name: Проверка результата

@@ -44,6 +44,7 @@ try {
     if (-not $iscc) {
         throw "Компилятор Inno Setup не найден (ISCC.exe). Установите Inno Setup 6."
     }
+    Write-Host "Компилятор: $iscc"
 
     & $iscc (Join-Path $PSScriptRoot "qgis-xtopo.iss")
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup вернул код $LASTEXITCODE" }
