@@ -112,6 +112,7 @@ foreach ($header in @("zlib.h", "expat.h", "bzlib.h", "lz4.h")) {
 Write-Host "==> Конфигурируем"
 $buildDir = Join-Path $WorkDir "build"
 if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+$configureLog = Join-Path $WorkDir "cmake-configure.log"
 cmake -S (Join-Path $WorkDir "osmium-tool-$OsmiumToolVersion") -B $buildDir `
     -DCMAKE_BUILD_TYPE=Release `
     -DBUILD_SHARED_LIBS=OFF `
@@ -129,12 +130,18 @@ cmake -S (Join-Path $WorkDir "osmium-tool-$OsmiumToolVersion") -B $buildDir `
     -DBZIP2_LIBRARIES_RELEASE="$bzip2" `
     -DLZ4_INCLUDE_DIR="$includeDir" `
     -DLZ4_LIBRARY="$lz4" `
-    -DCMAKE_INSTALL_PREFIX="$WorkDir\install"
+    -DCMAKE_INSTALL_PREFIX="$WorkDir\install" *>&1 |
+    Tee-Object -FilePath $configureLog
 if ($LASTEXITCODE -ne 0) {
+    Write-Host "==> Последние строки конфигурации CMake:"
+    Get-Content $configureLog -Tail 60
     Write-Host "==> Состояние CMake (диагностика)"
     $cache = Join-Path $buildDir "CMakeCache.txt"
     if (Test-Path $cache) {
-        Get-Content $cache | Select-String -Pattern "VCPKG_TARGET_TRIPLET|VCPKG_INSTALLED_DIR|CMAKE_PREFIX_PATH|ZLIB|EXPAT|BZIP2|PROTOZERO|LZ4|Boost"
+        Write-Host "==> Переменные, которые не нашлись:"
+        Get-Content $cache | Select-String "-NOTFOUND"
+        Write-Host "==> Важные переменные:"
+        Get-Content $cache | Select-String -Pattern "VCPKG_TARGET_TRIPLET|VCPKG_INSTALLED_DIR|CMAKE_PREFIX_PATH|Boost_DIR|OSMIUM_INCLUDE_DIR|PROTOZERO_INCLUDE_DIR"
     }
     Write-Host "==> Содержимое дерева vcpkg"
     Get-ChildItem -Path $Installed -Recurse -Depth 2 -ErrorAction SilentlyContinue |
