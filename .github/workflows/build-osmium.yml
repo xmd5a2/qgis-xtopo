@@ -1,0 +1,63 @@
+name: build-osmium
+
+# Сборка поставляемых бинарников osmium-tool для плагина QGIS-xtopo.
+# Готовые файлы кладутся в vendor/osmium/<платформа>-x86_64/ и
+# коммитятся в репозиторий: пользователю не нужно ничего ставить.
+#
+# В поставляемой папке vendor/osmium/win-x86_64/ лежит готовая сборка
+# из conda-forge (см. vendor/osmium/fetch-windows.sh).  Задача windows
+# ниже собирает из исходников альтернативный вариант без зависимостей
+# и складывает его в win-x86_64-msvc/, не трогая поставляемую папку.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "vendor/osmium/**"
+      - ".github/workflows/build-osmium.yml"
+
+jobs:
+  linux:
+    name: osmium для Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Сборка
+        run: |
+          chmod +x vendor/osmium/build-linux.sh
+          WORK_DIR="$RUNNER_TEMP/osmium" vendor/osmium/build-linux.sh
+      - name: Проверка бинарника
+        run: |
+          vendor/osmium/linux-x86_64/osmium --version
+          ldd vendor/osmium/linux-x86_64/osmium || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osmium-linux-x86_64
+          path: vendor/osmium/linux-x86_64/osmium
+
+  windows:
+    name: osmium для Windows x86_64 (сборка из исходников)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Установка cmake
+        run: python -m pip install cmake
+      - name: Сборка
+        shell: pwsh
+        run: |
+          $env:WORK_DIR = "${{ runner.temp }}\osmium"
+          $env:DEST_DIR = "vendor/osmium/win-x86_64-msvc"
+          ./vendor/osmium/build-windows.ps1
+      - name: Проверка бинарника
+        shell: pwsh
+        run: vendor/osmium/win-x86_64-msvc/osmium.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osmium-win-x86_64-msvc
+          path: vendor/osmium/win-x86_64-msvc/osmium.exe

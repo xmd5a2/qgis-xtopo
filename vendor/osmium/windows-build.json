@@ -1,0 +1,37 @@
+{
+  "channel": "conda-forge",
+  "packages": {
+    "osmium-tool": {
+      "version": "1.19.1",
+      "build": "win-64/osmium-tool-1.19.1-h60971b7_0.conda"
+    },
+    "libboost": {
+      "version": "1.90.0",
+      "build": "win-64/libboost-1.90.0-h9dfe17d_3.conda"
+    },
+    "libzlib": {
+      "version": "1.3.2",
+      "build": "win-64/libzlib-1.3.2-hfd05255_3.conda"
+    },
+    "bzip2": {
+      "version": "1.0.8",
+      "build": "win-64/bzip2-1.0.8-h0ad9c76_10.conda"
+    },
+    "libexpat": {
+      "version": "2.9.0",
+      "build": "win-64/libexpat-2.9.0-hac47afa_0.conda"
+    },
+    "lz4-c": {
+      "version": "1.10.0",
+      "build": "win-64/lz4-c-1.10.0-h6a83c73_2.conda"
+    }
+  },
+  "sha256": {
+    "osmium.exe": "455925087048db47c32ef1c9f20533f343dfc60f2aa7db8a0bfeca4851eb42e3",
+    "boost_program_options.dll": "cc75510a2ca5231e109ae0e79fd7da5d6a99628383d6fca6e47da1791ec6ec5b",
+    "zlib.dll": "f4f26ea6300c8449daad4650915e01ac80aafc6ca8b73a50be450f1fb66cdd63",
+    "libbz2.dll": "7f3ddbb88b670d79ada028480067ccdf240601319128e40eec8dce1daf4a9238",
+    "libexpat.dll": "05997b58cea2c628e97590120338957d2178a34dac3086f49211f70640ba1c44",
+    "lz4.dll": "4d747c9c0d4ad4d5d3b205da03920dc304719f0a4f12e1ea83c2b5cbde27a89f"
+  }
+}

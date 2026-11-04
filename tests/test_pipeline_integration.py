@@ -16,10 +16,9 @@ HAS_QGIS = importlib.util.find_spec("qgis") is not None
 class PipelineIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from qgis.core import QgsApplication
+        from tests import qgis_app
 
-        cls.app = QgsApplication([], False)
-        cls.app.initQgis()
+        cls.app = qgis_app()
 
     @classmethod
     def tearDownClass(cls):
@@ -31,7 +30,6 @@ class PipelineIntegrationTest(unittest.TestCase):
         cls.app.processEvents()
         QgsProject.instance().clear()
         cls.app.processEvents()
-        cls.app.exitQgis()
 
     @unittest.skipUnless(
         os.environ.get("QGIS_XTOPO_TEST_PBF")
@@ -188,23 +186,30 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(dock.tabs.currentIndex(), 0)
         self.assertLessEqual(dock.minimumSizeHint().height(), 600)
         self.assertFalse(dock.log_toggle.isChecked())
-        self.assertEqual(dock.overpass_server.count(), 4)
+        self.assertEqual(dock.overpass_server.count(), 5)
         self.assertEqual(
             dock.overpass_server.itemData(1),
-            "https://overpass-api.de/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter",
         )
         self.assertEqual(dock.source_mode.count(), 5)
         self.assertEqual(dock.source_mode.itemData(0), "geofabrik")
+        self.assertEqual(
+            dock.source_mode.itemText(0), "Карты с Geofabrik (предпочтительно)"
+        )
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("geofabrik"))
-        self.assertEqual(dock.source_label.text(), "Карты:")
+        self.assertEqual(dock.source_label.text(), "")
+        self.assertFalse(dock.source_label.isVisibleTo(dock))
+        self.assertFalse(dock.source_value.isVisibleTo(dock))
         self.assertFalse(dock.source_value.isEnabled())
         self.assertFalse(dock.browse_source.isVisibleTo(dock))
         self.assertFalse(dock.download_pbf_button.isVisibleTo(dock))
         self.assertFalse(hasattr(dock, "download_maps_button"))
         self.assertTrue(dock.geofabrik_info.isVisibleTo(dock))
+        self.assertFalse(dock.close_button.isEnabled())
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("pbf"))
+        self.assertTrue(dock.source_value.isVisibleTo(dock))
         self.assertIn(".pbf", dock.source_value.placeholderText())
-        self.assertIn("bbox", dock.source_hint.text())
+        self.assertIn("охват", dock.source_hint.text())
         self.assertNotIn("osmium", dock.source_hint.text())
         self.assertEqual(dock.source_label.text(), "Файл PBF:")
         self.assertFalse(dock.source_value.text().startswith("http"))
@@ -354,6 +359,161 @@ class PipelineIntegrationTest(unittest.TestCase):
                 project.clear()
                 dock.deleteLater()
 
+    def test_glacier_isolines_follow_interval_checkboxes(self):
+        """Галочки «Кратность» действуют и на изолинии ледников.
+
+        Изолинии ледников рисуются теми же интервалами, что и обычные,
+        поэтому включение и снятие кратности должно менять оба слоя.
+        """
+        from qgis.core import (
+            QgsFeature, QgsGeometry, QgsLineSymbol, QgsProject,
+            QgsRuleBasedRenderer, QgsVectorLayer,
+        )
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        project = QgsProject.instance()
+        project.clear()
+        dock = XtopoDockWidget(None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                crop = Path(directory) / "crop.geojson"
+                crop.write_text(
+                    '{"type":"FeatureCollection","features":[{"type":"Feature",'
+                    '"properties":{},"geometry":{"type":"Polygon","coordinates":'
+                    '[[[0,0],[0,1],[1,1],[1,0],[0,0]]]}}]}',
+                    encoding="utf-8",
+                )
+                project.addMapLayer(
+                    QgsVectorLayer(str(crop), "BBOX", "ogr")
+                )
+                layers = {}
+                for name in (
+                    "[TERRAIN] isolines regular",
+                    "[TERRAIN] isolines glacier",
+                ):
+                    layer = QgsVectorLayer(
+                        "LineString?crs=EPSG:4326&field=ELEV:integer",
+                        name,
+                        "memory",
+                    )
+                    root_rule = QgsRuleBasedRenderer.Rule(None)
+                    for value in (50, 10, 5):
+                        rule = QgsRuleBasedRenderer.Rule(QgsLineSymbol())
+                        rule.setLabel(str(value))
+                        rule.setFilterExpression(f'"ELEV" % {value} = 0')
+                        rule.setActive(value != 5)
+                        root_rule.appendChild(rule)
+                    layer.setRenderer(QgsRuleBasedRenderer(root_rule))
+                    feature = QgsFeature(layer.fields())
+                    feature.setAttribute("ELEV", 25)
+                    feature.setGeometry(QgsGeometry.fromWkt("LINESTRING (0 0, 1 1)"))
+                    layer.dataProvider().addFeature(feature)
+                    layers[name] = layer
+                project.addMapLayers(list(layers.values()))
+
+                dock._refresh_project_state()
+                panel = dock.project_panel
+                self.assertEqual(len(panel._rule_checks), 3)
+
+                regular = layers["[TERRAIN] isolines regular"]
+                glacier = layers["[TERRAIN] isolines glacier"]
+
+                def active(layer):
+                    return {
+                        rule.label(): rule.active()
+                        for rule in layer.renderer().rootRule().children()
+                    }
+
+                self.assertFalse(active(glacier)["5"])
+                box5 = next(
+                    box for box, label in panel._rule_checks if label == "5"
+                )
+                box5.setChecked(True)
+                self.assertTrue(active(glacier)["5"])
+                self.assertEqual(active(glacier), active(regular))
+
+                box5.setChecked(False)
+                self.assertFalse(active(glacier)["5"])
+                self.assertEqual(active(glacier), active(regular))
+        finally:
+            dock._project_timer.stop()
+            project.clear()
+            dock.deleteLater()
+
+    def test_scale_bar_length_and_label(self):
+        """Шкала масштаба подбирает «круглое» расстояние."""
+        from qgis_xtopo.gui.extentdialog import scale_bar
+
+        length, text = scale_bar(10.0)
+        self.assertAlmostEqual(length, 100.0)
+        self.assertEqual(text, "1 км")
+        length, text = scale_bar(0.5)
+        self.assertEqual(text, "50 м")
+        # Невозможные значения не дают полосы.
+        self.assertEqual(scale_bar(0)[0], 0.0)
+
+    def test_atlas_sheet_shows_its_size(self):
+        """Вдоль границ листа атласа показывается его размер."""
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsRectangle,
+        )
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.atlas import SheetSizeLabels
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        labels = SheetSizeLabels(canvas)
+        # Прямоугольник примерно 10 x 10 км в метрах EPSG:3857.
+        labels.set_rectangle(
+            QgsRectangle(0, 0, 10000, 10000),
+            QgsCoordinateReferenceSystem("EPSG:3857"),
+        )
+        self.assertIn("км", labels.width_text)
+        self.assertIn("км", labels.height_text)
+        # 10 000 метров в EPSG:3857 — это ровно 10 км на местности.
+        value = float(labels.width_text.split()[0].replace(",", "."))
+        self.assertGreater(value, 9.5)
+        self.assertLess(value, 10.5)
+
+    def test_project_panel_has_qgis_measure_and_identify(self):
+        """В панели инструментов есть штатные инструменты QGIS."""
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        panel = ProjectPanel(None)
+        try:
+            names = [
+                action.objectName() or action.text()
+                for action in panel.toolbar.actions()
+            ]
+            self.assertTrue(
+                any("мерить" in name.lower() for name in names),
+                "в панели нет инструмента измерения",
+            )
+            self.assertTrue(
+                any("определ" in name.lower() for name in names),
+                "в панели нет инструмента определения объектов",
+            )
+            # Меню измерения предлагает все режимы QGIS.
+            menu = panel.measure_action.menu()
+            self.assertIsNotNone(menu)
+            titles = [action.text() for action in menu.actions()]
+            self.assertEqual(len(titles), 4)
+        finally:
+            panel.deleteLater()
+
+    def test_short_status_keeps_path_tail(self):
+        """Длинный путь в строке статуса обрезается, но читается."""
+        from qgis_xtopo.gui.dockwidget import _short_status
+
+        short = _short_status("Готово")
+        self.assertEqual(short, "Готово")
+        long = _short_status(
+            "Готово: /home/user/qgis_projects/automap_test/automap_test.qgz"
+        )
+        self.assertLessEqual(len(long), 58)
+        self.assertIn("…", long)
+        self.assertTrue(long.endswith("automap_test.qgz"))
+
     def test_isolines_availability_respects_step(self):
         from qgis.core import (
             QgsFeature, QgsGeometry, QgsLineSymbol, QgsRuleBasedRenderer,
@@ -440,19 +600,32 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertTrue(dock.isolines_steps[10].isChecked())
             self.assertTrue(dock.isolines_steps[50].isChecked())
 
+            # Отметка 5 м включает все кратные (зависимость как раньше).
             dock.isolines_steps[5].click()
             self.assertTrue(
                 all(box.isChecked() for box in dock.isolines_steps.values())
             )
             self.assertEqual(dock._current_isolines_step(), 5)
 
-            dock.isolines_steps[100].click()
-            checked = [
+            # Снятие убирает галочки по одной, в любом порядке.
+            dock.isolines_steps[10].setChecked(False)
+            checked = sorted(
                 value for value, box in dock.isolines_steps.items()
                 if box.isChecked()
-            ]
-            self.assertEqual(checked, [100, 200])
-            self.assertEqual(dock._current_isolines_step(), 100)
+            )
+            self.assertEqual(checked, [5, 25, 50, 100, 200])
+            dock.isolines_steps[25].setChecked(False)
+            checked = sorted(
+                value for value, box in dock.isolines_steps.items()
+                if box.isChecked()
+            )
+            self.assertEqual(checked, [5, 50, 100, 200])
+            self.assertEqual(dock._current_isolines_step(), 5)
+
+            # Последнюю отметку снять нельзя.
+            dock._set_isolines_step(200)
+            dock.isolines_steps[200].setChecked(False)
+            self.assertTrue(dock.isolines_steps[200].isChecked())
 
             dock.dem_dir.setText("/tmp/dem")
             self.assertFalse(dock.download_terrain.isChecked())
@@ -495,6 +668,99 @@ class PipelineIntegrationTest(unittest.TestCase):
         tool.deactivate()
         tool.dispose()
         canvas.deleteLater()
+
+    def test_sheet_edit_tool_move_and_resize(self):
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsPointXY, QgsRectangle,
+        )
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.atlas import SheetEditMapTool
+
+        canvas = QgsMapCanvas()
+        canvas.resize(800, 600)
+        crs = QgsCoordinateReferenceSystem("EPSG:3857")
+        canvas.setDestinationCrs(crs)
+        canvas.setExtent(QgsRectangle(0, 0, 1000, 1000))
+        original = QgsRectangle(100, 100, 400, 300)
+        tool = SheetEditMapTool(canvas, [(original, crs)], 1.5)
+        try:
+            self.assertEqual(len(tool.handle_positions()), 4)
+            tool._index = 0
+            tool._corner = None
+            tool._original = QgsRectangle(original)
+            tool._press_point = QgsPointXY(150, 150)
+            tool._operation = "move"
+            moved = tool._current_rectangle(QgsPointXY(200, 180))
+            self.assertEqual(moved, QgsRectangle(150, 130, 450, 330))
+
+            tool._corner = 2
+            tool._operation = "resize"
+            resized = tool._current_rectangle(QgsPointXY(550, 400))
+            self.assertEqual(resized.xMinimum(), 100)
+            self.assertEqual(resized.yMinimum(), 100)
+            self.assertAlmostEqual(resized.width() / resized.height(), 1.5)
+            self.assertGreater(resized.width(), original.width())
+            self.assertEqual(tool._cursor_for_hit(0, 0), "SizeBDiagCursor")
+            self.assertEqual(tool._cursor_for_hit(0, 2), "SizeBDiagCursor")
+            self.assertEqual(tool._cursor_for_hit(0, 1), "SizeFDiagCursor")
+            self.assertEqual(tool._cursor_for_hit(0, 3), "SizeFDiagCursor")
+            self.assertEqual(tool._cursor_for_hit(0, None), "SizeAllCursor")
+        finally:
+            tool.deactivate()
+            tool.dispose()
+            canvas.deleteLater()
+            self.app.processEvents()
+
+    def test_atlas_active_sheet_selection_and_delete(self):
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        panel = ProjectPanel(Iface(canvas))
+        try:
+            for right in (100, 200, 300):
+                panel._sheet_drawn(QgsRectangle(0, 0, right, 70))
+            panel.edit_sheet_button.setChecked(True)
+            panel._sheet_activated(1)
+            self.assertEqual(panel._active_sheet_index, 1)
+            self.assertIn("выбран 2", panel.sheets_label.text())
+            self.assertEqual(panel._sheet_items[1][0].strokeColor(), QColor(220, 140, 20))
+            self.assertEqual(panel._sheet_items[0][0].strokeColor(), QColor(0, 120, 215))
+
+            panel._remove_last_sheet()
+            self.assertEqual(
+                [rectangle.xMaximum() for rectangle, _crs in panel._sheets],
+                [100, 300],
+            )
+            self.assertEqual(panel._active_sheet_index, 1)
+            self.assertEqual(
+                [
+                marker.number
+                for _band, marker, _labels in panel._sheet_items
+            ], [1, 2]
+            )
+            self.assertEqual(panel._sheet_items[1][0].strokeColor(), QColor(220, 140, 20))
+
+            panel.edit_sheet_button.setChecked(False)
+            self.assertIsNone(panel._active_sheet_index)
+            panel._remove_last_sheet()
+            self.assertEqual(len(panel._sheets), 1)
+            self.assertEqual(panel._sheets[0][0].xMaximum(), 100)
+        finally:
+            panel.clear_atlas()
+            panel.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
 
     def test_configure_map_layers_keeps_project_visibility(self):
         from qgis.core import (
@@ -702,11 +968,28 @@ class PipelineIntegrationTest(unittest.TestCase):
             panel._sheet_drawn(QgsRectangle(1000, 0, 2000, 707.0))
             self.assertEqual(len(panel._sheets), 2)
             self.assertIn("2", panel.sheets_label.text())
+            self.assertTrue(panel.edit_sheet_button.isEnabled())
+            self.assertEqual(panel.atlas_group.layout().itemAt(2).count(), 4)
+            panel.edit_sheet_button.setChecked(True)
+            self.assertIs(canvas.mapTool(), panel._edit_sheet_tool)
+            panel._sheet_edited(0, QgsRectangle(0, 0, 900, 636.3))
+            self.assertEqual(panel._sheets[0][0].xMaximum(), 900)
+            panel.edit_sheet_button.setChecked(False)
+            messages = []
+            panel.statusMessage.connect(messages.append)
             with tempfile.TemporaryDirectory() as directory:
                 target = Path(directory) / "map.png"
                 panel._export_to(str(target), "png")
                 names = sorted(path.name for path in Path(directory).iterdir())
                 self.assertEqual(names, ["map_1.png", "map_2.png"])
+                self.assertTrue(
+                    any("лист 1 из 2" in message for message in messages),
+                    messages,
+                )
+                self.assertTrue(
+                    any("лист 2 из 2" in message for message in messages),
+                    messages,
+                )
                 pdf = Path(directory) / "map.pdf"
                 panel._export_to(str(pdf), "pdf")
                 self.assertTrue(pdf.exists())
@@ -780,7 +1063,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertIn("100.0 МБ", dock.geofabrik_maps.item(0).text())
         self.assertTrue(dock.geofabrik_maps.item(0).checkState())
         self.assertEqual(dock._geofabrik_selected_ids(), ["bayern"])
-        self.assertIn("20.10.2026", dock.geofabrik_group.title())
+        self.assertIn("20.10.2026", dock.geofabrik_title.text())
         self.assertNotIn("Индекс Geofabrik", dock.geofabrik_info.text())
         self.assertIn("100.0 МБ", dock.geofabrik_summary.text())
         estimate = dock._geofabrik_estimate(50 * 1048576, 100 * 1048576)
@@ -805,6 +1088,71 @@ class PipelineIntegrationTest(unittest.TestCase):
         # Строка охвата находится внутри группы «Проект»
         self.assertIs(dock.area_label.parentWidget(), project_group)
         dock.deleteLater()
+
+    def test_log_window_and_noise_filter(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock._append_log("Первый этап")
+            dock._append_log("Результаты: {'OUTPUT': 'layer.gpkg'}")
+            dock._append_log("Results: {'OUTPUT': 'layer.gpkg'}")
+            dock._append_log("Второй этап")
+            self.assertNotIn("Результаты", dock.log.toPlainText())
+            self.assertNotIn("Results", dock.log.toPlainText())
+            dock._open_log_window()
+            self.assertTrue(dock.log_window.isVisible())
+            self.assertEqual(
+                dock.log_window_text.toPlainText(), dock.log.toPlainText()
+            )
+            dock._append_log("Третий этап")
+            self.assertEqual(
+                dock.log_window_text.toPlainText(), dock.log.toPlainText()
+            )
+        finally:
+            if dock.log_window is not None:
+                dock.log_window.close()
+            dock.deleteLater()
+
+    def test_extent_button_is_plain_and_disabled_while_running(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            self.assertTrue(dock.choose_extent.isEnabled())
+            self.assertTrue(dock.choose_extent.styleSheet())
+            dock._set_running(True)
+            self.assertFalse(dock.choose_extent.isEnabled())
+            self.assertEqual(dock.choose_extent.styleSheet(), "")
+            dock._set_running(False)
+            self.assertTrue(dock.choose_extent.isEnabled())
+            self.assertTrue(dock.choose_extent.styleSheet())
+        finally:
+            dock.deleteLater()
+
+    def test_close_project_button(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        project = QgsProject.instance()
+        project.clear()
+        layer = QgsVectorLayer("Point?crs=EPSG:4326", "BBOX", "memory")
+        project.addMapLayer(layer)
+        dock = XtopoDockWidget(None)
+        dock._own_marker = True
+        dock._refresh_project_state()
+        try:
+            self.assertTrue(dock._own_project_open)
+            self.assertTrue(dock.close_button.isEnabled())
+            self.assertFalse(dock.open_button.isEnabled())
+            dock._close_project()
+            self.assertEqual(len(project.mapLayers()), 0)
+            dock._refresh_project_state()
+            self.assertFalse(dock.close_button.isEnabled())
+            self.assertTrue(dock.open_button.isEnabled())
+        finally:
+            project.clear()
+            dock.deleteLater()
 
     def test_prepare_without_extent_asks_for_it(self):
         from unittest import mock
@@ -878,6 +1226,43 @@ class PipelineIntegrationTest(unittest.TestCase):
             panel.deleteLater()
             project.clear()
 
+    def test_project_panel_nature_reserve_and_labels(self):
+        from qgis.core import (
+            QgsPalLayerSettings, QgsProject, QgsVectorLayer,
+            QgsVectorLayerSimpleLabeling,
+        )
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        project = QgsProject.instance()
+        project.clear()
+        layer = QgsVectorLayer(
+            "Polygon?crs=EPSG:4326&field=name:string", "nature_reserve", "memory"
+        )
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(QgsPalLayerSettings()))
+        layer.setLabelsEnabled(False)
+        project.addMapLayer(layer)
+        project.layerTreeRoot().findLayer(layer.id()).setItemVisibilityChecked(False)
+        panel = ProjectPanel(None)
+        try:
+            panel._sync_from_project()
+            self.assertFalse(panel.nature_reserve_check.isChecked())
+            self.assertFalse(panel.nature_reserve_labels_check.isChecked())
+            self.assertFalse(panel.nature_reserve_labels_check.isEnabled())
+
+            panel.nature_reserve_check.setChecked(True)
+            self.assertTrue(panel._layer_visible("nature_reserve"))
+            self.assertTrue(panel.nature_reserve_labels_check.isEnabled())
+            self.assertFalse(layer.labelsEnabled())
+
+            panel.nature_reserve_labels_check.setChecked(True)
+            self.assertTrue(layer.labelsEnabled())
+            panel.nature_reserve_check.setChecked(False)
+            self.assertFalse(panel.nature_reserve_labels_check.isEnabled())
+            self.assertFalse(panel._layer_visible("nature_reserve"))
+        finally:
+            panel.deleteLater()
+            project.clear()
+
     def test_project_panel_single_hillshade(self):
         from qgis.core import QgsProject, QgsRasterLayer
         from qgis_xtopo.gui.projectpanel import ProjectPanel
@@ -924,26 +1309,28 @@ class PipelineIntegrationTest(unittest.TestCase):
         panel = ProjectPanel(None)
         try:
             panel._sync_from_project()
-            for name, widget in panel._opacity_widgets.items():
+            # У склонов шкала задаёт прозрачность слоя
+            for name in (STEEP_LAYER, SLIGHT_LAYER):
+                widget = panel._opacity_widgets[name]
                 slider = widget.property("slider")
                 self.assertEqual(slider.value(), 40, name)
                 self.assertTrue(slider.isEnabled(), name)
-            # Движение шкалы меняет прозрачность слоя
-            widget = panel._opacity_widgets[HILLSHADE_LAYER]
+            widget = panel._opacity_widgets[STEEP_LAYER]
             widget.property("slider").setValue(75)
-            self.assertAlmostEqual(
-                layers[HILLSHADE_LAYER].opacity(), 0.75, places=6
-            )
+            self.assertAlmostEqual(layers[STEEP_LAYER].opacity(), 0.75, places=6)
             self.assertEqual(widget.property("value_label").text(), "75%")
             # Кнопка сброса возвращает исходное значение из шаблона
             reset = widget.property("reset_button")
             self.assertIsNotNone(reset)
             self.assertTrue(reset.isEnabled())
             reset.click()
-            self.assertAlmostEqual(
-                layers[HILLSHADE_LAYER].opacity(), 0.4, places=6
-            )
+            self.assertAlmostEqual(layers[STEEP_LAYER].opacity(), 0.4, places=6)
             self.assertEqual(widget.property("value_label").text(), "40%")
+            # У затенения рельефа шкала задаёт прозрачность теней: 50% —
+            # исходный вид, меньше — темнее
+            widget = panel._opacity_widgets[HILLSHADE_LAYER]
+            self.assertEqual(widget.property("slider").value(), 50)
+            self.assertTrue(widget.property("slider").isEnabled())
             # У выключенного слоя шкала недоступна
             panel.hillshade_check.setChecked(False)
             self.assertFalse(widget.property("slider").isEnabled())
@@ -952,6 +1339,234 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             panel.deleteLater()
             project.clear()
+
+    def test_project_panel_slope_variants(self):
+        from qgis.core import QgsProject, QgsRasterLayer
+        from qgis_xtopo.gui.projectpanel import (
+            STEEP_LAYER, STEEP_VARIANTS, ProjectPanel,
+        )
+
+        project = QgsProject.instance()
+        project.clear()
+        layers = {}
+        for name, _label in STEEP_VARIANTS:
+            layer = QgsRasterLayer(
+                "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                "&zmax=19&zmin=0",
+                name,
+                "wms",
+            )
+            layer.setOpacity(0.4)
+            project.addMapLayer(layer)
+            layers[name] = layer
+        panel = ProjectPanel(None)
+        try:
+            panel._sync_from_project()
+            menu = panel.steep_variant_menu
+            labels = [action.text() for action in menu.actions()]
+            self.assertEqual(labels, ["Горы", "Предгорья", "Равнины"])
+            # По умолчанию выбран первый вариант
+            self.assertEqual(panel._active_steep_layer(), STEEP_VARIANTS[0][0])
+            self.assertEqual(panel.steep_variant_button.text(), "(Г) \u25bc")
+            self.assertTrue(panel.steep_check.isEnabled())
+            # Пока опция выключена, выбор варианта заблокирован
+            panel.steep_check.setChecked(False)
+            self.assertFalse(panel.steep_variant_button.isEnabled())
+            # Галочка показывает только выбранный вариант
+            panel.steep_check.setChecked(True)
+            self.assertTrue(panel.steep_variant_button.isEnabled())
+            self.assertTrue(panel._layer_visible(STEEP_VARIANTS[0][0]))
+            self.assertFalse(panel._layer_visible(STEEP_VARIANTS[1][0]))
+            self.assertFalse(panel._layer_visible(STEEP_VARIANTS[2][0]))
+            # Смена варианта переносит видимость и прозрачность
+            menu.actions()[1].trigger()
+            self.assertTrue(panel._layer_visible(STEEP_VARIANTS[1][0]))
+            self.assertFalse(panel._layer_visible(STEEP_VARIANTS[0][0]))
+            self.assertEqual(panel.steep_variant_button.text(), "(П) \u25bc")
+            slider = panel._opacity_widgets[STEEP_LAYER].property("slider")
+            self.assertEqual(slider.value(), 40)
+            slider.setValue(75)
+            self.assertAlmostEqual(
+                layers[STEEP_VARIANTS[1][0]].opacity(), 0.75, places=6
+            )
+            menu.actions()[2].trigger()
+            self.assertTrue(panel._layer_visible(STEEP_VARIANTS[2][0]))
+            self.assertFalse(panel._layer_visible(STEEP_VARIANTS[1][0]))
+            self.assertAlmostEqual(
+                layers[STEEP_VARIANTS[2][0]].opacity(), 0.75, places=6
+            )
+            # Снятие галочки прячет все варианты
+            panel.steep_check.setChecked(False)
+            for name, _label in STEEP_VARIANTS:
+                self.assertFalse(panel._layer_visible(name))
+        finally:
+            panel.deleteLater()
+            project.clear()
+
+    def test_project_panel_slope_variant_fallback(self):
+        """Старый шаблон: единственный слой «slope (steep)» без вариантов."""
+        from qgis.core import QgsProject, QgsRasterLayer
+        from qgis_xtopo.gui.projectpanel import STEEP_LAYER, ProjectPanel
+
+        project = QgsProject.instance()
+        project.clear()
+        layer = QgsRasterLayer(
+            "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+            "&zmax=19&zmin=0",
+            STEEP_LAYER,
+            "wms",
+        )
+        project.addMapLayer(layer)
+        panel = ProjectPanel(None)
+        try:
+            panel._sync_from_project()
+            self.assertEqual(len(panel.steep_variant_menu.actions()), 1)
+            self.assertEqual(panel._active_steep_layer(), STEEP_LAYER)
+            panel.steep_check.setChecked(True)
+            self.assertTrue(panel._layer_visible(STEEP_LAYER))
+        finally:
+            panel.deleteLater()
+            project.clear()
+
+    def test_project_panel_slope_variant_by_exact_name(self):
+        """Вариант уклона определяется полным именем слоя, а не суффиксом."""
+        from qgis.core import QgsProject, QgsRasterLayer
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        project = QgsProject.instance()
+        project.clear()
+        # Похожие имена не должны попадать в список вариантов.
+        names = (
+            "[TERRAIN] slope (steep) var1",
+            "slope (steep) var2",
+            "[TERRAIN] slope (slight)",
+        )
+        for name in names:
+            layer = QgsRasterLayer(
+                "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                "&zmax=19&zmin=0",
+                name,
+                "wms",
+            )
+            project.addMapLayer(layer)
+        panel = ProjectPanel(None)
+        try:
+            panel._sync_from_project()
+            actions = panel.steep_variant_menu.actions()
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0].text(), "Горы")
+            self.assertEqual(
+                panel._active_steep_layer(), "[TERRAIN] slope (steep) var1"
+            )
+            panel.steep_check.setChecked(True)
+            self.assertTrue(panel._layer_visible("[TERRAIN] slope (steep) var1"))
+        finally:
+            panel.deleteLater()
+            project.clear()
+
+    def test_ramp_items_scale(self):
+        from qgis.core import QgsColorRampShader
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui.projectpanel import _ramp_items
+
+        items = [
+            QgsColorRampShader.ColorRampItem(0, QColor(0, 0, 0, 115), "0"),
+            QgsColorRampShader.ColorRampItem(255, QColor(255, 255, 255, 0), "255"),
+        ]
+        baseline = [item.color.alpha() for item in items]
+        # 50% — исходный вид
+        self.assertEqual(
+            [item.color.alpha() for item in _ramp_items(items, baseline, 50)],
+            [115, 0],
+        )
+        # меньше — темнее
+        self.assertEqual(
+            [item.color.alpha() for item in _ramp_items(items, baseline, 0)],
+            [230, 0],
+        )
+        # больше — светлее, предельно светлый вариант без теней
+        self.assertEqual(
+            [item.color.alpha() for item in _ramp_items(items, baseline, 100)],
+            [0, 0],
+        )
+
+    def test_hillshade_shadows_can_be_darker(self):
+        """Шкала затенения рельефа меняет плотность теней в проекте.
+
+        Сценарий идёт в отдельном процессе: провайдер растров QGIS при
+        выгрузке слоя сбрасывает менеджер драйверов GDAL, и следующие
+        тесты в этом же процессе не смогли бы открыть векторные слои.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        root = Path(__file__).resolve().parent.parent
+        script = textwrap.dedent(f"""
+            import os, sys, tempfile
+            from pathlib import Path
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            sys.path.insert(0, {str(root)!r})
+            import tests
+            from qgis.core import QgsApplication
+            app = QgsApplication([], False)
+            app.initQgis()
+            from qgis.core import (QgsColorRampShader, QgsProject,
+                QgsRasterLayer, QgsRasterShader, QgsSingleBandPseudoColorRenderer)
+            from qgis.PyQt.QtGui import QColor
+            from qgis_xtopo.gui.projectpanel import HILLSHADE_LAYER, ProjectPanel
+            project = QgsProject.instance()
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "hillshade.tif"
+                from osgeo import gdal
+                gdal.UseExceptions()
+                dataset = gdal.GetDriverByName("GTiff").Create(
+                    str(path), 4, 4, 1, gdal.GDT_Byte)
+                dataset.SetGeoTransform((0, 1, 0, 10, 0, -1))
+                dataset.GetRasterBand(1).WriteRaster(0, 0, 4, 4, bytes(16))
+                dataset = None
+                layer = QgsRasterLayer(str(path), HILLSHADE_LAYER)
+                assert layer.isValid()
+                shader = QgsRasterShader()
+                function = QgsColorRampShader()
+                function.setColorRampType(QgsColorRampShader.Interpolated)
+                function.setColorRampItemList([
+                    QgsColorRampShader.ColorRampItem(
+                        0, QColor(0, 0, 0, 115), "0"),
+                    QgsColorRampShader.ColorRampItem(
+                        255, QColor(255, 255, 255, 0), "255"),
+                ])
+                shader.setRasterShaderFunction(function)
+                layer.setRenderer(QgsSingleBandPseudoColorRenderer(
+                    layer.dataProvider(), 1, shader))
+                project.addMapLayer(layer)
+                panel = ProjectPanel(None)
+                panel._sync_from_project()
+                widget = panel._opacity_widgets[HILLSHADE_LAYER]
+                slider = widget.property("slider")
+                assert slider.value() == 50, slider.value()
+                # Меньше прозрачности — темнее тени
+                slider.setValue(0)
+                items = layer.renderer().shader().rasterShaderFunction(
+                    ).colorRampItemList()
+                assert items[0].color.alpha() == 230, items[0].color.alpha()
+                assert items[1].color.alpha() == 0
+                # Сброс возвращает исходный вид
+                widget.property("reset_button").click()
+                items = layer.renderer().shader().rasterShaderFunction(
+                    ).colorRampItemList()
+                assert items[0].color.alpha() == 115
+                assert slider.value() == 50
+            print("OK")
+            sys.stdout.flush()
+            os._exit(0)
+        """)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=180,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK", result.stdout)
 
     def test_set_canvas_magnification(self):
         from qgis_xtopo.core import project as project_module
@@ -1035,6 +1650,55 @@ class PipelineIntegrationTest(unittest.TestCase):
             iface.canvas.extent.width(), 10 * 1.05, places=6
         )
         project.clear()
+
+    def test_fit_project_extent_preserves_extent_at_150_percent(self):
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsFeature, QgsGeometry,
+            QgsProject, QgsVectorLayer,
+        )
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.core import project as project_module
+
+        project = QgsProject.instance()
+        project.clear()
+        layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "BBOX", "memory")
+        feature = QgsFeature(layer.fields())
+        feature.setGeometry(
+            QgsGeometry.fromWkt("POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0))")
+        )
+        layer.dataProvider().addFeature(feature)
+        project.addMapLayer(layer)
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        canvas.resize(800, 600)
+        canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+        iface = Iface(canvas)
+        try:
+            canvas.setMagnificationFactor(1.0)
+            self.assertTrue(project_module.fit_project_extent(iface))
+            extent_100 = canvas.extent()
+            canvas.setMagnificationFactor(1.5)
+            self.assertTrue(project_module.fit_project_extent(iface))
+            extent_150 = canvas.extent()
+            self.assertAlmostEqual(extent_150.width(), extent_100.width(), places=6)
+            self.assertAlmostEqual(extent_150.height(), extent_100.height(), places=6)
+            self.assertAlmostEqual(
+                extent_150.center().x(), extent_100.center().x(), places=6
+            )
+            self.assertAlmostEqual(
+                extent_150.center().y(), extent_100.center().y(), places=6
+            )
+        finally:
+            project.clear()
+            canvas.deleteLater()
+            self.app.processEvents()
 
     def test_project_panel_rule_exclusivity(self):
         from qgis_xtopo.gui.projectpanel import ProjectPanel
@@ -1259,6 +1923,75 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock._build_config()
         dock.deleteLater()
 
+    def test_dock_geofabrik_downloaded_highlight(self):
+        from qgis.PyQt.QtCore import Qt
+
+        from qgis_xtopo.core import geofabrik
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        chosen = geofabrik.GeofabrikMap(
+            "corse", "Corse", "france",
+            "https://download.geofabrik.de/europe/france/corse-latest.osm.pbf",
+        )
+        state = geofabrik.IndexState(
+            geofabrik.GeofabrikIndex(), 0, "Tue, 20 Oct 2026 04:04:13 GMT"
+        )
+        plan = geofabrik.GeofabrikPlan(
+            state,
+            [chosen],
+            [geofabrik.MapStatus(chosen, True, 34506434, local=True)],
+        )
+        dock._geofabrik_plan = plan
+        dock._apply_geofabrik_plan(plan)
+        entry = dock.geofabrik_maps.item(0)
+        self.assertIn("скачана", entry.text())
+        self.assertNotEqual(entry.background().style(), Qt.NoBrush)
+        self.assertGreater(entry.background().color().green(),
+                           entry.background().color().red())
+        dock.deleteLater()
+
+    def test_dock_geofabrik_list_fits_width(self):
+        """Длинные названия не дают горизонтальную прокрутку списка."""
+        from qgis.PyQt.QtWidgets import QListView, QStyleOptionViewItem
+
+        from qgis_xtopo.core import geofabrik
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        self.assertEqual(
+            dock.geofabrik_maps.resizeMode(), QListView.Adjust
+        )
+        chosen = geofabrik.GeofabrikMap(
+            "russia", "Russian Federation", "europe",
+            "https://download.geofabrik.de/russia-latest.osm.pbf",
+        )
+        state = geofabrik.IndexState(
+            geofabrik.GeofabrikIndex(), 0, "Tue, 20 Oct 2026 04:04:13 GMT"
+        )
+        plan = geofabrik.GeofabrikPlan(
+            state,
+            [chosen],
+            [geofabrik.MapStatus(chosen, True, 5103585179)],
+        )
+        dock._geofabrik_plan = plan
+        dock._apply_geofabrik_plan(plan)
+        dock.geofabrik_maps.resize(260, 150)
+        dock.geofabrik_maps.show()
+        self.app.processEvents()
+        # Ширина элемента по мнению делегата не превышает ширину окна —
+        # прокрутка не нужна, а текст обрезается многоточием посередине.
+        delegate = dock.geofabrik_maps.itemDelegate()
+        index = dock.geofabrik_maps.model().index(0, 0)
+        hint = delegate.sizeHint(QStyleOptionViewItem(), index)
+        self.assertLessEqual(
+            hint.width(), dock.geofabrik_maps.viewport().width()
+        )
+        self.assertFalse(
+            dock.geofabrik_maps.horizontalScrollBar().isVisible()
+        )
+        dock.deleteLater()
+
     def test_dock_build_config_geofabrik(self):
         import tempfile
 
@@ -1307,8 +2040,9 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertFalse(hasattr(dialog, "zoom_out_button"))
         self.assertFalse(dialog.draw_button.icon().isNull())
         self.assertEqual(dialog.draw_button.text(), "")
-        self.assertIn("bbox", dialog.draw_button.toolTip())
-        # Запомненный bbox рисуется при открытии окна
+        self.assertIn("охват", dialog.draw_button.toolTip())
+        self.assertNotIn("bbox", dialog.draw_button.toolTip())
+        # Запомненный охват рисуется при открытии окна
         self.assertIsNotNone(dialog._drawn_extent)
         self.assertTrue(dialog.reset_button.isEnabled())
         bbox = dialog._extent_as_bbox()
@@ -1327,6 +2061,58 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertIsNone(dialog._drawn_extent)
         self.assertFalse(dialog.reset_button.isEnabled())
         dialog.done(0)
+
+    def test_extent_dialog_escape_and_scale_bar(self):
+        """Esc отменяет выбор, шкала масштаба рисуется на холсте."""
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtGui import QKeySequence
+        from qgis.PyQt.QtWidgets import QShortcut
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        dialog = ExtentDialog("37.5,55.7,37.7,55.8")
+        sequences = [
+            shortcut.key().toString()
+            for shortcut in dialog.findChildren(QShortcut)
+        ]
+        self.assertIn(
+            QKeySequence(Qt.Key_Escape).toString(), sequences,
+            "Esc должен закрывать окно выбора охвата",
+        )
+        # Подписи размеров сторон идут за рамкой во время рисования.
+        dialog._rectangle_changed(dialog.canvas.extent())
+        self.assertTrue(dialog._frame_labels[0])
+        self.assertTrue(dialog._frame_labels[1])
+        # Подписи берутся из поставщика: они следуют за рамкой при любой
+        # перерисовке, даже если карта перемещается.
+        rectangle, width_label, height_label = dialog.canvas._current_frame()
+        self.assertIsNotNone(rectangle)
+        self.assertEqual(width_label, dialog._frame_labels[0])
+        self.assertEqual(height_label, dialog._frame_labels[1])
+        # Шкала масштаба: длина полоски и подпись вычисляются без ошибок.
+        painter_check = dialog.canvas._draw_scale_bar
+        self.assertTrue(callable(painter_check))
+        dialog.done(0)
+
+    def test_geofabrik_refresh_button(self):
+        """Кнопка обновления индекса помечает кэш индекса устаревшим."""
+        from unittest import mock
+
+        from qgis_xtopo.core import geofabrik
+        from qgis_xtopo.core.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="refresh")
+            config.ensure_directories()
+            geofabrik_dir = config.geofabrik_dir
+            geofabrik_dir.mkdir(parents=True, exist_ok=True)
+            (geofabrik_dir / "index-meta.json").write_text(
+                '{"fetched_at": 9999999999, "etag": "x"}', encoding="utf-8"
+            )
+            with mock.patch.object(
+                geofabrik, "invalidate_index"
+            ) as invalidate:
+                invalidate(config)
+            invalidate.assert_called_once()
 
     def test_synthetic_osm(self):
         from qgis_xtopo.core.config import Config
@@ -1357,8 +2143,17 @@ class PipelineIntegrationTest(unittest.TestCase):
                 source_mode="pbf",
                 pbf_path=str(source),
             )
+            # Прежние слои проекта должны быть удалены до подготовки.
+            config.ensure_directories()
+            stale_vector = config.vector_dir / "stale.sqlite"
+            stale_raster = config.raster_dir / "stale.tif"
+            stale_vector.write_text("old", encoding="utf-8")
+            stale_raster.write_text("old", encoding="utf-8")
+
             project_path = run_project(config)
             self.assertTrue(project_path.exists())
+            self.assertFalse(stale_vector.exists())
+            self.assertFalse(stale_raster.exists())
             for name in ("peak", "water", "water_dissolved", "river", "places_main"):
                 self.assertTrue((config.vector_dir / f"{name}.sqlite").exists(), name)
 

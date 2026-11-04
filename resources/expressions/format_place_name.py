@@ -2,93 +2,111 @@ from qgis.core import *
 from qgis.gui import *
 import re
 
+# Типовые слова в названиях населённых пунктов и их сокращения.
+# Правила применяются по очереди, каждое — только к границам слова,
+# поэтому «Островского» не превращается в «о.ского».
+PLACE_TYPE_WORDS = (
+    ("санатория", "сан."),
+    ("санаторий", "сан."),
+    ("лесничества", "леснич."),
+    ("лесничество", "леснич."),
+    ("кордон", "корд."),
+    ("участка", "уч."),
+    ("участок", "уч."),
+    ("имени", "им."),
+    ("торфопредприятия", "торф."),
+    ("торфопредприятие", "торф."),
+    ("рыбопитомника", "рыб."),
+    ("рыбопитомник", "рыб."),
+    ("питомника", "пит."),
+    ("питомник", "пит."),
+    ("охотхозяйство", "охот."),
+    ("охотхозяйства", "охот."),
+    ("хозяйство", "хоз-во"),
+    ("микрорайона", "мкр."),
+    ("микрорайон", "мкр."),
+    ("квартала", "кв."),
+    ("квартал", "кв."),
+    ("кутан", "кут."),
+    ("район", "р-н"),
+    ("станция", "ст."),
+    ("полуостров", "п-ов."),
+    ("пристань", "прист."),
+    ("посёлок", "пос."),
+    ("поселок", "пос."),
+    ("урочища", "ур."),
+    ("урочище", "ур."),
+    ("долина", "дол."),
+    ("поляна", "пол."),
+    ("ущелье", "ущ."),
+    ("застава", "заст."),
+    ("озеро", "оз."),
+    ("острова", "о-ва"),
+    ("остров", "о."),
+    ("болото", "бол."),
+    ("зимник", "зим."),
+    ("зимовка", "зим."),
+    ("летник", "лет."),
+    ("балка", "б."),
+    ("овраг", "овр."),
+    ("монастырь", "мон."),
+    ("женский", "жен."),
+    ("женская", "жен."),
+    ("мужской", "муж."),
+    ("мужская", "муж."),
+    ("святой", "св."),
+    ("святого", "св."),
+    ("мыс", "м."),
+    ("лагерь", "лаг."),
+)
+
+# Многословные названия: сокращаются целиком.
+PLACE_PHRASES = (
+    ("рабочий поселок", "раб. пос."),
+    ("рабочий посёлок", "раб. пос."),
+    ("жилой комплекс", "Ж/к"),
+    ("дом отдыха", "д.о."),
+    ("база отдыха", "б.о."),
+    ("турбаза", "т/б"),
+    ("турбазы", "т/б"),
+    ("пионерлагерь", "пионерлаг."),
+    ("альплагерь", "а/л"),
+    ("садоводческое товарищество", "СТ"),
+    ("коттеджный поселок", "КП"),
+    ("коттеджный посёлок", "КП"),
+)
+
+# Признаки слова: буквы и цифры.
+WORD_EDGE = r"0-9A-Za-zА-Яа-яЁё-"
+
+
+def _replace_phrase(text, phrase, short, skip_whole=False):
+    """Заменяет фразу целиком, не задевая похожие слова.
+
+    При skip_whole название, состоящее только из этого слова, не
+    меняется: иначе «Остров» превратился бы в «о.», а «Мыс» — в «м.».
+    """
+    pattern = (
+        r"(?<![{edges}]){phrase}(?![{edges}])"
+    ).format(edges=WORD_EDGE, phrase=re.escape(phrase))
+    if skip_whole and re.fullmatch(pattern, text, flags=re.IGNORECASE):
+        return text
+    return re.sub(pattern, short, text, flags=re.IGNORECASE)
+
+
 @qgsfunction(args='auto', group='Custom')
 def format_place_name(name, population, name_pref_suf_lang, feature, parent):
     n = name
 
     if "name" == n.lower(): n = ""
     if "name ?" == n.lower(): n = ""
-    if "санатория" in n.lower(): n = re.sub("санатория","сан.", n, flags=re.IGNORECASE)
-    if "санаторий" in n.lower(): n = re.sub("санаторий","сан.", n, flags=re.IGNORECASE)
-    if "лесничества" in n.lower(): n = re.sub("лесничества","леснич.", n, flags=re.IGNORECASE)
-    if "лесничество" in n.lower(): n = re.sub("лесничество","леснич.", n, flags=re.IGNORECASE)
-    if "кордон " in n.lower(): n = re.sub("кордон ","корд. ", n, flags=re.IGNORECASE)
-    if " кордон" in n.lower(): n = re.sub(" кордон"," корд.", n, flags=re.IGNORECASE)
-    if "участок" in n.lower(): n = re.sub("участок","уч.", n, flags=re.IGNORECASE)
-    if "участка" in n.lower(): n = re.sub("участка","уч.", n, flags=re.IGNORECASE)
-    if "имени" in n.lower(): n = re.sub("имени","им.", n, flags=re.IGNORECASE)
-    if "торфопредприятия" in n.lower(): n = re.sub("торфопредприятия","торф.", n, flags=re.IGNORECASE)
-    if "торфопредприятие" in n.lower(): n = re.sub("торфопредприятие","торф.", n, flags=re.IGNORECASE)
-    if "рыбопитомника" in n.lower(): n = re.sub("рыбопитомника","рыб.", n, flags=re.IGNORECASE)
-    if "рыбопитомник" in n.lower(): n = re.sub("рыбопитомник","рыб.", n, flags=re.IGNORECASE)
-    if " питомник" in n.lower(): n = re.sub(" питомник"," пит.", n, flags=re.IGNORECASE)
-    if "охотхозяйство" in n.lower(): n = re.sub("охотхозяйство","охот.", n, flags=re.IGNORECASE)
-    if "охотхозяйства" in n.lower(): n = re.sub("охотхозяйства","охот.", n, flags=re.IGNORECASE)
-    if "хозяйство" in n.lower(): n = re.sub("хозяйство","хоз-во", n, flags=re.IGNORECASE)
-    if "микрорайона" in n.lower(): n = re.sub("микрорайона","мкр.", n, flags=re.IGNORECASE)
-    if "микрорайон" in n.lower(): n = re.sub("микрорайон","мкр.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('квартал '): n = re.sub("^квартал ","кв. ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' квартал'): n = re.sub(" квартал$"," кв.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('кутан '): n = re.sub("^кутан ","кут. ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' кутан'): n = re.sub(" кутан$"," кут.", n, flags=re.IGNORECASE)
-    if "район" in n.lower(): n = re.sub("район","р-н", n, flags=re.IGNORECASE)
-    if " станция" in n.lower(): n = re.sub(" станция"," ст.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('станция '): n = re.sub("^станция ","ст. ", n, flags=re.IGNORECASE)
-    if "полуостров" in n.lower() and " " in n: n = re.sub("полуостров","п-ов.", n, flags=re.IGNORECASE)
-    if "пристань" in n.lower(): n = re.sub("пристань","прист.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('поселок'): n = re.sub("^поселок","пос.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('посёлок'): n = re.sub("^посёлок","пос.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('рабочий поселок'): n = re.sub("^рабочий поселок","раб. пос.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('рабочий посёлок'): n = re.sub("^рабочий посёлок","раб. пос.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('жилой комплекс'): n = re.sub("^жилой комплекс","Ж/к", n, flags=re.IGNORECASE)
-    if n.lower().startswith('дом отдыха'): n = re.sub("^дом отдыха","д.о.", n, flags=re.IGNORECASE)
-    if "база отдыха" in n.lower(): n = re.sub("база отдыха","б.о.", n, flags=re.IGNORECASE)
-    if "турбаза" in n.lower(): n = re.sub("турбаза","т/б", n, flags=re.IGNORECASE)
-    if "турбазы" in n.lower(): n = re.sub("турбазы","т/б", n, flags=re.IGNORECASE)
-    if "пионерлагерь" in n.lower(): n = re.sub("пионерлагерь","пионерлаг.", n, flags=re.IGNORECASE)
-    if "альплагерь" in n.lower(): n = re.sub("альплагерь","а/л", n, flags=re.IGNORECASE)
-    if "международный" in n.lower(): n = re.sub("международный","междунар.", n, flags=re.IGNORECASE)
-    if "садоводческое товарищество" in n.lower(): n = re.sub("садоводческое товарищество","СТ", n, flags=re.IGNORECASE)
-    if "коттеджный поселок" in n.lower(): n = re.sub("коттеджный поселок","КП", n, flags=re.IGNORECASE)
-    if "коттеджный посёлок" in n.lower(): n = re.sub("коттеджный посёлок","КП", n, flags=re.IGNORECASE)
-    if n.lower().startswith('урочище '): n = re.sub("^урочище ","ур.", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' урочище'): n = re.sub(" урочище$","ур.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('урочища '): n = re.sub("^урочища ","ур.", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' урочища'): n = re.sub(" урочища$","ур.", n, flags=re.IGNORECASE)
-    if " урочища " in n.lower(): n = re.sub(" урочища "," ур. ", n, flags=re.IGNORECASE)
-    if n.lower().startswith('долина'): n = re.sub("^долина","дол.", n, flags=re.IGNORECASE)
-    if n.lower().endswith('долина'): n = re.sub("долина$","дол.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('поляна'): n = re.sub("^поляна","пол.", n, flags=re.IGNORECASE)
-    if n.lower().endswith('поляна'): n = re.sub("поляна$","пол.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('ущелье'): n = re.sub("^ущелье","ущ.", n, flags=re.IGNORECASE)
-    if n.lower().endswith('ущелье'): n = re.sub("ущелье$","ущ.", n, flags=re.IGNORECASE)
-    if "застава" in n.lower(): n = re.sub("застава","заст.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('озеро '): n = re.sub("^озеро ","оз. ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' озеро'): n = re.sub(" озеро$"," оз.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('острова '): n = re.sub("^острова ","о-ва ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' острова'): n = re.sub(" острова$"," о-ва", n, flags=re.IGNORECASE)
-    if " острова " in n.lower(): n = re.sub(" острова "," о-ва ", n, flags=re.IGNORECASE)
-    if "остров " in n.lower() and " " in n and "ур." not in n.lower() and "островн" not in n.lower() and "Острова" not in n: n = re.sub("остров ","о. ", n, flags=re.IGNORECASE)
-    if " остров" in n.lower() and " " in n and "ур." not in n.lower() and "островн" not in n.lower() and "Острова" not in n: n = re.sub(" остров"," о.", n, flags=re.IGNORECASE)
-    if "болото" in n.lower() and " " in n: n = re.sub("болото","бол.", n, flags=re.IGNORECASE)
-    if "зимник" in n.lower(): n = re.sub("зимник","зим.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('зимовка '): n = re.sub("^зимовка ","зим. ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' зимовка'): n = re.sub(" зимовка$"," зим.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('летник') and "летники" not in n.lower(): n = re.sub("летник","лет.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('балка '): n = re.sub("^балка ","б. ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' балка'): n = re.sub(" балка$"," б.", n, flags=re.IGNORECASE)
-    if n.lower().startswith('овраг '): n = re.sub("^овраг ","овр. ", n, flags=re.IGNORECASE)
-    if n.lower().endswith(' овраг'): n = re.sub(" овраг$"," овр.", n, flags=re.IGNORECASE)
-    if "монастырь " in n.lower(): n = re.sub("монастырь ","мон.", n, flags=re.IGNORECASE)
-    if " монастырь" in n.lower(): n = re.sub(" монастырь"," мон.", n, flags=re.IGNORECASE)
-    if "женский" in n.lower(): n = re.sub("женский","жен.", n, flags=re.IGNORECASE)
-    if "женская" in n.lower(): n = re.sub("женская","жен.", n, flags=re.IGNORECASE)
-    if "мужской" in n.lower(): n = re.sub("мужской","муж.", n, flags=re.IGNORECASE)
-    if "мужская" in n.lower(): n = re.sub("мужская","муж.", n, flags=re.IGNORECASE)
-    if "святой" in n.lower() and " " in n: n = re.sub("святой","св.", n, flags=re.IGNORECASE)
-    if "святого" in n.lower() and " " in n: n = re.sub("святого","св.", n, flags=re.IGNORECASE)
 
-    elif "верхняя" in n.lower() and " " in n and "." not in n.lower(): n = re.sub("верхняя","Верх.", n, flags=re.IGNORECASE)
+    for phrase, short in PLACE_PHRASES:
+        n = _replace_phrase(n, phrase, short)
+    for word, short in PLACE_TYPE_WORDS:
+        n = _replace_phrase(n, word, short, skip_whole=True)
+
+    if "верхняя" in n.lower() and " " in n and "." not in n.lower(): n = re.sub("верхняя","Верх.", n, flags=re.IGNORECASE)
     elif "верхний" in n.lower() and " " in n and "." not in n.lower(): n = re.sub("верхний","Верх.", n, flags=re.IGNORECASE)
     elif "верхние" in n.lower() and " " in n and "." not in n.lower(): n = re.sub("верхние","Верх.", n, flags=re.IGNORECASE)
     elif "верхнее" in n.lower() and " " in n and "." not in n.lower(): n = re.sub("верхнее","Верх.", n, flags=re.IGNORECASE)
@@ -161,4 +179,4 @@ def format_place_name(name, population, name_pref_suf_lang, feature, parent):
 
     if population == "0" and name_pref_suf_lang == "ru": n = n + "\n(неж.)"
 
-    return n
+    return " ".join(n.split())

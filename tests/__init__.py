@@ -29,3 +29,20 @@ def register_package(name=PACKAGE_NAME):
 
 
 register_package()
+
+_APP = None
+
+
+def qgis_app():
+    """Единственный экземпляр QgsApplication на весь процесс тестов.
+
+    QGIS не поддерживает повторный запуск приложения в одном процессе,
+    поэтому все файлы тестов используют общий экземпляр.
+    """
+    global _APP
+    if _APP is None:
+        from qgis.core import QgsApplication
+
+        _APP = QgsApplication([], False)
+        _APP.initQgis()
+    return _APP

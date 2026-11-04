@@ -113,6 +113,26 @@ def _paint(kind, painter, color, accent):
         painter.drawEllipse(QRectF(sun_x, 3, 4, 4))
         return
 
+    if kind == "nature":
+        # Охраняемая территория: пунктирная граница и дерево внутри.
+        pen = _pen(color, 1.3)
+        pen.setStyle(_enum(Qt, "PenStyle", "DashLine"))
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush if hasattr(Qt, "NoBrush") else Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        painter.setPen(_pen(color, 1.4))
+        path = QPainterPath(QPointF(12, 5.5))
+        path.lineTo(8.4, 11.4)
+        path.lineTo(10.3, 11.4)
+        path.lineTo(7, 16.6)
+        path.lineTo(17, 16.6)
+        path.lineTo(13.7, 11.4)
+        path.lineTo(15.6, 11.4)
+        path.closeSubpath()
+        painter.setBrush(_fill(color))
+        painter.drawPath(path)
+        return
+
     if kind == "labels":
         path = QPainterPath(QPointF(1, 20))
         path.lineTo(7, 8)
@@ -138,6 +158,34 @@ def terrain_icon(kind, palette):
         painter = QPainter(pixmap)
         painter.scale(size / 24.0, size / 24.0)
         _paint(kind, painter, color, accent)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def _paint_panels(painter, color, accent):
+    """Значок «панели QGIS»: рамка с боковой панелью."""
+    painter.setRenderHint(_enum(QPainter, "RenderHint", "Antialiasing"), True)
+    painter.setPen(_pen(color, 1.5))
+    painter.setBrush(Qt.NoBrush if hasattr(Qt, "NoBrush") else Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(2.5, 3.5, 19, 17), 2, 2)
+    painter.setBrush(_fill(accent))
+    painter.drawRect(QRectF(3.5, 4.5, 5, 15))
+    painter.setPen(_pen(color, 1.5))
+    painter.drawLine(QPointF(9.5, 4.5), QPointF(9.5, 19.5))
+
+
+def panels_icon(palette):
+    """Значок кнопки возврата скрытых панелей QGIS."""
+    color = palette.color(_enum(QPalette, "ColorRole", "WindowText"))
+    accent = palette.color(_enum(QPalette, "ColorRole", "Highlight"))
+    icon = QIcon()
+    for size in (24, 48):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.scale(size / 24.0, size / 24.0)
+        _paint_panels(painter, color, accent)
         painter.end()
         icon.addPixmap(pixmap)
     return icon

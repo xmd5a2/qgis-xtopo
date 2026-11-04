@@ -42,6 +42,47 @@ def _tags(element):
     return result
 
 
+class FieldNames:
+    """Имена полей, уникальные без учёта регистра.
+
+    SQLite не различает регистр имён колонок, поэтому теги вроде
+    `communication:5G` и `communication:5g` приводят к ошибке создания
+    таблицы, и слой молча теряется. Совпадающие имена переименуются
+    одинаково для всех объектов слоя.
+    """
+
+    def __init__(self, priority=("name",)):
+        self._mapping = {}
+        self._used = set()
+        for name in priority:
+            self.resolve(name)
+
+    def resolve(self, name):
+        target = self._mapping.get(name)
+        if target is not None:
+            return target
+        target = name
+        lowered = target.lower()
+        if lowered in self._used:
+            index = 2
+            while f"{lowered}{index}" in self._used:
+                index += 1
+            target = f"{name}{index}"
+            lowered = target.lower()
+        self._mapping[name] = target
+        self._used.add(lowered)
+        return target
+
+    def apply(self, properties):
+        """Свойства с уникальными именами; исходный словарь, если всё ок."""
+        resolved = {}
+        for key, value in properties.items():
+            resolved[self.resolve(key)] = value
+        if resolved == properties:
+            return properties
+        return resolved
+
+
 def _is_area(tags):
     if tags.get("area") == "yes":
         return True
@@ -190,10 +231,12 @@ def _ring_area(ring):
     return area / 2.0
 
 
-def _feature(osm_type, osm_id, tags, geometry):
+def _feature(osm_type, osm_id, tags, geometry, field_names=None):
     properties = dict(tags)
     properties["@id"] = f"{osm_type}/{osm_id}"
     properties["@type"] = osm_type
+    if field_names is not None:
+        properties = field_names.apply(properties)
     return {
         "type": "Feature",
         "properties": properties,
@@ -201,7 +244,7 @@ def _feature(osm_type, osm_id, tags, geometry):
     }
 
 
-def convert_osm_to_features(source, progress=None, cancel=None):
+def convert_osm_to_features(source, progress=None, cancel=None, field_names=None):
     nodes = {}
     node_tags = {}
     ways = {}
@@ -241,7 +284,13 @@ def convert_osm_to_features(source, progress=None, cancel=None):
     features = []
     for node_id, tags in node_tags.items():
         lon, lat = nodes[node_id]
-        features.append(_feature("node", node_id, tags, {"type": "Point", "coordinates": [lon, lat]}))
+        features.append(
+            _feature(
+                "node", node_id, tags,
+                {"type": "Point", "coordinates": [lon, lat]},
+                field_names,
+            )
+        )
 
     for way_id, way in ways.items():
         tags = way["tags"]
@@ -254,20 +303,24 @@ def convert_osm_to_features(source, progress=None, cancel=None):
             geometry = {"type": "Polygon", "coordinates": [coords]}
         else:
             geometry = {"type": "LineString", "coordinates": coords}
-        features.append(_feature("way", way_id, tags, geometry))
+        features.append(_feature("way", way_id, tags, geometry, field_names))
 
     for relation_id, members, tags in relations:
         if not tags:
             continue
         geometry = _relation_geometry(members, ways, nodes, tags)
         if geometry is not None:
-            features.append(_feature("relation", relation_id, tags, geometry))
+            features.append(
+                _feature("relation", relation_id, tags, geometry, field_names)
+            )
 
     return features
 
 
 def convert_osm_xml(source, destination, progress=None, cancel=None):
-    features = convert_osm_to_features(source, progress=progress, cancel=cancel)
+    features = convert_osm_to_features(
+        source, progress=progress, cancel=cancel, field_names=FieldNames()
+    )
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8") as handle:

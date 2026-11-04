@@ -1,14 +1,19 @@
 import math
 import re
 import time
+import zipfile
 from pathlib import Path
 
 from qgis.core import (
+    QgsAbstractVectorLayerLabeling,
     QgsApplication,
+    QgsColorRampShader,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsExpression,
+    QgsExpressionContextUtils,
     QgsFeature,
+    QgsFeatureRenderer,
     QgsFeatureRequest,
     QgsGeometry,
     QgsLayoutExporter,
@@ -20,7 +25,9 @@ from qgis.core import (
     QgsLayoutSize,
     QgsProject,
     QgsRasterLayer,
+    QgsReadWriteContext,
     QgsRectangle,
+    QgsRuleBasedLabeling,
     QgsRuleBasedRenderer,
     Qgis,
     QgsUnitTypes,
@@ -28,23 +35,32 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapToolPan, QgsRubberBand
-from qgis.PyQt.QtCore import QSize, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import QEventLoop, QPoint, QRectF, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtGui import (
+    QColor, QFontMetrics, QIcon, QPainter, QPalette, QPen, QPixmap,
+)
 from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu, QMessageBox,
+    QPushButton, QSlider, QStyle, QStyleOptionComboBox, QStylePainter,
     QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
+from qgis.PyQt.QtXml import QDomDocument
 
 try:
     from qgis.PyQt.QtWidgets import QAction
 except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
+from ..core import i18n, map_language
 from ..core.project import fit_project_extent
-from .atlas import SheetMapTool, SheetMarker
+from ..core.resources import template_path
+from .atlas import (
+    SheetEditMapTool, SheetMapTool, SheetMarker, SheetSizeLabels,
+)
 from .projecticons import terrain_icon
+from .translation import translate_tree
 
 PAGE_FORMATS = {
     "A4": (210.0, 297.0),
@@ -56,6 +72,35 @@ MEMORY_BUDGET = 800 * 1024 * 1024
 
 # Сколько кратных отметок перебирается при поиске общей линии у двух правил.
 CONFLICT_SEARCH_LIMIT = 1000
+
+# Краткая подпись в поле списка: полные названия видны в раскрытом списке.
+MAP_LANGUAGE_SHORT = {
+    code: ("Местные" if code == map_language.LOCAL_LANGUAGE else code.upper())
+    for code, _label, _script in map_language.MAP_LANGUAGES
+}
+
+
+class MapLanguageCombo(QComboBox):
+    """Список языков подписей: краткий код в поле, полные названия в списке."""
+
+    @staticmethod
+    def short_label(code):
+        return i18n.tr(MAP_LANGUAGE_SHORT.get(code, code or ""))
+
+    def short_text(self):
+        return self.short_label(self.currentData())
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.currentText = self.short_text()
+        painter.drawComplexControl(
+            _enum(QStyle, "ComplexControl", "CC_ComboBox"), option
+        )
+        painter.drawControl(
+            _enum(QStyle, "ControlElement", "CE_ComboBoxLabel"), option
+        )
 
 
 def _enum(owner, group, name):
@@ -69,7 +114,20 @@ GLACIER_ISOLINES_LAYER = "[TERRAIN] isolines glacier"
 STEEP_LAYER = "[TERRAIN] slope (steep)"
 SLIGHT_LAYER = "[TERRAIN] slope (slight)"
 HILLSHADE_LAYER = "[TERRAIN] hillshade"
+
+# Варианты окраски крутых склонов: это три слоя с общей подложкой
+# slope_upscaled.tif, но разными цветовыми шкалами — для гор, предгорий
+# и равнин. Показывается только один вариант, остальные скрыты.
+#
+# Привязка строго по полному имени слоя: в проекте есть и другие слои
+# с суффиксом «var1», их нельзя путать с вариантом окраски уклонов.
+STEEP_VARIANTS = (
+    ("[TERRAIN] slope (steep) var1", "Горы"),
+    ("[TERRAIN] slope (steep) var2", "Предгорья"),
+    ("[TERRAIN] slope (steep) var3", "Равнины"),
+)
 MOUNTAIN_LAYER = "mountain area"
+NATURE_RESERVE_LAYER = "nature_reserve"
 
 LAYER_NAMES = (
     ISOLINES_LAYER,
@@ -78,10 +136,29 @@ LAYER_NAMES = (
     SLIGHT_LAYER,
     HILLSHADE_LAYER,
     MOUNTAIN_LAYER,
+    NATURE_RESERVE_LAYER,
 )
 
 # Слои, у которых в панели есть шкала прозрачности.
 OPACITY_LAYERS = (STEEP_LAYER, SLIGHT_LAYER, HILLSHADE_LAYER)
+
+# Слой пересыхающей воды: стиль берётся из шаблона проекта.
+WATER_LAYER_NAME = "water intermittent"
+
+# Шкала затенения рельефа задаёт прозрачность теней: 50% — исходный вид
+# шаблона, меньше — темнее (0% — тени непрозрачные), больше — светлее.
+HILLSHADE_DEFAULT = 50
+
+# Переменная проекта, на которую умножается ширина линий изогипс.
+ISOLINES_WIDTH_VARIABLE = "isolines_width_mult"
+
+
+def _instant_popup():
+    """Режим кнопки, открывающей меню сразу по нажатию."""
+    try:
+        return QToolButton.ToolButtonPopupMode.InstantPopup
+    except AttributeError:
+        return QToolButton.InstantPopup
 
 
 def _tool_button_icon_only():
@@ -89,6 +166,328 @@ def _tool_button_icon_only():
         return Qt.ToolButtonStyle.ToolButtonIconOnly
     except AttributeError:
         return Qt.ToolButtonIconOnly
+
+
+def _ramp_items(items, baseline, number):
+    """Цветовая шкала для заданной прозрачности теней.
+
+    number=50 — исходный вид, меньше — темнее (прозрачность теней меньше),
+    больше — светлее.
+    """
+    factor = (100.0 - number) / float(HILLSHADE_DEFAULT)
+    updated = []
+    for item, base in zip(items, baseline):
+        alpha = max(0, min(255, int(round(base * factor))))
+        color = QColor(item.color)
+        color.setAlpha(alpha)
+        updated.append(
+            QgsColorRampShader.ColorRampItem(item.value, color, item.label)
+        )
+    return updated
+
+
+def _rule_descendants(rule):
+    """Правило отрисовки или подписей вместе со всеми вложенными."""
+    yield rule
+    for child in rule.children():
+        yield from _rule_descendants(child)
+
+
+def _renderer_symbols(renderer):
+    """Все символы отрисовщика, включая символы вложенных правил."""
+    if renderer is None:
+        return
+    if isinstance(renderer, QgsRuleBasedRenderer):
+        for rule in _rule_descendants(renderer.rootRule()):
+            symbol = rule.symbol()
+            if symbol is not None:
+                yield symbol
+        return
+    try:
+        symbol = renderer.symbol()
+    except Exception:
+        symbol = None
+    if symbol is not None:
+        yield symbol
+
+
+def _symbol_layers(symbol):
+    """Слои символа вместе с вложенными символами (например, штрихи)."""
+    for index in range(symbol.symbolLayerCount()):
+        layer = symbol.symbolLayer(index)
+        if layer is None:
+            continue
+        yield layer
+        try:
+            sub = layer.subSymbol()
+        except Exception:
+            sub = None
+        if sub is not None:
+            yield from _symbol_layers(sub)
+
+
+def _label_settings(labeling):
+    """Пары «правило, настройки» для правила-based подписей слоя."""
+    if not isinstance(labeling, QgsRuleBasedLabeling):
+        return
+    for rule in _rule_descendants(labeling.rootRule()):
+        settings = rule.settings()
+        if settings is not None:
+            yield rule, settings
+
+
+def _renderer_symbol_colors(renderer):
+    """Цвета всех слоёв символов отрисовщика в порядке обхода."""
+    colors = []
+    for symbol in _renderer_symbols(renderer):
+        for symbol_layer in _symbol_layers(symbol):
+            color = symbol_layer.color()
+            colors.append(QColor(color) if color.isValid() else None)
+    return colors
+
+
+def _labeling_styles(labeling):
+    """Цвет и обводка подписей в порядке обхода."""
+    styles = []
+    for _rule, settings in _label_settings(labeling):
+        fmt = settings.format()
+        styles.append((QColor(fmt.color()), fmt.buffer().enabled()))
+    return styles
+
+
+def _isoline_symbol_colors(layer):
+    """Цвета всех слоёв символов изогипс в порядке обхода."""
+    return _renderer_symbol_colors(layer.renderer())
+
+
+def _isoline_label_styles(layer):
+    """Цвет и обводка подписей изогипс в порядке обхода."""
+    return _labeling_styles(layer.labeling())
+
+
+def label_color_for(color):
+    """Заметно более тёмный оттенок цвета линии — для подписей."""
+    source = QColor(color)
+    hue, saturation, value, alpha = source.getHsvF()
+    if hue < 0:
+        hue, saturation = 0.0, 0.0
+    return QColor.fromHsvF(
+        hue,
+        min(1.0, saturation + 0.1),
+        max(0.0, value * 0.45),
+        alpha,
+    )
+
+
+def _repaint_layer(layer):
+    layer.triggerRepaint()
+    try:
+        layer.emitStyleChanged()
+    except Exception:
+        pass
+
+
+def apply_isoline_color(layer, color):
+    """Перекрашивает линии, штрихи и подписи изогипс одним цветом.
+
+    Альфа исходных слоёв сохраняется, поэтому невидимые служебные линии
+    остаются невидимыми. Подписи получают затемнённый оттенок того же
+    цвета и остаются без обводки.
+    """
+    if layer is None:
+        return False
+    pen = QColor(color)
+    text = label_color_for(pen)
+    changed = False
+    for symbol in _renderer_symbols(layer.renderer()):
+        for symbol_layer in _symbol_layers(symbol):
+            old = symbol_layer.color()
+            new = QColor(pen)
+            if old.isValid():
+                new.setAlpha(old.alpha())
+            if old.isValid() and old == new:
+                continue
+            symbol_layer.setColor(new)
+            changed = True
+    for rule, settings in _label_settings(layer.labeling()):
+        fmt = settings.format()
+        enabled = fmt.buffer().enabled()
+        if fmt.color() == text and not enabled:
+            continue
+        fmt.setColor(text)
+        if enabled:
+            buffer = fmt.buffer()
+            buffer.setEnabled(False)
+            fmt.setBuffer(buffer)
+        settings.setFormat(fmt)
+        rule.setSettings(settings)
+        changed = True
+    if changed:
+        _repaint_layer(layer)
+    return changed
+
+
+def restore_isoline_style(layer, symbol_colors, label_styles):
+    """Возвращает изогипсам цвета из шаблона проекта."""
+    if layer is None:
+        return False
+    changed = False
+    symbol_layers = []
+    for symbol in _renderer_symbols(layer.renderer()):
+        symbol_layers.extend(_symbol_layers(symbol))
+    for symbol_layer, base in zip(symbol_layers, symbol_colors):
+        if base is None or symbol_layer.color() == base:
+            continue
+        symbol_layer.setColor(QColor(base))
+        changed = True
+    settings_list = list(_label_settings(layer.labeling()))
+    for (rule, settings), (base, buffer_enabled) in zip(
+        settings_list, label_styles
+    ):
+        fmt = settings.format()
+        if (
+            fmt.color() == base
+            and fmt.buffer().enabled() == buffer_enabled
+        ):
+            continue
+        fmt.setColor(QColor(base))
+        buffer = fmt.buffer()
+        buffer.setEnabled(buffer_enabled)
+        fmt.setBuffer(buffer)
+        settings.setFormat(fmt)
+        rule.setSettings(settings)
+        changed = True
+    if changed:
+        _repaint_layer(layer)
+    return changed
+
+
+_TEMPLATE_ISOLINE_STYLES = {}
+
+
+def _template_layer_objects(layer_name):
+    """Отрисовщик и подписи слоя из шаблона automap.qgz."""
+    path = template_path()
+    try:
+        with zipfile.ZipFile(path) as archive:
+            text = archive.read("automap.qgs").decode("utf-8")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+    document = QDomDocument()
+    try:
+        parsed = document.setContent(text)
+    except Exception:
+        return None
+    if isinstance(parsed, tuple):
+        parsed = parsed[0]
+    if not parsed:
+        return None
+    maplayers = document.elementsByTagName("maplayer")
+    context = QgsReadWriteContext()
+    for index in range(maplayers.count()):
+        element = maplayers.at(index).toElement()
+        if element.firstChildElement("layername").text() != layer_name:
+            continue
+        renderer = QgsFeatureRenderer.load(
+            element.firstChildElement("renderer-v2"), context
+        )
+        labeling = None
+        labeling_element = element.firstChildElement("labeling")
+        if not labeling_element.isNull():
+            try:
+                labeling = QgsAbstractVectorLayerLabeling.create(
+                    labeling_element, context
+                )
+            except Exception:
+                labeling = None
+        return renderer, labeling
+    return None
+
+
+def template_isoline_styles(layer_name):
+    """Исходные цвета линий и подписей изогипс из automap.qgz."""
+    if layer_name in _TEMPLATE_ISOLINE_STYLES:
+        return _TEMPLATE_ISOLINE_STYLES[layer_name]
+    objects = _template_layer_objects(layer_name)
+    if objects is None:
+        return None
+    renderer, labeling = objects
+    styles = (
+        _renderer_symbol_colors(renderer),
+        _labeling_styles(labeling),
+    )
+    _TEMPLATE_ISOLINE_STYLES[layer_name] = styles
+    return styles
+
+
+def isoline_reset_styles(layer, captured):
+    """Цвета для сброса: из шаблона, а если он не подходит — сохранённые."""
+    styles = template_isoline_styles(layer.name())
+    if styles is not None:
+        colors, labels = styles
+        if (
+            len(colors) == len(_isoline_symbol_colors(layer))
+            and len(labels) == len(_isoline_label_styles(layer))
+        ):
+            return styles
+    return captured
+
+
+def isoline_styles_differ(layer):
+    """Текущие цвета изогипс отличаются от шаблона automap.qgz."""
+    styles = template_isoline_styles(layer.name())
+    if styles is None:
+        return False
+    return (
+        _isoline_symbol_colors(layer) != styles[0]
+        or _isoline_label_styles(layer) != styles[1]
+    )
+
+
+def color_swatch_icon(color, width=34, height=14):
+    """Значок-образец выбранного цвета для маленькой кнопки."""
+    pixmap = QPixmap(width, height)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(_enum(QPainter, "RenderHint", "Antialiasing"), True)
+    border = QColor(120, 120, 120)
+    painter.setPen(QPen(border, 1))
+    painter.setBrush(QColor(color))
+    painter.drawRoundedRect(
+        QRectF(0.5, 0.5, width - 1, height - 1), 2, 2
+    )
+    painter.end()
+    return QIcon(pixmap)
+
+
+def isolines_width_doubled(project=None):
+    """Включена ли двойная ширина линий изогипс."""
+    project = project or QgsProject.instance()
+    try:
+        value = project.customVariables().get(ISOLINES_WIDTH_VARIABLE)
+    except Exception:
+        return False
+    try:
+        return abs(float(value) - 2.0) < 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
+def set_isolines_width_doubled(enabled, project=None):
+    """Включает или выключает двойную ширину линий изогипс.
+
+    Шаблон проекта умножает ширину линий на переменную
+    `@isolines_width_mult`, поэтому достаточно задать её в проекте.
+    """
+    project = project or QgsProject.instance()
+    if enabled:
+        QgsExpressionContextUtils.setProjectVariable(
+            project, ISOLINES_WIDTH_VARIABLE, "2"
+        )
+    else:
+        QgsExpressionContextUtils.removeProjectVariable(
+            project, ISOLINES_WIDTH_VARIABLE
+        )
 
 
 class ProjectPanel(QWidget):
@@ -110,14 +509,38 @@ class ProjectPanel(QWidget):
         self._rule_available = {}
         self._sheets = []
         self._sheet_items = []
+        self._active_sheet_index = None
         self._sheet_tool = None
+        self._edit_sheet_tool = None
         self._atlas_layer = None
         self._layout_original_layers = None
         self._layout_visible_states = None
+        self._export_progress = None
         self._opacity_baseline = {}
+        self._hillshade_baseline = []
+        self._isoline_color = None
+        self._isoline_baseline = {}
         self._baseline_project = None
         self._build_ui()
         self._connect_root()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_wrapped_labels()
+
+    def _fit_wrapped_labels(self):
+        """Подписи с переносом строк не должны обрезаться по высоте.
+
+        QLabel с wordWrap не сообщает layout'у нужную высоту, если её
+        не задать явно: текст переносится, но нижние строки срезаются.
+        """
+        for label in getattr(self, "_wrapped_labels", []):
+            width = label.width()
+            if width <= 0:
+                width = label.sizeHint().width()
+            height = label.heightForWidth(width)
+            if height > 0:
+                label.setMinimumHeight(height)
 
     @staticmethod
     def is_xtopo_project(project=None):
@@ -142,8 +565,8 @@ class ProjectPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(3)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self.toolbar = QToolBar(self)
         self.toolbar.setMovable(False)
@@ -167,7 +590,86 @@ class ProjectPanel(QWidget):
         self.pan_action.toggled.connect(self._toggle_pan)
         self.toolbar.addAction(self.fit_action)
         self.toolbar.addAction(self.pan_action)
+        # Штатные инструменты QGIS: измерение и определение объектов.
+        self.measure_action = QAction(
+            QgsApplication.getThemeIcon("mActionMeasure.svg"),
+            i18n.tr("Измерить"),
+            self,
+        )
+        self.measure_action.setToolTip(i18n.tr("Измерить: длина, площадь, угол"))
+        measure_menu = QMenu(self)
+        for object_name, title in (
+            ("mActionMeasure", i18n.tr("Расстояние")),
+            ("mActionMeasureArea", i18n.tr("Площадь")),
+            ("mActionMeasureAngle", i18n.tr("Угол")),
+            ("mActionMeasureBearing", i18n.tr("Азимут")),
+        ):
+            action = QAction(title, measure_menu)
+            action.triggered.connect(
+                lambda checked=False, name=object_name:
+                self._trigger_qgis_action(name)
+            )
+            measure_menu.addAction(action)
+        self.measure_action.setMenu(measure_menu)
+        self.toolbar.addAction(self.measure_action)
+        measure_button = self.toolbar.widgetForAction(self.measure_action)
+        if measure_button is not None:
+            measure_button.setPopupMode(_instant_popup())
+        self.identify_action = QAction(
+            QgsApplication.getThemeIcon("mActionIdentify.svg"),
+            i18n.tr("Определить объект"),
+            self,
+        )
+        self.identify_action.setToolTip(
+            i18n.tr("Определить объект: показать сведения об объекте под курсором")
+        )
+        self.identify_action.triggered.connect(
+            lambda: self._trigger_qgis_action("mActionIdentify")
+        )
+        self.toolbar.addAction(self.identify_action)
         layout.addWidget(self.toolbar)
+
+        self.map_language_row = QWidget(self)
+        map_language_layout = QHBoxLayout(self.map_language_row)
+        map_language_layout.setContentsMargins(0, 0, 0, 0)
+        map_language_layout.setSpacing(6)
+        self.map_language_label = QLabel("Язык карты", self.map_language_row)
+        self.map_language_combo = MapLanguageCombo(self.map_language_row)
+        self.map_language_combo.currentIndexChanged.connect(
+            self._map_language_changed
+        )
+        self.transliteration_check = QCheckBox(
+            "Транслитерация", self.map_language_row
+        )
+        self.transliteration_check.setToolTip(
+            "Запасное название (когда нет name:xx) приводится к читаемому "
+            "виду: незнакомая письменность переводится в латиницу"
+        )
+        self.transliteration_check.toggled.connect(
+            self._transliteration_toggled
+        )
+        map_language_layout.addWidget(self.map_language_label)
+        map_language_layout.addWidget(self.map_language_combo)
+        map_language_layout.addWidget(self.transliteration_check, 1)
+        layout.addWidget(self.map_language_row)
+
+        # Уровень детализации — отдельной строкой: в одной строке с языком
+        # и транслитерацией список не помещается в узкой панели.
+        self.detail_row = QWidget(self)
+        detail_layout = QHBoxLayout(self.detail_row)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(6)
+        # Сколько подробностей показывать: тот же уровень, что задан в
+        # шаблоне переменной проекта level_of_detail.
+        self.detail_label = QLabel("Детализация", self.detail_row)
+        self.detail_combo = QComboBox(self.detail_row)
+        self.detail_combo.currentIndexChanged.connect(self._detail_changed)
+        detail_layout.addWidget(self.detail_label)
+        detail_layout.addWidget(self.detail_combo)
+        detail_layout.addStretch(1)
+        layout.addWidget(self.detail_row)
+        self._fill_map_language_combo()
+        self._fill_detail_combo()
 
         self.isolines_check = self._checkbox(
             "Контуры высот (изогипсы)", "isolines"
@@ -175,7 +677,51 @@ class ProjectPanel(QWidget):
         self.isolines_check.toggled.connect(
             lambda checked: self._layer_box_toggled(ISOLINES_LAYER, checked)
         )
-        layout.addWidget(self.isolines_check)
+        self.isolines_color_row = QWidget(self)
+        isolines_color_layout = QHBoxLayout(self.isolines_color_row)
+        isolines_color_layout.setContentsMargins(0, 0, 8, 0)
+        isolines_color_layout.setSpacing(4)
+        isolines_color_layout.addWidget(self.isolines_check, 1)
+        self.isolines_width_button = QToolButton(self)
+        self.isolines_width_button.setText("2×")
+        self.isolines_width_button.setCheckable(True)
+        self.isolines_width_button.setAutoRaise(True)
+        bold = self.isolines_width_button.font()
+        bold.setBold(True)
+        metrics = QFontMetrics(bold)
+        self.isolines_width_button.setFixedSize(
+            QSize(max(24, metrics.horizontalAdvance("2×") + 14), 18)
+        )
+        self.isolines_width_button.setToolTip(
+            "Двойная ширина линий изогипс"
+        )
+        self.isolines_width_button.toggled.connect(
+            self._isoline_width_toggled
+        )
+        self.isolines_color_button = QToolButton(self)
+        self.isolines_color_button.setAutoRaise(True)
+        self.isolines_color_button.setFixedSize(QSize(38, 18))
+        self.isolines_color_button.setIconSize(QSize(34, 14))
+        self.isolines_color_button.setToolTip(
+            "Цвет изогипс: выбрать произвольный цвет"
+        )
+        self.isolines_color_button.clicked.connect(self._pick_isoline_color)
+        self.isolines_color_reset = QToolButton(self)
+        self.isolines_color_reset.setIcon(
+            QgsApplication.getThemeIcon("mActionReload.svg")
+        )
+        self.isolines_color_reset.setAutoRaise(True)
+        self.isolines_color_reset.setFixedSize(QSize(18, 18))
+        self.isolines_color_reset.setIconSize(QSize(14, 14))
+        self.isolines_color_reset.setToolTip(
+            "Сбросить цвет изогипс до исходного"
+        )
+        self.isolines_color_reset.setEnabled(False)
+        self.isolines_color_reset.clicked.connect(self._reset_isoline_color)
+        isolines_color_layout.addWidget(self.isolines_width_button)
+        isolines_color_layout.addWidget(self.isolines_color_button)
+        isolines_color_layout.addWidget(self.isolines_color_reset)
+        layout.addWidget(self.isolines_color_row)
         self.rules_title = QLabel("Кратность:", self)
         self.rules_title.setStyleSheet("padding-left: 20px;")
         self.rules_title.setVisible(False)
@@ -188,12 +734,38 @@ class ProjectPanel(QWidget):
         layout.addWidget(self.rules_container)
 
         self.steep_check = self._checkbox(
-            "Крутые склоны", "steep"
+            "Раскр. уклонов", "steep"
         )
-        self.steep_check.toggled.connect(
-            lambda checked: self._layer_box_toggled(STEEP_LAYER, checked)
+        self.steep_check.toggled.connect(self._steep_toggled)
+        # Выбор варианта — кнопка с меню: в узкой панели выпадающий
+        # список обрезал названия, а в меню помещаются все варианты.
+        # В свёрнутом виде показывается первая буква выбранного варианта.
+        self.steep_variant_button = QToolButton(self)
+        self.steep_variant_button.setToolTip(
+            "Вариант окраски уклонов: для гор, предгорий или равнин. "
+            "Одновременно показывается только один вариант."
         )
-        self.steep_opacity = self._layer_row(self.steep_check, STEEP_LAYER)
+        self.steep_variant_button.setPopupMode(_instant_popup())
+        self.steep_variant_button.setToolButtonStyle(
+            Qt.ToolButtonTextBesideIcon
+        )
+        self.steep_variant_button.setAutoRaise(True)
+        # Системный индикатор меню у QToolButton нарисован мелким
+        # треугольником и в узкой панели его почти не видно. Рисуем
+        # стрелку сами: крупным глифом в тексте, а штатный индикатор
+        # убираем, чтобы стрелка была одна.
+        self.steep_variant_button.setStyleSheet(
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
+        self.steep_variant_button.setFixedHeight(
+            self.steep_check.sizeHint().height()
+        )
+        self.steep_variant_menu = QMenu(self)
+        self.steep_variant_button.setMenu(self.steep_variant_menu)
+        self._steep_variant_name = None
+        self.steep_opacity = self._layer_row(
+            self.steep_check, STEEP_LAYER, extra=self.steep_variant_button
+        )
         layout.addWidget(self.steep_opacity)
 
         self.slight_check = self._checkbox(
@@ -223,6 +795,27 @@ class ProjectPanel(QWidget):
             lambda checked: self._layer_box_toggled(MOUNTAIN_LAYER, checked)
         )
         layout.addWidget(self.mountain_check)
+
+        self.nature_reserve_check = self._checkbox(
+            "Природоохранные зоны", "nature"
+        )
+        self.nature_reserve_check.toggled.connect(
+            lambda checked: self._layer_box_toggled(
+                NATURE_RESERVE_LAYER, checked
+            )
+        )
+        self.nature_reserve_labels_check = QCheckBox("Подписи", self)
+        self.nature_reserve_labels_check.toggled.connect(
+            self._nature_reserve_labels_toggled
+        )
+        nature_reserve_row = QWidget(self)
+        nature_reserve_layout = QHBoxLayout(nature_reserve_row)
+        nature_reserve_layout.setContentsMargins(0, 0, 0, 0)
+        nature_reserve_layout.setSpacing(8)
+        nature_reserve_layout.addWidget(self.nature_reserve_check)
+        nature_reserve_layout.addWidget(self.nature_reserve_labels_check)
+        nature_reserve_layout.addStretch(1)
+        layout.addWidget(nature_reserve_row)
         self._build_atlas_ui(layout)
         layout.addStretch(1)
 
@@ -231,6 +824,7 @@ class ProjectPanel(QWidget):
             (self.slight_check, SLIGHT_LAYER),
             (self.hillshade_check, HILLSHADE_LAYER),
             (self.mountain_check, MOUNTAIN_LAYER),
+            (self.nature_reserve_check, NATURE_RESERVE_LAYER),
         ]
         self._opacity_widgets = {
             STEEP_LAYER: self.steep_opacity,
@@ -238,20 +832,34 @@ class ProjectPanel(QWidget):
             HILLSHADE_LAYER: self.hillshade_opacity,
         }
 
-    def _layer_row(self, check_box, layer_name):
+    def _layer_row(self, check_box, layer_name, extra=None):
         """Строка слоя рельефа: галочка, шкала прозрачности, значение, сброс."""
+        # Строки держим по 24 px: так панель остаётся в пределах 600 px.
+        check_box.setFixedHeight(24)
         row = QWidget(self)
         line = QHBoxLayout(row)
-        line.setContentsMargins(0, 0, 0, 0)
+        # Небольшой отступ справа: шкала и кнопка сброса не прилипают к краю.
+        line.setContentsMargins(0, 0, 8, 0)
         line.setSpacing(4)
+        hillshade = layer_name == HILLSHADE_LAYER
+        initial = HILLSHADE_DEFAULT if hillshade else 100
         slider = QSlider(Qt.Horizontal, row)
         slider.setRange(0, 100)
-        slider.setValue(100)
+        slider.setValue(initial)
         slider.setFixedWidth(70)
-        slider.setToolTip(
-            "Прозрачность слоя «%s»" % layer_name.replace("[TERRAIN] ", "")
-        )
-        value = QLabel("100%", row)
+        if hillshade:
+            slider.setToolTip(
+                "Прозрачность теней рельефа: 50% — исходный вид, "
+                "меньше — темнее (0% — тени непрозрачные), больше — светлее."
+            )
+        else:
+            slider.setToolTip(
+                i18n.trf(
+                    "Прозрачность слоя «{}»",
+                    layer_name.replace("[TERRAIN] ", ""),
+                )
+            )
+        value = QLabel(f"{initial}%", row)
         value.setMinimumWidth(34)
         value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         reset = QToolButton(row)
@@ -265,6 +873,9 @@ class ProjectPanel(QWidget):
             lambda _checked=False, ln=layer_name: self._reset_opacity(ln)
         )
         line.addWidget(check_box, 1)
+        if extra is not None:
+            extra.setFixedHeight(24)
+            line.addWidget(extra)
         line.addWidget(slider)
         line.addWidget(value)
         line.addWidget(reset)
@@ -289,7 +900,7 @@ class ProjectPanel(QWidget):
         self.atlas_group = QGroupBox("Атлас", self)
         group_layout = QVBoxLayout(self.atlas_group)
         group_layout.setContentsMargins(4, 4, 4, 4)
-        group_layout.setSpacing(4)
+        group_layout.setSpacing(2)
 
         options = QHBoxLayout()
         options.setSpacing(4)
@@ -323,12 +934,20 @@ class ProjectPanel(QWidget):
         group_layout.addLayout(quality)
 
         sheet_buttons = QHBoxLayout()
+        sheet_buttons.setSpacing(2)
         self.add_sheet_button = QPushButton(
-            QgsApplication.getThemeIcon("mActionAdd.svg"), "Добавить лист"
+            QgsApplication.getThemeIcon("mActionAdd.svg"), "Добавить"
         )
         self.add_sheet_button.setCheckable(True)
         self.add_sheet_button.setToolTip(
-            "Нарисовать на карте прямоугольник листа с пропорциями формата"
+            "Добавить лист: протянуть рамку на карте"
+        )
+        self.edit_sheet_button = QPushButton(
+            QgsApplication.getThemeIcon("mActionToggleEditing.svg"), "Изменить"
+        )
+        self.edit_sheet_button.setCheckable(True)
+        self.edit_sheet_button.setToolTip(
+            "Перетащите рамку листа или потяните за квадратный маркер угла"
         )
         self.remove_sheet_button = QPushButton(
             QgsApplication.getThemeIcon("mActionRemove.svg"), "Удалить"
@@ -340,23 +959,23 @@ class ProjectPanel(QWidget):
         )
         self.clear_sheets_button.setToolTip("Удалить все листы")
         for button in (
-            self.add_sheet_button, self.remove_sheet_button,
-            self.clear_sheets_button,
+            self.add_sheet_button, self.edit_sheet_button,
+            self.remove_sheet_button, self.clear_sheets_button,
         ):
             button.setIconSize(QSize(16, 16))
             sheet_buttons.addWidget(button)
-        sheet_buttons.addStretch(1)
         group_layout.addLayout(sheet_buttons)
 
         self.sheets_label = QLabel("Листов: 0 — будет экспортирован текущий вид")
         self.sheets_label.setWordWrap(True)
         group_layout.addWidget(self.sheets_label)
         hint = QLabel(
-            "Нажмите «Добавить лист» и протяните рамку на карте. "
-            "Номер листа рисуется в его центре."
+            "«Добавить» — нарисовать рамку, «Изменить» — двигать её."
         )
         hint.setWordWrap(True)
         group_layout.addWidget(hint)
+        # Подписи с переносом строк: без пересчёта высоты текст обрезается.
+        self._wrapped_labels = [self.sheets_label, hint]
 
         export_buttons = QHBoxLayout()
         self.export_png_button = QPushButton(
@@ -381,6 +1000,7 @@ class ProjectPanel(QWidget):
             self._atlas_page_changed
         )
         self.add_sheet_button.toggled.connect(self._toggle_sheet_tool)
+        self.edit_sheet_button.toggled.connect(self._toggle_edit_sheet_tool)
         self.remove_sheet_button.clicked.connect(self._remove_last_sheet)
         self.clear_sheets_button.clicked.connect(self._clear_sheets)
         self.export_png_button.clicked.connect(
@@ -396,11 +1016,24 @@ class ProjectPanel(QWidget):
         count = len(self._sheets)
         if count:
             text = f"Листов: {count}"
+            if self._active_sheet_index is not None:
+                text += f" · выбран {self._active_sheet_index + 1}"
         else:
-            text = "Листов: 0 — будет экспортирован текущий вид"
-        self.sheets_label.setText(text)
+            text = i18n.tr("Листов: 0 — будет экспортирован текущий вид")
+        self.sheets_label.setText(i18n.tr(text))
+        self._fit_wrapped_labels()
+        self.edit_sheet_button.setEnabled(count > 0)
         self.remove_sheet_button.setEnabled(count > 0)
+        self.remove_sheet_button.setToolTip(
+            i18n.tr(
+                "Удалить выбранный лист"
+                if self._active_sheet_index is not None
+                else "Удалить последний лист"
+            )
+        )
         self.clear_sheets_button.setEnabled(count > 0)
+        if not count and self.edit_sheet_button.isChecked():
+            self.edit_sheet_button.setChecked(False)
 
     def _page_size_mm(self):
         width, height = PAGE_FORMATS.get(
@@ -420,6 +1053,8 @@ class ProjectPanel(QWidget):
     def _atlas_page_changed(self, _index=None):
         if self._sheet_tool is not None:
             self._sheet_tool.set_aspect(self._page_aspect())
+        if self._edit_sheet_tool is not None:
+            self._edit_sheet_tool.set_aspect(self._page_aspect())
         if self._sheets:
             aspect = self._page_aspect()
             for index, (rectangle, crs) in enumerate(self._sheets):
@@ -486,6 +1121,65 @@ class ProjectPanel(QWidget):
             canvas.unsetMapTool(self._sheet_tool)
             self._sheet_tool._clear_preview()
 
+    def _toggle_edit_sheet_tool(self, active):
+        if self._tool_syncing:
+            return
+        canvas = self._canvas()
+        if active:
+            if canvas is None or not self._sheets:
+                self.edit_sheet_button.setChecked(False)
+                return
+            if self._edit_sheet_tool is None:
+                self._edit_sheet_tool = SheetEditMapTool(
+                    canvas, self._sheets, self._page_aspect()
+                )
+                self._edit_sheet_tool.sheetEdited.connect(self._sheet_edited)
+                self._edit_sheet_tool.sheetActivated.connect(
+                    self._sheet_activated
+                )
+            self._edit_sheet_tool.set_aspect(self._page_aspect())
+            canvas.setMapTool(self._edit_sheet_tool)
+            self.statusMessage.emit(
+                "Перетащите рамку листа или потяните за маркер угла"
+            )
+        else:
+            if self._edit_sheet_tool is not None and canvas is not None:
+                canvas.unsetMapTool(self._edit_sheet_tool)
+                self._edit_sheet_tool._clear_operation()
+            self._set_active_sheet(None)
+
+    def _sheet_activated(self, index):
+        self._set_active_sheet(index)
+
+    def _set_active_sheet(self, index):
+        if index is not None and (index < 0 or index >= len(self._sheets)):
+            return
+        self._active_sheet_index = index
+        self._update_sheet_colors()
+        self._update_sheet_controls()
+
+    def _sheet_band_colors(self, index):
+        if index == self._active_sheet_index:
+            return QColor(220, 140, 20), QColor(220, 140, 20, 45)
+        return QColor(0, 120, 215), QColor(0, 120, 215, 30)
+
+    def _update_sheet_colors(self):
+        for index, (band, _marker, _labels) in enumerate(self._sheet_items):
+            color, fill = self._sheet_band_colors(index)
+            band.setColor(color)
+            band.setFillColor(fill)
+            band.update()
+
+    def _sheet_edited(self, index, rectangle):
+        if index < 0 or index >= len(self._sheets):
+            return
+        self._active_sheet_index = index
+        _old_rectangle, crs = self._sheets[index]
+        self._sheets[index] = (QgsRectangle(rectangle), crs)
+        self._rebuild_sheet_items()
+        self._remove_atlas_layer()
+        self.statusMessage.emit(f"Лист {index + 1} изменён")
+
     def _sheet_drawn(self, rectangle):
         crs = QgsCoordinateReferenceSystem(
             self._canvas().mapSettings().destinationCrs()
@@ -504,22 +1198,28 @@ class ProjectPanel(QWidget):
         if canvas is None:
             return
         band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-        band.setColor(QColor(0, 120, 215))
-        band.setFillColor(QColor(0, 120, 215, 30))
+        color, fill = self._sheet_band_colors(number - 1)
+        band.setColor(color)
+        band.setFillColor(fill)
         band.setWidth(2)
         band.setToGeometry(QgsGeometry.fromRect(rectangle), crs)
         band.show()
         marker = SheetMarker(canvas, number)
         marker.set_map_point(rectangle.center())
         marker.show()
-        self._sheet_items.append((band, marker))
+        # Размеры страницы вдоль границ прямоугольника.
+        labels = SheetSizeLabels(canvas)
+        labels.set_rectangle(rectangle, crs)
+        labels.show()
+        self._sheet_items.append((band, marker, labels))
 
     def _dispose_sheet_item(self, item):
-        band, marker = item
+        band, marker, labels = item
         band.reset(QgsWkbTypes.PolygonGeometry)
         band.hide()
         marker.hide()
-        for graphics_item in (marker, band):
+        labels.hide()
+        for graphics_item in (marker, labels, band):
             try:
                 scene = graphics_item.scene()
                 if scene is not None:
@@ -536,6 +1236,15 @@ class ProjectPanel(QWidget):
             pass
         self._sheet_tool = None
 
+    def _dispose_edit_sheet_tool(self):
+        if self._edit_sheet_tool is None:
+            return
+        try:
+            self._edit_sheet_tool.dispose()
+        except Exception:
+            pass
+        self._edit_sheet_tool = None
+
     def _rebuild_sheet_items(self):
         for item in self._sheet_items:
             self._dispose_sheet_item(item)
@@ -544,19 +1253,26 @@ class ProjectPanel(QWidget):
             self._insert_sheet_items(rectangle, crs, number)
         if self._sheet_tool is not None:
             self._sheet_tool.set_number(len(self._sheets) + 1)
+        if self._edit_sheet_tool is not None:
+            self._edit_sheet_tool.handles.update()
         self._update_sheet_controls()
 
     def _remove_last_sheet(self):
         if not self._sheets:
             return
-        self._sheets.pop()
-        item = self._sheet_items.pop()
-        self._dispose_sheet_item(item)
-        if self._sheet_tool is not None:
-            self._sheet_tool.set_number(len(self._sheets) + 1)
-        self._update_sheet_controls()
+        index = (
+            self._active_sheet_index
+            if self._active_sheet_index is not None
+            else len(self._sheets) - 1
+        )
+        self._sheets.pop(index)
+        if self._active_sheet_index is not None:
+            self._active_sheet_index = (
+                min(index, len(self._sheets) - 1) if self._sheets else None
+            )
+        self._rebuild_sheet_items()
         self._remove_atlas_layer()
-        self.statusMessage.emit("Последний лист удалён")
+        self.statusMessage.emit(f"Лист {index + 1} удалён")
 
     def clear_atlas(self):
         if (
@@ -564,6 +1280,7 @@ class ProjectPanel(QWidget):
             or self._sheet_items
             or self._atlas_layer is not None
             or self.add_sheet_button.isChecked()
+            or self.edit_sheet_button.isChecked()
         ):
             self._clear_sheets()
 
@@ -575,19 +1292,26 @@ class ProjectPanel(QWidget):
         к падению QGIS.
         """
         self.add_sheet_button.setChecked(False)
+        self.edit_sheet_button.setChecked(False)
         self._sheets = []
         self._sheet_items = []
+        self._active_sheet_index = None
         self._atlas_layer = None
         self._dispose_sheet_tool()
+        self._dispose_edit_sheet_tool()
         self._update_sheet_controls()
 
     def _clear_sheets(self):
         if self.add_sheet_button.isChecked():
             self.add_sheet_button.setChecked(False)
+        if self.edit_sheet_button.isChecked():
+            self.edit_sheet_button.setChecked(False)
         self._sheets = []
+        self._active_sheet_index = None
         self._rebuild_sheet_items()
         self._remove_atlas_layer()
         self._dispose_sheet_tool()
+        self._dispose_edit_sheet_tool()
         self.statusMessage.emit("Листы атласа очищены")
 
     def _remove_atlas_layer(self):
@@ -821,9 +1545,9 @@ class ProjectPanel(QWidget):
     def _export(self, extension):
         atlas_export = bool(self._sheets)
         if atlas_export:
-            title = f"Экспорт атласа {extension.upper()}"
+            title = i18n.trf("Экспорт атласа {}", extension.upper())
         else:
-            title = f"Экспорт {extension.upper()}"
+            title = i18n.trf("Экспорт {}", extension.upper())
         dialog = QFileDialog(self, title)
         dialog.setAcceptMode(_enum(QFileDialog, "AcceptMode", "AcceptSave"))
         dialog.setFileMode(_enum(QFileDialog, "FileMode", "AnyFile"))
@@ -910,19 +1634,26 @@ class ProjectPanel(QWidget):
         box.setIcon(_enum(QMessageBox, "Icon", "Warning"))
         box.setWindowTitle("QGIS-xtopo")
         box.setText(
-            f"Экспорт при {preferred} dpi может потребовать около "
-            f"{estimate / (1024 ** 3):.1f} ГБ памяти."
+            i18n.trf(
+                "Экспорт при {} dpi может потребовать около {} ГБ памяти.",
+                preferred,
+                f"{estimate / (1024 ** 3):.1f}",
+            )
         )
-        box.setInformativeText(f"Снизить разрешение до {safe} dpi?")
+        box.setInformativeText(
+            i18n.trf("Снизить разрешение до {} dpi?", safe)
+        )
         lower = box.addButton(
-            f"Снизить до {safe} dpi",
+            i18n.trf("Снизить до {} dpi", safe),
             _enum(QMessageBox, "ButtonRole", "AcceptRole"),
         )
         proceed = box.addButton(
-            "Продолжить", _enum(QMessageBox, "ButtonRole", "DestructiveRole")
+            i18n.tr("Продолжить"),
+            _enum(QMessageBox, "ButtonRole", "DestructiveRole"),
         )
         cancel = box.addButton(
-            "Отмена", _enum(QMessageBox, "ButtonRole", "RejectRole")
+            i18n.tr("Отмена"),
+            _enum(QMessageBox, "ButtonRole", "RejectRole"),
         )
         box.setDefaultButton(lower)
         if hasattr(box, "exec"):
@@ -950,7 +1681,7 @@ class ProjectPanel(QWidget):
         try:
             layout, atlas = self._configure_layout(Path(path).stem)
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", str(exc))
+            QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
             return
         self._export_layout(layout, atlas, path, extension)
 
@@ -965,6 +1696,10 @@ class ProjectPanel(QWidget):
         self.statusMessage.emit(f"Экспорт {extension.upper()}…")
         self._notify(f"Экспорт {extension.upper()}…")
         started = time.monotonic()
+        progress_connected = atlas.enabled()
+        if progress_connected:
+            self._export_progress = (extension.upper(), len(self._sheets))
+            atlas.featureChanged.connect(self._atlas_export_feature)
         QApplication.setOverrideCursor(
             _enum(Qt, "CursorShape", "WaitCursor")
         )
@@ -993,13 +1728,35 @@ class ProjectPanel(QWidget):
                     result = exporter.exportToPdf(path, settings)
                     error = ""
         except Exception as exc:
-            QMessageBox.critical(self, "QGIS-xtopo", f"Ошибка экспорта: {exc}")
+            QMessageBox.critical(
+                self, "QGIS-xtopo",
+                i18n.trf("Ошибка экспорта: {}", exc),
+            )
             return
         finally:
+            if progress_connected:
+                try:
+                    atlas.featureChanged.disconnect(self._atlas_export_feature)
+                except Exception:
+                    pass
+            self._export_progress = None
             QApplication.restoreOverrideCursor()
             self._remove_atlas_layer()
             self._restore_map_layers()
         self._export_result(result, error, path, extension, elapsed=time.monotonic() - started)
+
+    def _atlas_export_feature(self, feature):
+        if self._export_progress is None:
+            return
+        kind, total = self._export_progress
+        try:
+            number = int(feature.attribute("sheet"))
+        except (KeyError, TypeError, ValueError):
+            number = feature.id()
+        self._notify(f"Экспорт {kind}: лист {number} из {total}…")
+        QApplication.processEvents(
+            _enum(QEventLoop, "ProcessEventsFlag", "ExcludeUserInputEvents")
+        )
 
     def _print_atlas(self):
         canvas = self._freeze_canvas()
@@ -1012,7 +1769,7 @@ class ProjectPanel(QWidget):
         try:
             layout, atlas = self._configure_layout()
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", str(exc))
+            QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
             return
         self._print_layout(layout, atlas)
 
@@ -1041,7 +1798,10 @@ class ProjectPanel(QWidget):
                 result = exporter.print(printer, settings)
                 error = ""
         except Exception as exc:
-            QMessageBox.critical(self, "QGIS-xtopo", f"Ошибка печати: {exc}")
+            QMessageBox.critical(
+                self, "QGIS-xtopo",
+                i18n.trf("Ошибка печати: {}", exc),
+            )
             return
         finally:
             self._remove_atlas_layer()
@@ -1051,20 +1811,22 @@ class ProjectPanel(QWidget):
     def _export_result(self, result, error, path, kind, elapsed=None):
         if result == _enum(QgsLayoutExporter, "ExportResult", "Success"):
             if kind == "print":
-                message = "Печать отправлена"
+                message = i18n.tr("Печать отправлена")
             else:
-                message = f"Экспорт: {path}"
+                message = i18n.trf("Экспорт: {}", path)
                 if elapsed is not None:
-                    message += f" ({elapsed:.1f} с)"
+                    message += i18n.trf(" ({} с)", f"{elapsed:.1f}")
             self._notify(message)
             return
-        detail = error or f"код {int(result)}"
+        detail = error or i18n.trf("код {}", int(result))
         QMessageBox.critical(
-            self, "QGIS-xtopo", f"Не удалось выполнить экспорт: {detail}"
+            self, "QGIS-xtopo",
+            i18n.trf("Не удалось выполнить экспорт: {}", detail),
         )
 
     def _notify(self, message):
         """Сообщение в журнал и всплывающее уведомление QGIS."""
+        message = i18n.tr(message)
         self.statusMessage.emit(message)
         iface = self.iface
         if iface is None:
@@ -1080,6 +1842,170 @@ class ProjectPanel(QWidget):
         except Exception:
             pass
 
+    def retranslate(self):
+        """Переводит подписи панели на текущий язык."""
+        self._update_sheet_controls()
+        self._update_isoline_controls()
+        translate_tree(self)
+        self._fill_map_language_combo()
+        self._fill_detail_combo()
+        # Название варианта в кнопке и в меню зависит от языка.
+        self._update_steep_variants()
+
+    def _fill_map_language_combo(self):
+        """Заполняет список языков подписей, сохраняя выбор."""
+        combo = self.map_language_combo
+        current = combo.currentData() or map_language.language()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for code, label, _script in map_language.MAP_LANGUAGES:
+                combo.addItem(i18n.tr(label), code)
+                combo.setItemData(
+                    combo.count() - 1,
+                    " → ".join(map_language.tags_for(code)),
+                    _enum(Qt, "ItemDataRole", "ToolTipRole"),
+                )
+            index = combo.findData(current)
+            combo.setCurrentIndex(max(0, index))
+        finally:
+            combo.blockSignals(False)
+        combo.setToolTip(i18n.tr("Язык подписей на карте"))
+        metrics = QFontMetrics(combo.font())
+        width = max(
+            metrics.horizontalAdvance(MapLanguageCombo.short_label(code))
+            for code, _label, _script in map_language.MAP_LANGUAGES
+        )
+        combo.setFixedWidth(max(56, width + 34))
+        combo.setFixedHeight(24)
+        self._update_transliteration_state()
+
+    def _map_language_changed(self, _index=None):
+        code = self.map_language_combo.currentData()
+        if not code:
+            return
+        map_language.set_map_language(code)
+        self._update_transliteration_state()
+        if self.is_xtopo_project():
+            map_language.apply_map_language(code, iface=self.iface)
+
+    def _update_transliteration_state(self):
+        """Транслитерация нужна там, где запасное название может быть
+        записано в незнакомой читателю письменности.
+
+        Для местных названий запасного варианта нет, поэтому галочка
+        недоступна.
+        """
+        code = self.map_language_combo.currentData() or map_language.language()
+        available = code != map_language.LOCAL_LANGUAGE
+        self.transliteration_check.setEnabled(available)
+        if not available and self.transliteration_check.isChecked():
+            self.transliteration_check.setChecked(False)
+            map_language.set_transliteration(False)
+        elif available and map_language.transliteration_enabled():
+            self.transliteration_check.blockSignals(True)
+            self.transliteration_check.setChecked(True)
+            self.transliteration_check.blockSignals(False)
+
+    def _transliteration_toggled(self, checked):
+        map_language.set_transliteration(bool(checked))
+        if self.is_xtopo_project():
+            map_language.apply_map_language(iface=self.iface)
+
+    DETAIL_TITLES = {
+        3: "3 — главное",
+        4: "4 — обычный",
+        5: "5 — подробнее",
+        6: "6 — всё",
+    }
+    DETAIL_TIPS = {
+        3: "Только главные объекты: без мелких родников, троп и остановок",
+        4: "Обычная подробность карты",
+        5: "Больше мелких объектов: тропы, родники, остановки",
+        6: "Все мелкие объекты, какие есть в данных",
+    }
+
+    def _fill_detail_combo(self):
+        """Заполняет список уровней детализации, сохраняя выбор."""
+        combo = self.detail_combo
+        current = combo.currentData()
+        if current is None:
+            current = map_language.level_of_detail()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            # Переводим сами: панель проекта переводится не всегда (её
+            # retranslate откладывается до открытия проекта), а список
+            # пересобирается при каждой смене выбора.
+            for level in map_language.DETAIL_LEVELS:
+                combo.addItem(i18n.tr(self.DETAIL_TITLES[level]), level)
+                combo.setItemData(
+                    combo.count() - 1,
+                    i18n.tr(self.DETAIL_TIPS[level]),
+                    _enum(Qt, "ItemDataRole", "ToolTipRole"),
+                )
+            index = combo.findData(current)
+            combo.setCurrentIndex(max(0, index))
+        finally:
+            combo.blockSignals(False)
+        combo.setToolTip(
+            i18n.tr(
+                "Уровень детализации: какие мелкие объекты показывать "
+                "(названия, дороги, тропы, родники)"
+            )
+        )
+        metrics = combo.fontMetrics()
+        text_width = max(
+            (metrics.horizontalAdvance(combo.itemText(i))
+             for i in range(combo.count())),
+            default=0,
+        )
+        combo.setFixedWidth(max(120, text_width + 40))
+        combo.setFixedHeight(22)
+
+    def _detail_changed(self, _index=None):
+        level = self.detail_combo.currentData()
+        if level is None:
+            return
+        map_language.set_level_of_detail(level)
+        # Открытый проект правится на месте (признак карты проекта — слой
+        # BBOX, а не имя файла: несохранённый проект тоже бывает собран
+        # плагином); новый получит значение из шаблона при сборке.
+        project = QgsProject.instance()
+        if self.is_xtopo_project(project):
+            map_language.set_project_detail(level, project)
+            self._repaint_canvas()
+
+    def _sync_detail_combo(self):
+        """Показывает в списке уровень детализации открытого проекта."""
+        project = QgsProject.instance()
+        try:
+            value = project.customVariables().get(
+                map_language.DETAIL_VARIABLE
+            )
+        except Exception:
+            value = None
+        if value is None or not self.is_xtopo_project(project):
+            return
+        level = map_language.normalize_detail(value)
+        combo = self.detail_combo
+        if combo.currentData() == level:
+            return
+        combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(max(0, combo.findData(level)))
+        finally:
+            combo.blockSignals(False)
+        map_language.sync_level_of_detail(level)
+
+    def _repaint_canvas(self):
+        canvas = self._canvas()
+        if canvas is not None:
+            try:
+                canvas.refresh()
+            except Exception:
+                pass
+
     def refresh(self):
         self._connect_root()
         own = self.is_xtopo_project()
@@ -1092,9 +2018,22 @@ class ProjectPanel(QWidget):
         if file_name != self._baseline_project:
             self._baseline_project = file_name
             self._opacity_baseline = {}
+            self._hillshade_baseline = []
+            self._isoline_color = None
+            self._isoline_baseline = {}
+            self._capture_hillshade_baseline()
         self._connect_style_layer()
         self._rebuild_rules()
         self._sync_from_project()
+        self._sync_isoline_color()
+        # Уровень детализации для проекта берётся из списка панели: проект,
+        # собранный старым шаблоном, может не иметь переменной вовсе.
+        before = self.detail_combo.currentData()
+        self._sync_detail_combo()
+        if before == self.detail_combo.currentData():
+            map_language.set_project_detail(
+                self.detail_combo.currentData() or map_language.level_of_detail()
+            )
 
     def focus_first(self):
         widget = self.toolbar.widgetForAction(self.fit_action)
@@ -1133,6 +2072,27 @@ class ProjectPanel(QWidget):
                 canvas.mapToolSet.connect(self._map_tool_changed)
             except Exception:
                 pass
+
+    def _trigger_qgis_action(self, object_name):
+        """Включает штатный инструмент QGIS по имени его действия.
+
+        Инструменты измерения и определения объектов живут в самом QGIS
+        (QgsMapToolMeasure, QgsMapToolIdentify) и в Python-обёртках QGIS
+        3.44 недоступны, поэтому вызывается готовое действие главного
+        окна: пользователь получает ровно инструмент QGIS.
+        """
+        iface = self.iface
+        if iface is None:
+            return False
+        try:
+            window = iface.mainWindow()
+        except Exception:
+            return False
+        for action in window.findChildren(QAction):
+            if action.objectName() == object_name:
+                action.trigger()
+                return True
+        return False
 
     def fit_to_screen(self):
         canvas = self._canvas()
@@ -1174,6 +2134,15 @@ class ProjectPanel(QWidget):
             self._tool_syncing = True
             self.add_sheet_button.setChecked(False)
             self._tool_syncing = False
+        if (
+            self._edit_sheet_tool is not None
+            and new_tool is not self._edit_sheet_tool
+            and self.edit_sheet_button.isChecked()
+        ):
+            self._tool_syncing = True
+            self.edit_sheet_button.setChecked(False)
+            self._tool_syncing = False
+            self._set_active_sheet(None)
 
     def _connect_root(self):
         root = QgsProject.instance().layerTreeRoot()
@@ -1256,8 +2225,18 @@ class ProjectPanel(QWidget):
             return
         self._syncing = True
         try:
+            self._update_steep_variants()
             available = {name: self._layer(name) is not None for name in LAYER_NAMES}
             visible = {name: self._layer_visible(name) for name in LAYER_NAMES}
+            # Раскраска уклонов — семейство слоёв: в проекте может быть
+            # несколько вариантов окраски, показывается только один.
+            steep_names = self._steep_variant_names()
+            available[STEEP_LAYER] = bool(steep_names)
+            self._sync_steep_state()
+            active = self._active_steep_layer()
+            visible[STEEP_LAYER] = (
+                self._layer_visible(active) if active else False
+            )
             for box, name in self._layer_boxes:
                 box.setEnabled(available[name])
                 box.setChecked(visible[name])
@@ -1269,8 +2248,20 @@ class ProjectPanel(QWidget):
             )
             self.isolines_check.setEnabled(isolines_available)
             self.isolines_check.setChecked(isolines_visible)
+            nature = self._layer(NATURE_RESERVE_LAYER)
+            self.nature_reserve_labels_check.setEnabled(
+                nature is not None
+                and nature.labeling() is not None
+                and self.nature_reserve_check.isChecked()
+            )
+            self.nature_reserve_labels_check.setChecked(
+                nature is not None and nature.labelsEnabled()
+            )
             self._sync_opacity_sliders()
+            self._update_steep_variant_state()
             self._update_rule_checks(available[ISOLINES_LAYER])
+            self._sync_glacier_rules()
+            self._update_isoline_controls()
         finally:
             self._syncing = False
 
@@ -1428,9 +2419,40 @@ class ProjectPanel(QWidget):
         self._syncing = True
         try:
             self._set_rule_states(renderer, values, target)
+            self._sync_glacier_rules()
             self._update_rule_checks(True)
         finally:
             self._syncing = False
+
+    def _sync_glacier_rules(self):
+        """Приводит правила изолиний ледников к состоянию обычных изолиний.
+
+        Галочки «Кратность» относятся к обоим слоям: изолинии ледников
+        рисуются теми же интервалами, что и остальные изолинии.
+        """
+        states = self._rule_states()
+        if not states:
+            return False
+        layer = self._layer(GLACIER_ISOLINES_LAYER)
+        renderer = layer.renderer() if layer is not None else None
+        if not isinstance(renderer, QgsRuleBasedRenderer):
+            return False
+        changed = False
+        for rule in renderer.rootRule().children():
+            label = rule.label().strip()
+            if label not in states:
+                continue
+            if rule.active() != states[label]:
+                rule.setActive(states[label])
+                changed = True
+        if not changed:
+            return False
+        layer.triggerRepaint()
+        try:
+            layer.emitStyleChanged()
+        except Exception:
+            pass
+        return True
 
     def _rule_dependencies(self):
         """Кратности, линии которых правило не рисует: взяты из фильтра.
@@ -1606,6 +2628,211 @@ class ProjectPanel(QWidget):
             except Exception:
                 pass
 
+    def _steep_variant_hint(self, name):
+        """Порог уклона, с которого показывается вариант окраски.
+
+        У каждого варианта своя классификация: «Горы» показывает крутые
+        склоны, «Предгорья» — более пологие. Подсказка объясняет, почему
+        на равнинной карте «Горы» могут выглядеть почти пустыми.
+
+        Возвращает градусы (число) или None, если порог неизвестен.
+        """
+        layer = self._layer(name)
+        if layer is None:
+            return None
+        try:
+            renderer = layer.renderer()
+            items = renderer.shader().rasterShaderFunction().colorRampItemList()
+            minimum = float(items[0].value)
+        except Exception:
+            return None
+        return int(round(minimum))
+
+    def _steep_variant_hint_text(self, name):
+        """Подсказка о пороге уклона на языке интерфейса."""
+        minimum = self._steep_variant_hint(name)
+        if minimum is None:
+            return ""
+        return i18n.trf("склоны круче {}°", minimum)
+
+    def _steep_variant_names(self):
+        """Слои-варианты крутых склонов, присутствующие в проекте.
+
+        Сопоставление строго по полному имени слоя: в проекте встречаются
+        и другие слои с суффиксом «var1», они вариантами не являются.
+        """
+        known = dict(STEEP_VARIANTS)
+        known[STEEP_LAYER] = ""
+        names = []
+        try:
+            layers = list(QgsProject.instance().mapLayers().values())
+        except Exception:
+            layers = []
+        for layer in layers:
+            name = layer.name()
+            if name in known:
+                names.append(name)
+        order = {
+            name: index for index, (name, _) in enumerate(STEEP_VARIANTS)
+        }
+        names.sort(key=lambda name: (order.get(name, len(order)), name))
+        return names
+
+    def _steep_variant_label(self, name):
+        """Подпись варианта уклонов."""
+        for layer_name, label in STEEP_VARIANTS:
+            if layer_name == name:
+                return label
+        if name == STEEP_LAYER:
+            return "Общий"
+        return name
+
+    def _active_steep_layer(self):
+        """Выбранный вариант крутых склонов (имя слоя)."""
+        names = self._steep_variant_names()
+        if not names:
+            return None
+        if self._steep_variant_name in names:
+            return self._steep_variant_name
+        return names[0]
+
+    def _update_steep_variants(self):
+        """Приводит список вариантов уклонов в соответствие с проектом."""
+        names = self._steep_variant_names()
+        current = self._steep_variant_name
+        if current not in names:
+            current = names[0] if names else None
+        self._steep_variant_name = current
+        self.steep_variant_menu.clear()
+        for name in names:
+            label = self._steep_variant_label(name)
+            action = self.steep_variant_menu.addAction(i18n.tr(label))
+            action.setData(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            hint = self._steep_variant_hint_text(name)
+            if hint:
+                action.setToolTip(f"{i18n.tr(label)}: {hint}")
+            action.triggered.connect(
+                lambda checked=False, layer_name=name:
+                self._steep_variant_changed(layer_name)
+            )
+        self._update_steep_variant_button()
+        self._update_steep_variant_state()
+
+    def _update_steep_variant_button(self):
+        """Текст кнопки: первая буква выбранного варианта."""
+        name = self._steep_variant_name
+        if not name:
+            self.steep_variant_button.setText("")
+            return
+        label = self._steep_variant_label(name)
+        # Стрелка вниз — крупным глифом прямо в тексте: штатный
+        # индикатор меню у QToolButton слишком мелкий и в узкой панели
+        # его почти не видно.
+        self.steep_variant_button.setText(
+            "(%s) ▼" % i18n.tr(label)[:1].upper()
+        )
+        hint = self._steep_variant_hint_text(name)
+        tooltip = i18n.tr(
+            "Вариант окраски уклонов: для гор, предгорий или равнин. "
+            "Одновременно показывается только один вариант."
+        )
+        if hint:
+            tooltip += " " + i18n.trf("Выбрано: {} — {}.", i18n.tr(label), hint)
+        self.steep_variant_button.setToolTip(tooltip)
+
+    def _update_steep_variant_state(self):
+        """Вариант окраски уклонов доступен только при включённой опции.
+
+        Пока «Раскр. уклонов» выключено, выбор заблокирован:
+        выбирать окраску, которая не показывается, бессмысленно.
+        """
+        enabled = (
+            self.steep_check.isChecked()
+            and len(self._steep_variant_names()) > 1
+        )
+        self.steep_variant_button.setEnabled(enabled)
+        self.steep_variant_button.setVisible(
+            bool(self._steep_variant_names())
+        )
+
+    def _apply_steep_visibility(self, checked):
+        """Показывает выбранный вариант уклонов, остальные скрывает."""
+        active = self._active_steep_layer()
+        for name in self._steep_variant_names():
+            self._set_layer_visible(name, bool(checked) and name == active)
+
+    def _set_steep_variant(self, name):
+        """Выбирает вариант уклонов без обработчика (по состоянию проекта)."""
+        if name not in self._steep_variant_names():
+            return
+        self._steep_variant_name = name
+        for action in self.steep_variant_menu.actions():
+            action.setChecked(action.data() == name)
+        self._update_steep_variant_button()
+
+    def _sync_steep_state(self):
+        """Держит включённым только один вариант окраски уклонов."""
+        names = self._steep_variant_names()
+        if not names:
+            return
+        active = self._active_steep_layer()
+        visible = [name for name in names if self._layer_visible(name)]
+        if active is not None and active not in visible and len(visible) == 1:
+            # Другой вариант включили в дереве слоёв QGIS — он и выбран.
+            active = visible[0]
+            self._set_steep_variant(active)
+            self._apply_steep_opacity()
+        if len(visible) > 1:
+            for name in visible:
+                if name != active:
+                    self._set_layer_visible(name, False)
+
+    def _apply_steep_opacity(self):
+        """Переносит прозрачность со шкалы на выбранный вариант уклонов."""
+        widget = self._opacity_widgets.get(STEEP_LAYER)
+        slider = widget.property("slider") if widget is not None else None
+        active = self._active_steep_layer()
+        layer = self._layer(active) if active else None
+        if slider is None or layer is None:
+            return
+        try:
+            layer.setOpacity(slider.value() / 100.0)
+        except Exception:
+            return
+        layer.triggerRepaint()
+        try:
+            layer.emitStyleChanged()
+        except Exception:
+            pass
+
+    def _steep_toggled(self, checked):
+        """Галочка «Раскр. уклонов» управляет выбранным вариантом."""
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            self._apply_steep_visibility(checked)
+        finally:
+            self._syncing = False
+        self._update_steep_variant_state()
+        self._sync_from_project()
+
+    def _steep_variant_changed(self, name):
+        """Выбор варианта уклонов из меню: показываем новый, остальные прячем."""
+        if self._syncing:
+            return
+        self._steep_variant_name = name
+        self._update_steep_variant_button()
+        self._syncing = True
+        try:
+            self._apply_steep_visibility(self.steep_check.isChecked())
+        finally:
+            self._syncing = False
+        self._apply_steep_opacity()
+        self._sync_from_project()
+
     def _layer_box_toggled(self, name, checked):
         if self._syncing:
             return
@@ -1619,12 +2846,30 @@ class ProjectPanel(QWidget):
             self._syncing = False
         self._sync_from_project()
 
+    def _nature_reserve_labels_toggled(self, checked):
+        if self._syncing:
+            return
+        layer = self._layer(NATURE_RESERVE_LAYER)
+        if layer is None:
+            return
+        layer.setLabelsEnabled(bool(checked))
+        layer.triggerRepaint()
+        try:
+            layer.emitStyleChanged()
+        except Exception:
+            pass
+        self._sync_from_project()
+
     def _opacity_changed(self, layer_name, number, label):
         """Шкала прозрачности слоя рельефа."""
         label.setText(f"{number}%")
         if self._syncing:
             return
-        layer = self._layer(layer_name)
+        if layer_name == HILLSHADE_LAYER:
+            self._apply_hillshade_transparency(number)
+            return
+        target = self._opacity_target(layer_name)
+        layer = self._layer(target) if target else None
         if layer is None:
             return
         try:
@@ -1637,14 +2882,232 @@ class ProjectPanel(QWidget):
         except Exception:
             pass
 
+    def _opacity_target(self, layer_name):
+        """Слой, к которому применяется прозрачность.
+
+        Для крутых склонов это выбранный вариант окраски.
+        """
+        if layer_name == STEEP_LAYER:
+            return self._active_steep_layer()
+        return layer_name
+
     def _reset_opacity(self, layer_name):
         """Возвращает слою прозрачность из шаблона проекта."""
-        value = self._opacity_baseline.get(layer_name)
         widget = self._opacity_widgets.get(layer_name)
         slider = widget.property("slider") if widget is not None else None
-        if value is None or slider is None:
+        if slider is None:
+            return
+        if layer_name == HILLSHADE_LAYER:
+            slider.setValue(HILLSHADE_DEFAULT)
+            return
+        target = self._opacity_target(layer_name)
+        value = self._opacity_baseline.get(target)
+        if value is None:
+            value = self._opacity_baseline.get(layer_name)
+        if value is None:
             return
         slider.setValue(value)
+
+    def _capture_isoline_baseline(self):
+        """Запоминает цвета линий и подписей изогипс из шаблона."""
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
+            if name in self._isoline_baseline:
+                continue
+            layer = self._layer(name)
+            if layer is None:
+                continue
+            self._isoline_baseline[name] = (
+                _isoline_symbol_colors(layer),
+                _isoline_label_styles(layer),
+            )
+
+    def _template_isoline_color(self):
+        """Исходный цвет линий изогипс из шаблона automap.qgz."""
+        styles = template_isoline_styles(ISOLINES_LAYER)
+        colors = styles[0] if styles is not None else []
+        if not colors:
+            data = self._isoline_baseline.get(ISOLINES_LAYER)
+            colors = data[0] if data else []
+        for color in colors:
+            if color is not None and color.alpha() > 0:
+                return QColor(color)
+        return None
+
+    def _isoline_swatch_color(self):
+        if self._isoline_color is not None:
+            return QColor(self._isoline_color)
+        layer = self._layer(ISOLINES_LAYER)
+        if layer is not None:
+            for color in _isoline_symbol_colors(layer):
+                if color is not None and color.alpha() > 0:
+                    return QColor(color)
+        template = self._template_isoline_color()
+        return template if template is not None else QColor(64, 64, 64)
+
+    def _reset_available(self, enabled):
+        """Сброс нужен, если цвет выбран или проект уже перекрашен."""
+        if not enabled:
+            return False
+        if self._isoline_color is not None:
+            return True
+        layer = self._layer(ISOLINES_LAYER)
+        return layer is not None and isoline_styles_differ(layer)
+
+    def _update_isoline_controls(self):
+        """Образец цвета, кнопки сброса и двойной ширины."""
+        if not self._isoline_baseline and self._isoline_color is None:
+            self._capture_isoline_baseline()
+        layer = self._layer(ISOLINES_LAYER) or self._layer(
+            GLACIER_ISOLINES_LAYER
+        )
+        enabled = layer is not None and self.isolines_check.isChecked()
+        self.isolines_width_button.setEnabled(enabled)
+        self.isolines_width_button.blockSignals(True)
+        self.isolines_width_button.setChecked(isolines_width_doubled())
+        self.isolines_width_button.blockSignals(False)
+        self._style_isoline_width_button(
+            self.isolines_width_button.isChecked()
+        )
+        self.isolines_color_button.setEnabled(enabled)
+        self.isolines_color_button.setIcon(
+            color_swatch_icon(self._isoline_swatch_color())
+        )
+        self.isolines_color_reset.setEnabled(
+            self._reset_available(enabled)
+        )
+
+    def _isoline_width_toggled(self, checked):
+        """Двойная ширина линий изогипс через переменную проекта."""
+        self._style_isoline_width_button(checked)
+        if self._syncing:
+            return
+        set_isolines_width_doubled(bool(checked))
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
+            layer = self._layer(name)
+            if layer is not None:
+                _repaint_layer(layer)
+
+    def _style_isoline_width_button(self, checked):
+        """Жирная надпись «2×» — заметный признак включённой ширины."""
+        font = self.isolines_width_button.font()
+        if font.bold() == bool(checked):
+            return
+        font.setBold(bool(checked))
+        self.isolines_width_button.setFont(font)
+
+    def _pick_isoline_color(self):
+        color = QColorDialog.getColor(
+            self._isoline_swatch_color(), self, "Цвет изогипс"
+        )
+        if not color.isValid():
+            return
+        self._set_isoline_color(color)
+
+    def _set_isoline_color(self, color):
+        self._capture_isoline_baseline()
+        self._isoline_color = QColor(color)
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
+            apply_isoline_color(self._layer(name), self._isoline_color)
+        self._update_isoline_controls()
+
+    def _reset_isoline_color(self):
+        self._isoline_color = None
+        self._capture_isoline_baseline()
+        for name, captured in self._isoline_baseline.items():
+            layer = self._layer(name)
+            if layer is None:
+                continue
+            colors, labels = isoline_reset_styles(layer, captured)
+            restore_isoline_style(layer, colors, labels)
+        self._update_isoline_controls()
+
+    def _sync_isoline_color(self):
+        """Возвращает выбранный цвет после перезагрузки слоёв проекта."""
+        self._capture_isoline_baseline()
+        if self._isoline_color is not None:
+            for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
+                apply_isoline_color(self._layer(name), self._isoline_color)
+        self._update_isoline_controls()
+
+    def _hillshade_ramp(self):
+        """Отрисовщик, шейдер и цветовая шкала слоя затенения рельефа."""
+        layer = self._layer(HILLSHADE_LAYER)
+        if layer is None:
+            return None, None, None
+        try:
+            renderer = layer.renderer()
+            shader = renderer.shader()
+            function = shader.rasterShaderFunction()
+        except Exception:
+            return None, None, None
+        if not isinstance(function, QgsColorRampShader):
+            return None, None, None
+        return renderer, shader, function
+
+    def _capture_hillshade_baseline(self):
+        """Запоминает прозрачность теней из шаблона проекта."""
+        _, _, function = self._hillshade_ramp()
+        if function is None:
+            return
+        try:
+            alphas = [item.color.alpha() for item in function.colorRampItemList()]
+        except Exception:
+            return
+        if alphas:
+            self._hillshade_baseline = alphas
+
+    def _apply_hillshade_transparency(self, number):
+        """Затемняет или осветляет тени рельефа.
+
+        Прозрачность слоя ограничена единицей, поэтому плотность теней
+        задаётся прозрачностью цветовой шкалы: 50% — исходный вид,
+        меньше — темнее, больше — светлее.
+        """
+        renderer, shader, function = self._hillshade_ramp()
+        if renderer is None:
+            return False
+        try:
+            items = function.colorRampItemList()
+        except Exception:
+            return False
+        baseline = self._hillshade_baseline
+        if not baseline or len(baseline) != len(items):
+            return False
+        updated = _ramp_items(items, baseline, number)
+        # Меняем цветовую шкалу на месте: шейдер и функция принадлежат
+        # отрисовщику, повторная установка привела бы к двойному удалению.
+        function.setColorRampItemList(updated)
+        layer = self._layer(HILLSHADE_LAYER)
+        if layer is not None:
+            layer.triggerRepaint()
+            try:
+                layer.emitStyleChanged()
+            except Exception:
+                pass
+        return True
+
+    def _hillshade_transparency(self):
+        """Текущая прозрачность теней по цветовой шкале слоя."""
+        _, _, function = self._hillshade_ramp()
+        if function is None:
+            return None
+        baseline = self._hillshade_baseline
+        try:
+            items = function.colorRampItemList()
+        except Exception:
+            return None
+        if not baseline or len(baseline) != len(items):
+            return None
+        ratios = [
+            item.color.alpha() / base
+            for item, base in zip(items, baseline)
+            if base
+        ]
+        if not ratios:
+            return None
+        factor = sum(ratios) / len(ratios)
+        value = int(round(100.0 - HILLSHADE_DEFAULT * factor))
+        return max(0, min(100, value))
 
     def _sync_opacity_sliders(self):
         """Показывает в шкалах прозрачность слоёв из проекта."""
@@ -1655,13 +3118,21 @@ class ProjectPanel(QWidget):
             reset_button = widget.property("reset_button")
             if slider is None or label is None:
                 continue
-            layer = self._layer(layer_name)
+            layer = self._layer(self._opacity_target(layer_name) or "")
             value = 100
-            if layer is not None:
+            if layer_name == HILLSHADE_LAYER:
+                if not self._hillshade_baseline:
+                    self._capture_hillshade_baseline()
+                value = self._hillshade_transparency()
+                if value is None:
+                    value = HILLSHADE_DEFAULT
+            elif layer is not None:
                 try:
                     value = int(round(layer.opacity() * 100))
                 except Exception:
                     value = 100
+            target = self._opacity_target(layer_name) or layer_name
+            self._opacity_baseline.setdefault(target, value)
             self._opacity_baseline.setdefault(layer_name, value)
             slider.blockSignals(True)
             slider.setValue(max(0, min(100, value)))

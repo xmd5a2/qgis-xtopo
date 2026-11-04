@@ -49,7 +49,7 @@ class ConfigTest(unittest.TestCase):
         config = Config()
         self.assertEqual(
             config.overpass_endpoint,
-            "https://overpass.private.coffee/api/interpreter",
+            "https://overpass.osm.ch/api/interpreter",
         )
         self.assertIn(
             "https://maps.mail.ru/osm/tools/overpass/api/interpreter",

@@ -2,100 +2,95 @@ from qgis.core import *
 from qgis.gui import *
 import re
 
+# Слова, обозначающие тип водного объекта, и их сокращения.
+# Порядок важен: срабатывает первое подходящее правило.
+WATER_TYPE_WORDS = (
+    ("озёра", "оз."),
+    ("озеро", "оз."),
+    ("торфопредприятия", "торф."),
+    ("торфопредприятие", "торф."),
+    ("торфоразработки", "торф."),
+    ("торфоболото", "торф-бол."),
+    ("рыбопитомника", "рыб."),
+    ("рыбопитомник", "рыб."),
+    ("хозяйство", "хоз-во"),
+    ("лиман", "лим."),
+    ("заводь", "зав."),
+    ("затон", "зат."),
+    ("плотина", "пл."),
+    ("запруда", ""),
+    ("пруды", "пр."),
+    ("пруда", "пр."),
+    ("пруд", "пр."),
+    ("водохранилище", "вдхр."),
+    ("водоём", "вод."),
+    ("водоема", "вод."),
+    ("водоем", "вод."),
+    # Балка стоит раньше ручья и речки: сокращается слово типа в начале
+    # названия, а «балка Третья речка» читается как «б. Третья речка».
+    ("балка", "б."),
+    ("ручей", "руч."),
+    ("речка", "р."),
+    ("река", "р."),
+    ("бассейн", "басс."),
+    ("лагуна", "лаг."),
+    ("залив", "зал."),
+    ("протока", "прот."),
+    ("воложка", "вол."),
+    ("старица", "стар."),
+    ("овраг", "овр."),
+    ("водопады", "вдп."),
+    ("водопад", "вдп."),
+    ("болота", "бол."),
+    ("болото", "бол."),
+    ("урочище", "ур."),
+    ("ерик", "ер."),
+    ("карьеры", "кар."),
+    ("карьера", "кар."),
+    ("карьер", "кар."),
+    ("канал", "кан."),
+)
+
+# Слова, из которых название состоит целиком: подпись не нужна.
+WATER_EMPTY_NAMES = (
+    "водопад", "родник", "бассейн", "водоем", "водоём", "водохранилище",
+    "воложка", "дренажная канава", "дренажный канал", "залив", "заводь",
+    "запруда", "затон", "канава", "канал", "рыбопитомник", "карьер",
+    "карьеры", "лагуна", "овраг", "озеро", "протока", "пруд", "река",
+    "речка", "ручей", "старица", "spring", "water", "stream", "river",
+    "drain", "canal", "исток", "балка",
+)
+
+# Признаки слова: буквы и цифры, чтобы «Прудовая» не попало под «пруд».
+WORD_EDGE = r"0-9A-Za-zА-Яа-яЁё-"
+
+
+def _replace_word(text, word, short):
+    """Заменяет слово целиком, не задевая похожие слова."""
+    pattern = (
+        r"(?<![{edges}]){word}(?![{edges}])"
+    ).format(edges=WORD_EDGE, word=re.escape(word))
+    return re.sub(pattern, short, text, flags=re.IGNORECASE)
+
+
+def _shorten_type(text):
+    """Сокращает первое найденное слово типа водного объекта."""
+    for word, short in WATER_TYPE_WORDS:
+        result = _replace_word(text, word, short)
+        if result != text:
+            return result
+    return text
+
+
 @qgsfunction(args='auto', group='Custom')
 def format_water_name(name, feature, parent):
     n = name
-    if n.lower() == "водопад" \
-    or n.lower() == "родник" \
-    or n.lower() == "бассейн" \
-    or n.lower() == "водоем" \
-    or n.lower() == "водоём" \
-    or n.lower() == "водохранилище" \
-    or n.lower() == "воложка" \
-    or n.lower() == "дренажная канава" \
-    or n.lower() == "дренажный канал" \
-    or n.lower() == "залив" \
-    or n.lower() == "заводь" \
-    or n.lower() == "запруда" \
-    or n.lower() == "затон" \
-    or n.lower() == "канава" \
-    or n.lower() == "канал" \
-    or n.lower() == "рыбопитомник" \
-    or n.lower() == "карьер" \
-    or n.lower() == "карьеры" \
-    or n.lower() == "лагуна" \
-    or n.lower() == "овраг" \
-    or n.lower() == "озеро" \
-    or n.lower() == "протока" \
-    or n.lower() == "пруд" \
-    or n.lower() == "река" \
-    or n.lower() == "речка" \
-    or n.lower() == "ручей" \
-    or n.lower() == "старица" \
-    or n.lower() == "spring" \
-    or n.lower() == "water" \
-    or n.lower() == "stream" \
-    or n.lower() == "river" \
-    or n.lower() == "drain" \
-    or n.lower() == "canal" \
-    or n == "исток": n = ''
-    if "озеро" in n.lower(): n = re.sub("озеро","оз.",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("озёра "): n = re.sub("^озёра ","оз.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith(" озёра"): n = re.sub(" озёра$"," оз.",n, flags=re.IGNORECASE)
-    elif "торфопредприятия" in n.lower(): n = re.sub("торфопредприятия","торф.",n, flags=re.IGNORECASE)
-    elif "торфопредприятие" in n.lower(): n = re.sub("торфопредприятие","торф.",n, flags=re.IGNORECASE)
-    elif "торфоразработки" in n.lower(): n = re.sub("торфоразработки","торф.",n, flags=re.IGNORECASE)
-    elif "торфоболото" in n.lower(): n = re.sub("торфоболото","торф-бол.",n, flags=re.IGNORECASE)
-    elif "рыбопитомника" in n.lower(): n = re.sub("рыбопитомника","рыб.",n, flags=re.IGNORECASE)
-    elif "рыбопитомник" in n.lower(): n = re.sub("рыбопитомник","рыб.",n, flags=re.IGNORECASE)
+    if n.lower() in WATER_EMPTY_NAMES: n = ''
+    else:
+        n = _shorten_type(n)
 
-    elif "хозяйство" in n.lower(): n = re.sub("хозяйство","хоз-во",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("лиман "): n = re.sub("^лиман ","лим. ",n, flags=re.IGNORECASE)
-    elif n.lower().endswith(" лиман"): n = re.sub(" лиман$"," лим.",n, flags=re.IGNORECASE)
-    elif "заводь" in n.lower(): n = re.sub("заводь","зав.",n, flags=re.IGNORECASE)
-    elif "затон " in n.lower(): n = re.sub("затон ","зат. ",n, flags=re.IGNORECASE)
-    elif " затон" in n.lower(): n = re.sub(" затон"," зат.",n, flags=re.IGNORECASE)
-    elif "плотина " in n.lower(): n = re.sub("плотина ","пл. ",n, flags=re.IGNORECASE)
-    elif " плотина" in n.lower(): n = re.sub(" плотина"," пл.",n, flags=re.IGNORECASE)
-    elif "запруда " in n.lower(): n = re.sub("запруда","",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("пруд"): n = re.sub("^пруд","пр.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith("пруд"): n = re.sub("пруд$","пр.",n, flags=re.IGNORECASE)
-    elif "водохранилище" in n.lower(): n = re.sub("водохранилище","вдхр.",n, flags=re.IGNORECASE)
-    elif "водоём " in n.lower(): n = re.sub("водоём ","вод. ",n, flags=re.IGNORECASE)
-    elif " водоём" in n.lower(): n = re.sub(" водоём"," вод.",n, flags=re.IGNORECASE)
-    elif "ручей " in n.lower(): n = re.sub("ручей ","руч. ",n, flags=re.IGNORECASE)
-    elif " ручей" in n.lower(): n = re.sub(" ручей"," руч.",n, flags=re.IGNORECASE)
-    elif "бассейн " in n.lower(): n = re.sub("бассейн ","басс. ",n, flags=re.IGNORECASE)
-    elif " бассейн" in n.lower(): n = re.sub(" бассейн"," басс.",n, flags=re.IGNORECASE)
-    elif "лагуна " in n.lower(): n = re.sub("лагуна ","лаг. ",n, flags=re.IGNORECASE)
-    elif " лагуна" in n.lower(): n = re.sub(" лагуна"," лаг.",n, flags=re.IGNORECASE)
-    elif "залив " in n.lower(): n = re.sub("залив ","зал. ",n, flags=re.IGNORECASE)
-    elif " залив" in n.lower(): n = re.sub(" залив"," зал.",n, flags=re.IGNORECASE)
-    elif "протока " in n.lower(): n = re.sub("протока ","прот. ",n, flags=re.IGNORECASE)
-    elif " протока" in n.lower(): n = re.sub(" протока"," прот.",n, flags=re.IGNORECASE)
-    elif "воложка " in n.lower(): n = re.sub("воложка ","вол. ",n, flags=re.IGNORECASE)
-    elif " воложка" in n.lower(): n = re.sub(" воложка"," вол.",n, flags=re.IGNORECASE)
-    elif "старица " in n.lower(): n = re.sub("старица ","стар. ",n, flags=re.IGNORECASE)
-    elif " старица" in n.lower(): n = re.sub(" старица"," стар.",n, flags=re.IGNORECASE)
-    elif "овраг " in n.lower(): n = re.sub("овраг ","овр. ",n, flags=re.IGNORECASE)
-    elif " овраг" in n.lower(): n = re.sub(" овраг"," овр.",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("водопад "): n = re.sub("водопад ","вдп. ",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("водопады "): n = re.sub("водопады ","вдп. ",n, flags=re.IGNORECASE)
-    elif n.lower().endswith(" водопад"): n = re.sub(" водопад"," вдп.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith(" водопады"): n = re.sub(" водопады"," вдп.",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("болото"): n = re.sub("^болото","бол.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith("болото"): n = re.sub("болото$","бол.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith("болота"): n = re.sub("болота$","бол.",n, flags=re.IGNORECASE)
-    elif "урочище" in n.lower(): n = re.sub("урочище","ур.",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("ерик"): n = re.sub("^ерик","ер.",n, flags=re.IGNORECASE)
-    elif "карьер-" in n.lower(): n = ""
-    elif n.lower().startswith("карьеры"): n = re.sub("^карьеры","кар.",n, flags=re.IGNORECASE)
-    elif n.lower().startswith("карьер"): n = re.sub("^карьер","кар.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith("карьер"): n = re.sub("карьер$","кар.",n, flags=re.IGNORECASE)
-    elif n.lower().endswith("карьера"): n = re.sub("карьера$","кар.",n, flags=re.IGNORECASE)
+    if "карьер-" in n.lower(): n = ""
     elif "земснаряд " in n.lower(): n = ""
-    elif n.lower().startswith("канал "): n = re.sub("канал ","кан. ",n, flags=re.IGNORECASE)
-    elif n.lower().endswith(" канал"): n = re.sub(" канал"," кан.",n, flags=re.IGNORECASE)
 
     if "(залив)" in n.lower(): n = re.sub("(залив)","",n, flags=re.IGNORECASE)
     if "(пролив)" in n.lower(): n = re.sub("(пролив)","",n, flags=re.IGNORECASE)
@@ -160,6 +155,5 @@ def format_water_name(name, feature, parent):
 
     if " исток" in n.lower() and "." not in n: n = re.sub(" исток"," ист.",n, flags=re.IGNORECASE)
     if "исток " in n.lower() and "." not in n: n = re.sub("исток ","ист. ",n, flags=re.IGNORECASE)
-#    if (". " or " ." or "оз " or " оз") not in n.lower() and (n.lower().endswith("ое") or n.lower().endswith("ее")): n = "оз. " + n
 
-    return n
+    return " ".join(n.split())

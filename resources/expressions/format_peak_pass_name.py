@@ -2,6 +2,18 @@ from qgis.core import *
 from qgis.gui import *
 import re
 
+# Признаки слова: буквы и цифры.
+WORD_EDGE = r"0-9A-Za-zА-Яа-яЁё-"
+
+
+def _replace_word(text, word, short):
+    """Заменяет слово целиком, не задевая похожие слова."""
+    pattern = (
+        r"(?<![{edges}]){word}(?![{edges}])"
+    ).format(edges=WORD_EDGE, word=re.escape(word))
+    return re.sub(pattern, short, text, flags=re.IGNORECASE)
+
+
 @qgsfunction(args='auto', group='Custom')
 def format_peak_pass_name(name, feature, parent):
     n = name
@@ -25,8 +37,10 @@ def format_peak_pass_name(name, feature, parent):
     if n.lower().startswith('соп.'): n = re.sub("^соп.","соп.", n, flags=re.IGNORECASE)
     if n.lower().endswith(' соп.'): n = re.sub(" соп.$"," соп.", n, flags=re.IGNORECASE)
     if 'плато' in n.lower() and " " in n: n = re.sub("плато","пл.", n, flags=re.IGNORECASE)
-    if 'перевал' in n.lower() and " " in n: n = re.sub("перевал","", n, flags=re.IGNORECASE)
-    if 'пер.' in n.lower(): n = re.sub("пер.","", n, flags=re.IGNORECASE)
+    # «перевал» и «пер.» убираются вместе с пробелом, иначе остаётся
+    # пустое место в начале или в конце подписи.
+    if 'перевал' in n.lower() and " " in n: n = _replace_word(n, "перевал", "")
+    if 'пер.' in n.lower(): n = _replace_word(n, "пер.", "")
     if 'седловина' in n.lower() and " " in n: n = re.sub("седловина","седл.", n, flags=re.IGNORECASE)
     if '-летия' in n.lower() and " " in n: n = re.sub("-летия","-лет.", n, flags=re.IGNORECASE)
     if ' летия' in n.lower() and " " in n: n = re.sub(" летия"," лет.", n, flags=re.IGNORECASE)
@@ -124,4 +138,4 @@ def format_peak_pass_name(name, feature, parent):
     elif n.lower().endswith('ледовые') and " " in n: n = re.sub("ледовые$","лед.", n, flags=re.IGNORECASE)
     elif n.lower().endswith('ледовое') and " " in n: n = re.sub("ледовое$","лед.", n, flags=re.IGNORECASE)
 
-    return n
+    return " ".join(n.split())

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qgis_xtopo.core.osm_convert import convert_osm_to_features
+from qgis_xtopo.core.osm_convert import FieldNames, convert_osm_to_features
 from qgis_xtopo.core.pbf_source import filter_features, parse_query
 
 
@@ -62,6 +62,28 @@ class OsmConvertTest(unittest.TestCase):
         ]
         selected = filter_features(features, query)
         self.assertEqual(len(selected), 1)
+
+    def test_field_names_are_unique_ignoring_case(self):
+        """SQLite не различает регистр имён колонок."""
+        names = FieldNames()
+        first = names.apply({"communication:5G": "yes", "name": "tower"})
+        second = names.apply({"communication:5g": "no", "name": "tower"})
+        keys = set(first) | set(second)
+        self.assertEqual(len(keys), len({key.lower() for key in keys}))
+
+    def test_rename_is_the_same_for_all_features(self):
+        names = FieldNames()
+        first = names.apply({"communication:5G": "yes"})
+        second = names.apply({"communication:5g": "no"})
+        self.assertIn("communication:5G", first)
+        self.assertNotIn("communication:5g", second)
+        self.assertEqual(len(second), 1)
+
+    def test_name_keeps_its_spelling(self):
+        names = FieldNames()
+        resolved = names.apply({"Name": "x", "name": "y"})
+        self.assertIn("name", resolved)
+        self.assertEqual(resolved["name"], "y")
 
 
 if __name__ == "__main__":

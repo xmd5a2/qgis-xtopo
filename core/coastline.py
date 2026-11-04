@@ -113,7 +113,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         notify("Береговая линия: нет данных")
         return False
     if not crop.exists():
-        notify("WARNING: Береговая линия: не найден bbox проекта")
+        notify("WARNING: Береговая линия: не найден охват проекта")
         return False
 
     runner = ProcessingRunner(progress=progress, cancel=cancel)
@@ -133,7 +133,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             "OUTPUT": _temp(config, "coastline_simplified.geojson"),
         })
 
-        notify("Береговая линия: разделение bbox")
+        notify("Береговая линия: разделение охвата")
         split = _run(runner, "native:splitwithlines", {
             "INPUT": str(crop),
             "LINES": simplified,

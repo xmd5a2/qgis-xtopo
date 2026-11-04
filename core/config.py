@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import i18n
 from .overpass_servers import DEFAULT_OVERPASS_SERVERS
 from .resources import resource_path
 
@@ -29,7 +30,7 @@ def project_name_error(value):
     if not invalid:
         return ""
     readable = ", ".join(
-        "пробел" if char == " " else f"«{char}»" for char in invalid
+        i18n.tr("пробел") if char == " " else f"«{char}»" for char in invalid
     )
     return (
         f"Уберите из имени проекта недопустимые символы: {readable}. "
@@ -141,6 +142,9 @@ class Config:
     smooth_isolines: bool = False
     manual_coastline_processing: bool = False
 
+    # Сколько слоёв обрабатывается одновременно (0 — выбрать автоматически).
+    parallel_workers: int = 0
+
     source_version: str = "0.7.0"
 
     def __post_init__(self):
@@ -189,6 +193,10 @@ class Config:
     @property
     def terrain_cache_dir(self):
         return self.projects_dir / "qgisxtopo-cache" / "srtm"
+
+    @property
+    def terrain_result_cache_dir(self):
+        return self.projects_dir / "qgisxtopo-cache" / "terrain"
 
     def validate(self):
         if not self.project_name:
@@ -252,6 +260,7 @@ class Config:
             isolines_step=_as_int(values.get("isolines_step"), 10),
             smooth_isolines=_as_bool(values.get("smooth_isolines")),
             manual_coastline_processing=_as_bool(values.get("manual_coastline_processing")),
+            parallel_workers=_as_int(values.get("parallel_workers"), 0),
         )
 
     def to_file(self, path):
@@ -292,6 +301,7 @@ generate_terrain_isolines={str(self.generate_terrain_isolines).lower()}
 isolines_step={self.isolines_step}
 smooth_isolines={str(self.smooth_isolines).lower()}
 manual_coastline_processing={str(self.manual_coastline_processing).lower()}
+parallel_workers={self.parallel_workers}
 source_version="{self.source_version}"
 """
         path.write_text(content, encoding="utf-8")

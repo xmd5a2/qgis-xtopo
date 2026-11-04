@@ -73,6 +73,13 @@ class OverpassClient:
         raise OverpassError(f"{endpoint}: unexpected response to the test query")
 
     def fetch(self, query_name, query_text, bbox, destination, cancel=None, progress=None):
+        return self.fetch_raw(
+            query_name, build_query(query_text, bbox), destination,
+            cancel=cancel, progress=progress,
+        )
+
+    def fetch_raw(self, query_name, full_query, destination, cancel=None, progress=None):
+        """Скачивает готовый запрос Overpass (заголовок уже собран)."""
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if _valid_osm(destination):
@@ -82,7 +89,7 @@ class OverpassClient:
         if not self.endpoints:
             raise OverpassError("No Overpass endpoints configured")
 
-        payload = urllib.parse.urlencode({"data": build_query(query_text, bbox)}).encode("utf-8")
+        payload = urllib.parse.urlencode({"data": full_query}).encode("utf-8")
         errors = []
         for attempt in range(self.retries + 1):
             for endpoint in self.endpoints:

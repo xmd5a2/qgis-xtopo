@@ -14,6 +14,8 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsRectangle
 
+from . import osmium_tool
+
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 INDEX_TTL = 7 * 24 * 60 * 60
@@ -24,6 +26,8 @@ DOWNLOAD_TIMEOUT = 30
 CHECK_TTL = 10 * 60
 CHUNK = 1024 * 1024
 MAX_DOWNLOADS = 4
+# Карты крупнее этого размера не предлагаются к скачиванию.
+MAX_MAP_SIZE = 7 * 1024 * 1024 * 1024
 USER_AGENT = "QGIS-xtopo/0.5 (+https://github.com/xmd5a2/qgis-xtopo)"
 MIN_FREE_SPACE = 100 * 1024 * 1024
 
@@ -90,6 +94,8 @@ class GeofabrikIndex:
         rectangle, clip = self._clip(bbox)
         found = []
         for entry in self.entries:
+            if entry.map.id == "europe":
+                continue
             if not entry.bounds.intersects(rectangle):
                 continue
             if not entry.geometry.intersects(clip):
@@ -159,6 +165,8 @@ class GeofabrikPlan:
     extra: list = field(default_factory=list)
     extra_statuses: list = field(default_factory=list)
     parent_names: dict = field(default_factory=dict)
+    # Карты, которые не предлагаются из-за размера: (карта, размер в байтах).
+    skipped: list = field(default_factory=list)
 
     def items(self):
         """Все карты плана вместе со статусом: сначала выбранные, потом прочие."""
@@ -250,6 +258,21 @@ def _write_meta(path, meta):
     temp.parent.mkdir(parents=True, exist_ok=True)
     temp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
+
+
+def invalidate_index(config):
+    """Пометить кэш индекса Geofabrik устаревшим.
+
+    Следующий вызов ``fetch_index`` скачает индекс заново (сервер может
+    ответить «не изменён» — тогда останется прежний индекс, но с новой
+    датой проверки). Используется кнопкой «Обновить» в панели.
+    """
+    _directory, _index_path, meta_path = _cache_paths(config)
+    meta = _read_meta(meta_path)
+    if not meta:
+        return
+    meta["fetched_at"] = 0
+    _write_meta(meta_path, meta)
 
 
 def _fetch(url, headers=None, cancel=None, progress=None, label=""):
@@ -396,6 +419,11 @@ def _cached_head(url):
 def clear_caches():
     _size_cache.clear()
     _index_cache.clear()
+
+
+def _too_large(status):
+    """Карта крупнее MAX_MAP_SIZE не предлагается к скачиванию."""
+    return status is not None and status.size > MAX_MAP_SIZE
 
 
 def check_maps(config, maps, cancel=None, progress=None, report=True):
@@ -579,9 +607,14 @@ def _download_one(config, item, status, transfer, progress, cancel):
 def ensure_maps(config, maps, statuses=None, progress=None, percent=None,
                 cancel=None):
     if not maps:
-        raise GeofabrikError("Для выбранного bbox карты Geofabrik не найдены")
+        raise GeofabrikError("Для выбранного охвата карты Geofabrik не найдены")
     if statuses is None:
         statuses = check_maps(config, maps, cancel=cancel, progress=progress)
+    oversized = [status.map.name for status in statuses if _too_large(status)]
+    if oversized:
+        raise GeofabrikError(
+            "Слишком большая карта для скачивания: " + ", ".join(oversized)
+        )
     by_id = {status.map.id: status for status in statuses}
 
     pending = []
@@ -663,7 +696,7 @@ def merged_path(config, maps, paths):
 
 
 def find_osmium():
-    return shutil.which("osmium")
+    return osmium_tool.find_osmium()
 
 
 def merge_if_available(config, maps, paths, progress=None, cancel=None):
@@ -702,7 +735,14 @@ def merge_if_available(config, maps, paths, progress=None, cancel=None):
     return str(destination)
 
 
-def source_paths(config, maps, merge=False, progress=None, cancel=None):
+def source_paths(config, maps, merge=False, progress=None, cancel=None,
+                 prefer_separate=False):
+    """Файлы выгрузок для чтения.
+
+    ``prefer_separate`` — вернуть отдельные выгрузки, даже если есть
+    склеенный файл: он нужен только для чтения карт целиком, а при
+    вырезке области osmium каждая выгрузка обрабатывается сама по себе.
+    """
     paths = local_maps(config, maps)
     missing = [path.name for path in paths if not path.exists()]
     if missing:
@@ -710,7 +750,7 @@ def source_paths(config, maps, merge=False, progress=None, cancel=None):
             "Карты не скачаны: " + ", ".join(missing)
             + ". Запустите «Подготовить данные» ещё раз."
         )
-    if not merge:
+    if not merge and not prefer_separate:
         cached = merged_path(config, maps, paths)
         if cached.exists() and _looks_like_pbf(cached):
             return [cached]
@@ -744,11 +784,34 @@ def analyse(config, bbox, cancel=None, progress=None):
         for entry in state.index.entries
         if entry.map.parent
     }
+
+    # Слишком большие выгрузки не предлагаются к скачиванию.
+    skipped = []
+    allowed_maps = []
+    allowed_statuses = []
+    for item in maps:
+        status = by_id[item.id]
+        if _too_large(status):
+            skipped.append((item, status.size))
+        else:
+            allowed_maps.append(item)
+            allowed_statuses.append(status)
+    allowed_extra = []
+    allowed_extra_statuses = []
+    for item in extra:
+        status = by_id[item.id]
+        if _too_large(status):
+            skipped.append((item, status.size))
+        else:
+            allowed_extra.append(item)
+            allowed_extra_statuses.append(status)
+
     return GeofabrikPlan(
         state=state,
-        maps=maps,
-        statuses=[by_id[item.id] for item in maps],
-        extra=extra,
-        extra_statuses=[by_id[item.id] for item in extra],
+        maps=allowed_maps,
+        statuses=allowed_statuses,
+        extra=allowed_extra,
+        extra_statuses=allowed_extra_statuses,
         parent_names=parent_names,
+        skipped=skipped,
     )

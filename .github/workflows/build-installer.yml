@@ -1,0 +1,57 @@
+name: build-installer
+
+# Сборка инсталлятора QGIS-xtopo для Windows (Inno Setup).
+#
+# Инсталлятор проверяет наличие QGIS, при необходимости предлагает
+# скачать и установить его, ставит плагин в профиль QGIS, включает его
+# и создаёт ярлык на рабочем столе.
+#
+# Результат: qgis-xtopo-setup-<версия>.exe в dist/.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "installer/**"
+      - "core/**"
+      - "gui/**"
+      - "resources/**"
+      - "metadata.txt"
+      - "tools/build_plugin.py"
+      - ".github/workflows/build-installer.yml"
+
+jobs:
+  windows:
+    name: инсталлятор для Windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Сборка инсталлятора
+        shell: pwsh
+        run: |
+          $env:Path += ";$env:ProgramFiles(x86)\Inno Setup 6"
+          ./installer/build-installer.ps1
+
+      - name: Проверка результата
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path metadata.txt -Pattern '^version=').Line -replace '^version=', ''
+          $setup = "dist/qgis-xtopo-setup-$version.exe"
+          if (-not (Test-Path $setup)) { throw "Инсталлятор не собран: $setup" }
+          Get-Item $setup | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qgis-xtopo-setup
+          path: dist/qgis-xtopo-setup-*.exe

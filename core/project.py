@@ -7,7 +7,8 @@ import zipfile
 from pathlib import Path
 
 from .bbox import parse_bbox
-from .resources import resource_path
+from .map_language import DETAIL_VARIABLE
+from .resources import resource_path, template_path
 
 TEMPLATE_FONT = "Century Schoolbook L"
 SERIF_FONTS = (
@@ -24,6 +25,27 @@ DEFAULT_ZOOM = 1.0
 # Множитель «Увеличение» в строке состояния: иконки и подписи рисуются
 # в 1.5 раза крупнее (QgsMapCanvas::setMagnificationFactor).
 MAGNIFICATION_FACTOR = 1.5
+
+# Фильтры правил, ссылающиеся на слои, которых может не быть в готовом
+# проекте: пустые слои вырезаются при сборке, а обращение overlay_* к
+# отсутствующему слою обращает фильтр в NULL.  try(...) возвращает
+# запасное значение, и объекты остаются на карте.
+OVERLAY_FILTERS = (
+    (
+        "if(overlay_within('spoil heap'),false,true)",
+        "try(overlay_within('spoil heap'), false) = false",
+    ),
+    (
+        "if(overlay_within('prison'),false,true)",
+        "try(overlay_within('prison'), false) = false",
+    ),
+    (
+        "if(overlay_contains('earth bank gully') OR "
+        "overlay_contains('cliff'),0,1)",
+        "if(try(overlay_contains('earth bank gully') OR "
+        "overlay_contains('cliff'), false),0,1)",
+    ),
+)
 
 
 def resolve_label_font():
@@ -47,6 +69,19 @@ def project_file(config):
     return config.project_dir / f"{config.project_name}.qgz"
 
 
+def project_file_path(projects_dir, project_name):
+    """Путь к файлу проекта по каталогу проектов и имени.
+
+    None, если имя проекта недопустимо.
+    """
+    from .config import normalize_project_name, project_name_error
+
+    name = normalize_project_name(project_name) or "automap"
+    if project_name_error(name):
+        return None
+    return Path(projects_dir).expanduser() / name / f"{name}.qgz"
+
+
 def prepare_project(config):
     config.ensure_directories()
     _copy_missing(
@@ -63,7 +98,7 @@ def prepare_project(config):
     # layers from the project file, and a reused file could never get them
     # back after a later run produced data for the same layers.
     rewrite_project_archive(
-        Path(resource_path("automap.qgz")),
+        template_path(),
         path,
         config.project_name,
     )
@@ -257,6 +292,20 @@ def clean_project_layers(path):
     return _rewrite_archive(path, transform)
 
 
+def patch_overlay_filters(text):
+    """Оборачивает обращения к overlay_* в try(...).
+
+    Пустые слои (spoil heap, prison, cliff, earth bank gully)
+    вырезаются при сборке проекта.  Обращение overlay_* к
+    отсутствующему слою — ошибка выражения, и весь фильтр правила
+    становится NULL: объекты пропадают с карты.  try(...) вместо
+    ошибки возвращает запасное значение, и фильтр работает.
+    """
+    for old, new in OVERLAY_FILTERS:
+        text = text.replace(old, new)
+    return text
+
+
 def repair_project(path):
     """Patch fonts and drop empty layers in a single archive rewrite."""
     path = Path(path)
@@ -275,6 +324,7 @@ def repair_project(path):
         text = archive.read(name).decode("utf-8")
 
     updated, _removed = _remove_empty_layers(text, base_dir)
+    updated = patch_overlay_filters(updated)
     if new_font:
         updated = updated.replace(old_font, new_font)
     if updated == text:
@@ -285,6 +335,43 @@ def repair_project(path):
         return encoded if item_name == name else data
 
     return _rewrite_archive(path, transform)
+
+
+VARIABLE_NAMES_PATTERN = re.compile(
+    r'<variableNames type="QStringList">(.*?)</variableNames>', re.S
+)
+VARIABLE_VALUES_PATTERN = re.compile(
+    r'<variableValues type="QStringList">(.*?)</variableValues>', re.S
+)
+VARIABLE_VALUE_PATTERN = re.compile(r"<value>(.*?)</value>", re.S)
+
+
+def _set_detail_variable(text, level=None):
+    """Записывает уровень детализации в переменные проекта шаблона.
+
+    Значения переменных лежат отдельным списком и связаны с именами по
+    позиции, поэтому правится значение той же позиции, что и имя
+    `level_of_detail`. Если имени в списке нет, значение не трогается.
+    """
+    names = VARIABLE_NAMES_PATTERN.search(text)
+    values = VARIABLE_VALUES_PATTERN.search(text)
+    if names is None or values is None:
+        return text
+    names_list = [item.group(1) for item in
+                  VARIABLE_VALUE_PATTERN.finditer(names.group(1))]
+    if DETAIL_VARIABLE not in names_list:
+        return text
+    position = names_list.index(DETAIL_VARIABLE)
+    entries = list(VARIABLE_VALUE_PATTERN.finditer(values.group(1)))
+    if position >= len(entries):
+        return text
+    if level is None:
+        from .map_language import level_of_detail
+
+        level = level_of_detail()
+    start = values.start(1) + entries[position].start()
+    end = values.start(1) + entries[position].end()
+    return f"{text[:start]}<value>{level}</value>{text[end:]}"
 
 
 def rewrite_project_archive(source, destination, project_name):
@@ -315,6 +402,7 @@ def rewrite_project_archive(source, destination, project_name):
                     )
                     if new_font:
                         text = text.replace(old_font, new_font)
+                    text = _set_detail_variable(text)
                     data = text.encode("utf-8")
                     name = f"{project_name}.qgs"
                 elif name.endswith(".qgd"):
@@ -376,6 +464,17 @@ def fit_project_extent(iface, zoom=DEFAULT_ZOOM):
             factor = 1.0
         if factor > 0:
             extent.scale(1.0 / factor)
+        # QgsMapCanvas делит переданный setExtent охват на magnificationFactor.
+        # Компенсируем это, чтобы при увеличении 150% была видна та же
+        # область, что и при 100%, а не только её центральная часть.
+        magnification = getattr(canvas, "magnificationFactor", None)
+        if callable(magnification):
+            try:
+                value = float(magnification())
+                if value > 0:
+                    extent.scale(value)
+            except (TypeError, ValueError):
+                pass
         canvas.setExtent(extent)
         canvas.refresh()
         return True
@@ -407,12 +506,14 @@ def open_project(path, iface=None, repair=True):
             pass
     if iface is not None and hasattr(iface, "addProject"):
         iface.addProject(path)
+        # Увеличение меняет видимый охват, поэтому сначала задаём 150%,
+        # а затем вписываем BBOX с учётом этого множителя.
+        set_canvas_magnification(iface)
         if not fit_project_extent(iface) and hasattr(iface, "zoomFull"):
             try:
                 iface.zoomFull()
             except Exception:
                 pass
-        set_canvas_magnification(iface)
         return
     from qgis.core import QgsProject
 

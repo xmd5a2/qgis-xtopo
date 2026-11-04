@@ -1,13 +1,26 @@
 import bz2
 import gzip
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import osmium_prefilter
+from .osm_convert import FieldNames
+
 
 LAYER_NAMES = ("points", "lines", "multipolygons", "multilinestrings", "other_relations")
+
+# Порядок опроса слоёв при INTERLEAVED_READING: драйвер читает файл
+# потоково (nodes -> ways -> relations), и слои нужно опрашивать по
+# одному объекту за цикл строго в этом порядке.  Чтение слоя до конца
+# подряд ломает сборку мультиполигонов: в охвате с 52 реляциями-ледниками
+# доходило лишь 1-2 (остальные молча терялись вместе с way-полигонами).
+INTERLEAVED_LAYER_ORDER = (
+    "points", "lines", "multilinestrings", "multipolygons", "other_relations",
+)
 
 # Запас вокруг bbox при грубом фильтре GDAL (в градусах и доля от размера
 # области).  Фильтр отсекает большую часть файла ещё до построения
@@ -282,7 +295,9 @@ def _field(feature, name):
 
 
 def _feature_properties(feature, definition, kind):
-    properties = parse_tags(_field(feature, "other_tags"))
+    # Сначала известные поля драйвера OSM: они важнее одноимённых тегов из
+    # other_tags, иначе тег в другом регистре переименовал бы «name».
+    properties = {}
     for index in range(definition.GetFieldCount()):
         name = definition.GetFieldDefn(index).GetName()
         if name in INTERNAL_FIELDS:
@@ -298,24 +313,107 @@ def _feature_properties(feature, definition, kind):
         return {}
     properties["@id"] = f"{kind}/{osm_id}"
     properties["@type"] = kind
+    for key, value in parse_tags(_field(feature, "other_tags")).items():
+        if key not in properties:
+            properties[key] = value
     return properties
 
 
-def _feature_geometry(feature):
-    geometry = feature.GetGeometryRef()
+def _point_count(geometry):
+    """Число точек геометрии с учётом колец полигона.
+
+    У полигона внутри GEOMETRYCOLLECTION GetPointCount() возвращает ноль,
+    хотя кольца содержат точки, поэтому у полигонов считаем их иначе.
+    """
+    if geometry is None:
+        return 0
+    if geometry.GetGeometryName() not in ("POLYGON", "MULTIPOLYGON"):
+        return geometry.GetPointCount()
+    total = 0
+    parts = (
+        [geometry]
+        if geometry.GetGeometryName() == "POLYGON"
+        else [geometry.GetGeometryRef(index) for index in range(geometry.GetGeometryCount())]
+    )
+    for part in parts:
+        if part is None:
+            continue
+        for ring in range(part.GetGeometryCount()):
+            total += part.GetGeometryRef(ring).GetPointCount()
+    return total
+
+
+def _is_degenerate(geometry):
+    """Часть без точек — рисовать её нечем.
+
+    У полигона с пустым кольцом IsEmpty() возвращает False, хотя точек
+    нет, поэтому emptiness проверяем по числу точек.
+    """
+    if geometry is None:
+        return True
+    if geometry.IsEmpty():
+        return True
+    return _point_count(geometry) == 0
+
+
+def _clean_geometry(geometry):
+    """Убрать вырожденные части составной геометрии.
+
+    GDAL собирает отношения с разнородными членами в GEOMETRYCOLLECTION, куда
+    попадают и полигоны без точек. Такие объекты бесполезны: часть без точек
+    не рисуется, а коллекция целиком не совпадает с типом слоя и даёт
+    предупреждение при записи. Вырожденные части отбрасываем, а если
+    осталась одна часть — берём её.
+
+    Остальные части оставляем коллекцией: собирать из них мультитип нельзя,
+    слой ожидает свой тип, а мультитип в него не вставляется.
+    """
     if geometry is None or geometry.IsEmpty():
         return None
+    if geometry.GetGeometryName() != "GEOMETRYCOLLECTION":
+        return geometry
+    parts = []
+    for index in range(geometry.GetGeometryCount()):
+        part = geometry.GetGeometryRef(index)
+        if _is_degenerate(part):
+            continue
+        parts.append(part)
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return geometry
+
+
+def _feature_geometry_json(feature):
+    """Геометрия объекта в виде готового JSON.
+
+    Строка берётся прямо из GDAL: разбирать и собирать JSON заново
+    для каждой геометрии (особенно крупных полигонов) дорого.
+    """
+    geometry = _clean_geometry(feature.GetGeometryRef())
+    if geometry is None:
+        return None
     try:
-        return json.loads(geometry.ExportToJson())
+        return geometry.ExportToJson()
     except Exception:
         return None
 
 
-def _open_dataset(gdal, source, temp_dir):
+def _open_dataset(gdal, source, temp_dir, custom_indexing=True):
+    """Открывает PBF драйвером OSM.
+
+    ``custom_indexing`` — собственный индекс GDAL для узлов.  Он быстрее
+    обычного, но требует строго возрастающих id узлов.  Карты, склеенные
+    osmium из пересекающихся выгрузок, содержат повторяющиеся id (в
+    пограничных объектах версии выгрузок различаются), и на таких файлах
+    индекс падает с «Non increasing node id» — чтение прерывается.
+    Тогда файл открывают заново без индекса.
+    """
     gdal.SetConfigOption("CPL_TMPDIR", str(temp_dir))
     options = [
         "INTERLEAVED_READING=YES",
-        "USE_CUSTOM_INDEXING=YES",
+        "USE_CUSTOM_INDEXING=YES" if custom_indexing else "USE_CUSTOM_INDEXING=NO",
         "MAX_TMPFILE_SIZE=100",
         "TAGS_FORMAT=JSON",
     ]
@@ -333,15 +431,56 @@ def _filter_extent(bbox):
     целой геометрией: иначе GDAL обрезает линии по фильтру, и полигоны
     relations собираются из незамкнутых колец.  Всё, что попало в запас,
     отсекается точным проверкой пересечения с самим bbox.
+
+    Порядок углов — как у ``OGRLayer::SetSpatialFilterRect``
+    (minx, miny, maxx, maxy): Python-обёртка GDAL принимает именно его,
+    а ``GetEnvelope()`` отдаёт углы в порядке (minx, maxx, miny, maxy), и
+    эти порядки нельзя смешивать.
     """
     width = bbox.lon_max - bbox.lon_min
     height = bbox.lat_max - bbox.lat_min
     margin = max(FILTER_MARGIN_DEGREES, FILTER_MARGIN_RATIO * max(width, height))
     return (
         bbox.lon_min - margin,
-        bbox.lon_max + margin,
         bbox.lat_min - margin,
+        bbox.lon_max + margin,
         bbox.lat_max + margin,
+    )
+
+
+def _extend_box(box, min_x, max_x, min_y, max_y):
+    """Расширяет рамку прочитанных объектов.
+
+    Аргументы — в порядке GetEnvelope, рамка хранится как
+    (min_x, min_y, max_x, max_y).
+    """
+    if box is None:
+        return (min_x, min_y, max_x, max_y)
+    return (
+        min(box[0], min_x),
+        min(box[1], min_y),
+        max(box[2], max_x),
+        max(box[3], max_y),
+    )
+
+
+def _filter_delivered(read_box, area):
+    """Доставил ли фильтр драйвера нужную область.
+
+    Драйвер OSM выбирает блоки файла, пересекающиеся с областью фильтра,
+    и отдаёт объекты целиком.  Поэтому рамка прочитанного должна
+    пересекаться с самой областью.  В некоторых выгрузках индекс PBF
+    битый, и драйвер отдаёт блоки из другого места файла: тогда такой
+    фильтр только мешает, и файл нужно читать целиком.
+
+    ``area`` — прямоугольник в порядке (слева, справа, снизу, сверху).
+    """
+    if read_box is None:
+        return False
+    left, right, bottom, top = area
+    min_x, min_y, max_x, max_y = read_box
+    return not (
+        max_x < left or min_x > right or max_y < bottom or min_y > top
     )
 
 
@@ -351,12 +490,23 @@ def _apply_spatial_filter(layers, source, bbox):
     Фильтр работает только для .pbf: драйвер OSM не умеет фильтровать
     XML-файлы .osm и с фильтром не отдаёт ни одного объекта.  Такие файлы
     читаются полностью, как и раньше.
+
+    Слой ``points`` фильтровать нельзя: по документации драйвера OSM
+    фильтр, заданный на нём, действует и на остальные слои, и у них
+    «пропадают вершины».  Из-за этого теряются объекты, геометрия которых
+    выходит далеко за пределы области: отношения с большим кольцом
+    (границы регионов, заповедники) отбрасываются целиком, а линии,
+    пересекающие край области, приходят обрезанными.  Поэтому фильтр
+    ставится на остальные слои, а ``points`` читается без него — точная
+    отсечка по самому bbox делается отдельно, при разборе объектов.
     """
     if Path(source).suffix.lower() != ".pbf":
         return False
-    extent = _filter_extent(bbox)
+    min_x, min_y, max_x, max_y = _filter_extent(bbox)
     for layer in layers:
-        layer.SetSpatialFilterRect(*extent)
+        if layer.GetName() == "points":
+            continue
+        layer.SetSpatialFilterRect(min_x, min_y, max_x, max_y)
     return True
 
 
@@ -380,13 +530,56 @@ def _expected_objects(source, bbox):
     left, right, top, bottom = box
     file_area = max(1e-9, (right - left) * (top - bottom))
     extent = _filter_extent(bbox)
-    area = max(0.0, (extent[1] - extent[0]) * (extent[3] - extent[2]))
+    area = max(0.0, (extent[2] - extent[0]) * (extent[3] - extent[1]))
     share = min(1.0, area / file_area)
     return max(1, int(total * share))
 
 
 def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
-                    progress=None, sources=None):
+                    progress=None, sources=None, use_osmium=True):
+    """Читает объекты OSM из PBF и раскладывает их по слоям.
+
+    Собственный индекс GDAL для узлов требует строго возрастающих id.
+    Карты, склеенные osmium из пересекающихся выгрузок, содержат
+    повторяющиеся id (в пограничных объектах версии выгрузок различаются),
+    и на таких файлах индекс падает — чтение прерывается.  Тогда всё
+    читается заново без индекса: он медленнее, но работает.
+
+    Если доступен osmium, область сначала вырезается из выгрузок:
+    чтение большой карты целиком занимает минуты, а вырезка — секунды.
+    """
+    paths = [Path(item).expanduser() for item in (sources or [config.pbf_path])]
+    temporary = []
+    unfiltered = set()
+    if use_osmium and paths:
+        paths, temporary, covering = osmium_prefilter.prefilter_sources(
+            paths, bbox, config, progress=progress, cancel=cancel
+        )
+        unfiltered = {str(Path(item).expanduser()) for item in covering}
+    try:
+        dataset = _prepare_dataset(
+            config, bbox, query_names, query_texts=query_texts, cancel=cancel,
+            progress=progress, sources=paths, _custom_indexing=True,
+            unfiltered=unfiltered,
+        )
+    except RuntimeError:
+        if progress:
+            progress(
+                "PBF: индекс GDAL не справился с повторяющимися id, "
+                "файл читается заново без индекса"
+            )
+        dataset = _prepare_dataset(
+            config, bbox, query_names, query_texts=query_texts, cancel=cancel,
+            progress=progress, sources=paths, _custom_indexing=False,
+            unfiltered=unfiltered,
+        )
+    dataset.temp_files.extend(temporary)
+    return dataset
+
+
+def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
+                      progress=None, sources=None, _custom_indexing=True,
+                      unfiltered=None):
     gdal, ogr = _gdal()
     paths = [Path(item).expanduser() for item in (sources or [config.pbf_path])]
     for source in paths:
@@ -403,11 +596,15 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
     pbf_dir.mkdir(parents=True, exist_ok=True)
     handles = {}
     feature_files = {}
+    field_names = {name: FieldNames() for name in query_names}
     temp_files = []
     features_written = 0
     features_seen = 0
     seen = set()
     total_files = len(paths)
+    # Файлы, которые читаются целиком: геометрия объектов в них лежит за
+    # пределами области, и фильтр драйвера отбросил бы их целиком.
+    unfiltered = {str(Path(item).expanduser()) for item in (unfiltered or ())}
     # Rough object density of OSM extracts (about 70 bytes per node, way and
     # relation).  It is only used to show a progress scale while GDAL decodes
     # the file, so a rough guess is enough.  With the spatial filter only the
@@ -428,37 +625,89 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                     f"({position}/{total_files})"
                 )
 
-            dataset = _open_dataset(gdal, source, config.temp_dir)
-            if dataset is None:
-                raise PbfError(
-                    f"GDAL could not open {source.name}. "
-                    "Make sure the OSM/PBF driver is available in this QGIS build."
+            area = (
+                bbox.lon_min, bbox.lon_max, bbox.lat_min, bbox.lat_max
+            )
+            dataset = None
+            filter_enabled = True
+            # Файлы горных массивов читаются целиком: их вершины лежат за
+            # пределами области, и фильтр драйвера их бы отбросил.
+            whole_file = str(source) in unfiltered
+            if whole_file and progress:
+                progress(
+                    f"{source.name}: файл читается целиком "
+                    "(горные массивы, геометрия вне области)"
                 )
-
             try:
-                layers = [
-                    layer for layer in (dataset.GetLayerByName(name) for name in LAYER_NAMES)
-                    if layer is not None
-                ]
-                # Два прохода.  Первый — грубый фильтр GDAL по области с
-                # запасом: драйвер не строит геометрию объектов, которые
-                # заведомо далеко от bbox, и до файла в 500 МБ и больше дело
-                # не доходит целиком.  Второй — точная проверка пересечения
-                # с самим bbox: в выход попадают только кандидаты, реально
-                # пересекающие область.
-                _apply_spatial_filter(layers, source, bbox)
                 while True:
+                    dataset = _open_dataset(
+                        gdal, source, config.temp_dir,
+                        custom_indexing=_custom_indexing,
+                    )
+                    if dataset is None:
+                        raise PbfError(
+                            f"GDAL could not open {source.name}. "
+                            "Make sure the OSM/PBF driver is available in this QGIS build."
+                        )
+                    layers = [
+                        layer for layer in (
+                            dataset.GetLayerByName(name)
+                            for name in INTERLEAVED_LAYER_ORDER
+                        )
+                        if layer is not None
+                    ]
+                    definitions = {
+                        layer: layer.GetLayerDefn() for layer in layers
+                    }
+                    # Два прохода.  Первый — грубый фильтр GDAL по области
+                    # с запасом: драйвер не строит геометрию объектов,
+                    # которые заведомо далеко от bbox, и до файла в 500 МБ
+                    # и больше дело не доходит целиком.  Второй — точная
+                    # проверка пересечения с самим bbox: в выход попадают
+                    # только кандидаты, реально пересекающие область.
+                    use_filter = (
+                        filter_enabled
+                        and not whole_file
+                        and _apply_spatial_filter(layers, source, bbox)
+                    )
+                    read_box = None
                     has_features = False
-                    for layer in layers:
-                        definition = layer.GetLayerDefn()
-                        while True:
+                    # Снимок состояния для отката: если фильтр драйвера
+                    # не сработал, файл читается заново целиком, и запись
+                    # текущего прохода надо отменить.  Откат затрагивает
+                    # только текущий файл: результаты предыдущих файлов
+                    # остаются в силе.
+                    marks = {
+                        name: handle.tell() for name, handle in handles.items()
+                    }
+                    file_ids = set()
+                    seen_before = features_seen
+                    written_before = features_written
+                    # Слои опрашиваются по одному объекту за цикл
+                    # (см. INTERLEAVED_LAYER_ORDER): иначе драйвер теряет
+                    # мультиполигоны.
+                    while True:
+                        any_feature = False
+                        for layer in layers:
                             if cancel is not None and cancel.is_set():
-                                raise InterruptedError("PBF processing cancelled")
+                                raise InterruptedError(
+                                    "PBF processing cancelled"
+                                )
                             feature = layer.GetNextFeature()
                             if feature is None:
-                                break
+                                continue
+                            any_feature = True
                             has_features = True
                             features_seen += 1
+                            if use_filter:
+                                raw = feature.GetGeometryRef()
+                                if raw is not None and not raw.IsEmpty():
+                                    try:
+                                        read_box = _extend_box(
+                                            read_box, *raw.GetEnvelope()
+                                        )
+                                    except Exception:
+                                        pass
                             if features_seen % 10000 == 0 and progress:
                                 percent = min(
                                     99, features_seen * 100 // max(1, expected)
@@ -479,6 +728,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                             except Exception:
                                 continue
 
+                            definition = definitions[layer]
                             kind = _kind_for_layer(layer.GetName(), feature)
                             properties = _feature_properties(feature, definition, kind)
                             if not properties:
@@ -489,7 +739,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                                 continue
                             # Геометрию в JSON переводим только для объектов,
                             # которые действительно попадут в выход.
-                            geometry = _feature_geometry(feature)
+                            geometry = _feature_geometry_json(feature)
                             if geometry is None:
                                 continue
                             identity = (layer.GetName(), properties.get("@id"))
@@ -497,23 +747,76 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                                 if identity in seen:
                                     continue
                                 seen.add(identity)
-                            obj = {
-                                "type": "Feature",
-                                "properties": properties,
-                                "geometry": geometry,
-                            }
+                                file_ids.add(identity)
+                            base_json = json.dumps(
+                                properties, ensure_ascii=False, separators=(",", ":")
+                            )
                             for name in matched:
                                 handle = handles.get(name)
                                 if handle is None:
                                     path = pbf_dir / f"{name}.ndjson"
-                                    handle = path.open("w", encoding="utf-8")
+                                    # Файл открыт в двоичном режиме: позиция
+                                    # записи нужна побайтовая, чтобы при
+                                    # откате обрезать файл до нужного места.
+                                    handle = path.open("wb")
                                     handles[name] = handle
                                     feature_files[name] = path
-                                json.dump(obj, handle, ensure_ascii=False, separators=(",", ":"))
-                                handle.write("\n")
+                                # Имена полей приводятся к уникальным без учёта
+                                # регистра: иначе SQLite не создаёт таблицу.
+                                resolved = field_names[name].apply(properties)
+                                properties_json = (
+                                    base_json
+                                    if resolved is properties
+                                    else json.dumps(
+                                        resolved, ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                )
+                                handle.write(
+                                    (
+                                        '{"type":"Feature","properties":'
+                                        + properties_json
+                                        + ',"geometry":'
+                                        + geometry
+                                        + "}\n"
+                                    ).encode("utf-8")
+                                )
                             features_written += 1
-                    if not has_features:
-                        break
+                        if not any_feature:
+                            break
+                    if use_filter and not _filter_delivered(read_box, area):
+                        # Фильтр драйвера не доставил нужную область: файл
+                        # закрываем и читаем заново целиком.  Сбросить фильтр
+                        # на том же датасете нельзя — драйвер продолжает
+                        # отдавать выбранные ранее блоки.
+                        if progress:
+                            progress(
+                                f"{source.name}: фильтр по области не работает, "
+                                "файл читается целиком"
+                            )
+                        # Откат затрагивает только текущий файл: записи
+                        # предыдущих файлов остаются в силе.
+                        for name, handle in list(handles.items()):
+                            if name in marks:
+                                handle.flush()
+                                handle.seek(marks[name])
+                                handle.truncate()
+                                handle.seek(0, os.SEEK_END)
+                            else:
+                                handle.close()
+                                del handles[name]
+                                path = feature_files.pop(name, None)
+                                if path is not None:
+                                    path.unlink(missing_ok=True)
+                        seen.difference_update(file_ids)
+                        features_seen = seen_before
+                        features_written = written_before
+                        last_percent = 0
+                        dataset = None
+                        use_filter = False
+                        filter_enabled = False
+                        continue
+                    break
             finally:
                 dataset = None
             if progress and total_files > 1:
@@ -574,45 +877,50 @@ def probe_dataset(config, bbox, query_names, query_texts=None, cancel=None,
 
         try:
             layers = [
-                layer for layer in (dataset.GetLayerByName(name) for name in LAYER_NAMES)
+                layer for layer in (
+                    dataset.GetLayerByName(name)
+                    for name in INTERLEAVED_LAYER_ORDER
+                )
                 if layer is not None
             ]
+            definitions = {
+                layer: layer.GetLayerDefn() for layer in layers
+            }
             # Тот же грубый фильтр, что и при подготовке: оценка не должна
-            # перебирать весь файл.
+            # перебирать весь файл.  Чтение — тем же round-robin протоколом.
             _apply_spatial_filter(layers, source, bbox)
             while True:
-                has_features = False
+                any_feature = False
                 for layer in layers:
-                    definition = layer.GetLayerDefn()
-                    while True:
-                        if cancel is not None and cancel.is_set():
-                            raise InterruptedError("PBF probe cancelled")
-                        feature = layer.GetNextFeature()
-                        if feature is None:
-                            break
-                        has_features = True
-                        total += 1
-                        if total % 50000 == 0 and progress:
-                            progress(f"PBF: проверено {total} объектов")
-                        geometry = feature.GetGeometryRef()
-                        if geometry is None or geometry.IsEmpty():
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("PBF probe cancelled")
+                    feature = layer.GetNextFeature()
+                    if feature is None:
+                        continue
+                    any_feature = True
+                    total += 1
+                    if total % 50000 == 0 and progress:
+                        progress(f"PBF: проверено {total} объектов")
+                    geometry = feature.GetGeometryRef()
+                    if geometry is None or geometry.IsEmpty():
+                        continue
+                    try:
+                        if not geometry.Intersects(bbox_geometry):
                             continue
-                        try:
-                            if not geometry.Intersects(bbox_geometry):
+                    except Exception:
+                        continue
+                    in_bbox += 1
+                    kind = _kind_for_layer(layer.GetName(), feature)
+                    definition = definitions[layer]
+                    properties = _feature_properties(feature, definition, kind)
+                    if properties and index.matching_names(kind, properties):
+                        identity = (layer.GetName(), properties.get("@id"))
+                        if identity[1]:
+                            if identity in seen:
                                 continue
-                        except Exception:
-                            continue
-                        in_bbox += 1
-                        kind = _kind_for_layer(layer.GetName(), feature)
-                        properties = _feature_properties(feature, definition, kind)
-                        if properties and index.matching_names(kind, properties):
-                            identity = (layer.GetName(), properties.get("@id"))
-                            if identity[1]:
-                                if identity in seen:
-                                    continue
-                                seen.add(identity)
-                            matched += 1
-                if not has_features:
+                            seen.add(identity)
+                        matched += 1
+                if not any_feature:
                     break
         finally:
             dataset = None

@@ -3,6 +3,7 @@
 #
 # Пакет плагина регистрируется под именем qgis_xtopo, поэтому верхний
 # уровень поиска модулей указывается на корень репозитория (-t .).
+# Тестовые модули выполняются параллельно, каждый в своём процессе.
 set -e
 cd "$(dirname "$0")/.."
-exec env QT_QPA_PLATFORM=offscreen /usr/bin/python3 -m unittest discover -s tests -t . "$@"
+exec env QT_QPA_PLATFORM=offscreen /usr/bin/python3 tools/run_tests.py "$@"

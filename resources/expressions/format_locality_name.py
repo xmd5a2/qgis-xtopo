@@ -2,6 +2,16 @@ from qgis.core import *
 from qgis.gui import *
 import re
 
+
+def _has_cyrillic(text):
+    """Есть ли в названии кириллические буквы.
+
+    Тип объекта по-русски приписывается только названию кириллицей:
+    к грузинскому или латинскому названию «ур. » приписывать нечего.
+    """
+    return bool(re.search(r"[А-Яа-яЁё]", text))
+
+
 @qgsfunction(args='auto', group='Custom')
 def format_locality_name(name, project_lang, feature, parent):
     n = name
@@ -13,6 +23,9 @@ def format_locality_name(name, project_lang, feature, parent):
     if n.lower().endswith(" водопады"): n = re.sub(" водопады"," вдп.",n, flags=re.IGNORECASE)
     if n.lower().startswith("водопад "): n = re.sub("водопад ","вдп. ",n, flags=re.IGNORECASE)
     if n.lower().endswith(" водопад"): n = re.sub(" водопад"," вдп.",n, flags=re.IGNORECASE)
+    # Слово типа заменяется, иначе получается «ур. урочище Волчьи Ворота».
+    if n.lower().startswith("урочище "): n = re.sub("^урочище ","ур. ", n, flags=re.IGNORECASE)
+    if n.lower().endswith(" урочище"): n = re.sub(" урочище$"," ур.", n, flags=re.IGNORECASE)
 
     if project_lang == "ru" and \
     "ур." not in n and \
@@ -43,6 +56,8 @@ def format_locality_name(name, project_lang, feature, parent):
     n != "лет." and \
     n != "зим." and \
     not (n.lower().endswith(" вал")) and \
-    "лесопилка" not in n.lower(): n = "ур. " + n
+    "лесопилка" not in n.lower() and \
+    n.strip().lower().rstrip(".") != "урочище" and \
+    _has_cyrillic(n): n = "ур. " + n
 
     return n

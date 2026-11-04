@@ -22,5 +22,8 @@ def format_resort_name(name, resort, abandoned, feature, parent):
 
     if abandoned == "yes": abandoned_string = "\n(забр.)"
 
-    result = short_name+abandoned_string
+    # Если ни одно правило не сработало, подписью остаётся само название:
+    # пустая подпись у объекта без названия теряет объект на карте.
+    if not short_name: short_name = name
+
     return short_name+abandoned_string

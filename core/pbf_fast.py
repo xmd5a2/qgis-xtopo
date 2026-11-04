@@ -12,9 +12,11 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .pbf_source import QueryIndex, PbfError
+from .pbf_source import (
+    FILTER_MARGIN_DEGREES, FILTER_MARGIN_RATIO, QueryIndex, PbfError,
+)
 
-MAX_SAMPLES = 24
+MAX_SAMPLES = 96
 MIN_SAMPLES = 6
 
 
@@ -26,6 +28,11 @@ class FastProbe:
     elapsed: float
     sampled_blobs: int
     total_blobs: int
+    # Площадь выгрузки в квадратных градусах и доля расширенной области
+    # (bbox с запасом фильтра) в ней: по этой доле оценивается, сколько
+    # объектов придётся прочитать драйверу.
+    header_area: float = 0.0
+    extended_ratio: float = 0.0
 
     @property
     def approximate(self):
@@ -393,12 +400,25 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
         sample_count = min(len(blobs), MAX_SAMPLES)
         if sample_count < MIN_SAMPLES:
             sample_count = len(blobs)
+        total_bytes = sum(size for _offset, size in blobs) or 1
         if sample_count >= len(blobs):
             indices = list(range(len(blobs)))
         else:
-            step = len(blobs) / sample_count
-            indices = sorted({min(len(blobs) - 1, int((i + 0.5) * step))
-                              for i in range(sample_count)})
+            # Выборка пропорциональна размеру блоков, а не их номеру.
+            # В густо застроенных местах блоки мельче, и равномерная
+            # выборка по номеру почти не попадает в них: оценка
+            # плотных районов получалась занижена в десятки раз.
+            step = total_bytes / sample_count
+            indices = []
+            accumulated = 0
+            next_at = 0.0
+            for position, (_offset, size) in enumerate(blobs):
+                accumulated += size
+                if accumulated >= next_at:
+                    indices.append(position)
+                    next_at += step
+                    if len(indices) >= sample_count:
+                        break
 
         counters = {
             "nodes_all": 0,
@@ -432,7 +452,11 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
         if not decoded:
             raise UnsupportedPbf("Could not decode PBF blocks")
 
-        ratio = len(blobs) / len(indices)
+        # Выборка сделана по размеру блоков, поэтому и масштабирование
+        # ведётся по байтам: иначе крупные блоки в выборке приводят к
+        # завышению в несколько раз.
+        sampled_bytes = sum(blobs[position][1] for position in indices)
+        ratio = (total_bytes / sampled_bytes) if sampled_bytes else 1.0
         nodes = counters["nodes"] * ratio
         nodes_bbox = counters["nodes_bbox"] * ratio
 
@@ -468,6 +492,19 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
 
     total = int(round(nodes + ways + relations))
     in_bbox = int(round(nodes_bbox + ways_bbox + relations_bbox))
+    header_area = 0.0
+    extended_ratio = 0.0
+    if header_box is not None:
+        left, right, top, bottom = header_box
+        header_area = max(1e-9, (right - left) * (top - bottom))
+        margin = max(FILTER_MARGIN_DEGREES, FILTER_MARGIN_RATIO * max(
+            bbox.lon_max - bbox.lon_min, bbox.lat_max - bbox.lat_min
+        ))
+        area = max(1e-9, (
+            (bbox.lon_max - bbox.lon_min + 2 * margin)
+            * (bbox.lat_max - bbox.lat_min + 2 * margin)
+        ))
+        extended_ratio = min(1.0, area / header_area)
     return FastProbe(
         total=total,
         in_bbox=in_bbox,
@@ -475,4 +512,6 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
         elapsed=time.monotonic() - started,
         sampled_blobs=len(indices),
         total_blobs=len(blobs),
+        header_area=header_area,
+        extended_ratio=extended_ratio,
     )

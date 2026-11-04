@@ -1,0 +1,201 @@
+# AGENTS.md — qgis-xtopo
+
+## Что это
+
+- Плагин QGIS (не приложение и не библиотека), минимум QGIS 3.28. Готовит
+  данные OSM и рельефа (SRTM) и собирает проект QGIS из шаблона `automap.qgz`.
+  Старый Docker-пайплайн лежит в `legacy/` только для справки.
+- Корень репозитория — корень пакета: при установке каталог называется
+  `qgis_xtopo`, поэтому импорты в тестах идут как `qgis_xtopo.core...`
+  (`tests/__init__.py` регистрирует пакет).
+- Плагин самодостаточен: только QGIS и его Python, без pip-зависимостей и
+  системных утилит. Исключение — поставляемый `vendor/osmium/`; без него
+  плагин обязан работать, только медленнее (`core/osmium_prefilter.py`).
+
+## Команды
+
+```sh
+./tools/run_tests.sh                      # все тесты, offscreen, ~20 с
+./tools/run_tests.sh tests.test_project   # только выбранный модуль (можно несколько)
+python3 tools/build_plugin.py             # dist/qgis_xtopo-<версия>.zip + dist/qgis-xtopo-ready/
+python3 tools/build_plugin.py --install   # + установка в профиль QGIS
+./tools/run_qgis.sh                       # сборка + установка + QGIS с открытой панелью
+WINEPREFIX=~/.cache/wineprefix-inno ./installer/build-installer.sh  # Windows-инсталлятор
+QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверка полноты с osmium
+```
+
+- После изменения поведения: тесты зелёные → `build_plugin.py --install` →
+  `installer/build-installer.sh`. Инсталлятор собирается всегда, даже если
+  правка не про Windows: он содержит ту же копию плагина.
+- При смене версии правьте `metadata.txt` **и** `#define MyAppVersion`
+  в `installer/qgis-xtopo.iss`.
+- Тесты — `unittest`. `tools/run_tests.py` запускает каждый модуль отдельным
+  процессом: QGIS не переносит два приложения в одном процессе.
+  `QT_QPA_PLATFORM=offscreen` уже выставлен. Запускайте имена модулей, а не
+  отдельные классы: часть тестов создаёт `QgsApplication` в `setUpClass`, и
+  класс, запущенный первым, может упасть на `QFontDatabase`.
+- Интеграционные тесты с PBF пропускаются, пока `QGIS_XTOPO_TEST_PBF` не
+  указывает на локальный `.pbf`. `check_pbf_coverage.py` дополнительно ждёт
+  выгрузки Geofabrik в `~/qgis_projects/qgisxtopo-cache/geofabrik`.
+- CI тесты не запускает: workflows собирают только Windows-инсталлятор и
+  бинарники osmium.
+
+## Структура и поток данных
+
+- `core/pipeline.py` — оркестрация. Источники OSM (`geofabrik.py`,
+  `overpass_*.py`, `sources.py`) → вырезка `osmium_prefilter.py` → чтение
+  `pbf_source.py` → раскладка по слоям (`query_recipes.py`,
+  `resources/queries/`) → рельеф `terrain.py` → чистка пустых слоёв.
+  `core/project.py` собирает проект из шаблона в начале и удаляет пустые слои
+  в конце.
+- `core/terrain_cache.py` — кэш DEM/изолиний; `core/transliteration.py` +
+  `map_language.py` — язык карты; `core/i18n.py` + `resources/lang/en.json` —
+  язык интерфейса; `core/expressions.py` — регистрация выражений QGIS;
+  `core/measure.py` — размеры рамки.
+- `gui/dockwidget.py` — вкладки «Данные/Слои/Рельеф»; `gui/projectpanel.py` —
+  вкладка открытого проекта, атлас и слои.
+- **Штатные инструменты QGIS** (измерение, identify) вызываются через `QAction`
+  по `objectName`: `mActionMeasure`, `mActionMeasureArea`,
+  `mActionMeasureAngle`, `mActionMeasureBearing`, `mActionIdentify`. В
+  Python-обёртках QGIS 3.44 классов измерения нет
+  (`gui/projectpanel.py: _trigger_qgis_action`).
+- **Подписи размеров** — `core/measure.py` по эллипсоиду WGS84; в окне охвата
+  они берутся у `MeasuredCanvas.set_frame_provider` при каждой отрисовке.
+  Шкала масштаба считается от ширины видимой области, а не от знаменателя
+  масштаба (`gui/extentdialog.py: scale_bar`).
+- `automap.qgz` лежит только в корне; путь в коде — `core/resources.py:
+  template_path()`. При сборке копируется в пакет как
+  `resources/automap.qgz`. Рядом не оставлять `*.bak*`.
+- `dist/`, `output/`, `installer/payload/`, `__pycache__/`,
+  `resources/automap.qgz` — артефакты, не редактировать.
+
+## Ограничения
+
+- **Git**: после каждой законченной feature делать коммит с осмысленным комментарием
+  на английском. Без явной просьбы не делать `checkout`, `reset --hard`, `stash`.
+- **Стиль — только в `automap.qgz`**. Инструментов правки шаблона и переноса
+  стиля в готовые проекты нет (не возвращать `tools/patch_template_*.py`).
+  `core/project.py: repair_project` при открытии лишь убирает пустые слои,
+  чинит шрифт и оборачивает `overlay_*` в `try(...)`, но стиль не обновляет.
+  Изменили стиль — переготовьте данные.
+- **Пустые слои** вырезаются при сборке; обращение `overlay_*` к
+  отсутствующему слою даёт NULL и скрывает объекты. Поэтому такие фильтры
+  обёрнуты в `try(..., запасное значение)` (`patch_overlay_filters`).
+- **Панель ≤ 600 px по высоте** — тест `test_dock_is_compact`
+  (`tests/test_pipeline_integration.py`). Сжимайте spacing/высоту, а не тест.
+- **Рабочие данные пользователя** (`~/qgis_projects/...`, кэш Geofabrik) не
+  использовать как тестовые полигоны; чтение и offscreen-открытие допустимы.
+
+## Шаблон и стили
+
+- **Варианты крутых склонов**: `[TERRAIN] slope (steep) var1/var2/var3` на
+  общей подложке `slope_upscaled.tif`, показывается один. Привязка строго по
+  полному имени (`STEEP_VARIANTS`, `LAYER_NAMES` в `gui/projectpanel.py`);
+  другие слои с «var1» вариантами не являются, а переименование слоя в
+  шаблоне ломает панель. Выбор — кнопка с меню, не выпадающий список: в узкой
+  панели он обрезает названия.
+- **Фаза штрихов изолиний**: `offsetAlongLine` должен лежать внутри карты
+  `properties` блока `data_defined_properties`. Свойство рядом с картой QGIS
+  не читает, и штрихи выстраиваются колонками. Проверка —
+  `tests/test_template_styles.py`.
+- **Изолинии режутся по воде до деления на ледниковые и обычные**
+  (`terrain.py: generate_isolines`, `_water_mask_paths`): по
+  `water_dissolved` и `water_intermittent_dissolved`, иначе по исходным слоям.
+  Тест — `GlacierIsolinesWaterTest`.
+
+## Подписи и язык карты
+
+- Язык карты — переменные проекта. **Пустое значение переменной удаляется**,
+  `@name_pref_suf_lang` становится NULL, QGIS не вызывает функцию подписи, и
+  названия исчезают. Защита внутри выражений не помогает: QGIS до них не
+  доходит.
+- `@name_pref_suf_lang` равен `ru` даже при «Местных названиях»: тип объекта
+  сокращается по-русски всегда («ледник» → «л.», «брод» → «бр.»).
+- `level_of_detail` — переменная, на которой держатся фильтры отрисовки во
+  многих слоях (дороги, тропы, родники). Без неё правила ложны. Панель: 3–6,
+  по умолчанию 4, ключ `SETTINGS_KEY_DETAIL`; в новый проект попадает через
+  `project.py: _set_detail_variable`.
+- `pick_name_part` (`core/transliteration.py` +
+  `resources/expressions/transliterate.py`): берёт кириллическую часть,
+  помеченную языком (`ru: ...`) или скобками с той же строкой другой азбукой;
+  скобки-уточнения (`Mersedes Benc (грузовой)`) название не заменяют. Дефис
+  внутри слова не делит, тире с пробелами делит. При `script="local"`
+  название выводится целиком.
+- Русский тип объекта (`л.`, `м.`, `хр.`, `ур.`) приписывается только
+  кириллическому названию (`_has_cyrillic` в `resources/expressions/
+  format_*.py`). Название из одного слова типа не дополняется префиксом.
+  Списки типовых слов у водной и населённой групп должны совпадать.
+- Выражения (`readable_name`, `format_place_name`, `pick_name_part`, ...)
+  регистрируются `core/expressions.py: load_expressions()`. Если функции нет,
+  QGIS не рисует подписи. Доступные функции — `registered_functions()` через
+  `QgsExpression.Functions()`; `registeredFunctionNames()` в QGIS нет.
+
+## Рельеф и кэш
+
+- `terrain_cache.py` переиспользует DEM/изолинии, пока совпадают версия
+  плагина (`metadata.txt`), параметры (шаг, сглаживание, ресемплинг) и
+  исходные данные. Меняя формат результатов, добавляйте новые файлы в
+  `DEM_FILES`/`ISOLINES_FILES`, иначе старый кэш отдаст устаревшее.
+- Оценка времени в панели (`dockwidget.py: _estimate_seconds`) считается от
+  доли области в выгрузке (`pbf_fast.py: extended_ratio`), а не от общего
+  числа объектов; прежняя формула завышала в 3–8 раз.
+
+## Драйверы и osmium (частые потери данных)
+
+- **GRASS переименовывает поля**: первый недопустимый символ → `x`, остальные
+  → `_` (`name:ru` → `name_ru`, `@id` → `xid`). После `skeleton` имена
+  восстанавливает `Pipeline._restore_field_names` (правило
+  `_grass_field_name`). Растворение — по `@id`.
+- **Порядок углов GDAL**: `SetSpatialFilterRect` принимает
+  `(minx, miny, maxx, maxy)`, а `GetEnvelope()` отдаёт
+  `(minx, maxx, miny, maxy)`. Не смешивать; отбор полигонов — через
+  `terrain.py: _PolygonIndex`.
+- **Драйвер OSM читается по кругу**: опрашивать слои по одному объекту в
+  порядке `INTERLEAVED_LAYER_ORDER` (`points → lines → multilinestrings →
+  multipolygons → other_relations`). Чтение слоя до конца теряет
+  мультиполигоны.
+- **Фильтр на `points` действует на все слои** и теряет вершины больших
+  отношений. Поэтому `_apply_spatial_filter` ставит фильтр на все слои, кроме
+  `points`; точная отсечка — при разборе. Цена — примерно в 4 раза больше
+  времени на чтение PBF.
+- **Склейка osmium даёт повторяющиеся id**: GDAL обрывает чтение.
+  `sources.py: prepare_sources` при ошибке читает карты по отдельности,
+  дубликаты отсекаются по `@id`.
+- **`osmium extract`**: `-b <padded bbox> --strategy=smart -S types=any`;
+  запас `padded_bbox` — 0.3° или 15% от области. `smart` не берёт отношения
+  вне области, их добирает `tags-filter` по `COVERING_EXPRESSIONS` (горные
+  массивы и хребты). Вырезанные области нескольких карт склеиваются
+  `osmium merge` **после** вырезки, иначе разорванные границей отношения не
+  собрать.
+- **Файлы горных массивов читаются без фильтра** (`unfiltered`): их геометрия
+  лежит вне области, и фильтр отбросил бы их целиком.
+- **Откат чтения** (фильтр не доставил область → файл читается целиком)
+  обрезает записи только текущего файла по смещению, а не всех.
+- Бинарь в zip теряет бит исполнения — `osmium_tool.py: ensure_executable`;
+  имя файла ровно `osmium` (osmium воспринимает его как имя команды).
+- Полнота проверяется `tools/check_pbf_coverage.py`: эталон — osmium,
+  сравнение множеств `@id`. Известный остаток ~0,06% на границе области;
+  увеличение запаса фильтра не помогает.
+
+## Проверка в реальном QGIS
+
+- Offscreen-тесты не покрывают регистрацию плагина и раскладку окон.
+- Не трогать работающий QGIS (`pgrep -x qgis.bin`); запускать с временным
+  профилем: `qgis --profiles-path /tmp/... --code script.py`.
+- Панель открывается при `QGIS_XTOPO_OPEN=1`; показ — по
+  `iface.initializationCompleted`, иначе восстановление окон перезапишет
+  `show()`.
+- Плагин включается секцией `[PythonPlugins]` в `QGIS/QGIS3.ini` профиля
+  (не `[Plugins]`). В `qgis.utils` QGIS 3.44 нет `enabled_plugins`.
+
+## Стиль изменений
+
+- В этом проекте комментарии, docstring'и и сообщения — на русском, как в
+  окружающем коде (это переопределяет общее правило про английский).
+- UI-строки пишутся по-русски; английский — в `resources/lang/en.json`
+  (словарь «русская строка → английская», работает в обе стороны). Уже
+  построенные виджеты переводит `gui/translation.py`.
+- Тесты добавлять в существующие тематические файлы. Запуск — только через
+  `./tools/run_tests.sh`.
+- После изменения поведения обновляйте docstring'и и README (разделы
+  «Установка» и «Разработка»).

@@ -141,9 +141,10 @@ class GeofabrikHierarchyTest(unittest.TestCase):
             self.ids(BBox(0.5, 0.5, 4.5, 3.5)), ["island", "neighbour"]
         )
 
-    def test_candidates_lists_every_intersecting_map(self):
+    def test_candidates_lists_every_intersecting_map_except_europe(self):
         found = [item.id for item in self.index.candidates(BBox(0, 0, 1.5, 1.5))]
-        self.assertEqual(found, ["island", "land", "europe"])
+        self.assertEqual(found, ["island", "land"])
+        self.assertNotIn("europe", found)
 
 
 class GeofabrikFetchTest(unittest.TestCase):
@@ -334,6 +335,63 @@ class GeofabrikDownloadTest(unittest.TestCase):
         self.assertEqual(paths, [merged])
 
 
+class GeofabrikSizeLimitTest(unittest.TestCase):
+    """Карты крупнее 7 ГБ не предлагаются к скачиванию."""
+
+    def setUp(self):
+        geofabrik.clear_caches()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = Config(qgis_projects_dir=self.directory.name)
+        self.small = geofabrik.GeofabrikMap(
+            "small", "Small", "", "https://example.org/small.osm.pbf"
+        )
+        self.huge = geofabrik.GeofabrikMap(
+            "huge", "Huge", "", "https://example.org/huge.osm.pbf"
+        )
+
+    def _plan(self, huge_size):
+        sizes = {self.small.id: 100 * 1024 * 1024, self.huge.id: huge_size}
+
+        def head(url):
+            for item in (self.small, self.huge):
+                if url == item.url:
+                    return True, sizes[item.id], ""
+            return False, 0, "404"
+
+        state = mock.Mock()
+        state.warning = ""
+        state.last_modified = ""
+        state.fetched_at = 0
+        state.index.required.return_value = [self.small, self.huge]
+        state.index.candidates.return_value = [self.small, self.huge]
+        state.index.entries = []
+        with mock.patch.object(
+            geofabrik, "fetch_index", return_value=state
+        ), mock.patch.object(geofabrik, "_head_size", side_effect=head):
+            return geofabrik.analyse(self.config, BBox(0, 0, 1, 1))
+
+    def test_big_map_is_not_offered(self):
+        plan = self._plan(geofabrik.MAX_MAP_SIZE + 1)
+        self.assertEqual([item.id for item in plan.maps], ["small"])
+        self.assertEqual([item.id for item in plan.extra], [])
+        self.assertEqual([item.id for item, _ in plan.skipped], ["huge"])
+
+    def test_map_at_the_limit_is_offered(self):
+        plan = self._plan(geofabrik.MAX_MAP_SIZE)
+        self.assertEqual(
+            sorted(item.id for item in plan.maps + plan.extra), ["huge", "small"]
+        )
+        self.assertEqual(plan.skipped, [])
+
+    def test_ensure_maps_refuses_big_map(self):
+        status = geofabrik.MapStatus(
+            map=self.huge, available=True, size=geofabrik.MAX_MAP_SIZE + 1
+        )
+        with self.assertRaises(geofabrik.GeofabrikError):
+            geofabrik.ensure_maps(self.config, [self.huge], statuses=[status])
+
+
 class GeofabrikSourcesTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -403,6 +461,41 @@ class GeofabrikSourcesTest(unittest.TestCase):
         ):
             sources.prepare_sources(self.config, BBox(1, 2, 3, 4), ["water"])
         ensure.assert_not_called()
+
+    def test_merged_file_failure_falls_back_to_separate_maps(self):
+        """Склеенный файл с повторяющимися id не читается — карты берём по отдельности."""
+        from qgis_xtopo.core import sources
+
+        state = self._state()
+        dataset = mock.Mock(warnings=[])
+        separate = [Path("/tmp/a.osm.pbf"), Path("/tmp/b.osm.pbf")]
+
+        def prepare_dataset(config, bbox, names, **kwargs):
+            if kwargs.get("sources") == [Path("/tmp/merged.osm.pbf")]:
+                raise RuntimeError("Non increasing node id")
+            return dataset
+
+        with mock.patch.object(
+            sources.geofabrik, "fetch_index", return_value=state
+        ), mock.patch.object(
+            sources.geofabrik, "local_ready", return_value=True
+        ), mock.patch.object(
+            sources.geofabrik, "source_paths",
+            return_value=[Path("/tmp/merged.osm.pbf")],
+        ), mock.patch.object(
+            sources.geofabrik, "local_maps", return_value=separate
+        ), mock.patch.object(
+            sources.pbf_source, "prepare_dataset", side_effect=prepare_dataset
+        ) as prepare:
+            result = sources.prepare_sources(
+                self.config, BBox(1, 2, 3, 4), ["water"],
+            )
+        self.assertIs(result.dataset, dataset)
+        self.assertEqual(prepare.call_args.kwargs["sources"], separate)
+        self.assertTrue(
+            any("по отдельности" in warning for warning in result.warnings),
+            result.warnings,
+        )
 
     def test_user_selection_overrides_auto_detection(self):
         from qgis_xtopo.core import sources

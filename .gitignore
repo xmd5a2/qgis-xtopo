@@ -5,6 +5,14 @@ __pycache__/
 
 # Сборка
 dist/
+installer/payload/
+# Шаблон проекта хранится один раз — в корне (automap.qgz).
+# Копия в resources/ появляется только в собранном пакете.
+resources/automap.qgz
+
+# Рабочие данные пользователя
+output/
+symbology-style.db
 
 # Локальное окружение
 .idea/

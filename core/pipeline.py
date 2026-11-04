@@ -2,16 +2,66 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
-from . import coastline, osm_convert, project, sources, terrain
+from . import coastline, gdal_log, i18n, osm_convert, project, sources, terrain
 from .bbox import parse_bbox
 from .query_recipes import recipe_for
 
 
 class PipelineError(RuntimeError):
     pass
+
+
+class Timings:
+    """Хронометраж подготовки: время этапов и самых долгих шагов.
+
+    Данные нужны, чтобы понимать, на что уходит время: выводятся в журнал
+    в конце подготовки.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.stages = {}
+        self.steps = []
+
+    def add_stage(self, name, seconds):
+        with self._lock:
+            self.stages[name] = self.stages.get(name, 0.0) + seconds
+
+    def add_step(self, name, operation, seconds):
+        with self._lock:
+            self.steps.append((seconds, name, operation))
+
+    def top_steps(self, limit=15):
+        with self._lock:
+            steps = sorted(self.steps, reverse=True)[:limit]
+        return steps
+
+    def summary(self):
+        with self._lock:
+            stages = dict(self.stages)
+            total_steps = sum(item[0] for item in self.steps)
+        lines = []
+        if stages:
+            parts = ", ".join(
+                i18n.trf(
+                    "{} — {} с",
+                    i18n.tr(name),
+                    f"{seconds:.1f}",
+                )
+                for name, seconds in sorted(stages.items(), key=lambda i: -i[1])
+            )
+            lines.append(i18n.trf("Хронометраж: {}", parts))
+            lines.append(
+                i18n.trf(
+                    "Хронометраж: суммарно в слоях {} с",
+                    f"{total_steps:.1f}",
+                )
+            )
+        return lines
 
 
 _TERRAIN_STEPS = (
@@ -24,6 +74,13 @@ _TERRAIN_STEPS = (
     ("Generating hillshade", 0.85),
     ("Generating contour lines", 0.95),
 )
+
+# Формат промежуточных данных при обработке слоёв. GeoPackage с
+# пространственным индексом заметно быстрее geojson: JSON не разбирается
+# заново на каждом шаге, а наложения ищутся по индексу.
+INTERMEDIATE_EXTENSION = os.environ.get(
+    "QGIS_XTOPO_INTERMEDIATE", "gpkg"
+).lower()
 
 
 def progress_stages(config):
@@ -38,6 +95,17 @@ def progress_stages(config):
         stages.append(("Обработка рельефа", 14))
     stages.append(("Удаление пустых слоёв", 2))
     return stages
+
+
+def _source_timings(elapsed, download):
+    """Делит время подготовки источника на скачивание и остальную работу.
+
+    Скачивание карт и ответов Overpass учитывается отдельно, чтобы в
+    хронометраже было видно, сколько времени ушло на сеть.
+    """
+    elapsed = max(float(elapsed or 0.0), 0.0)
+    download = min(max(float(download or 0.0), 0.0), elapsed)
+    return download, elapsed - download
 
 
 class _ProgressTracker:
@@ -311,9 +379,55 @@ def _recipe_dependencies(name, producers):
     return dependencies
 
 
+class _GpkgWriter:
+    """Потоковая запись в GeoPackage одной транзакцией."""
+
+    def __init__(self, path, layer_name, definition, spatial_ref=None):
+        from osgeo import ogr
+
+        self.path = Path(path)
+        self.count = 0
+        self.driver = ogr.GetDriverByName("GPKG")
+        self.dataset = self.driver.CreateDataSource(str(self.path))
+        self.layer = self.dataset.CreateLayer(
+            layer_name, spatial_ref, ogr.wkbUnknown
+        )
+        for index in range(definition.GetFieldCount()):
+            field = definition.GetFieldDefn(index)
+            self.layer.CreateField(ogr.FieldDefn(field.GetName(), field.GetType()))
+        # Иначе GPKG фиксирует каждый объект отдельной транзакцией.
+        self.layer.StartTransaction()
+
+    def add(self, feature, geometry=None):
+        from osgeo import ogr
+
+        definition = self.layer.GetLayerDefn()
+        output = ogr.Feature(definition)
+        if geometry is None:
+            geometry = feature.GetGeometryRef()
+        if geometry is not None:
+            output.SetGeometry(geometry)
+        for index in range(definition.GetFieldCount()):
+            value = feature.GetField(index)
+            if value is not None:
+                output.SetField(index, value)
+        self.layer.CreateFeature(output)
+        self.count += 1
+
+    def close(self, commit=True):
+        if self.layer is None:
+            return
+        if commit:
+            self.layer.CommitTransaction()
+        else:
+            self.layer.RollbackTransaction()
+        self.layer = None
+        self.dataset = None
+
+
 class Pipeline:
     def __init__(self, config, bbox, runner, progress=None, cancel=None,
-                 fraction=None):
+                 fraction=None, timings=None):
         self.config = config
         self.bbox = bbox
         self.runner = runner
@@ -322,11 +436,12 @@ class Pipeline:
         self.fraction = fraction or (lambda value: None)
         self.warnings = []
         self.counter = 0
+        self.timings = timings or Timings()
 
     def run(self, source, query_names):
         if not query_names:
             return self.warnings
-        workers = min(2, os.cpu_count() or 1)
+        workers = self._worker_count(len(query_names))
         if workers <= 1 or len(query_names) == 1:
             total = len(query_names)
             for index, name in enumerate(query_names, start=1):
@@ -334,6 +449,15 @@ class Pipeline:
                 self.fraction(index / total)
             return self.warnings
         return self._run_parallel(source, query_names, workers)
+
+    def _worker_count(self, total):
+        """Сколько слоёв обрабатывать одновременно."""
+        configured = int(getattr(self.config, "parallel_workers", 0) or 0)
+        if configured > 0:
+            return max(1, min(configured, total))
+        cpu = os.cpu_count() or 2
+        # Оставляем пару ядер системе и самому QGIS.
+        return max(1, min(6, cpu - 2, total))
 
     def _run_layer(self, name, source, index, total):
         if self.cancel is not None and self.cancel.is_set():
@@ -344,17 +468,28 @@ class Pipeline:
                 self.fraction((index - 1 + value) / total)
             )
         self.progress(f"[{index}/{total}] {name}")
-        geojson = self._source_geojson(name, source)
-        if geojson is None:
-            self.progress(f"{name}: no objects, skipped")
-            return
-        current = geojson
+        # GDAL различает обработчики ошибок по потокам, а слои готовятся в
+        # отдельных потоках: перехватчик ставим здесь, иначе предупреждения
+        # уйдут в консоль QGIS мимо журнала.
+        gdal_log.LOG.install()
         try:
-            for operation, parameters in recipe_for(name).steps:
-                current = self._step(name, current, operation, parameters)
-        except PipelineError as exc:
-            self.warnings.append(f"{name}: {exc}; layer skipped")
-            self.progress(f"{name}: skipped ({exc})")
+            geojson = self._source_geojson(name, source)
+            if geojson is None:
+                self.progress(f"{name}: no objects, skipped")
+                return
+            current = geojson
+            try:
+                for operation, parameters in recipe_for(name).steps:
+                    started = time.monotonic()
+                    current = self._step(name, current, operation, parameters)
+                    self.timings.add_step(
+                        name, operation, time.monotonic() - started
+                    )
+            except PipelineError as exc:
+                self.warnings.append(f"{name}: {exc}; layer skipped")
+                self.progress(f"{name}: skipped ({exc})")
+        finally:
+            gdal_log.LOG.restore()
 
     def _run_parallel(self, source, query_names, workers):
         producers = {}
@@ -404,7 +539,7 @@ class Pipeline:
                     task = Pipeline(
                         self.config, self.bbox, self.runner.clone(),
                         progress=report, cancel=self.cancel,
-                        fraction=self.fraction,
+                        fraction=self.fraction, timings=self.timings,
                     )
                     future = pool.submit(task._run_layer, name, source, started, total)
                     running[future] = (name, task)
@@ -458,18 +593,6 @@ class Pipeline:
         return destination
 
     @staticmethod
-    def _write_features(path, features):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(
-                {"type": "FeatureCollection", "features": features},
-                handle,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-
-    @staticmethod
     def _ndjson_to_geojson(source, destination):
         source = Path(source)
         destination = Path(destination)
@@ -492,7 +615,34 @@ class Pipeline:
 
     def _temp_path(self, name, suffix):
         self.counter += 1
-        return self.config.temp_dir / f"{name}_{suffix}_{self.counter}.geojson"
+        return self.config.temp_dir / (
+            f"{name}_{suffix}_{self.counter}.{INTERMEDIATE_EXTENSION}"
+        )
+
+    def _dissolve_fields(self, source, fields):
+        """Поля растворения, пригодные для данного слоя.
+
+        В слое может не оказаться поля, по которому рецепт хочет
+        растворить объекты (например, ``name`` у слоя без названий).
+        ``native:dissolve`` в таком случае считает все объекты одним
+        значением и сливает слой в единственный объект — вместо десятков
+        точек остаётся одна. Если поле отсутствует или пустое у всех
+        объектов, растворяем по ``@id`` (идентификатору объекта):
+        объекты остаются раздельными.
+        """
+        if not fields:
+            return fields
+        available = {name.lower() for name in _source_fields(source)}
+        usable = {
+            name.lower()
+            for name in fields
+            if name.lower() in available and _has_values(source, name)
+        }
+        if not usable:
+            if "@id" in available:
+                return ["@id"]
+            return []
+        return [name for name in fields if name.lower() in usable]
 
     def _step(self, name, current, operation, parameters):
         if operation == "save":
@@ -517,6 +667,7 @@ class Pipeline:
                 field = [field] if field else []
             elif field is None:
                 field = []
+            field = self._dissolve_fields(current, list(field))
             return self._algorithm("native:dissolve", {
                 "INPUT": current,
                 "FIELD": list(field),
@@ -565,6 +716,10 @@ class Pipeline:
                 "INPUT": current,
                 "OUTPUT": self._temp_path(name, "lines"),
             })
+        if operation == "linestopolygons":
+            return self._lines_to_polygons(
+                name, current, drop_others=parameters.get("drop_others", False)
+            )
         if operation == "explode":
             return self._algorithm("native:explodelines", {
                 "INPUT": current,
@@ -608,13 +763,15 @@ class Pipeline:
                     f"{name}: GRASS v.voronoi.skeleton is unavailable; names layer skipped"
                 )
                 return current
-            return self._algorithm("grass7:v.voronoi.skeleton", {
+            original = _source_fields(current)
+            output = self._algorithm("grass7:v.voronoi.skeleton", {
                 "input": current,
                 "smoothness": parameters.get("smoothness", 0.25),
                 "thin": parameters.get("thin", -1),
                 "-s": True,
                 "output": self._temp_path(name, "skel"),
             })
+            return self._restore_field_names(name, output, original)
         if operation == "split_layer":
             return self._split_layer(name, current)
         raise PipelineError(f"Unknown pipeline operation: {operation}")
@@ -644,6 +801,66 @@ class Pipeline:
                 raise PipelineError(f"{algorithm} produced an empty or unreadable layer")
         return output
 
+    def _restore_field_names(self, name, path, original_names):
+        """Возвращает слою исходные имена полей.
+
+        GRASS при импорте атрибутов переименовывает поля: «name:ru» становится
+        «name_ru», «@id» — «xid». Подписи в шаблоне проекта ищут поля по
+        исходным именам тегов OSM, поэтому после скелета имена возвращаются.
+        """
+        from osgeo import ogr
+
+        if not original_names:
+            return path
+        source = ogr.Open(str(path))
+        if source is None:
+            return path
+        layer = source.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        fields = [
+            definition.GetFieldDefn(index).GetName()
+            for index in range(definition.GetFieldCount())
+        ]
+        reverse = {}
+        for original in original_names:
+            mangled = _grass_field_name(original)
+            if mangled != original and mangled not in reverse:
+                reverse[mangled] = original
+        renames = {
+            field: reverse[field]
+            for field in fields
+            if field in reverse and reverse[field] not in fields
+        }
+        if not renames:
+            source = None
+            return path
+        destination = self._temp_path(name, "fields")
+        destination.unlink(missing_ok=True)
+        driver = ogr.GetDriverByName("GPKG")
+        output = driver.CreateDataSource(str(destination))
+        target = output.CreateLayer(
+            layer.GetName(), layer.GetSpatialRef(), layer.GetGeomType()
+        )
+        for index in range(definition.GetFieldCount()):
+            field = definition.GetFieldDefn(index)
+            target.CreateField(
+                ogr.FieldDefn(
+                    renames.get(field.GetName(), field.GetName()),
+                    field.GetType(),
+                )
+            )
+        for feature in layer:
+            item = ogr.Feature(target.GetLayerDefn())
+            for index in range(definition.GetFieldCount()):
+                item.SetField(index, feature.GetField(index))
+            geometry = feature.GetGeometryRef()
+            if geometry is not None:
+                item.SetGeometry(geometry)
+            target.CreateFeature(item)
+        output = None
+        source = None
+        return destination
+
     def _save(self, name, current, suffix="", layer_name=None, target_crs=None):
         destination = self.config.vector_dir / f"{name}{suffix}.sqlite"
         save_vector(
@@ -661,50 +878,230 @@ class Pipeline:
             self.config.vector_dir / f"{name}.geojson",
             self.config.temp_dir / f"{name}.geojson",
             self.config.temp_dir / f"{name}.sqlite",
+            self.config.temp_dir / f"{name}.gpkg",
         ]
         for candidate in candidates:
             if candidate.exists():
                 return candidate
         return None
 
-    def _split_layer(self, name, current):
+    def _lines_to_polygons(self, name, current, drop_others=False):
+        """Замкнутые линии превращает в полигоны.
+
+        Площадные дороги и площади OSM заданы замкнутым контуром, но
+        драйвер отдаёт их линиями: слой с заливкой такой контур не рисует.
+        Остальные геометрии переносятся без изменений, а с drop_others=True
+        отбрасываются: площадный слой (ледники) должен состоять только из
+        полигонов — разомкнутый контур ледника это ошибка данных, на карте
+        он всё равно не рисуется, а в слое портит тип геометрии.
+        """
         from osgeo import ogr
 
         source = ogr.Open(str(current))
         if source is None:
             raise PipelineError(f"Cannot open {current}")
         layer = source.GetLayer(0)
-        groups = {"": [], "layer_1": [], "layer_-1": []}
-        for feature in layer:
-            index = feature.GetFieldIndex("layer")
-            value = feature.GetField(index) if index >= 0 else None
-            try:
-                value = int(value)
-            except (TypeError, ValueError):
-                value = 0
-            if value > 0:
-                groups["layer_1"].append(feature.ExportToJson())
-            elif value < 0:
-                groups["layer_-1"].append(feature.ExportToJson())
-            else:
-                groups[""].append(feature.ExportToJson())
-        source = None
+        definition = layer.GetLayerDefn()
+        spatial_ref = layer.GetSpatialRef()
+        path = self._temp_path(name, "polygons")
+        path.unlink(missing_ok=True)
+        writer = _GpkgWriter(path, name, definition, spatial_ref)
+        converted = 0
+        dropped = 0
+        try:
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                polygon = _polygon_from_geometry(geometry)
+                if polygon is not None:
+                    converted += 1
+                    writer.add(feature, polygon)
+                    continue
+                if drop_others and not _is_polygonal(geometry):
+                    dropped += 1
+                    continue
+                writer.add(feature, None)
+            writer.close()
+        except Exception:
+            writer.close(commit=False)
+            raise
+        finally:
+            source = None
+        if not writer.count:
+            raise PipelineError("no objects left after converting lines to polygons")
+        self.progress(f"{name}: converted {converted} closed lines to polygons")
+        if dropped:
+            self.progress(
+                f"{name}: отброшено {dropped} объектов без полигональной геометрии"
+            )
+        return writer.path
+
+    def _split_layer(self, name, current):
+        """Делит слой на три группы по значению тега layer."""
+        from osgeo import ogr
+
+        source = ogr.Open(str(current))
+        if source is None:
+            raise PipelineError(f"Cannot open {current}")
+        layer = source.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        spatial_ref = layer.GetSpatialRef()
+        writers = {}
+        try:
+            for suffix in ("", "layer_1", "layer_-1"):
+                path = self.config.temp_dir / (
+                    f"{name}{('_' + suffix) if suffix else ''}.gpkg"
+                )
+                path.unlink(missing_ok=True)
+                writers[suffix] = _GpkgWriter(path, name, definition, spatial_ref)
+            for feature in layer:
+                index = feature.GetFieldIndex("layer")
+                value = feature.GetField(index) if index >= 0 else None
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    value = 0
+                if value > 0:
+                    suffix = "layer_1"
+                elif value < 0:
+                    suffix = "layer_-1"
+                else:
+                    suffix = ""
+                writers[suffix].add(feature)
+            for writer in writers.values():
+                writer.close()
+        except Exception:
+            for writer in writers.values():
+                writer.close(commit=False)
+            raise
+        finally:
+            source = None
 
         base_path = current
-        for suffix, raw_features in groups.items():
-            if not raw_features:
+        for suffix, writer in writers.items():
+            if not writer.count:
                 continue
-            features = [json.loads(item) for item in raw_features]
-            path = self.config.temp_dir / f"{name}{('_' + suffix) if suffix else ''}.geojson"
-            self._write_features(path, features)
-            if suffix == "":
-                base_path = path
-                save_vector(path, self.config.vector_dir / f"{name}.sqlite", name)
-            else:
-                layer_name = f"{name}_{suffix}"
-                save_vector(path, self.config.vector_dir / f"{layer_name}.sqlite", layer_name)
+            layer_name = name if not suffix else f"{name}_{suffix}"
+            save_vector(
+                writer.path,
+                self.config.vector_dir / f"{layer_name}.sqlite",
+                layer_name,
+            )
+            if not suffix:
+                base_path = writer.path
             self.progress(f"{name}: saved {suffix or 'base'} layer")
         return base_path
+
+
+def _grass_field_name(name):
+    """Имя поля после импорта в GRASS.
+
+    GRASS допускает в именах только латиницу, цифры и подчёркивание: первый
+    недопустимый символ заменяется на «x», остальные — на «_». Так «name:ru»
+    превращается в «name_ru», а «@id» — в «xid».
+    """
+    if not name:
+        return name
+    result = []
+    for position, char in enumerate(name):
+        if char.isascii() and (char.isalnum() or char == "_"):
+            result.append(char)
+        else:
+            result.append("x" if position == 0 else "_")
+    if result and result[0].isdigit():
+        result[0] = "x"
+    return "".join(result)
+
+
+def _ring_points(line):
+    """Кольцо замкнутой линии; None, если линия не замкнута."""
+    from osgeo import ogr
+
+    count = line.GetPointCount()
+    if count < 4:
+        return None
+    first = line.GetPoint(0)
+    last = line.GetPoint(count - 1)
+    if abs(first[0] - last[0]) > 1e-9 or abs(first[1] - last[1]) > 1e-9:
+        return None
+    ring = ogr.Geometry(ogr.wkbLinearRing)
+    for index in range(count):
+        x, y = line.GetPoint(index)[:2]
+        ring.AddPoint_2D(x, y)
+    return ring
+
+
+def _is_polygonal(geometry):
+    """Полигон или мультиполигон (непустой)."""
+    return (
+        geometry is not None
+        and not geometry.IsEmpty()
+        and geometry.GetGeometryName() in ("POLYGON", "MULTIPOLYGON")
+    )
+
+
+def _polygon_from_geometry(geometry):
+    """Полигон из замкнутой линии.
+
+    None, если геометрия не является замкнутой линией: полигоны и точки
+    остаются без изменений.
+    """
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        ring = _ring_points(geometry)
+        if ring is None:
+            return None
+        polygon = ogr.Geometry(ogr.wkbPolygon)
+        polygon.AddGeometry(ring)
+        return polygon
+    if name == "MULTILINESTRING":
+        rings = []
+        for index in range(geometry.GetGeometryCount()):
+            ring = _ring_points(geometry.GetGeometryRef(index))
+            if ring is None:
+                return None
+            rings.append(ring)
+        if not rings:
+            return None
+        multi = ogr.Geometry(ogr.wkbMultiPolygon)
+        for ring in rings:
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            multi.AddGeometry(polygon)
+        return multi
+    return None
+
+
+def _geometry_families(layer):
+    """Семейства геометрий, реально присутствующие в объектах слоя.
+
+    Заголовок слоя GeoJSON со смешанными геометриями отражает тип лишь
+    части объектов (например, только way-линий рядом с relation-полигонами):
+    если по нему выбрать -nlt для VectorTranslate, полигоны сплющатся
+    в линии и перестанут рисоваться. Поэтому тип проверяем по объектам.
+    """
+    from osgeo import ogr
+
+    families = set()
+    for feature in layer:
+        geometry = feature.GetGeometryRef()
+        if geometry is None or geometry.IsEmpty():
+            continue
+        code = geometry.GetGeometryType() & 0x7FFFFFFF
+        if code in (ogr.wkbPolygon, ogr.wkbMultiPolygon):
+            families.add("POLYGON")
+        elif code in (ogr.wkbLineString, ogr.wkbMultiLineString):
+            families.add("LINESTRING")
+        elif code in (ogr.wkbPoint, ogr.wkbMultiPoint):
+            families.add("POINT")
+        else:
+            families.add("GEOMETRY")
+        if len(families) > 1:
+            break
+    return families
 
 
 def _geometry_type(source):
@@ -716,17 +1113,57 @@ def _geometry_type(source):
             return "GEOMETRY"
         layer = dataset.GetLayer(0)
         name = ogr.GeometryTypeToName(layer.GetGeomType())
+        result = {
+            "Point": "POINT",
+            "Multi Point": "MULTIPOINT",
+            "Line String": "LINESTRING",
+            "Multi Line String": "MULTILINESTRING",
+            "Polygon": "POLYGON",
+            "Multi Polygon": "MULTIPOLYGON",
+        }.get(name, "GEOMETRY")
+        if result != "GEOMETRY":
+            header_family = {
+                "POINT": "POINT", "MULTIPOINT": "POINT",
+                "LINESTRING": "LINESTRING", "MULTILINESTRING": "LINESTRING",
+                "POLYGON": "POLYGON", "MULTIPOLYGON": "POLYGON",
+            }[result]
+            # Заголовок противоречит реальному содержимому (смешанный
+            # файл): единый -nlt искажал бы часть объектов, пишем слой
+            # без фиксации типа — QGIS отфильтрует нужный по URI слоя.
+            if _geometry_families(layer) - {header_family}:
+                result = "GEOMETRY"
         dataset = None
     except Exception:
         return "GEOMETRY"
-    return {
-        "Point": "POINT",
-        "Multi Point": "MULTIPOINT",
-        "Line String": "LINESTRING",
-        "Multi Line String": "MULTILINESTRING",
-        "Polygon": "POLYGON",
-        "Multi Polygon": "MULTIPOLYGON",
-    }.get(name, "GEOMETRY")
+    return result
+
+
+def _has_values(source, field):
+    """Есть ли у объектов слоя непустое значение поля."""
+    from osgeo import ogr
+
+    try:
+        dataset = ogr.Open(str(source))
+        if dataset is None:
+            return False
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return False
+        definition = layer.GetLayerDefn()
+        index = -1
+        for position in range(definition.GetFieldCount()):
+            if definition.GetFieldDefn(position).GetName() == field:
+                index = position
+                break
+        if index < 0:
+            return False
+        for feature in layer:
+            value = feature.GetField(index)
+            if value not in (None, ""):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _source_fields(source):
@@ -763,7 +1200,6 @@ def save_vector(source, destination, layer_name, target_crs=None):
         "-nlt", _geometry_type(source),
         "-lco", "COMPRESS_GEOM=YES",
         "-unsetFid",
-        "-skipfailures",
     ]
     names = _source_fields(source)
     keep = [
@@ -777,7 +1213,21 @@ def save_vector(source, destination, layer_name, target_crs=None):
         options.extend(["-dsco", "SPATIALITE=YES"])
     if target_crs:
         options.extend(["-t_srs", target_crs])
-    result = gdal.VectorTranslate(str(destination), str(source), options=options)
+    try:
+        result = gdal.VectorTranslate(str(destination), str(source), options=options)
+    except Exception:
+        result = None
+    if result is None:
+        # -skipfailures отключает пакетную запись в SQLite: каждая
+        # геометрия сохраняется отдельной транзакцией, а перенос замедляется
+        # в пять раз. Поэтому основной путь идёт без него, а запасной — с ним.
+        destination.unlink(missing_ok=True)
+        try:
+            result = gdal.VectorTranslate(
+                str(destination), str(source), options=options + ["-skipfailures"]
+            )
+        except Exception as exc:
+            raise PipelineError(f"Failed to write {destination}: {exc}") from exc
     if result is None:
         raise PipelineError(f"Failed to write {destination}")
     result = None
@@ -789,6 +1239,36 @@ def _clean_temp(config):
             path.unlink(missing_ok=True)
 
 
+# Промежуточные файлы DEM — это кэш, а не слои проекта: их сохраняем,
+# чтобы не пересобирать репроекцию DEM при каждой подготовке.
+_RASTER_CACHE_PREFIX = "merged_dem"
+
+
+def _clean_layers(config):
+    """Удаляет ранее подготовленные векторные и растровые слои проекта.
+
+    Возвращает число удалённых файлов.
+    """
+    removed = 0
+    for directory, keep_cache in (
+        (config.vector_dir, False),
+        (config.raster_dir, True),
+    ):
+        if not directory.exists():
+            continue
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file():
+                continue
+            if keep_cache and path.name.startswith(_RASTER_CACHE_PREFIX):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+    return removed
+
+
 def run_project(config, progress=None, cancel=None, percent=None, status=None):
     notify = progress or (lambda message: None)
     tracker = _ProgressTracker(
@@ -798,20 +1278,42 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         status=status,
     )
     report = tracker.wrap(notify)
+    timings = Timings()
     report("Проверка параметров")
     config.validate()
+    gdal_log.LOG.reset()
     bbox = parse_bbox(config.bbox)
+    report("Очистка прежних слоёв")
+    _clean_layers(config)
     report("Создание проекта QGIS")
+    started = time.monotonic()
     project_path = project.prepare_project(config)
     _clean_temp(config)
+    timings.add_stage("создание проекта", time.monotonic() - started)
     prepared = None
     try:
         if config.array_queries:
             report("Подготовка источника OSM")
-            prepared = sources.prepare_sources(
-                config, bbox, config.array_queries, cancel=cancel, progress=report,
-                percent=tracker.download_percent,
+            started = time.monotonic()
+            # Чтение PBF идёт в главном потоке, поэтому перехватчик ставим
+            # здесь: без него предупреждения драйвера OSM уходят в консоль.
+            gdal_log.LOG.install()
+            try:
+                prepared = sources.prepare_sources(
+                    config, bbox, config.array_queries, cancel=cancel,
+                    progress=report, percent=tracker.download_percent,
+                )
+            finally:
+                gdal_log.LOG.restore()
+            elapsed = time.monotonic() - started
+            # Скачивание карт и ответов Overpass считаем отдельно:
+            # в «источник OSM» остаётся только подготовка данных.
+            download, prepared_time = _source_timings(
+                elapsed, getattr(prepared, "download_seconds", 0.0)
             )
+            if download >= 0.05:
+                timings.add_stage("скачивание данных", download)
+            timings.add_stage("источник OSM", prepared_time)
         else:
             prepared = sources.SourceResult()
         for warning in prepared.warnings:
@@ -822,22 +1324,49 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         )
         pipeline = Pipeline(
             config, bbox, runner, progress=report, cancel=cancel,
-            fraction=tracker.fraction,
+            fraction=tracker.fraction, timings=timings,
         )
+        started = time.monotonic()
         pipeline.run(prepared, config.array_queries)
+        timings.add_stage("обработка слоёв", time.monotonic() - started)
         if "coastline" in config.array_queries:
             report("Обработка береговой линии")
-            coastline.prepare_coastline(
-                config, bbox, progress=report, cancel=cancel
-            )
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                coastline.prepare_coastline(
+                    config, bbox, progress=report, cancel=cancel
+                )
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage("береговая линия", time.monotonic() - started)
         if config.generate_terrain:
             report("Обработка рельефа")
-            terrain.prepare_terrain(
-                config, bbox, progress=report, cancel=cancel,
-                status=tracker.status,
-            )
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                terrain.prepare_terrain(
+                    config, bbox, progress=report, cancel=cancel,
+                    status=tracker.status,
+                )
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage("рельеф", time.monotonic() - started)
         report("Удаление пустых слоёв")
+        started = time.monotonic()
         project.clean_project_layers(project_path)
+        timings.add_stage("очистка проекта", time.monotonic() - started)
+        for line in timings.summary():
+            report(line)
+        for seconds, name, operation in timings.top_steps():
+            report(
+                i18n.trf(
+                    "Хронометраж: {} [{}] — {} с",
+                    name, operation, f"{seconds:.1f}",
+                )
+            )
+        for line in gdal_log.LOG.summary():
+            report(line)
         tracker.finish()
     finally:
         if prepared is not None and prepared.dataset is not None:

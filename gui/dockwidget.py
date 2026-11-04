@@ -3,35 +3,119 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from qgis.core import QgsProject
-from qgis.PyQt.QtCore import QSettings, QThread, QTime, QTimer, QUrl, pyqtSignal, Qt
-from qgis.PyQt.QtGui import QDesktopServices
+from qgis.core import QgsApplication, QgsProject
+from qgis.PyQt.QtCore import (
+    QSettings, QSize, QThread, QTime, QTimer, QUrl, pyqtSignal, Qt,
+)
+from qgis.PyQt.QtGui import (
+    QBrush, QDesktopServices, QColor, QFontMetrics,
+)
 from qgis.PyQt.QtWidgets import (
-    QCheckBox, QComboBox, QDockWidget, QFileDialog, QFormLayout, QFrame,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSizePolicy, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QListView, QMessageBox, QPlainTextEdit,
+    QProgressBar,
+    QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core import geofabrik
+from ..core import geofabrik, i18n
 from ..core.bbox import parse_bbox
 from ..core.config import (
     Config, default_projects_dir, default_queries, project_name_error,
 )
+from ..core.map_language import apply_map_language
 from ..core.overpass_client import OverpassClient
 from ..core.overpass_servers import DEFAULT_OVERPASS_SERVERS
 from ..core.pbf_fast import UnsupportedPbf, probe_fast
 from ..core.pbf_source import probe_dataset
 from ..core.pipeline import run_project
-from ..core.project import open_project, project_file, set_canvas_magnification
+from ..core.project import (
+    fit_project_extent, open_project, project_file, project_file_path,
+    set_canvas_magnification,
+)
 from ..core.resources import query_names, read_query
+from ..core.transliteration import functions_available, patch_project_labeling
+from ..core.ui import PLUGIN_DOCK_NAME, hide_docks, show_docks
 from .extentdialog import ExtentDialog
+from .projecticons import panels_icon
 from .projectpanel import ProjectPanel
+from .translation import translate_tree
 
 MODE_EXAMPLES = {
     "local": "/usr/bin/osm3s_query --db-dir=/path/to/overpass_db",
     "ssh": 'ssh user@server "/usr/bin/osm3s_query --db-dir=/path/to/overpass_db"',
 }
+
+
+def _log_expand_icon(style):
+    """Иконка кнопки «развернуть журнал».
+
+    Раньше здесь была иконка открытой папки (SP_DialogOpenButton) — она
+    читалась как «открыть файл», а не как «развернуть журнал». Теперь
+    используется значок разворачивания окна.
+    """
+    for pixmap in (
+        QStyle.StandardPixmap.SP_TitleBarMaxButton,
+        QStyle.StandardPixmap.SP_ArrowUp,
+        QStyle.StandardPixmap.SP_DialogOpenButton,
+    ):
+        icon = style.standardIcon(pixmap)
+        if not icon.isNull():
+            return icon
+    return QStyle.StandardPixmap.SP_DialogOpenButton
+
+
+def _short_status(text, limit=58):
+    """Сокращает длинный текст статуса, оставляя конец пути.
+
+    Строка статуса имеет фиксированную высоту в две строки, и длинный
+    путь к проекту в ней обрезался.  Полный текст остаётся в подсказке
+    и в журнале.
+    """
+    if len(text) <= limit:
+        return text
+    head, separator, tail = text.rpartition(": ")
+    if separator and len(head) + len(separator) < limit - 12:
+        keep = limit - len(head) - len(separator) - 1
+        return head + separator + "…" + tail[-keep:]
+    return "…" + text[-(limit - 1):]
+
+
+class _MiddleElideDelegate(QStyledItemDelegate):
+    """Обрезает длинные строки списка многоточием посередине.
+
+    Названия карт Geofabrik не влезают в ширину панели; обрезка посередине
+    оставляет видимым и начало названия, и конец строки со статусом
+    («скачана»). Полный текст доступен в подсказке элемента.
+    """
+
+    _CHECK_WIDTH = 24  # место под галочку слева от текста
+
+    def paint(self, painter, option, index):
+        option = QStyleOptionViewItem(option)
+        self.initStyleOption(option, index)
+        width = option.rect.width() - self._CHECK_WIDTH
+        option.text = option.fontMetrics.elidedText(
+            option.text, Qt.ElideMiddle, max(0, width)
+        )
+        widget = option.widget
+        style = widget.style() if widget is not None else option.style
+        style.drawControl(QStyle.CE_ItemViewItem, option, painter, widget)
+
+    def sizeHint(self, option, index):
+        # Без ограничения ширины элементы растягиваются под полный текст,
+        # появляется горизонтальная полоса прокрутки, а делегат рисует
+        # строку целиком с обрезкой у края окна.
+        hint = super().sizeHint(option, index)
+        widget = option.widget
+        if widget is not None:
+            hint.setWidth(widget.viewport().width())
+        return hint
+
+
+# Фон строк карт, уже лежащих в локальном кэше: слабый светло-зелёный.
+_DOWNLOADED_MAP_BG = QColor("#d8efdb")
 
 # Measured aggregate throughput of four parallel Geofabrik downloads.
 DOWNLOAD_RATE = 1_000_000
@@ -65,6 +149,13 @@ def _user_role():
         return Qt.UserRole
 
 
+def _top_right_corner():
+    try:
+        return Qt.Corner.TopRightCorner
+    except AttributeError:
+        return Qt.TopRightCorner
+
+
 def _item_flags():
     try:
         return (
@@ -89,14 +180,14 @@ def _spaced(value):
 
 def _duration(seconds):
     if seconds < 1:
-        return "меньше 1 с"
+        return i18n.tr("меньше 1 с")
     seconds = int(round(seconds))
     if seconds < 60:
-        return f"{seconds} с"
+        return i18n.trf("{} с", seconds)
     minutes = seconds // 60
     if minutes < 60:
-        return f"{minutes} мин"
-    return f"{minutes // 60} ч {minutes % 60} мин"
+        return i18n.trf("{} мин", minutes)
+    return i18n.trf("{} ч {} мин", minutes // 60, minutes % 60)
 
 
 PRIMARY_BUTTON_STYLE = (
@@ -119,6 +210,18 @@ def _primary_button(button):
 
 def _set_primary(button, active):
     button.setStyleSheet(PRIMARY_BUTTON_STYLE if active else "")
+
+
+LANGUAGE_BUTTON_STYLE = (
+    "QToolButton {"
+    " border: 1px solid rgba(128, 128, 128, 0.65);"
+    " border-radius: 2px;"
+    " padding: 0px 2px;"
+    "}"
+    "QToolButton:hover {"
+    " border-color: palette(highlight);"
+    "}"
+)
 
 
 class PipelineWorker(QThread):
@@ -175,7 +278,7 @@ class ServerCheckWorker(QThread):
 
 
 class PbfProbeWorker(QThread):
-    result = pyqtSignal(int, int, int, float, bool, int, int, int)
+    result = pyqtSignal(int, int, int, float, bool, int, int, int, float)
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -194,6 +297,7 @@ class PbfProbeWorker(QThread):
         total_blobs = 0
         total = in_bbox = matched = 0
         elapsed = 0.0
+        extended_ratio = 0.0
         try:
             for position, path in enumerate(self.paths, 1):
                 if self.cancel_event.is_set():
@@ -221,6 +325,10 @@ class PbfProbeWorker(QThread):
                 in_bbox += probe.in_bbox
                 matched += probe.matched
                 elapsed += probe.elapsed
+                if getattr(probe, "extended_ratio", 0.0):
+                    # Для нескольких выгрузок берём самую большую долю:
+                    # столько данных придётся прочитать в худшем случае.
+                    extended_ratio = max(extended_ratio, probe.extended_ratio)
         except InterruptedError:
             return
         except Exception as exc:
@@ -229,6 +337,7 @@ class PbfProbeWorker(QThread):
             self.result.emit(
                 total, in_bbox, matched, elapsed,
                 approximate, sampled, total_blobs, len(self.paths),
+                extended_ratio,
             )
 
     def cancel(self):
@@ -274,6 +383,7 @@ class XtopoDockWidget(QDockWidget):
         self._geofabrik_plan = None
         self._geofabrik_plan_bbox = ""
         self._geofabrik_stats_maps = ()
+        self._pbf_info_state = None
         self._geofabrik_timer = QTimer(self)
         self._geofabrik_timer.setSingleShot(True)
         self._geofabrik_timer.timeout.connect(self._start_geofabrik)
@@ -285,18 +395,48 @@ class XtopoDockWidget(QDockWidget):
         self._active_mode = "geofabrik"
         self._own_project_open = False
         self._own_marker = False
+        self._hidden_panels = []
         self._running = False
         self._narrowed = False
+        self._minimum_width = 0
         self._project_timer = QTimer(self)
         self._project_timer.setSingleShot(True)
         self._project_timer.setInterval(0)
         self._project_timer.timeout.connect(self._refresh_project_state)
         self.settings = QSettings("qgis-xtopo", "qgis-xtopo")
+        i18n.add_listener(self._language_changed)
+        self.destroyed.connect(self.detach_language_listener)
         self.setObjectName("QgisXtopoDockWidget")
         self._build_ui()
         self._restore_settings()
         self._connect_project_signals()
         self._refresh_project_state()
+        self.retranslate()
+        if not self._own_project_open:
+            # Проекта нет — возвращаем панели, скрытые в прошлой сессии.
+            self.restore_panels()
+
+    def detach_language_listener(self):
+        i18n.remove_listener(self._language_changed)
+
+    def _fit_language_button(self):
+        """Высота кнопки языка — как у строки заголовков вкладок.
+
+        Угловая кнопка ставится с отступом сверху (его задаёт стиль),
+        поэтому доступная высота — высота строки вкладок минус отступ.
+        """
+        bar = self.tabs.tabBar()
+        height = bar.sizeHint().height()
+        if height <= 0:
+            height = bar.height()
+        inset = self.language_button.y() - bar.y()
+        if inset > 0:
+            height -= inset
+        metrics = QFontMetrics(self.language_button.font())
+        width = max(30, metrics.horizontalAdvance("RU") + 16)
+        self.language_button.setFixedSize(
+            QSize(width, max(16, height - 2))
+        )
 
     def _narrow_minimum_width(self):
         """Минимальная ширина панели на 15% меньше естественной."""
@@ -310,16 +450,45 @@ class XtopoDockWidget(QDockWidget):
         self.container.setMinimumWidth(target)
         self.tabs.setMinimumWidth(target)
         self.setMinimumWidth(target)
+        self._minimum_width = target
+        return target
+
+    def _collapse_to_minimum(self):
+        """По умолчанию панель занимает минимальную ширину."""
+        target = self._narrow_minimum_width()
+        if not target:
+            return
+        iface = self.iface
+        if iface is not None:
+            try:
+                iface.mainWindow().resizeDocks(
+                    [self], [target], Qt.Horizontal
+                )
+                return
+            except Exception:
+                pass
+        self.resize(target, self.height())
 
     def _build_ui(self):
         container = QWidget(self)
         self.container = container
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setSpacing(3)
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
+        self.language_button = QToolButton()
+        self.language_button.setText(i18n.language().upper())
+        self.language_button.setAutoRaise(True)
+        bold = self.language_button.font()
+        bold.setBold(True)
+        self.language_button.setFont(bold)
+        self.language_button.setStyleSheet(LANGUAGE_BUTTON_STYLE)
+        self.language_button.setToolTip("Язык интерфейса")
+        self.language_button.clicked.connect(self._switch_language)
+        self.tabs.setCornerWidget(self.language_button, _top_right_corner())
+        self._fit_language_button()
 
         data_tab = QWidget()
         data_layout = QVBoxLayout(data_tab)
@@ -339,6 +508,7 @@ class XtopoDockWidget(QDockWidget):
         self.project_name = QLineEdit("automap")
         self.project_name.setPlaceholderText("буквы, цифры, _ - +")
         self.project_name.textChanged.connect(self._project_name_changed)
+        self.projects_dir.textChanged.connect(self._project_path_changed)
         project_form.addRow("Имя проекта:", self.project_name)
         self.project_name_hint = QLabel("")
         self.project_name_hint.setWordWrap(True)
@@ -349,14 +519,14 @@ class XtopoDockWidget(QDockWidget):
         self.bbox = QLineEdit()
         self.bbox.setPlaceholderText("lon_min,lat_min,lon_max,lat_max или ссылка на OpenStreetMap")
         self.bbox.textChanged.connect(self._bbox_text_changed)
-        choose_extent = _primary_button(QPushButton("Выбрать…"))
-        choose_extent.setToolTip(
+        self.choose_extent = _primary_button(QPushButton("Выбрать…"))
+        self.choose_extent.setToolTip(
             "Открыть карту OpenStreetMap и выбрать охват без создания проекта"
         )
-        choose_extent.clicked.connect(self._bbox_from_picker)
+        self.choose_extent.clicked.connect(self._bbox_from_picker)
         row = QHBoxLayout()
         row.addWidget(self.bbox)
-        row.addWidget(choose_extent)
+        row.addWidget(self.choose_extent)
         project_form.addRow("Охват:", row)
         self.area_label = project_form.labelForField(row)
         data_layout.addWidget(project_group)
@@ -364,7 +534,7 @@ class XtopoDockWidget(QDockWidget):
         source_group = QGroupBox("Источник OSM")
         source_form = QFormLayout(source_group)
         self.source_mode = QComboBox()
-        self.source_mode.addItem("Карты с Geofabrik PBF", "geofabrik")
+        self.source_mode.addItem("Карты с Geofabrik (предпочтительно)", "geofabrik")
         self.source_mode.addItem("Публичный Overpass API", "overpass")
         self.source_mode.addItem("Локальный PBF/OSM экстракт", "pbf")
         self.source_mode.addItem("Локальный Overpass", "local")
@@ -414,11 +584,36 @@ class XtopoDockWidget(QDockWidget):
         self.geofabrik_info.setWordWrap(True)
         self.geofabrik_info.setVisible(False)
         source_form.addRow(self.geofabrik_info)
-        self.geofabrik_group = QGroupBox("Карты Geofabrik")
+        self.geofabrik_group = QGroupBox("")
         maps_layout = QVBoxLayout(self.geofabrik_group)
         maps_layout.setContentsMargins(4, 4, 4, 4)
+        # Заголовок группы с датой индекса и кнопкой обновления.
+        maps_header = QHBoxLayout()
+        self.geofabrik_title = QLabel(i18n.tr("Карты Geofabrik"))
+        maps_header.addWidget(self.geofabrik_title)
+        maps_header.addStretch(1)
+        self.geofabrik_refresh = QToolButton()
+        self.geofabrik_refresh.setIcon(
+            QgsApplication.getThemeIcon("mActionReload.svg")
+        )
+        self.geofabrik_refresh.setAutoRaise(True)
+        self.geofabrik_refresh.setFixedSize(QSize(18, 18))
+        self.geofabrik_refresh.setIconSize(QSize(14, 14))
+        self.geofabrik_refresh.setToolTip(
+            i18n.tr("Обновить индекс Geofabrik")
+        )
+        self.geofabrik_refresh.clicked.connect(self._refresh_geofabrik_index)
+        maps_header.addWidget(self.geofabrik_refresh)
+        maps_layout.addLayout(maps_header)
         self.geofabrik_maps = QListWidget()
         self.geofabrik_maps.setMaximumHeight(150)
+        # Элементы всегда по ширине окна списка: иначе длинные названия
+        # дают горизонтальную прокрутку, а делегат обрезает строку у края
+        # вместо многоточия посередине.
+        self.geofabrik_maps.setResizeMode(QListView.Adjust)
+        self.geofabrik_maps.setItemDelegate(
+            _MiddleElideDelegate(self.geofabrik_maps)
+        )
         self.geofabrik_maps.itemChanged.connect(self._geofabrik_selection_changed)
         maps_layout.addWidget(self.geofabrik_maps)
         self.geofabrik_summary = QLabel("")
@@ -440,6 +635,7 @@ class XtopoDockWidget(QDockWidget):
         queries_group = QGroupBox("Слои")
         queries_layout = QVBoxLayout(queries_group)
         self.queries = QListWidget()
+        self.queries.setObjectName("queriesList")
         self.queries.setMinimumHeight(120)
         self._fill_queries(query_names())
         self.queries.itemChanged.connect(self._queries_changed)
@@ -492,17 +688,24 @@ class XtopoDockWidget(QDockWidget):
         )
         terrain_form.addRow(self.hillshade_slope)
         self.resample_method = QComboBox()
-        self.resample_method.addItem(
-            "cubicspline — мягче, меньше деталей", "cubicspline"
-        )
-        self.resample_method.addItem(
-            "lanczos — резче, возможны артефакты", "lanczos"
-        )
+        self.resample_method.addItem("cubicspline — мягче", "cubicspline")
+        self.resample_method.addItem("lanczos — резче", "lanczos")
         self.resample_method.setToolTip(
             "Terrain resample method: влияет на детальность затенения "
-            "рельефа и уклонов"
+            "рельефа и уклонов.\n"
+            "cubicspline — мягче, меньше деталей; "
+            "lanczos — резче, возможны артефакты"
         )
-        terrain_form.addRow("Метод масштабирования:", self.resample_method)
+        # Список не должен занимать всю ширину панели: из-за этого
+        # подпись «Масштабирование» не помещалась.
+        try:
+            self.resample_method.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToContents
+            )
+        except AttributeError:
+            self.resample_method.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.resample_method.setMaximumWidth(170)
+        terrain_form.addRow("Масштабирование:", self.resample_method)
         separator = QFrame()
         try:
             separator.setFrameShape(QFrame.Shape.HLine)
@@ -528,8 +731,10 @@ class XtopoDockWidget(QDockWidget):
         for index, value in enumerate((5, 10, 25, 50, 100, 200)):
             box = QCheckBox(f"{value} м")
             box.setToolTip(
-                "Минимальная кратность контуров. Остальные отметки "
-                "включаются автоматически."
+                "Отметка включает эту кратность и все кратные ей. "
+                "Снятие убирает одну галочку — набор можно уточнять по "
+                "одной. Контуры строятся с минимальной из отмеченных; "
+                "последнюю галочку снять нельзя."
             )
             box.toggled.connect(
                 lambda checked, step=value: self._isolines_step_toggled(
@@ -555,24 +760,28 @@ class XtopoDockWidget(QDockWidget):
         self.tabs.setTabEnabled(self.project_tab_index, False)
         layout.addWidget(self.tabs, 1)
 
-        buttons = QHBoxLayout()
+        buttons = QGridLayout()
         self.prepare_button = _primary_button(QPushButton("Подготовить данные"))
         self.prepare_button.clicked.connect(self._prepare)
         self.open_button = QPushButton("Открыть проект")
         self.open_button.clicked.connect(self._open_project)
+        self.close_button = QPushButton("Закрыть проект")
+        self.close_button.setEnabled(False)
+        self.close_button.clicked.connect(self._close_project)
         self.cancel_button = QPushButton("Отмена")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel)
-        buttons.addWidget(self.prepare_button)
-        buttons.addWidget(self.open_button)
-        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.prepare_button, 0, 0)
+        buttons.addWidget(self.cancel_button, 0, 1)
+        buttons.addWidget(self.open_button, 1, 0)
+        buttons.addWidget(self.close_button, 1, 1)
         layout.addLayout(buttons)
 
         self.status = QLabel("Готово")
         self.status.setWordWrap(True)
         self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.status.setFixedHeight(
-            self.status.fontMetrics().lineSpacing() * 2 + 6
+            self.status.fontMetrics().lineSpacing() * 2 + 4
         )
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -583,11 +792,31 @@ class XtopoDockWidget(QDockWidget):
         self.log.setMinimumHeight(70)
         self.log.setMaximumHeight(140)
         self.log.setVisible(False)
+        self.log_window = None
+        self.log_window_text = None
         self.log_toggle = QCheckBox("Журнал")
         self.log_toggle.toggled.connect(self.log.setVisible)
+        self.log_window_button = QPushButton()
+        self.log_window_button.setIcon(_log_expand_icon(self.style()))
+        self.log_window_button.setFixedSize(24, 24)
+        self.log_window_button.setToolTip("Открыть журнал в отдельном окне")
+        self.log_window_button.clicked.connect(self._open_log_window)
+        # Кнопка живёт вне вкладок: вкладки блокируются при открытом
+        # проекте, а переключить панели нужно именно в этот момент.
+        self.show_panels_button = QPushButton()
+        self.show_panels_button.setIcon(panels_icon(self.palette()))
+        self.show_panels_button.setFixedSize(24, 24)
+        self.show_panels_button.setToolTip(
+            "Скрыть или показать стандартные панели и панели инструментов "
+            "QGIS, а также строку уведомлений. При открытии проекта всё это "
+            "скрывается автоматически."
+        )
+        self.show_panels_button.clicked.connect(self._show_panels)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status, 1)
         status_row.addWidget(self.log_toggle)
+        status_row.addWidget(self.log_window_button)
+        status_row.addWidget(self.show_panels_button)
         layout.addLayout(status_row)
         progress_row = QHBoxLayout()
         progress_row.addWidget(self.progress, 1)
@@ -603,6 +832,9 @@ class XtopoDockWidget(QDockWidget):
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | flag)
             item.setCheckState(checked)
+            # Имя файла запроса хранится отдельно от подписи: подпись могут
+            # перевести, а имя файла нужно для чтения запроса как есть.
+            item.setData(_user_role(), name)
             self.queries.addItem(item)
 
     def _set_queries(self, value):
@@ -616,32 +848,53 @@ class XtopoDockWidget(QDockWidget):
         checked, unchecked = _checked_state()
         for index in range(self.queries.count()):
             item = self.queries.item(index)
-            item.setCheckState(checked if item.text() in defaults else unchecked)
+            name = item.data(_user_role()) or item.text()
+            item.setCheckState(checked if name in defaults else unchecked)
 
     def _selected_queries(self):
         checked, _ = _checked_state()
-        return [
-            self.queries.item(index).text()
-            for index in range(self.queries.count())
-            if self.queries.item(index).checkState() == checked
-        ]
+        names = []
+        for index in range(self.queries.count()):
+            item = self.queries.item(index)
+            if item.checkState() != checked:
+                continue
+            names.append(str(item.data(_user_role()) or item.text()))
+        return names
 
     def _browse_projects(self):
-        path = QFileDialog.getExistingDirectory(self, "Каталог проектов", self.projects_dir.text())
+        path = QFileDialog.getExistingDirectory(
+            self, i18n.tr("Каталог проектов"), self.projects_dir.text()
+        )
         if path:
             self.projects_dir.setText(path)
 
     def _project_name_changed(self, text):
         error = project_name_error(text)
-        self.project_name_hint.setText(error)
+        self.project_name_hint.setText(i18n.tr(error))
         self.project_name_hint.setVisible(bool(error))
+        self._project_path_changed()
+
+    def _project_path_changed(self, *_args):
+        """Имя или каталог изменились: обновляем доступность кнопок."""
+        self._update_action_buttons()
+
+    def _project_file_path(self):
+        """Путь к файлу проекта по указанным каталогу и имени.
+
+        None, если имя недопустимо или проект ещё не создан.
+        """
+        directory = self.projects_dir.text().strip() or default_projects_dir()
+        return project_file_path(directory, self.project_name.text())
 
     def _browse_source(self):
         if self.source_mode.currentData() != "pbf":
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "OSM экстракт", "",
-            "OSM files (*.pbf *.osm *.osm.bz2 *.osm.gz);;All files (*)",
+            self, i18n.tr("OSM экстракт"), "",
+            i18n.tr(
+                "OSM files (*.pbf *.osm *.osm.bz2 *.osm.gz)"
+                ";;All files (*)"
+            ),
         )
         if path:
             self.source_value.setText(path)
@@ -650,13 +903,16 @@ class XtopoDockWidget(QDockWidget):
         QDesktopServices.openUrl(QUrl("https://download.geofabrik.de/"))
 
     def _browse_dem(self):
-        path = QFileDialog.getExistingDirectory(self, "Каталог DEM", self.dem_dir.text())
+        path = QFileDialog.getExistingDirectory(
+            self, i18n.tr("Каталог DEM"), self.dem_dir.text()
+        )
         if path:
             self.dem_dir.setText(path)
 
     def _bbox_from_picker(self):
         """Открывает окно выбора охвата. True, если охват выбран."""
         dialog = ExtentDialog(self.bbox.text().strip(), self)
+        translate_tree(dialog)
         if dialog.exec():
             self.bbox.setText(dialog.bbox_csv())
             return True
@@ -682,22 +938,26 @@ class XtopoDockWidget(QDockWidget):
                 self.source_value.setText(self._mode_values.get(mode, ""))
 
         labels = {
-            "geofabrik": "Карты:",
+            "geofabrik": "",
             "overpass": "Сервер:",
             "pbf": "Файл PBF:",
             "local": "Команда:",
             "ssh": "SSH-команда:",
         }
         if self.source_label is not None:
-            self.source_label.setText(labels.get(mode, "Адрес/файл:"))
+            self.source_label.setText(
+                i18n.tr(labels.get(mode, "Адрес/файл:"))
+            )
 
         is_geofabrik = mode == "geofabrik"
+        self.source_value.setVisible(not is_geofabrik)
+        self.source_label.setVisible(not is_geofabrik)
         self.download_pbf_button.setEnabled(mode == "pbf")
         self.download_pbf_button.setVisible(not is_geofabrik)
         self.browse_source.setEnabled(mode == "pbf")
         self.browse_source.setVisible(not is_geofabrik)
         self.browse_source.setToolTip(
-            "Выбрать файл .pbf или .osm" if mode == "pbf" else ""
+            i18n.tr("Выбрать файл .pbf или .osm") if mode == "pbf" else ""
         )
         self.geofabrik_info.setVisible(is_geofabrik)
         self.geofabrik_group.setVisible(is_geofabrik)
@@ -707,6 +967,7 @@ class XtopoDockWidget(QDockWidget):
             self.geofabrik_info.clear()
             self.geofabrik_maps.clear()
             self.geofabrik_summary.clear()
+            self._pbf_info_state = None
             self._reset_geofabrik_index_stamp()
             if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
                 self.geofabrik_worker.cancel()
@@ -728,50 +989,70 @@ class XtopoDockWidget(QDockWidget):
             if not self.overpass_server.currentData() and remembered:
                 self.source_value.setText(remembered)
             self.source_hint.setText(
-                "Адрес выбранного Overpass-сервера. Проверка серверов выполняется "
-                "в фоне. Для подготовки данных используются только ответившие "
-                "серверы. Для больших областей используйте PBF."
+                i18n.tr(
+                    "Адрес выбранного Overpass-сервера. Проверка серверов "
+                    "выполняется в фоне. Для подготовки данных используются "
+                    "только ответившие серверы. Для больших областей "
+                    "используйте PBF."
+                )
             )
             if self.isVisible():
                 self._check_servers()
         elif mode == "pbf":
             self.source_value.setEnabled(True)
-            self.source_value.setPlaceholderText("Путь к .pbf или .osm")
+            self.source_value.setPlaceholderText(
+                i18n.tr("Путь к .pbf или .osm")
+            )
             self.source_hint.setText(
-                "Файл .pbf или .osm. Загружаются только объекты внутри bbox."
+                i18n.tr(
+                    "Файл .pbf или .osm. Загружаются только объекты внутри "
+                    "охвата."
+                )
             )
             self.pbf_info.setVisible(True)
             self._schedule_pbf_probe()
         elif is_geofabrik:
             self.source_value.setEnabled(False)
-            self.source_value.setPlaceholderText("Определяется по bbox автоматически")
+            self.source_value.setPlaceholderText(
+                i18n.tr("Определяется по охвату автоматически")
+            )
             self.source_value.clear()
             self.source_hint.setText(
-                "Список карт определяется по bbox из онлайн-индекса Geofabrik. "
-                "Отмеченные карты скачиваются автоматически при нажатии "
-                "«Подготовить данные». Снимите галочку с лишней карты, чтобы "
-                "не качать её целиком."
+                i18n.tr(
+                    "Список карт определяется по охвату из онлайн-индекса "
+                    "Geofabrik. Отмеченные карты скачиваются автоматически "
+                    "при нажатии «Подготовить данные». Снимите галочку с "
+                    "лишней карты, чтобы не качать её целиком."
+                )
             )
             self.pbf_info.setVisible(True)
-            self.geofabrik_info.setText("Определение карт по bbox…")
+            self.geofabrik_info.setText(
+                i18n.tr("Определение карт по охвату…")
+            )
             self._schedule_geofabrik()
         elif mode == "local":
             self.source_value.setEnabled(True)
-            self.source_value.setPlaceholderText("/usr/bin/osm3s_query --db-dir=...")
+            self.source_value.setPlaceholderText(
+                "/usr/bin/osm3s_query --db-dir=..."
+            )
             self._apply_example(mode)
             self.source_hint.setText(
-                "Команда osm3s_query и параметры. Если osm3s_query нет в PATH, "
-                "укажите полный путь к файлу. --db-dir — каталог базы Overpass. "
-                "Запрос передаётся через stdin."
+                i18n.tr(
+                    "Команда osm3s_query и параметры. Если osm3s_query нет "
+                    "в PATH, укажите полный путь к файлу. --db-dir — каталог "
+                    "базы Overpass. Запрос передаётся через stdin."
+                )
             )
         else:
             self.source_value.setEnabled(True)
             self.source_value.setPlaceholderText('ssh user@server "..."')
             self._apply_example(mode)
             self.source_hint.setText(
-                "Команда ssh для удалённого Overpass. Укажите полный путь к "
-                "osm3s_query на сервере, если его нет в PATH. Запрос передаётся "
-                "через stdin."
+                i18n.tr(
+                    "Команда ssh для удалённого Overpass. Укажите полный путь "
+                    "к osm3s_query на сервере, если его нет в PATH. Запрос "
+                    "передаётся через stdin."
+                )
             )
 
     def _source_path_changed(self, _text):
@@ -807,10 +1088,13 @@ class XtopoDockWidget(QDockWidget):
         self.geofabrik_maps.clear()
         self.geofabrik_maps.blockSignals(False)
         self.geofabrik_summary.clear()
+        self._pbf_info_state = None
         self._reset_geofabrik_index_stamp()
         if self.source_mode.currentData() == "geofabrik":
             self.source_value.clear()
-            self.geofabrik_info.setText("Определение карт по bbox…")
+            self.geofabrik_info.setText(
+                i18n.tr("Определение карт по охвату…")
+            )
         self._geofabrik_timer.start(700)
 
     def _geofabrik_config(self, bbox):
@@ -830,7 +1114,9 @@ class XtopoDockWidget(QDockWidget):
             bbox = parse_bbox(self.bbox.text().strip())
         except Exception as exc:
             self._geofabrik_plan = None
-            self.geofabrik_info.setText(f"Определение карт недоступно: {exc}")
+            self.geofabrik_info.setText(
+                i18n.trf("Определение карт недоступно: {}", exc)
+            )
             return
         if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
             self.geofabrik_worker.cancel()
@@ -842,7 +1128,7 @@ class XtopoDockWidget(QDockWidget):
         worker.result.connect(lambda plan, w=worker: self._geofabrik_ready(w, plan))
         worker.failed.connect(lambda message, w=worker: self._geofabrik_failed(w, message))
         worker.finished.connect(lambda w=worker: self._geofabrik_done(w))
-        self.geofabrik_info.setText("Загрузка индекса Geofabrik…")
+        self.geofabrik_info.setText(i18n.tr("Загрузка индекса Geofabrik…"))
         worker.start()
 
     def _geofabrik_done(self, worker):
@@ -851,7 +1137,7 @@ class XtopoDockWidget(QDockWidget):
         worker.deleteLater()
 
     def _geofabrik_progress(self, message):
-        self.geofabrik_info.setText(message)
+        self.geofabrik_info.setText(i18n.tr(message))
 
     def _geofabrik_ready(self, worker, plan):
         if worker is not self.geofabrik_worker:
@@ -877,7 +1163,9 @@ class XtopoDockWidget(QDockWidget):
         if self.worker is not None and self.worker.isRunning():
             return
         self._geofabrik_plan = None
-        self.geofabrik_info.setText(f"Не удалось определить карты: {message}")
+        self.geofabrik_info.setText(
+            i18n.trf("Не удалось определить карты: {}", message)
+        )
 
     def _apply_geofabrik_plan(self, plan):
         self._fill_geofabrik_list(plan)
@@ -885,23 +1173,33 @@ class XtopoDockWidget(QDockWidget):
         self.source_value.setText(", ".join(item.id for item in selected))
         base = []
         if plan.state.warning:
-            base.append(plan.state.warning)
+            base.append(i18n.tr(plan.state.warning))
         self._set_geofabrik_index_stamp(plan)
         details = []
         total_line = []
         if not plan.maps:
-            base.append("Для этого bbox карты Geofabrik не найдены.")
+            base.append(i18n.tr("Для этого охвата карты Geofabrik не найдены."))
         else:
             total = 0
             for item, status in plan.items():
-                size = f"{status.size / 1048576:.1f} МБ" if status.size else "размер неизвестен"
-                state = "доступна" if status.available else "недоступна"
-                local = " · уже скачана" if status.local else ""
-                details.append(f"• {item.name} ({item.id}) — {size} — {state}{local}")
+                size = (
+                    i18n.trf("{} МБ", f"{status.size / 1048576:.1f}")
+                    if status.size
+                    else i18n.tr("размер неизвестен")
+                )
+                state = i18n.tr(
+                    "доступна" if status.available else "недоступна"
+                )
+                local = i18n.tr(" · скачана") if status.local else ""
+                details.append(
+                    f"• {item.name} ({item.id}) — {size} — {state}{local}"
+                )
                 if status.size:
                     total += status.size
             if total:
-                total_line.append(f"Всего: {total / 1048576:.1f} МБ")
+                total_line.append(
+                    i18n.trf("Всего: {} МБ", f"{total / 1048576:.1f}")
+                )
         self.geofabrik_info.setText("\n".join(base))
         self.geofabrik_info.setVisible(bool(self.geofabrik_info.text()))
         self.geofabrik_info.setToolTip(
@@ -926,17 +1224,39 @@ class XtopoDockWidget(QDockWidget):
         self._reset_geofabrik_index_stamp(stamp)
 
     def _reset_geofabrik_index_stamp(self, stamp=""):
-        title = "Карты Geofabrik"
+        title = i18n.tr("Карты Geofabrik")
         if stamp:
-            title = f"{title} · индекс {stamp}"
-        self.geofabrik_group.setTitle(title)
+            title = i18n.trf("{} · индекс {}", title, stamp)
+        self.geofabrik_title.setText(title)
+
+    def _refresh_geofabrik_index(self):
+        """Перезагрузить индекс Geofabrik из сети."""
+        if self.source_mode.currentData() != "geofabrik":
+            return
+        try:
+            bbox = parse_bbox(self.bbox.text().strip())
+        except Exception:
+            return
+        try:
+            geofabrik.invalidate_index(self._geofabrik_config(bbox))
+        except Exception as exc:
+            self.geofabrik_info.setText(
+                i18n.trf("Не удалось обновить индекс: {}", exc)
+            )
+            return
+        self.geofabrik_info.setText(i18n.tr("Обновление индекса Geofabrik…"))
+        self._start_geofabrik()
 
     def _geofabrik_item(self, item, status, checked):
-        size = f"{status.size / 1048576:.1f} МБ" if status.size else "размер неизвестен"
+        size = (
+            i18n.trf("{} МБ", f"{status.size / 1048576:.1f}")
+            if status.size
+            else i18n.tr("размер неизвестен")
+        )
         if status.local:
-            state = "уже скачана"
+            state = i18n.tr("скачана")
         elif not status.available:
-            state = "недоступна"
+            state = i18n.tr("недоступна")
         else:
             state = ""
         parts = [item.name]
@@ -947,6 +1267,11 @@ class XtopoDockWidget(QDockWidget):
         if state:
             text += f" · {state}"
         entry = QListWidgetItem(text)
+        entry.setToolTip(text)
+        if status.local:
+            # Скачанные в кэш карты подсвечиваем зелёным — сразу видно,
+            # что их можно не скачивать повторно.
+            entry.setBackground(QBrush(_DOWNLOADED_MAP_BG))
         entry.setData(_user_role(), item.id)
         entry.setFlags(_item_flags())
         checked_state, unchecked_state = _checked_state()
@@ -968,7 +1293,9 @@ class XtopoDockWidget(QDockWidget):
             for item, status in zip(plan.maps, plan.statuses):
                 widget.addItem(self._geofabrik_item(item, status, True))
             if plan.extra:
-                header = QListWidgetItem("Другие карты для этой области")
+                header = QListWidgetItem(
+                    i18n.tr("Другие карты для этой области")
+                )
                 header.setFlags(_no_flags())
                 widget.addItem(header)
                 for item, status in zip(plan.extra, plan.extra_statuses):
@@ -1012,9 +1339,9 @@ class XtopoDockWidget(QDockWidget):
     def _update_geofabrik_summary(self):
         statuses = self._geofabrik_selected_statuses()
         total = sum(status.size or 0 for status in statuses)
-        text = f"Выбрано карт: {len(statuses)}"
+        text = i18n.trf("Выбрано карт: {}", len(statuses))
         if total:
-            text += f", объём {total / 1048576:.1f} МБ"
+            text += i18n.trf(", объём {} МБ", f"{total / 1048576:.1f}")
         self.geofabrik_summary.setText(text)
 
     def _geofabrik_selection_changed(self, _item):
@@ -1024,12 +1351,13 @@ class XtopoDockWidget(QDockWidget):
         self.source_value.setText(", ".join(item.id for item in selected))
         self._update_geofabrik_summary()
         pending, total = self._geofabrik_pending(self._geofabrik_plan)
-        self.pbf_info.setText(self._geofabrik_estimate(pending, total))
+        self._show_pbf_estimate(pending, total)
         self._start_geofabrik_stats(self._geofabrik_plan)
 
     def _start_geofabrik_stats(self, plan):
         maps = self._geofabrik_selected_maps()
         if not maps:
+            self._pbf_info_state = None
             self.pbf_info.setText("")
             self._geofabrik_stats_maps = ()
             return
@@ -1043,14 +1371,15 @@ class XtopoDockWidget(QDockWidget):
             paths = geofabrik.source_paths(config, maps)
         except Exception:
             pending, total = self._geofabrik_pending(plan)
-            self.pbf_info.setText(self._geofabrik_estimate(pending, total))
+            self._show_pbf_estimate(pending, total)
             return
         names = self._selected_queries()
         texts = {name: read_query(name) for name in names}
         if self.pbf_probe is not None and self.pbf_probe.isRunning():
             self.pbf_probe.cancel()
             self.pbf_probe.wait(2000)
-        self.pbf_info.setText("Оценка объединённой карты…")
+        self._pbf_info_state = None
+        self.pbf_info.setText(i18n.tr("Оценка объединённой карты…"))
         self.pbf_probe = PbfProbeWorker(
             config, bbox, names, texts, paths=paths, parent=self
         )
@@ -1067,7 +1396,9 @@ class XtopoDockWidget(QDockWidget):
         try:
             bbox = parse_bbox(self.bbox.text().strip())
         except Exception as exc:
-            self.pbf_info.setText(f"Оценка PBF недоступна: {exc}")
+            self.pbf_info.setText(
+                i18n.trf("Оценка PBF недоступна: {}", exc)
+            )
             return
         if mode == "geofabrik":
             plan = self._geofabrik_plan
@@ -1083,19 +1414,24 @@ class XtopoDockWidget(QDockWidget):
                 paths = geofabrik.source_paths(config, maps)
             except Exception:
                 pending, total = self._geofabrik_pending(plan)
-                self.pbf_info.setText(self._geofabrik_estimate(pending, total))
+                self._show_pbf_estimate(pending, total)
                 return
             source_config = config
         else:
             text = self.source_value.text().strip()
             if not text:
                 self.pbf_info.setText(
-                    "Выберите файл, чтобы оценить количество объектов и время подготовки."
+                    i18n.tr(
+                        "Выберите файл, чтобы оценить количество объектов "
+                        "и время подготовки."
+                    )
                 )
                 return
             path = Path(text).expanduser()
             if not path.exists():
-                self.pbf_info.setText(f"Файл не найден: {path}")
+                self.pbf_info.setText(
+                    i18n.trf("Файл не найден: {}", path)
+                )
                 return
             paths = [path]
             source_config = Config(
@@ -1111,7 +1447,8 @@ class XtopoDockWidget(QDockWidget):
             self.pbf_probe.wait(2000)
         names = self._selected_queries()
         texts = {name: read_query(name) for name in names}
-        self.pbf_info.setText("Быстрая оценка PBF…")
+        self._pbf_info_state = None
+        self.pbf_info.setText(i18n.tr("Быстрая оценка PBF…"))
         self.pbf_probe = PbfProbeWorker(
             source_config, bbox, names, texts, paths=paths, parent=self
         )
@@ -1121,43 +1458,111 @@ class XtopoDockWidget(QDockWidget):
         self.pbf_probe.start()
 
     def _pbf_probe_progress(self, message):
-        self.pbf_info.setText(message)
+        self._pbf_info_state = None
+        self.pbf_info.setText(i18n.tr(message))
 
     def _pbf_probed(self, total, in_bbox, matched, elapsed, approximate,
-                    sampled, total_blobs, file_count):
+                    sampled, total_blobs, file_count, extended_ratio=0.0):
         if approximate:
             prefix = "≈ "
         else:
             prefix = ""
-        # GDAL reads roughly 45 thousand objects per second on an average
-        # desktop; layer processing adds about 3 ms per matched object
-        # (calibrated on a small PBF extract).
-        estimate = total / 45000.0 + matched * 0.003
-        counts = (
-            f"объектов: {prefix}{_spaced(total)} · в bbox: "
-            f"{prefix}{_spaced(in_bbox)}"
+        estimate = self._estimate_seconds(
+            total, matched, extended_ratio, file_count
         )
         if self.source_mode.currentData() == "geofabrik":
             plan = self._geofabrik_plan
             pending, _size = self._geofabrik_pending(plan) if plan else (0, 0)
+            self._pbf_info_state = (
+                "geo", total, in_bbox, estimate, pending, prefix
+            )
+        else:
+            path = Path(self.source_value.text().strip()).expanduser()
+            try:
+                size = path.stat().st_size / 1048576
+            except OSError:
+                size = 0.0
+            self._pbf_info_state = (
+                "pbf", total, in_bbox, elapsed, estimate, size,
+                file_count, prefix,
+            )
+        self._render_pbf_info()
+
+    def _estimate_seconds(self, total, matched, extended_ratio, file_count=1):
+        """Оценка времени подготовки в секундах.
+
+        Читать приходится не весь файл, а только область с запасом
+        фильтра: долю этой области в выгрузке даёт быстрая оценка.
+        Дальше добавляется время обработки слоёв — примерно 0,5 мс на
+        объект и около 50 мс на слой (запуск обработки, GRASS-операции).
+        Калибровано на замерах по выгрузкам Малопольши, Грузии, Армении
+        и Юкона.
+        """
+        share = max(0.0, min(1.0, float(extended_ratio or 0.0)))
+        if not share:
+            # Площадь выгрузки неизвестна: читаем весь файл.
+            share = 1.0
+        read = total * share / 20000.0
+        layers = len(self.queries) if hasattr(self, "queries") else 0
+        return read + matched * 0.0005 + layers * 0.05 + 5.0
+
+    def _show_pbf_estimate(self, pending, total):
+        """Оценка по объёму карт (до точного подсчёта объектов)."""
+        self._pbf_info_state = ("estimate", pending, total)
+        self._render_pbf_info()
+
+    def _render_pbf_info(self):
+        """Собирает подпись оценки PBF на текущем языке."""
+        state = getattr(self, "_pbf_info_state", None)
+        if state is None:
+            return
+        kind = state[0]
+        if kind == "estimate":
+            _, pending, total = state
+            self.pbf_info.setText(self._geofabrik_estimate(pending, total))
+            return
+        if kind == "geo":
+            _, total, in_bbox, estimate, pending, prefix = state
+            counts = i18n.trf(
+                "объектов: {} · в охвате: {}",
+                f"{prefix}{_spaced(total)}",
+                f"{prefix}{_spaced(in_bbox)}",
+            )
             parts = []
             if pending:
-                parts.append(f"Скачивание ≈ {_duration(pending / DOWNLOAD_RATE)}")
-            parts.append(f"подготовка ≈ {_duration(estimate)}")
+                parts.append(
+                    i18n.trf(
+                        "Скачивание ≈ {}",
+                        _duration(pending / DOWNLOAD_RATE),
+                    )
+                )
+            parts.append(
+                i18n.trf("подготовка ≈ {}", _duration(estimate))
+            )
             text = ", ".join(parts)
             self.pbf_info.setText(
                 f"{text[0].upper()}{text[1:]} · {counts}."
             )
             return
-        path = Path(self.source_value.text().strip()).expanduser()
-        try:
-            size = path.stat().st_size / 1048576
-        except OSError:
-            size = 0.0
-        title = f"PBF ({file_count} файлов)" if file_count > 1 else f"PBF {size:.1f} МБ"
+        _, total, in_bbox, elapsed, estimate, size, file_count, prefix = state
+        counts = i18n.trf(
+            "объектов: {} · в охвате: {}",
+            f"{prefix}{_spaced(total)}",
+            f"{prefix}{_spaced(in_bbox)}",
+        )
+        title = (
+            i18n.trf("PBF ({} файлов)", file_count)
+            if file_count > 1
+            else i18n.trf("PBF {} МБ", f"{size:.1f}")
+        )
         self.pbf_info.setText(
-            f"{title} · {counts}. Проверка ≈ {elapsed:.1f} с, "
-            f"подготовка ≈ {estimate:.0f} с."
+            i18n.trf(
+                "{} · {}. Проверка ≈ {} с, подготовка ≈ {} с.",
+                title,
+                counts,
+                f"{elapsed:.1f}",
+                f"{estimate:.0f}",
+            )
         )
 
     def _geofabrik_pending(self, plan=None):
@@ -1178,22 +1583,35 @@ class XtopoDockWidget(QDockWidget):
     def _geofabrik_estimate(pending, total):
         parts = []
         if pending:
-            parts.append(f"Скачивание ≈ {_duration(pending / DOWNLOAD_RATE)}")
+            parts.append(
+                i18n.trf(
+                    "Скачивание ≈ {}",
+                    _duration(pending / DOWNLOAD_RATE),
+                )
+            )
         if total:
             # Rough processing scale before exact object counts are known:
             # about 16 thousand OSM objects per megabyte at ~45 thousand
             # objects per second, plus layer assembly overhead.
-            parts.append(f"подготовка ≈ {_duration(total / 1048576 * 0.45)}")
+            parts.append(
+                i18n.trf(
+                    "подготовка ≈ {}",
+                    _duration(total / 1048576 * 0.45),
+                )
+            )
         if not parts:
-            return "Оценка времени появится после проверки карт."
+            return i18n.tr("Оценка времени появится после проверки карт.")
         text = ", ".join(parts)
-        return (
-            f"{text[0].upper()}{text[1:]}. Точная статистика появится "
-            "после загрузки карт."
+        return i18n.trf(
+            "{}. Точная статистика появится после загрузки карт.",
+            f"{text[0].upper()}{text[1:]}",
         )
 
     def _pbf_probe_failed(self, message):
-        self.pbf_info.setText(f"Не удалось оценить PBF: {message}")
+        self._pbf_info_state = None
+        self.pbf_info.setText(
+            i18n.trf("Не удалось оценить PBF: {}", message)
+        )
 
     def _server_changed(self, _index):
         if self.source_mode.currentData() != "overpass":
@@ -1202,16 +1620,24 @@ class XtopoDockWidget(QDockWidget):
         if url:
             self.source_value.setText(url)
             self.source_value.setEnabled(False)
-            self.source_value.setPlaceholderText("URL выбранного сервера")
+            self.source_value.setPlaceholderText(
+                i18n.tr("URL выбранного сервера")
+            )
             self.source_hint.setText(
-                "Проверка серверов выполняется в фоне. При подготовке данных "
-                "плагин использует только доступные серверы."
+                i18n.tr(
+                    "Проверка серверов выполняется в фоне. При подготовке "
+                    "данных плагин использует только доступные серверы."
+                )
             )
         else:
             self.source_value.setEnabled(True)
             self.source_value.clear()
-            self.source_value.setPlaceholderText("https://example.org/api/interpreter")
-            self.source_hint.setText("Укажите URL своего Overpass API.")
+            self.source_value.setPlaceholderText(
+                "https://example.org/api/interpreter"
+            )
+            self.source_hint.setText(
+                i18n.tr("Укажите URL своего Overpass API.")
+            )
 
     def _check_servers(self, force=False):
         if not force and self._servers_checked:
@@ -1222,7 +1648,7 @@ class XtopoDockWidget(QDockWidget):
         self.recheck_servers.setEnabled(False)
         self.server_workers = []
         for server in DEFAULT_OVERPASS_SERVERS:
-            self._set_server_status(server.url, "проверка…")
+            self._set_server_status(server.url, i18n.tr("проверка…"))
         for server in DEFAULT_OVERPASS_SERVERS:
             worker = ServerCheckWorker(server.url, self)
             worker.checked.connect(self._server_checked)
@@ -1252,24 +1678,30 @@ class XtopoDockWidget(QDockWidget):
         if index < 0:
             return
         if ok:
-            self._set_server_status(url, f"доступен ({detail} с)")
-            tooltip = f"Тестовый запрос выполнен за {detail} с"
+            self._set_server_status(
+                url, i18n.trf("доступен ({} с)", detail)
+            )
+            tooltip = i18n.trf("Тестовый запрос выполнен за {} с", detail)
         else:
-            self._set_server_status(url, "недоступен")
-            tooltip = detail
+            self._set_server_status(url, i18n.tr("недоступен"))
+            tooltip = i18n.tr(detail)
         self.overpass_server.setItemData(index, tooltip, _tooltip_role())
         if not ok and self.overpass_server.currentIndex() == index:
             self.source_hint.setText(
-                "Выбранный сервер не отвечает. При подготовке данных плагин "
-                "попробует остальные доступные серверы."
+                i18n.tr(
+                    "Выбранный сервер не отвечает. При подготовке данных "
+                    "плагин попробует остальные доступные серверы."
+                )
             )
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._fit_language_button()
         if not self._narrowed:
             self._narrowed = True
-            # После показа панели известна её естественная ширина.
-            QTimer.singleShot(0, self._narrow_minimum_width)
+            # После показа панели известна её естественная ширина: по
+            # умолчанию панель занимает минимальную ширину.
+            QTimer.singleShot(0, self._collapse_to_minimum)
         mode = self.source_mode.currentData()
         if mode == "overpass":
             self._check_servers()
@@ -1334,8 +1766,24 @@ class XtopoDockWidget(QDockWidget):
         ]
         return min(checked) if checked else 10
 
-    def _isolines_step_toggled(self, value, _checked):
-        self._apply_isolines_step(value)
+    def _isolines_step_toggled(self, value, checked):
+        if checked:
+            # Отметка включает кратность и все кратные ей (как раньше).
+            self._apply_isolines_step(value)
+            return
+        # Снятие убирает только эту галочку: набор кратностей можно
+        # уточнять по одной отметке. Последнюю снять нельзя.
+        others = any(
+            box.isChecked()
+            for other, box in self.isolines_steps.items()
+            if other != value
+        )
+        if others:
+            return
+        box = self.isolines_steps[value]
+        box.blockSignals(True)
+        box.setChecked(True)
+        box.blockSignals(False)
 
     def _apply_isolines_step(self, step):
         step = max(1, int(step))
@@ -1392,17 +1840,35 @@ class XtopoDockWidget(QDockWidget):
         self.download_terrain.setChecked(self.settings.value("download_terrain", "false") == "true")
         if self.dem_dir.text().strip():
             self.download_terrain.setChecked(False)
-        try:
-            step = int(self.settings.value("isolines_step", 10))
-        except (TypeError, ValueError):
-            step = 10
-        self._set_isolines_step(step)
+        saved_steps = str(self.settings.value("isolines_steps", "") or "")
+        checked = []
+        for item in saved_steps.split(","):
+            item = item.strip()
+            if item.isdigit():
+                checked.append(int(item))
+        if checked:
+            known = set(self.isolines_steps)
+            checked = [value for value in checked if value in known]
+            for value, box in self.isolines_steps.items():
+                box.blockSignals(True)
+                box.setChecked(value in checked)
+                box.blockSignals(False)
+        else:
+            try:
+                step = int(self.settings.value("isolines_step", 10))
+            except (TypeError, ValueError):
+                step = 10
+            self._set_isolines_step(step)
         method = str(self.settings.value("terrain_resample_method", "cubicspline"))
         self.resample_method.setCurrentIndex(
             max(0, self.resample_method.findData(method))
         )
         self.generate_terrain.setChecked(self.settings.value("generate_terrain", "false") == "true")
         self._terrain_changed(self.generate_terrain.isChecked())
+        hidden = self.settings.value("hidden_panels", [])
+        if isinstance(hidden, str):
+            hidden = [hidden] if hidden else []
+        self._hidden_panels = [str(name) for name in hidden or []]
 
     def _save_settings(self):
         self.settings.setValue("projects_dir", self.projects_dir.text())
@@ -1421,10 +1887,20 @@ class XtopoDockWidget(QDockWidget):
         self.settings.setValue("download_terrain", str(self.download_terrain.isChecked()).lower())
         self.settings.setValue("generate_terrain", str(self.generate_terrain.isChecked()).lower())
         self.settings.setValue("isolines_step", str(self._current_isolines_step()))
+        checked_steps = ",".join(
+            str(value)
+            for value, box in sorted(self.isolines_steps.items())
+            if box.isChecked()
+        )
+        self.settings.setValue("isolines_steps", checked_steps)
         self.settings.setValue(
             "terrain_resample_method",
             self.resample_method.currentData() or "cubicspline",
         )
+        if self._hidden_panels:
+            self.settings.setValue("hidden_panels", list(self._hidden_panels))
+        else:
+            self.settings.remove("hidden_panels")
 
     def _connect_project_signals(self):
         project = QgsProject.instance()
@@ -1468,10 +1944,42 @@ class XtopoDockWidget(QDockWidget):
     def _project_closed(self):
         self._own_marker = False
         self.project_panel.reset_atlas_state()
+        # Проект закрыт — возвращаем стандартные панели QGIS.
+        self.restore_panels()
         self._schedule_project_refresh()
 
     def _schedule_project_refresh(self, *_args):
         self._project_timer.start()
+
+    def _apply_panel_visibility(self):
+        """Прячет стандартные панели QGIS при открытии проекта."""
+        return self._hide_panels()
+
+    def _hide_panels(self):
+        """Прячет стандартные панели QGIS и запоминает их имена."""
+        hidden = hide_docks(self.iface, keep=(PLUGIN_DOCK_NAME,))
+        if hidden:
+            self._hidden_panels = sorted(set(self._hidden_panels) | set(hidden))
+            self._save_settings()
+        return hidden
+
+    def restore_panels(self):
+        """Возвращает панели QGIS, скрытые плагином."""
+        names = list(self._hidden_panels)
+        restored = show_docks(self.iface, names) if names else []
+        if names:
+            self._hidden_panels = []
+            self._save_settings()
+        return restored
+
+    def _show_panels(self):
+        # Кнопка переключает видимость: скрытые панели возвращает,
+        # видимые скрывает. Автоматическое скрытие при открытии проекта
+        # при этом не отключается: оно всегда включено.
+        if self._hidden_panels:
+            self.restore_panels()
+        else:
+            self._hide_panels()
 
     def _refresh_project_state(self):
         was_own = self._own_project_open
@@ -1482,20 +1990,102 @@ class XtopoDockWidget(QDockWidget):
             self.tabs.setTabEnabled(index, is_project if own else not is_project)
         self.project_panel.refresh()
         if own:
+            # Панели скрываем при каждом открытии проекта, а не только при
+            # первом: кнопка переключает видимость только сейчас,
+            # а следующее открытие снова оставит на экране панель плагина.
+            self._apply_panel_visibility()
             if not was_own:
                 self.log_toggle.setChecked(False)
                 set_canvas_magnification(self.iface)
+                self._patch_transliteration()
+                apply_map_language(iface=self.iface)
+                # Скрытие панелей меняет размер холста, поэтому охват
+                # вписываем после пересчёта размера интерфейса.
+                QTimer.singleShot(0, lambda: fit_project_extent(self.iface))
             self.tabs.setCurrentWidget(self.project_panel)
             self.project_panel.focus_first()
         else:
             self.tabs.setCurrentIndex(0)
         self._update_action_buttons()
 
+    def _patch_transliteration(self):
+        """Добавляет в подписи проекта запасной вариант с транслитерацией.
+
+        Если функция `readable_name` в QGIS не зарегистрирована, ветка из
+        подписей убирается: иначе QGIS не нарисовал бы ни одной подписи.
+        """
+        project = QgsProject.instance()
+        try:
+            was_dirty = project.isDirty()
+        except Exception:
+            was_dirty = False
+        available = functions_available()
+        patch_project_labeling(project, available)
+        try:
+            project.setDirty(was_dirty)
+        except Exception:
+            pass
+        if not available:
+            self._append_log(
+                "WARNING: Функция readable_name не зарегистрирована — "
+                "подписи показаны без транслитерации. Перезапустите QGIS."
+            )
+
+    def _switch_language(self):
+        i18n.cycle_language()
+
+    def _language_changed(self, _code=None):
+        self.retranslate()
+
+    def retranslate(self):
+        """Переводит интерфейс на текущий язык без пересборки панели."""
+        translate_tree(self)
+        self.language_button.setText(i18n.language().upper())
+        self.language_button.setToolTip(i18n.tr("Язык интерфейса"))
+        self._fit_language_button()
+        self._retranslate_dynamic()
+        self.project_panel.retranslate()
+
+    def _retranslate_dynamic(self):
+        """Пересобирает динамические подписи на текущем языке."""
+        self._render_pbf_info()
+        plan = self._geofabrik_plan
+        if plan is None:
+            return
+        chosen = set(self._geofabrik_selected_ids())
+        self._apply_geofabrik_plan(plan)
+        self._restore_geofabrik_selection(chosen)
+
+    def _restore_geofabrik_selection(self, chosen):
+        checked, unchecked = _checked_state()
+        widget = self.geofabrik_maps
+        widget.blockSignals(True)
+        try:
+            for row in range(widget.count()):
+                entry = widget.item(row)
+                identifier = entry.data(_user_role())
+                if not identifier:
+                    continue
+                entry.setCheckState(
+                    checked if identifier in chosen else unchecked
+                )
+        finally:
+            widget.blockSignals(False)
+        self._update_geofabrik_summary()
+
     def _update_action_buttons(self):
         can_create = not self._running and not self._own_project_open
         self.prepare_button.setEnabled(can_create)
-        self.open_button.setEnabled(can_create)
+        # Открыть можно только существующий проект: путь берётся из полей
+        # «Каталог проектов» и «Имя проекта».
+        path = self._project_file_path()
+        self.open_button.setEnabled(
+            can_create and path is not None and path.exists()
+        )
+        self.close_button.setEnabled(self._own_project_open and not self._running)
+        self.choose_extent.setEnabled(can_create)
         _set_primary(self.prepare_button, can_create)
+        _set_primary(self.choose_extent, can_create)
 
     def _build_config(self):
         mode = self.source_mode.currentData()
@@ -1517,7 +2107,7 @@ class XtopoDockWidget(QDockWidget):
                 raise ValueError("Замените user@server на адрес вашего сервера")
         if mode == "geofabrik" and self._geofabrik_plan is not None:
             if not self._geofabrik_plan.maps:
-                raise ValueError("Для этого bbox карты Geofabrik не найдены")
+                raise ValueError("Для этого охвата карты Geofabrik не найдены")
             if not self._geofabrik_selected_ids():
                 raise ValueError("Выберите хотя бы одну карту Geofabrik")
         endpoints = [server.url for server in DEFAULT_OVERPASS_SERVERS]
@@ -1580,7 +2170,7 @@ class XtopoDockWidget(QDockWidget):
         try:
             config = self._build_config()
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", str(exc))
+            QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
             return
         self._pbf_probe_timer.stop()
         if self.pbf_probe is not None and self.pbf_probe.isRunning():
@@ -1592,6 +2182,8 @@ class XtopoDockWidget(QDockWidget):
             self.geofabrik_worker.wait(1000)
         self._save_settings()
         self.log.clear()
+        if self.log_window_text is not None:
+            self.log_window_text.clear()
         self.log_toggle.setChecked(True)
         self._set_status("Подготовка...")
         self.progress.setRange(0, 100)
@@ -1618,12 +2210,36 @@ class XtopoDockWidget(QDockWidget):
         self._update_action_buttons()
 
     def _set_status(self, message):
-        self.status.setText(message)
+        message = i18n.tr(message)
         self.status.setToolTip(message)
+        self.status.setText(_short_status(message))
+
+    def _open_log_window(self):
+        if self.log_window is None:
+            self.log_window = QDialog(self)
+            self.log_window.setWindowTitle("Журнал QGIS-xtopo")
+            self.log_window.resize(850, 500)
+            window_layout = QVBoxLayout(self.log_window)
+            self.log_window_text = QPlainTextEdit(self.log_window)
+            self.log_window_text.setReadOnly(True)
+            self.log_window_text.setMaximumBlockCount(2000)
+            self.log_window_text.setPlainText(self.log.toPlainText())
+            window_layout.addWidget(self.log_window_text)
+            translate_tree(self.log_window)
+        self.log_window.show()
+        self.log_window.raise_()
+        self.log_window.activateWindow()
 
     def _append_log(self, message):
+        if message.lstrip().casefold().startswith(("результаты", "results")):
+            return
+        message = i18n.tr(message)
         timestamp = QTime.currentTime().toString("HH:mm:ss")
-        self.log.appendPlainText(f"[{timestamp}] {message}")
+        line = f"[{timestamp}] {message}"
+        self.log.appendPlainText(line)
+        if self.log_window_text is not None:
+            self.log_window_text.appendPlainText(line)
+            self.log_window_text.ensureCursorVisible()
         self._set_status(message)
         self.log.ensureCursorVisible()
 
@@ -1636,12 +2252,17 @@ class XtopoDockWidget(QDockWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self._set_running(False)
-        self._set_status("Готово")
         self._append_log(f"Готово: {path}")
+        # В строке статуса путь не помещается: показываем короткий текст,
+        # полный остаётся в журнале и в подсказке.
+        self._set_status("Готово")
         try:
             open_project(path, self.iface, repair=False)
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", f"Проект создан, но не открылся: {exc}")
+            QMessageBox.warning(
+                self, "QGIS-xtopo",
+                i18n.trf("Проект создан, но не открылся: {}", exc),
+            )
         if self.source_mode.currentData() == "geofabrik":
             self._schedule_geofabrik()
 
@@ -1651,7 +2272,7 @@ class XtopoDockWidget(QDockWidget):
         self._set_status("Ошибка")
         self.log_toggle.setChecked(True)
         self._append_log(f"Ошибка: {message}")
-        QMessageBox.critical(self, "QGIS-xtopo", message)
+        QMessageBox.critical(self, "QGIS-xtopo", i18n.tr(message))
 
     def _cancelled(self):
         self.worker = None
@@ -1675,11 +2296,23 @@ class XtopoDockWidget(QDockWidget):
             config = self._build_config()
             path = project_file(config)
             if not path.exists():
-                QMessageBox.warning(self, "QGIS-xtopo", f"Проект не найден: {path}")
+                QMessageBox.warning(
+                    self, "QGIS-xtopo",
+                    i18n.trf("Проект не найден: {}", path),
+                )
                 return
             open_project(path, self.iface)
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", str(exc))
+            QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
+
+    def _close_project(self):
+        if not self._own_project_open:
+            return
+        if self.iface is not None and hasattr(self.iface, "newProject"):
+            self.iface.newProject(True)
+        else:
+            QgsProject.instance().clear()
+        self._schedule_project_refresh()
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

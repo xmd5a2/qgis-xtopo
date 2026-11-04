@@ -78,6 +78,10 @@ def split_layer():
     return step("split_layer")
 
 
+def linestopolygons(drop_others=False):
+    return step("linestopolygons", drop_others=drop_others)
+
+
 RECIPES = {
     "water": Recipe([
         fix(), save(), dissolve(), singleparts(), save("_dissolved"),
@@ -166,30 +170,45 @@ RECIPES = {
         fix(), save(layer_name="mountain_area_fixed"),
     ]),
     "plateau": Recipe([
+        # Шаблон показывает «plateau node» — узлы с тегом natural=plateau
+        # (точки с названиями), поэтому исходный слой сохраняем отдельно,
+        # до исправления геометрии.
+        save(suffix="_original", layer_name="plateau"),
         fix(), save(layer_name="plateau_fixed"),
     ]),
     "glacier": Recipe([
-        fix(), save(), polygonstolines(), save("_lines"), load("glacier"),
+        # Ледник — только замкнутый контур или мультиполигон: разомкнутые
+        # way и прочую геометрию отбрасываем, иначе смешанный тип слоя
+        # ломал его запись (полигоны сплющивались в линии).
+        linestopolygons(drop_others=True), fix(), save(),
+        polygonstolines(), save("_lines"), load("glacier"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("id"), save("_names"),
+        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
     ]),
     "bay_polygon": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("bay_polygon"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(0.25, -1), simplify(0.002), smooth(10), dissolve("id"), save("_names"),
+        skeleton(0.25, -1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
     ]),
     "wetland": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("wetland"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("id"), save("_names"),
+        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
     ]),
     "wood": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("wood"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("id"), save("_names"),
+        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
     ]),
     "strait": Recipe([
-        fix(), save(),
+        # Шаблон ждёт два файла: strait.sqlite (исходные объекты — точки
+        # проливов и линии) и strait_skel.sqlite (остовные линии
+        # многоугольников проливов).
+        save(),
+        linestopolygons(drop_others=True), fix(),
+        buffer(0.002), buffer(-0.002), simplify(0.0002),
+        skeleton(0.25, -1), simplify(0.002), smooth(10),
+        dissolve("@id"), save("_skel"),
     ]),
     "coastline": Recipe([
         save(),
@@ -217,9 +236,24 @@ RECIPES = {
         buffer(0.004), dissolve("name"), centroid(), reproject(),
         save("_buffered_dissolved_centroids"),
     ]),
+    "barrier": Recipe([
+        # Замкнутые барьеры GDAL/OSM может отнести к полигонам (например,
+        # стена кладбища). Для слоя «barrier way» нужны линии: превращаем
+        # полигоны в их контуры.
+        save(), polygonstolines(), save("_lines"),
+    ]),
     "railway_halt_icons": Recipe([
         buffer(0.004), dissolve("name"), centroid(), reproject(),
         save("_buffered_dissolved_centroids"),
+    ]),
+    # Площадные дороги (highway=* с area=yes или area:highway=*) OSM рисует
+    # замкнутым контуром, но драйвер отдаёт их линиями: слой с заливкой
+    # такой контур не рисует. Замкнутые линии превращаем в полигоны.
+    "highway_main_area": Recipe([
+        linestopolygons(), save(),
+    ]),
+    "place_square_highway_area": Recipe([
+        linestopolygons(), save(),
     ]),
     "aerialway_station": Recipe([
         buffer(0.004), dissolve("name"), centroid(), reproject(),
