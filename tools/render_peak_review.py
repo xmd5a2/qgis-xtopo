@@ -37,7 +37,8 @@ from matplotlib.colors import LightSource
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from check_peak_placement import (  # noqa: E402
-    DemTiles, fill_nan, find_osmium, half_pixels, read_waterways,
+    DemTiles, fill_nan, find_osmium, find_summit, half_pixels, read_waterways,
+    ridge_mask,
 )
 
 METRES_PER_DEGREE = 111320.0
@@ -45,16 +46,20 @@ METRES_PER_DEGREE = 111320.0
 
 def load_rows(csv_path):
     """Читает CSV с метриками пиков."""
+    numeric = (
+        "lon", "lat", "dem", "max3", "min3", "max5", "summit_distance",
+        "summit_drop", "cross300", "cross600", "ridge_distance", "ele",
+    )
     rows = []
     with Path(csv_path).open(encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            for key in ("lon", "lat", "dem", "max3", "min3"):
-                row[key] = float(row[key]) if row[key] not in ("", None) else float("nan")
-            row["lon"] = float(row["lon"])
-            row["lat"] = float(row["lat"])
+            for key in numeric:
+                value = row.get(key, "")
+                row[key] = float(value) if value not in ("", None) else float("nan")
             for key in list(row):
                 if key.startswith("drop"):
-                    row[key] = float(row[key]) if row[key] not in ("", None) else float("nan")
+                    value = row[key]
+                    row[key] = float(value) if value not in ("", None) else float("nan")
             rows.append(row)
     return rows
 
@@ -105,40 +110,6 @@ def select_rows(rows, limit, verdicts, radius_column):
     return chosen
 
 
-def find_summit(smooth, lon, lat, half_x, half_y, search_x, search_y, dem_value, zoom):
-    """Самая высокая точка рельефа в радиусе поиска.
-
-    Берётся максимум по сглаженной поверхности: на сыром DEM максимум
-    попадает на случайный шумовой выброс, и метка уезжает с вершины.
-    Сглаживание ставит метку на гребень/вершину устойчиво.
-
-    Координаты считаются по увеличенной сетке, поэтому шаг ячейки
-    делится на zoom.
-    """
-    rows, columns = smooth.shape
-    row_center = rows // 2
-    column_center = columns // 2
-    row_from = max(0, row_center - search_y * zoom)
-    row_to = min(rows, row_center + search_y * zoom + 1)
-    column_from = max(0, column_center - search_x * zoom)
-    column_to = min(columns, column_center + search_x * zoom + 1)
-    values = smooth[row_from:row_to, column_from:column_to]
-    if values.size == 0:
-        return None
-    flat = int(np.argmax(values))
-    row_index, column = divmod(flat, values.shape[1])
-    height = float(values[row_index, column])
-    if height <= dem_value + 5:
-        return None
-    lon_min = lon - half_x / 3600.0
-    lat_min = lat - half_y / 3600.0
-    return (
-        lon_min + (column_from + column + 0.5) / 3600.0 / zoom,
-        lat_min + (row_from + row_index + 0.5) / 3600.0 / zoom,
-        height,
-    )
-
-
 def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
     """Рисует фрагмент карты вокруг пика."""
     lon = row["lon"]
@@ -153,8 +124,10 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
 
     zoom = 3
     surface = ndimage.zoom(window, zoom, order=3)
-    lon_span = 2 * half_x / 3600.0
-    lat_span = 2 * half_y / 3600.0
+    # Окно занимает ±half_x/half_y пикселей вокруг точки, то есть
+    # полуширина в градусах — half_x/3600, а не удвоенная.
+    lon_span = half_x / 3600.0
+    lat_span = half_y / 3600.0
     extent = (lon - lon_span, lon + lon_span, lat - lat_span, lat + lat_span)
 
     # SRTM в горах шумный, поэтому подложку и изолинии считаем по
@@ -167,6 +140,12 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
 
     figure, axes = plt.subplots(figsize=(7.2, 7.2), dpi=120)
     axes.imshow(shade, cmap="gray", extent=extent, origin="lower", vmin=0.15, vmax=0.95)
+
+    # Гребни: ячейки, у которых поперёк склона рельеф ниже с обеих сторон.
+    ridges = ridge_mask(window, lat)
+    overlay = np.zeros((*ridges.shape, 4), dtype="float32")
+    overlay[ridges] = (0.15, 0.65, 0.25, 0.35)
+    axes.imshow(overlay, extent=extent, origin="lower", interpolation="nearest")
 
     span = float(np.nanmax(smooth) - np.nanmin(smooth))
     if span > 500:
@@ -207,37 +186,18 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
             markerfacecolor="0.55", markeredgecolor="0.25", linestyle="none", zorder=4,
         )
 
-    # Ближайший названный пик OSM — для масштаба: где стоят настоящие вершины.
-    nearest = None
-    for other in peaks_index:
-        if other is row or not other["name"].strip():
-            continue
-        distance = math.hypot(
-            (other["lon"] - lon) * METRES_PER_DEGREE * math.cos(math.radians(lat)),
-            (other["lat"] - lat) * METRES_PER_DEGREE,
-        )
-        if distance > 3000:
-            continue
-        if nearest is None or distance < nearest[0]:
-            nearest = (distance, other)
-    if nearest is not None:
-        distance, other = nearest
-        axes.plot(
-            other["lon"], other["lat"], marker="^", markersize=10,
-            markerfacecolor="#1a5fb4", markeredgecolor="black",
-            linestyle="none", zorder=6,
-        )
-        axes.text(
-            other["lon"], other["lat"] + lat_span * 0.02,
-            f"{other['name']} ({distance / 1000:.1f} км)", color="#1a5fb4",
-            fontsize=8, ha="center", zorder=7,
-        )
-
-    # Ближайшая настоящая вершина (локальный максимум рельефа).
-    search_x, search_y = half_pixels(600, lat)
-    summit = find_summit(
-        smooth, lon, lat, half_x, half_y, search_x, search_y, row["dem"], zoom
-    )
+    # Ближайшая локальная вершина рельефа — тот же алгоритм, что и в
+    # проверке: локальный максимум сглаженного DEM.
+    summit = None
+    found = find_summit(window, lat, row["dem"])
+    if found is not None:
+        distance, drop, summit_row, summit_column = found
+        if distance > 0:
+            summit = (
+                lon - half_x / 3600.0 + (summit_column + 0.5) / 3600.0,
+                lat - half_y / 3600.0 + (summit_row + 0.5) / 3600.0,
+                row["dem"] + drop,
+            )
 
     axes.plot(lon, lat, marker="^", markersize=13, markerfacecolor="#e02020",
               markeredgecolor="black", linestyle="none", zorder=6)
@@ -248,8 +208,9 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
         axes.plot([lon, summit[0]], [lat, summit[1]], color="#e02020",
                   linestyle="--", linewidth=1.0, zorder=5)
         axes.text(
-            summit[0], summit[1] + lat_span * 0.02, f"+{summit[2] - row['dem']:.0f} м",
-            color="#1a6b2a", fontsize=9, ha="center", zorder=7,
+            summit[0], summit[1] - lat_span * 0.03,
+            f"вершина +{summit[2] - row['dem']:.0f} м",
+            color="#1a6b2a", fontsize=9, ha="center", va="top", zorder=7,
         )
 
     verdict = row["verdict"]
@@ -257,22 +218,27 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
         verdict, "black"
     )
     title = {
-        "error": "ОШИБКА: пик не на вершине",
+        "error": "ОШИБКА: пик не на хребте",
         "suspect": "ПОДОЗРИТЕЛЬНО",
-        "mismatch": "РАСХОЖДЕНИЕ ele",
+        "ok": "В ПОРЯДКЕ",
     }.get(verdict, verdict)
     name = row["name"] or "(без названия)"
+    ele_text = "—" if row["ele"] != row["ele"] else f"{row['ele']:.0f}"
     axes.set_title(
         f"node/{row['osm_id']}  ·  {title}\n"
-        f"{name}  ·  OSM ele={row['ele'] or '—'}  ·  DEM={row['dem']:.0f} м",
+        f"{name}  ·  OSM ele={ele_text}  ·  DEM={row['dem']:.0f} м",
         fontsize=10, color=colour,
     )
     axes.text(
         0.015, 0.985,
         "\n".join([
-            f"ниже вершины на {row.get('drop600') or 0:.0f} м (радиус 600 м)",
+            f"до ближайшего гребня: {row['ridge_distance']:.0f} м",
+            f"поперёк склона (600 м): {row['cross600']:+.0f} м",
+            ("ближайшая вершина рельефа: "
+             f"{row['summit_distance']:.0f} м, +{row['summit_drop']:.0f} м")
+            if row['summit_distance'] > 0
+            else "точка сама локальный максимум DEM",
             f"локальный макс. в 90 м: {row['max3']:.0f} м",
-            f"локальный мин. в 90 м: {row['min3']:.0f} м",
             f"правка: {row['timestamp'][:10]}  {row['user'] or '(без пользователя)'}",
         ]),
         transform=axes.transAxes, fontsize=8, va="top", ha="left",
@@ -304,11 +270,15 @@ def main(argv=None):
     parser.add_argument("--out", required=True, help="каталог для картинок")
     parser.add_argument("--limit", type=int, default=60, help="сколько пиков показать")
     parser.add_argument(
+        "--ids", default="",
+        help="список osm_id через запятую: рисовать только их",
+    )
+    parser.add_argument(
         "--verdicts", default="error,suspect",
         help="вердикты для просмотра через запятую",
     )
     parser.add_argument(
-        "--radius", type=float, default=1200.0,
+        "--radius", type=float, default=1500.0,
         help="радиус фрагмента карты, м (по умолчанию 1200)",
     )
     parser.add_argument(
@@ -322,7 +292,11 @@ def main(argv=None):
 
     rows = load_rows(arguments.csv)
     verdicts = [item.strip() for item in arguments.verdicts.split(",") if item.strip()]
-    chosen = select_rows(rows, arguments.limit, verdicts, "drop600")
+    ids = [item.strip() for item in arguments.ids.split(",") if item.strip()]
+    if ids:
+        chosen = [row for row in rows if row["osm_id"] in set(ids)]
+    else:
+        chosen = select_rows(rows, arguments.limit, verdicts, "drop600")
     print(f"Кандидатов: {len(chosen)}")
 
     dem = DemTiles(arguments.dem_cache, download=True)
@@ -362,8 +336,8 @@ def main(argv=None):
         caption = (
             f"<b class='{row['verdict']}'>{row['verdict']}</b> "
             f"node/{row['osm_id']} — {html.escape(row['name'] or 'без названия')}<br>"
-            f"DEM={row['dem']:.0f} м, OSM ele={row['ele'] or '—'}, "
-            f"ниже вершины на {row.get('drop600') or 0:.0f} м<br>"
+            f"DEM={row['dem']:.0f} м, вершина в {row['summit_distance']:.0f} м "
+            f"(+{row['summit_drop']:.0f} м)<br>"
             f"{row['timestamp'][:10]} · {html.escape(row['user'] or 'без пользователя')}"
             f" · {html.escape(row['file'])}"
         )

@@ -27,6 +27,7 @@
 """
 
 import argparse
+import csv
 import gzip
 import json
 import math
@@ -58,6 +59,8 @@ NAME_TAGS = ("name", "alt_name", "official_name", "short_name", "old_name",
 # Допуск шума SRTM: вершиной считаем точку, не ниже максимума в окне.
 SUMMIT_TOLERANCE = 8.0
 SUMMIT_TOLERANCE_WIDE = 15.0
+# Допуск, с которым точка считается стоящей на локальном максимуме.
+LOCAL_MAX_TOLERANCE = 3.0
 
 OPL_TAIL = re.compile(r"\s+x(-?[\d.]+)\s+y(-?[\d.]+)\s*$")
 OPL_HEAD = re.compile(r"\s+v(\d+)\s+d\S*\s+c(\d+)\s+t(\S+)\s+i(\d+)\s+u(.*)$")
@@ -81,6 +84,19 @@ def tile_name(lat, lon):
     north = f"N{lat:02d}" if lat >= 0 else f"S{abs(lat):02d}"
     east = f"E{lon:03d}" if lon >= 0 else f"W{abs(lon):03d}"
     return f"{north}{east}"
+
+
+OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]{2})")
+
+
+def decode_opl_value(value):
+    """Раскодирует значение тега из OPL.
+
+    osmium пишет пробел как ``%20%`` (с лишним процентом), остальные
+    спецсимволы — как ``%XX``.
+    """
+    value = value.replace("%20%", " ").replace("%20", " ")
+    return OPL_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), value)
 
 
 def parse_opl(line):
@@ -108,7 +124,7 @@ def parse_opl(line):
     for item in body[split + 2:].split(","):
         if "=" in item:
             key, value = item.split("=", 1)
-            tags[key] = value
+            tags[decode_opl_value(key)] = decode_opl_value(value)
     head = OPL_HEAD.search(body[:split])
     result = {"lon": lon, "lat": lat, "tags": tags}
     if head:
@@ -154,6 +170,16 @@ class Peak:
                 except ValueError:
                     return None
         return None
+
+    @property
+    def anonymous(self):
+        """Ни названия, ни высоты — только такие пики и проверяем.
+
+        Узлы с названием или ele считаются нормальными и не трогаются:
+        ошибка в них встречается заметно реже, а исправлять положение
+        пиков в этом инструменте не предполагается.
+        """
+        return not self.name and self.ele is None
 
     @property
     def natural(self):
@@ -409,6 +435,11 @@ class Metrics:
     min3: float = float("nan")
     max5: float = float("nan")
     drop: dict = field(default_factory=dict)
+    summit_distance: float = float("nan")
+    summit_drop: float = float("nan")
+    cross300: float = float("nan")
+    cross600: float = float("nan")
+    ridge_distance: float = float("nan")
 
     @property
     def on_summit(self):
@@ -436,7 +467,70 @@ class Metrics:
         return float("nan") if value is None else value
 
 
-def measure(peak, dem, radii):
+def find_summit(window, lat, dem_value, tolerance=50.0):
+    """Ближайший локальный максимум DEM.
+
+    Локальный максимум — ячейка не ниже всех восьми соседей.  Он не
+    обязан быть выдающейся вершиной: на хребте это может быть бугор
+    рядом с точкой.  Допускаются максимумы ниже точки на tolerance
+    метров — на хребте соседний бугор часто чуть ниже.
+
+    Возвращает (расстояние в метрах, превышение над точкой, строка,
+    столбец) либо None.
+    """
+    maximum = ndimage.maximum_filter(window, size=3, mode="nearest")
+    is_peak = window >= maximum - 1e-6
+    rows, columns = window.shape
+    row_center = rows // 2
+    column_center = columns // 2
+    rows_index, columns_index = np.nonzero(is_peak)
+    best = None
+    metres_lat = 111320.0
+    metres_lon = metres_lat * math.cos(math.radians(lat))
+    for row, column in zip(rows_index, columns_index):
+        height = float(window[row, column])
+        if height < dem_value - tolerance:
+            continue
+        dy = (row - row_center) * metres_lat / 3600.0
+        dx = (column - column_center) * metres_lon / 3600.0
+        distance = math.hypot(dx, dy)
+        if best is None or distance < best[0]:
+            best = (distance, height - dem_value, int(row), int(column))
+    return best
+
+
+def cross_profile(smoothed, lat, radius):
+    """Поперечный профиль склона для каждой ячейки окна.
+
+    Для каждой ячейки берётся линия падения склона и две точки на
+    расстоянии radius поперёк неё.  Возвращает превышение более высокой
+    из них над ячейкой: отрицательное значение — гребень (обе стороны
+    ниже), положительное — долина или склон.
+    """
+    gradient_y, gradient_x = np.gradient(smoothed)
+    norm = np.hypot(gradient_x, gradient_y) + 1e-9
+    across_x = gradient_y / norm
+    across_y = -gradient_x / norm
+    metres_lat = 111320.0 / 3600.0
+    metres_lon = 111320.0 * math.cos(math.radians(lat)) / 3600.0
+    row_grid, column_grid = np.indices(smoothed.shape)
+    sides = []
+    for sign in (1, -1):
+        sample_rows = row_grid + sign * across_y * radius / metres_lat
+        sample_columns = column_grid + sign * across_x * radius / metres_lon
+        sides.append(ndimage.map_coordinates(
+            smoothed, [sample_rows, sample_columns], order=1, mode="nearest"
+        ))
+    return np.maximum(sides[0] - smoothed, sides[1] - smoothed)
+
+
+def ridge_mask(window, lat, ridge_cross=-20.0, radius=600):
+    """Ячейки-гребни: поперёк склона рельеф ниже с обеих сторон."""
+    smoothed = ndimage.gaussian_filter(window, 1.0)
+    return cross_profile(smoothed, lat, radius) <= ridge_cross
+
+
+def measure(peak, dem, radii, thresholds):
     """Метрики положения пика по рельефу.
 
     Считается одно окно по радиусу 1500 м, из него берутся и локальные
@@ -488,40 +582,105 @@ def measure(peak, dem, radii):
             )
             - metrics.dem
         )
+    # Поперечный профиль склона: на хребте рельеф ниже по обе стороны от
+    # линии падения, в долине — выше, на склоне — выше с одной стороны.
+    # Считается для каждой ячейки окна, чтобы найти ближайший гребень.
+    metrics.cross300 = float(
+        cross_profile(smoothed, peak.lat, 300)[row_center, column_center]
+    )
+    metrics.cross600 = float(
+        cross_profile(smoothed, peak.lat, 600)[row_center, column_center]
+    )
+    ridges = ridge_mask(window, peak.lat, thresholds["ridge_cross"])
+    metres_lat = 111320.0 / 3600.0
+    metres_lon = 111320.0 * math.cos(math.radians(peak.lat)) / 3600.0
+    if ridges.any():
+        distances = ndimage.distance_transform_edt(
+            ~ridges, sampling=(metres_lat, metres_lon)
+        )
+        metrics.ridge_distance = float(distances[row_center, column_center])
+    else:
+        metrics.ridge_distance = float(outer)
+
+    summit = find_summit(window, peak.lat, metrics.dem)
+    if summit is not None:
+        metrics.summit_distance = summit[0]
+        metrics.summit_drop = summit[1]
+    else:
+        # Отдельной вершины в окне нет: считаем, что ближайшая — за
+        # пределом поиска, а превышение — максимум окна.
+        metrics.summit_distance = float(outer)
+        metrics.summit_drop = float(np.max(smoothed) - metrics.dem)
     return metrics
 
 
-def classify(peak, metrics, thresholds):
+def neighbour_stats(results, radius=2000.0):
+    """Сравнение каждого пика с соседними пиками OSM.
+
+    Ошибочный пик обычно оказывается ниже соседей: рядом стоят
+    настоящие вершины, а он — в долине между ними.  Возвращает словарь
+    osm_id -> (число соседей в радиусе, максимальная разница высот DEM
+    с соседом, расстояние до ближайшего более высокого соседа).
+    """
+    grid = defaultdict(list)
+    for peak, metrics, _verdict, _flags, _mismatch in results:
+        if math.isnan(metrics.dem):
+            continue
+        grid[(int(peak.lon / 0.05), int(peak.lat / 0.05))].append((peak, metrics.dem))
+    stats = {}
+    for peak, metrics, _verdict, _flags, _mismatch in results:
+        if math.isnan(metrics.dem):
+            continue
+        key = (int(peak.lon / 0.05), int(peak.lat / 0.05))
+        neighbours = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                neighbours.extend(grid.get((key[0] + dx, key[1] + dy), ()))
+        count = 0
+        drop = 0.0
+        nearest = float("nan")
+        for other, other_dem in neighbours:
+            if other is peak:
+                continue
+            distance = math.hypot(
+                (other.lon - peak.lon) * 111320.0 * math.cos(math.radians(peak.lat)),
+                (other.lat - peak.lat) * 111320.0,
+            )
+            if distance > radius:
+                continue
+            count += 1
+            difference = other_dem - metrics.dem
+            if difference > 10 and (math.isnan(nearest) or distance < nearest):
+                nearest = distance
+            if difference > drop:
+                drop = difference
+        stats[peak.osm_id] = (count, drop, nearest)
+    return stats
+
+
+def classify(peak, metrics, thresholds, neighbour=None):
     """Вердикт по пику.
 
-    Основная группа проверки — пики без названия: у них ошибка
-    положения встречается вдвое чаще, а названные пики почти всегда
-    поставлены на настоящую вершину (их геометрическое срабатывание —
-    чаще погрешность самого рельефа).
+    Проверяются только пики без названия и без ele: у остальных
+    положение не трогаем.  Критерий ошибки — пик далеко от ближайшей
+    локальной вершины рельефа и заметно ниже неё.
 
     error — безымянный пик явно не на вершине;
-    error_named — то же, но у пика есть название (редко, стоит взглянуть);
-    named_suspect — названный пик не проходит проверку положения
-    (вероятнее всего, погрешность рельефа или широко��ая вершина);
     suspect — безымянный пик с умеренными признаками ошибки;
-    mismatch — расхождение тега ele с DEM;
-    ok — остальное.
+    skipped — у пика есть название или ele (не проверяем);
+    ok — безымянный пик стоит на вершине.
     """
     flags = []
     drop = metrics.drop_at(thresholds["radius"])
     deep = metrics.drop_at(thresholds["deep_radius"])
 
-    named = bool(peak.name)
-    if not named:
-        flags.append("без названия")
+    if not peak.anonymous:
+        reason = "с названием" if peak.name else "с ele"
+        return "skipped", [f"не проверяется ({reason})"], None
 
     if not math.isnan(deep) and deep >= thresholds["deep_drop"]:
         flags.append(
             f"ниже вершины на {deep:.0f} м в радиусе {thresholds['deep_radius']} м"
-        )
-    elif not math.isnan(drop) and drop >= thresholds["drop"]:
-        flags.append(
-            f"ниже вершины на {drop:.0f} м в радиусе {thresholds['radius']} м"
         )
     if metrics.in_pit:
         flags.append("локальный минимум DEM (дно долины или яма)")
@@ -530,30 +689,57 @@ def classify(peak, metrics, thresholds):
     elif not metrics.on_summit_wide:
         flags.append("не локальный максимум DEM в пределах 150 м")
 
-    ele = peak.ele
-    mismatch = None
-    if ele is not None and not math.isnan(metrics.dem):
-        mismatch = ele - metrics.dem
-        if abs(mismatch) >= thresholds["ele_mismatch"]:
-            flags.append(f"ele={ele:.0f} расходится с DEM на {mismatch:+.0f} м")
+    distance = metrics.summit_distance
+    summit_drop = metrics.summit_drop
+    if not math.isnan(distance):
+        flags.append(
+            f"ближайшая вершина рельефа в {distance:.0f} м"
+            f", выше на {summit_drop:.0f} м"
+        )
+    if not math.isnan(metrics.cross600):
+        if metrics.cross600 > thresholds["ridge_cross"]:
+            flags.append(
+                "не на хребте: поперёк склона выше на "
+                f"{metrics.cross600:.0f} м (600 м)"
+            )
+        else:
+            flags.append(
+                "на хребте: поперёк склона ниже на "
+                f"{-metrics.cross600:.0f} м (600 м)"
+            )
+    if not math.isnan(distance) and distance > thresholds["summit_distance"]:
+        flags.append(
+            f"ближайший локальный максимум дальше {distance:.0f} м"
+        )
+    if not math.isnan(metrics.ridge_distance):
+        flags.append(f"до ближайшего гребня {metrics.ridge_distance:.0f} м")
 
-    deep_drop = max(
-        [value for value in (drop, deep) if not math.isnan(value)] or [0.0]
+    if neighbour is not None:
+        _count, neighbour_drop, nearest = neighbour
+        if neighbour_drop >= 30:
+            where = (
+                f", ближайший выше в {nearest:.0f} м"
+                if not math.isnan(nearest)
+                else ""
+            )
+            flags.append(
+                f"ниже соседних пиков OSM на {neighbour_drop:.0f} м{where}"
+            )
+
+    # Ошибка — пик далеко от ближайшего локального максимума или далеко
+    # от ближайшего гребня.  Небольшое смещение от гребня (до 100 м) и
+    # вершина в стороне (до 400 м) допустимы: такие узлы стоят на
+    # отрогах и в OSM считаются нормальными.
+    far_from_max = (
+        not math.isnan(distance) and distance > thresholds["summit_distance"]
     )
-    wrong_place = metrics.in_pit or (
-        deep_drop >= thresholds["deep_drop"] and not metrics.on_summit_wide
+    far_from_ridge = (
+        not math.isnan(metrics.ridge_distance)
+        and metrics.ridge_distance > thresholds["ridge_distance"]
     )
-    if wrong_place:
-        verdict = "error_named" if named else "error"
-    elif mismatch is not None and abs(mismatch) >= thresholds["ele_mismatch"]:
-        verdict = "mismatch"
-    elif named:
-        verdict = "named_suspect"
-    elif not metrics.on_summit or deep_drop >= thresholds["drop"]:
-        verdict = "suspect"
-    else:
-        verdict = "ok"
-    return verdict, flags, mismatch
+    wrong_place = far_from_max or far_from_ridge
+    verdict = "error" if wrong_place else "ok"
+    return verdict, flags, None
 
 
 def cluster_points(items, cell_degrees=0.02):
@@ -596,46 +782,50 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
 
     csv_path = output_dir / "peaks.csv"
     header = [
-        "osm_id", "lon", "lat", "name", "named", "ele", "dem", "max3", "min3",
-        "max5", "on_summit", "on_summit_wide", "in_pit", "verdict", "flags",
-        "ele_minus_dem", "timestamp", "user", "changeset", "source", "file",
+        "osm_id", "lon", "lat", "name", "ele", "dem", "max3", "min3", "max5",
+        "on_summit", "on_summit_wide", "in_pit", "summit_distance", "summit_drop",
+        "cross300", "cross600", "ridge_distance", "verdict", "flags", "timestamp", "user", "changeset", "source", "file",
     ]
     for radius in radii:
         header.append(f"drop{radius}")
-    lines = [",".join(header)]
-    for peak, metrics, verdict, flags, mismatch in results:
-        row = [
-            peak.osm_id,
-            f"{peak.lon:.7f}",
-            f"{peak.lat:.7f}",
-            peak.name.replace('"', '""'),
-            "1" if peak.name else "0",
-            "" if peak.ele is None else f"{peak.ele:.0f}",
-            f"{metrics.dem:.0f}",
-            f"{metrics.max3:.0f}",
-            f"{metrics.min3:.0f}",
-            f"{metrics.max5:.0f}",
-            "1" if metrics.on_summit else "0",
-            "1" if metrics.on_summit_wide else "0",
-            "1" if metrics.in_pit else "0",
-            verdict,
-            "; ".join(flags).replace('"', '""'),
-            "" if mismatch is None else f"{mismatch:.0f}",
-            peak.timestamp,
-            peak.user,
-            str(peak.changeset),
-            peak.tags.get("source", ""),
-            peak.source_file,
-        ]
-        for radius in radii:
-            value = metrics.drop_at(radius)
-            row.append("" if math.isnan(value) else f"{value:.0f}")
-        lines.append(",".join(row))
-    csv_path.write_text("\n".join(lines), encoding="utf-8")
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        for peak, metrics, verdict, flags, _mismatch in results:
+            row = [
+                peak.osm_id,
+                f"{peak.lon:.7f}",
+                f"{peak.lat:.7f}",
+                peak.name,
+                "" if peak.ele is None else f"{peak.ele:.0f}",
+                f"{metrics.dem:.0f}",
+                f"{metrics.max3:.0f}",
+                f"{metrics.min3:.0f}",
+                f"{metrics.max5:.0f}",
+                "1" if metrics.on_summit else "0",
+                "1" if metrics.on_summit_wide else "0",
+                "1" if metrics.in_pit else "0",
+                f"{metrics.summit_distance:.0f}",
+                f"{metrics.summit_drop:.0f}",
+                f"{metrics.cross300:.0f}",
+                f"{metrics.cross600:.0f}",
+                f"{metrics.ridge_distance:.0f}",
+                verdict,
+                "; ".join(flags),
+                peak.timestamp,
+                peak.user,
+                str(peak.changeset),
+                peak.tags.get("source", ""),
+                peak.source_file,
+            ]
+            for radius in radii:
+                value = metrics.drop_at(radius)
+                row.append("" if math.isnan(value) else f"{value:.0f}")
+            writer.writerow(row)
 
     features = []
     for peak, metrics, verdict, flags, mismatch in results:
-        if verdict == "ok":
+        if verdict not in ("error", "suspect"):
             continue
         features.append({
             "type": "Feature",
@@ -655,8 +845,12 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
                 "on_summit": metrics.on_summit,
                 "on_summit_wide": metrics.on_summit_wide,
                 "in_pit": metrics.in_pit,
+                "summit_distance": round(metrics.summit_distance, 1),
+                "summit_drop": round(metrics.summit_drop, 1),
+                "cross300": round(metrics.cross300, 1),
+                "cross600": round(metrics.cross600, 1),
+                "ridge_distance": round(metrics.ridge_distance, 1),
                 "flags": "; ".join(flags),
-                "ele_minus_dem": None if mismatch is None else round(mismatch, 1),
                 "timestamp": peak.timestamp,
                 "user": peak.user,
                 "changeset": peak.changeset,
@@ -685,13 +879,10 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
 def build_report(peaks, results, radii, thresholds):
     verdicts = Counter(item[2] for item in results)
     total = len(results)
-    named = [item for item in results if item[0].name]
-    unnamed = [item for item in results if not item[0].name]
-    errors = [item for item in results if item[2] == "error"]
-    errors_named = [item for item in results if item[2] == "error_named"]
-    suspects = [item for item in results if item[2] == "suspect"]
-    named_suspects = [item for item in results if item[2] == "named_suspect"]
-    mismatches = [item for item in results if item[2] == "mismatch"]
+    anonymous = [item for item in results if item[0].anonymous]
+    skipped = [item for item in results if item[2] == "skipped"]
+    errors = [item for item in anonymous if item[2] == "error"]
+    suspects = [item for item in anonymous if item[2] == "suspect"]
     without_dem = sum(1 for item in results if math.isnan(item[1].dem))
 
     lines = []
@@ -700,38 +891,33 @@ def build_report(peaks, results, radii, thresholds):
     lines.append(f"Всего пиков: {total}")
     if without_dem:
         lines.append(f"  без данных DEM (тайл не скачан): {without_dem}")
-    lines.append(f"  с названием: {len(named)}   без названия: {len(unnamed)}")
+    lines.append(f"  без названия и без ele (проверяются): {len(anonymous)}")
+    lines.append(f"  с названием или ele (не трогаем): {len(skipped)}")
     lines.append("")
     lines.append("Вердикты: " + ", ".join(
         f"{name}={count}" for name, count in sorted(verdicts.items())
     ))
     lines.append("")
 
-    lines.append("Доля пиков, стоящих не на вершине")
+    lines.append("Проверяемая группа (без названия и без ele)")
     lines.append("-" * 62)
-    lines.append("Без названия — основная группа: такие узлы чаще всего")
-    lines.append("и есть ошибочные пики в долинах.")
+    lines.append(f"пиков: {len(anonymous)}")
+    lines.append(f"  ошибок (далеко от гребня или вершины): {len(errors)}")
+    lines.append(f"  в порядке: {len(anonymous) - len(errors)}")
+    if anonymous:
+        lines.append(
+            f"  доля ошибок: {len(errors) / len(anonymous) * 100:.1f} %"
+        )
     lines.append("")
-    lines.append(f"{'группа':<34}{'пиков':>8}{'не на вершине':>16}")
-    for label, group in (
-        ("без названия", unnamed),
-        ("с названием", named),
-        ("все", results),
-    ):
-        wrong = sum(1 for item in group if item[2] in ("error", "error_named"))
-        share = wrong / len(group) * 100 if group else 0
-        lines.append(f"{label:<34}{len(group):>8}{share:>13.1f} %")
-    lines.append("")
-    lines.append(f"Ошибок без названия: {len(errors)}")
-    lines.append(f"Ошибок с названием (стоит взглянуть): {len(errors_named)}")
-    lines.append(f"Подозрительных без названия: {len(suspects)}")
-    lines.append(f"Названных, не прошедших проверку (скорее всего погрешность "
-                 f"рельефа): {len(named_suspects)}")
-    lines.append(f"Расхождений ele с DEM: {len(mismatches)}")
+    lines.append(
+        "Ошибка: ближайший локальный максимум дальше "
+        f"{thresholds['summit_distance']:.0f} м или ближайший гребень "
+        f"дальше {thresholds['ridge_distance']:.0f} м."
+    )
     lines.append("")
 
     if errors:
-        lines.append("Ошибки без названия: срез по источнику данных")
+        lines.append("Ошибки: срез по источнику данных")
         lines.append("-" * 62)
         sources = Counter(
             item[0].tags.get("source", "(нет source)") for item in errors
@@ -739,64 +925,44 @@ def build_report(peaks, results, radii, thresholds):
         for source, count in sources.most_common(10):
             lines.append(f"  {count:>5}  {source}")
         lines.append("")
-        lines.append("Ошибки без названия: срез по дате правки")
+        lines.append("Ошибки: срез по дате правки")
         lines.append("-" * 62)
         dates = Counter(item[0].timestamp[:10] for item in errors)
         for date, count in dates.most_common(10):
             lines.append(f"  {count:>5}  {date}")
         lines.append("")
-
-    if errors_named:
-        lines.append("Ошибки с названием (список для выборочной проверки)")
+        lines.append("Ошибки: срез по стране (файл OSM)")
         lines.append("-" * 62)
-        for peak, metrics, _verdict, flags, _mismatch in errors_named[:20]:
-            lines.append(
-                f"  node/{peak.osm_id:<12} {peak.lat:8.4f} N {peak.lon:9.4f} E  "
-                f"{peak.name[:28]:<28} DEM={metrics.dem:6.0f} м"
-            )
-        lines.append("")
-
-    if errors:
-        lines.append("Все ошибки: срез по стране (файл OSM)")
-        lines.append("-" * 62)
-        files = Counter(item[0].source_file for item in errors + errors_named)
+        files = Counter(item[0].source_file for item in errors)
         for source, count in files.most_common(10):
             lines.append(f"  {count:>5}  {source}")
         lines.append("")
 
-    suspects_all = errors + errors_named + suspects
-    if suspects_all:
-        clusters = cluster_points(suspects_all)
+    if errors or suspects:
+        clusters = cluster_points(errors + suspects)
         clusters.sort(key=len, reverse=True)
-        lines.append(f"Кластеры подозрительных пиков (всего кластеров: {len(clusters)})")
+        lines.append(f"Кластеры (всего: {len(clusters)})")
         lines.append("-" * 62)
         for group in clusters[:15]:
             if len(group) < 2:
                 continue
             lon = sum(item[0].lon for item in group) / len(group)
             lat = sum(item[0].lat for item in group) / len(group)
-            users = Counter(item[0].user or "(без пользователя)" for item in group)
             dates = Counter(item[0].timestamp[:10] for item in group)
             lines.append(
                 f"  {len(group):>4} пиков  {lat:8.4f} N  {lon:9.4f} E   "
                 f"даты: {', '.join(f'{d}×{c}' for d, c in dates.most_common(3))}"
             )
-            lines.append(f"        авторы: {', '.join(f'{u}×{c}' for u, c in users.most_common(3))}")
         lines.append("")
 
-    lines.append("Самые явные ошибки (ниже вершины больше всего)")
+    lines.append("Самые явные ошибки (сильнее всего не на хребте)")
     lines.append("-" * 62)
-    ranked = sorted(
-        errors + errors_named,
-        key=lambda item: item[1].drop_at(thresholds["deep_radius"]),
-        reverse=True,
-    )
-    for peak, metrics, _verdict, flags, _mismatch in ranked[:30]:
-        drop = metrics.drop_at(thresholds["deep_radius"])
+    ranked = sorted(errors, key=lambda item: item[1].cross600, reverse=True)
+    for peak, metrics, _verdict, _flags, _mismatch in ranked[:30]:
         lines.append(
             f"  node/{peak.osm_id:<12} {peak.lat:8.4f} N {peak.lon:9.4f} E  "
-            f"DEM={metrics.dem:6.0f} м  ниже вершины на {drop:6.0f} м  "
-            f"{peak.timestamp[:10]}  {peak.name[:20]:<20} {'; '.join(flags)}"
+            f"DEM={metrics.dem:6.0f} м  поперёк склона "
+            f"{metrics.cross600:+.0f} м (600 м)  {peak.timestamp[:10]}"
         )
     lines.append("")
     return "\n".join(lines)
@@ -844,8 +1010,17 @@ def main(argv=None):
         help="провал от вершины, за которым считаем ошибкой, м",
     )
     parser.add_argument(
-        "--ele-mismatch", type=float, default=50.0,
-        help="допустимое расхождение тега ele и DEM, м",
+        "--summit-distance", type=float, default=400.0,
+        help="предельное расстояние до ближайшего локального максимума, м",
+    )
+    parser.add_argument(
+        "--ridge-distance", type=float, default=100.0,
+        help="предельное расстояние до ближайшего гребня, м",
+    )
+    parser.add_argument(
+        "--ridge-cross", type=float, default=-20.0,
+        help="поперечный профиль (600 м), при котором ячейка считается "
+             "гребнем, м",
     )
     arguments = parser.parse_args(argv)
 
@@ -855,7 +1030,9 @@ def main(argv=None):
         "deep_radius": arguments.deep_radius,
         "drop": arguments.drop,
         "deep_drop": arguments.deep_drop,
-        "ele_mismatch": arguments.ele_mismatch,
+        "ridge_cross": arguments.ridge_cross,
+        "summit_distance": arguments.summit_distance,
+        "ridge_distance": arguments.ridge_distance,
     }
     radii = sorted({arguments.radius, arguments.deep_radius, 1500})
 
@@ -867,11 +1044,17 @@ def main(argv=None):
     dem = DemTiles(arguments.dem_cache, download=not arguments.no_download)
     results = []
     for index, peak in enumerate(peaks, 1):
-        metrics = measure(peak, dem, radii)
-        verdict, flags, mismatch = classify(peak, metrics, thresholds)
-        results.append((peak, metrics, verdict, flags, mismatch))
+        metrics = measure(peak, dem, radii, thresholds)
+        results.append((peak, metrics, "ok", [], None))
         if index % 1000 == 0:
             print(f"Проверено {index}/{len(peaks)}", flush=True)
+
+    print("Сравнение с соседними пиками", flush=True)
+    neighbours = neighbour_stats(results)
+    results = [
+        (peak, metrics, *classify(peak, metrics, thresholds, neighbours.get(peak.osm_id)))
+        for peak, metrics, _verdict, _flags, _mismatch in results
+    ]
 
     csv_path, geojson_path, report_path = write_reports(
         peaks, results, arguments.out, radii, thresholds
