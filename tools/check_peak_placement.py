@@ -28,6 +28,7 @@
 
 import argparse
 import csv
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import gzip
 import json
 import math
@@ -172,14 +173,22 @@ class Peak:
         return None
 
     @property
-    def anonymous(self):
-        """Ни названия, ни высоты — только такие пики и проверяем.
+    def category(self):
+        """Категория для отчёта.
 
-        Узлы с названием или ele считаются нормальными и не трогаются:
-        ошибка в них встречается заметно реже, а исправлять положение
-        пиков в этом инструменте не предполагается.
+        named — есть название, не проверяем;
+        ele_only — без названия, но с ele (проверяем отдельно);
+        anonymous — без названия и без ele (основная группа).
         """
-        return not self.name and self.ele is None
+        if self.name:
+            return "named"
+        if self.ele is not None:
+            return "ele_only"
+        return "anonymous"
+
+    @property
+    def anonymous(self):
+        return self.category == "anonymous"
 
     @property
     def natural(self):
@@ -213,11 +222,8 @@ def read_peaks(pbf_files, natural_values, osmium_bin):
     expression = "n/natural=" + ",".join(natural_values)
     peaks = []
     seen = set()
-    for path in pbf_files:
-        path = Path(path).expanduser()
-        if not path.exists():
-            print(f"WARNING: файл не найден, пропущен: {path}", file=sys.stderr)
-            continue
+
+    def extract(path):
         command = [
             osmium_bin, "tags-filter", "-f", "opl", str(path), expression,
         ]
@@ -226,7 +232,20 @@ def read_peaks(pbf_files, natural_values, osmium_bin):
             raise SystemExit(
                 f"osmium tags-filter не отработал для {path}:\n{result.stderr}"
             )
-        for line in result.stdout.splitlines():
+        return result.stdout
+
+    paths = []
+    for path in pbf_files:
+        path = Path(path).expanduser()
+        if not path.exists():
+            print(f"WARNING: файл не найден, пропущен: {path}", file=sys.stderr)
+            continue
+        paths.append(path)
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(paths)))) as pool:
+        outputs = list(pool.map(extract, paths))
+
+    for path, output in zip(paths, outputs):
+        for line in output.splitlines():
             record = parse_opl(line)
             if record is None:
                 continue
@@ -591,7 +610,9 @@ def measure(peak, dem, radii, thresholds):
     metrics.cross600 = float(
         cross_profile(smoothed, peak.lat, 600)[row_center, column_center]
     )
-    ridges = ridge_mask(window, peak.lat, thresholds["ridge_cross"])
+    ridges = ridge_mask(
+        window, peak.lat, thresholds["ridge_cross"], thresholds["ridge_radius"]
+    )
     metres_lat = 111320.0 / 3600.0
     metres_lon = 111320.0 * math.cos(math.radians(peak.lat)) / 3600.0
     if ridges.any():
@@ -674,9 +695,8 @@ def classify(peak, metrics, thresholds, neighbour=None):
     drop = metrics.drop_at(thresholds["radius"])
     deep = metrics.drop_at(thresholds["deep_radius"])
 
-    if not peak.anonymous:
-        reason = "с названием" if peak.name else "с ele"
-        return "skipped", [f"не проверяется ({reason})"], None
+    if peak.category == "named":
+        return "skipped", ["не проверяется (с названием)"], None
 
     if not math.isnan(deep) and deep >= thresholds["deep_drop"]:
         flags.append(
@@ -782,7 +802,7 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
 
     csv_path = output_dir / "peaks.csv"
     header = [
-        "osm_id", "lon", "lat", "name", "ele", "dem", "max3", "min3", "max5",
+        "osm_id", "lon", "lat", "category", "name", "ele", "dem", "max3", "min3", "max5",
         "on_summit", "on_summit_wide", "in_pit", "summit_distance", "summit_drop",
         "cross300", "cross600", "ridge_distance", "verdict", "flags", "timestamp", "user", "changeset", "source", "file",
     ]
@@ -796,6 +816,7 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
                 peak.osm_id,
                 f"{peak.lon:.7f}",
                 f"{peak.lat:.7f}",
+                peak.category,
                 peak.name,
                 "" if peak.ele is None else f"{peak.ele:.0f}",
                 f"{metrics.dem:.0f}",
@@ -836,6 +857,7 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
             "properties": {
                 "osm_id": f"node/{peak.osm_id}",
                 "verdict": verdict,
+                "category": peak.category,
                 "name": peak.name,
                 "ele": peak.ele,
                 "dem": round(metrics.dem, 1),
@@ -879,11 +901,14 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
 def build_report(peaks, results, radii, thresholds):
     verdicts = Counter(item[2] for item in results)
     total = len(results)
-    anonymous = [item for item in results if item[0].anonymous]
+    anonymous = [item for item in results if item[0].category == "anonymous"]
+    ele_only = [item for item in results if item[0].category == "ele_only"]
     skipped = [item for item in results if item[2] == "skipped"]
-    errors = [item for item in anonymous if item[2] == "error"]
-    suspects = [item for item in anonymous if item[2] == "suspect"]
+    errors = [item for item in results if item[2] == "error"]
     without_dem = sum(1 for item in results if math.isnan(item[1].dem))
+
+    def errors_in(group):
+        return [item for item in group if item[2] == "error"]
 
     lines = []
     lines.append("Проверка положения пиков OSM по рельефу SRTM")
@@ -891,28 +916,32 @@ def build_report(peaks, results, radii, thresholds):
     lines.append(f"Всего пиков: {total}")
     if without_dem:
         lines.append(f"  без данных DEM (тайл не скачан): {without_dem}")
-    lines.append(f"  без названия и без ele (проверяются): {len(anonymous)}")
-    lines.append(f"  с названием или ele (не трогаем): {len(skipped)}")
+    lines.append(f"  с названием (не проверяем): {len(skipped)}")
+    lines.append(f"  без названия и без ele: {len(anonymous)}")
+    lines.append(f"  без названия, но с ele: {len(ele_only)}")
     lines.append("")
     lines.append("Вердикты: " + ", ".join(
         f"{name}={count}" for name, count in sorted(verdicts.items())
     ))
     lines.append("")
 
-    lines.append("Проверяемая группа (без названия и без ele)")
+    lines.append("Результат по категориям")
     lines.append("-" * 62)
-    lines.append(f"пиков: {len(anonymous)}")
-    lines.append(f"  ошибок (далеко от гребня или вершины): {len(errors)}")
-    lines.append(f"  в порядке: {len(anonymous) - len(errors)}")
-    if anonymous:
-        lines.append(
-            f"  доля ошибок: {len(errors) / len(anonymous) * 100:.1f} %"
-        )
+    lines.append(f"{'категория':<28}{'пиков':>8}{'ошибок':>8}{'доля':>8}")
+    for label, group in (
+        ("без названия и без ele", anonymous),
+        ("без названия, с ele", ele_only),
+        ("все проверенные", anonymous + ele_only),
+    ):
+        wrong = len(errors_in(group))
+        share = wrong / len(group) * 100 if group else 0
+        lines.append(f"{label:<28}{len(group):>8}{wrong:>8}{share:>7.1f}%")
     lines.append("")
     lines.append(
-        "Ошибка: ближайший локальный максимум дальше "
-        f"{thresholds['summit_distance']:.0f} м или ближайший гребень "
-        f"дальше {thresholds['ridge_distance']:.0f} м."
+        "Ошибка: ближайший гребень дальше "
+        f"{thresholds['ridge_distance']:.0f} м (гребень ищется на "
+        f"{thresholds['ridge_radius']:.0f} м) или ближайший локальный "
+        f"максимум дальше {thresholds['summit_distance']:.0f} м."
     )
     lines.append("")
 
@@ -938,10 +967,10 @@ def build_report(peaks, results, radii, thresholds):
             lines.append(f"  {count:>5}  {source}")
         lines.append("")
 
-    if errors or suspects:
-        clusters = cluster_points(errors + suspects)
+    if errors:
+        clusters = cluster_points(errors)
         clusters.sort(key=len, reverse=True)
-        lines.append(f"Кластеры (всего: {len(clusters)})")
+        lines.append(f"Кластеры ошибок (всего: {len(clusters)})")
         lines.append("-" * 62)
         for group in clusters[:15]:
             if len(group) < 2:
@@ -955,17 +984,30 @@ def build_report(peaks, results, radii, thresholds):
             )
         lines.append("")
 
-    lines.append("Самые явные ошибки (сильнее всего не на хребте)")
+    lines.append("Самые явные ошибки (дальше всего от гребня)")
     lines.append("-" * 62)
-    ranked = sorted(errors, key=lambda item: item[1].cross600, reverse=True)
+    ranked = sorted(errors, key=lambda item: item[1].ridge_distance, reverse=True)
     for peak, metrics, _verdict, _flags, _mismatch in ranked[:30]:
         lines.append(
             f"  node/{peak.osm_id:<12} {peak.lat:8.4f} N {peak.lon:9.4f} E  "
-            f"DEM={metrics.dem:6.0f} м  поперёк склона "
-            f"{metrics.cross600:+.0f} м (600 м)  {peak.timestamp[:10]}"
+            f"{peak.category:<10} DEM={metrics.dem:6.0f} м  "
+            f"гребень в {metrics.ridge_distance:5.0f} м  {peak.timestamp[:10]}"
         )
     lines.append("")
     return "\n".join(lines)
+
+
+_WORKER = {}
+
+
+def _measure_init(cache_dir, radii, thresholds, download):
+    _WORKER["dem"] = DemTiles(cache_dir, download=download)
+    _WORKER["radii"] = radii
+    _WORKER["thresholds"] = thresholds
+
+
+def _measure_one(peak):
+    return measure(peak, _WORKER["dem"], _WORKER["radii"], _WORKER["thresholds"])
 
 
 def main(argv=None):
@@ -994,6 +1036,10 @@ def main(argv=None):
         "--osmium", default=None, help="путь к бинарю osmium",
     )
     parser.add_argument(
+        "--jobs", type=int, default=0,
+        help="число процессов для расчёта рельефа (0 — по числу ядер)",
+    )
+    parser.add_argument(
         "--radius", type=int, default=300,
         help="радиус окна для проверки вершины, м (по умолчанию 300)",
     )
@@ -1010,12 +1056,16 @@ def main(argv=None):
         help="провал от вершины, за которым считаем ошибкой, м",
     )
     parser.add_argument(
-        "--summit-distance", type=float, default=400.0,
+        "--summit-distance", type=float, default=600.0,
         help="предельное расстояние до ближайшего локального максимума, м",
     )
     parser.add_argument(
         "--ridge-distance", type=float, default=100.0,
         help="предельное расстояние до ближайшего гребня, м",
+    )
+    parser.add_argument(
+        "--ridge-radius", type=int, default=300,
+        help="радиус, на котором ищется гребень, м",
     )
     parser.add_argument(
         "--ridge-cross", type=float, default=-20.0,
@@ -1033,6 +1083,7 @@ def main(argv=None):
         "ridge_cross": arguments.ridge_cross,
         "summit_distance": arguments.summit_distance,
         "ridge_distance": arguments.ridge_distance,
+        "ridge_radius": arguments.ridge_radius,
     }
     radii = sorted({arguments.radius, arguments.deep_radius, 1500})
 
@@ -1041,13 +1092,28 @@ def main(argv=None):
     peaks = read_peaks(arguments.pbf, natural_values, osmium_bin)
     print(f"Найдено пиков: {len(peaks)}")
 
-    dem = DemTiles(arguments.dem_cache, download=not arguments.no_download)
+    jobs = arguments.jobs or (os.cpu_count() or 1)
+    jobs = max(1, min(jobs, len(peaks)))
+    print(f"Расчёт рельефа в {jobs} процессе(ах)", flush=True)
     results = []
-    for index, peak in enumerate(peaks, 1):
-        metrics = measure(peak, dem, radii, thresholds)
-        results.append((peak, metrics, "ok", [], None))
-        if index % 1000 == 0:
-            print(f"Проверено {index}/{len(peaks)}", flush=True)
+    if jobs == 1:
+        dem = DemTiles(arguments.dem_cache, download=not arguments.no_download)
+        for peak in peaks:
+            results.append((peak, measure(peak, dem, radii, thresholds), "ok", [], None))
+    else:
+        with ProcessPoolExecutor(
+            max_workers=jobs,
+            initializer=_measure_init,
+            initargs=(
+                arguments.dem_cache, radii, thresholds,
+                not arguments.no_download,
+            ),
+        ) as pool:
+            measured = list(pool.map(_measure_one, peaks, chunksize=64))
+        results = [
+            (peak, metrics, "ok", [], None)
+            for peak, metrics in zip(peaks, measured)
+        ]
 
     print("Сравнение с соседними пиками", flush=True)
     neighbours = neighbour_stats(results)

@@ -19,6 +19,8 @@
 
 import argparse
 import csv
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import html
 import math
 import sys
@@ -224,9 +226,13 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
     }.get(verdict, verdict)
     name = row["name"] or "(без названия)"
     ele_text = "—" if row["ele"] != row["ele"] else f"{row['ele']:.0f}"
+    category = {
+        "anonymous": "без названия и ele",
+        "ele_only": "без названия, с ele",
+    }.get(row.get("category", ""), "")
     axes.set_title(
         f"node/{row['osm_id']}  ·  {title}\n"
-        f"{name}  ·  OSM ele={ele_text}  ·  DEM={row['dem']:.0f} м",
+        f"{name}  ·  {category}  ·  OSM ele={ele_text}  ·  DEM={row['dem']:.0f} м",
         fontsize=10, color=colour,
     )
     axes.text(
@@ -263,12 +269,36 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
     return out_path
 
 
+_RENDER = {}
+
+
+def _render_init(cache_dir, radius):
+    # Строки CSV и линии рек родитель загружает до создания пула: при
+    # fork процессы наследуют их без копирования и без повторного
+    # osmium (иначе каждый процесс читает весь PBF и не хватает памяти).
+    _RENDER["dem"] = DemTiles(cache_dir, download=True)
+    _RENDER["radius"] = radius
+
+
+def _render_one(item):
+    number, row, path = item
+    render_peak(
+        row, _RENDER["rows"], _RENDER["water"], _RENDER["dem"],
+        _RENDER["radius"], path,
+    )
+    return number, row["osm_id"], path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", required=True, help="CSV из check_peak_placement.py")
     parser.add_argument("--pbf", action="append", default=[], help="файлы OSM PBF")
     parser.add_argument("--out", required=True, help="каталог для картинок")
     parser.add_argument("--limit", type=int, default=60, help="сколько пиков показать")
+    parser.add_argument(
+        "--category", default="",
+        help="фильтр по категории: anonymous, ele_only",
+    )
     parser.add_argument(
         "--ids", default="",
         help="список osm_id через запятую: рисовать только их",
@@ -285,6 +315,10 @@ def main(argv=None):
         "--dem-cache", default=str(Path.home() / "qgis_projects" / "qgisxtopo-cache" / "srtm"),
     )
     parser.add_argument("--osmium", default=None)
+    parser.add_argument(
+        "--jobs", type=int, default=0,
+        help="число процессов для рендера (0 — по числу ядер)",
+    )
     arguments = parser.parse_args(argv)
 
     out_dir = Path(arguments.out)
@@ -296,29 +330,60 @@ def main(argv=None):
     if ids:
         chosen = [row for row in rows if row["osm_id"] in set(ids)]
     else:
-        chosen = select_rows(rows, arguments.limit, verdicts, "drop600")
+        pool = rows
+        if arguments.category:
+            pool = [row for row in rows if row.get("category") == arguments.category]
+        chosen = select_rows(pool, arguments.limit, verdicts, "drop600")
     print(f"Кандидатов: {len(chosen)}")
 
-    dem = DemTiles(arguments.dem_cache, download=True)
-    waterlines = []
-    if arguments.pbf:
-        osmium_bin = find_osmium(arguments.osmium)
-        print("Чтение водных объектов...")
-        waterlines = read_waterways(arguments.pbf, osmium_bin)
-        print(f"Линий водных объектов: {len(waterlines)}")
+    osmium_bin = find_osmium(arguments.osmium) if arguments.pbf else None
+    jobs = arguments.jobs or min(8, os.cpu_count() or 1)
+    jobs = max(1, min(jobs, len(chosen)))
+    print(f"Рендер в {jobs} процессе(ах)", flush=True)
 
-    index = []
+    # Готовим данные один раз — процессы-потомки получат их через fork.
+    _RENDER["rows"] = rows
+    _RENDER["water"] = (
+        read_waterways(arguments.pbf, osmium_bin) if arguments.pbf else []
+    )
+    if _RENDER["water"]:
+        print(f"Линий водных объектов: {len(_RENDER['water'])}", flush=True)
+
+    tasks = []
     for number, row in enumerate(chosen, 1):
         name = f"{number:03d}_{row['osm_id']}_{row['verdict']}.png"
-        path = out_dir / name
-        try:
-            render_peak(row, rows, waterlines, dem, arguments.radius, path)
-        except Exception as exc:  # noqa: BLE001 - один кадр не должен ронять всё
-            print(f"WARNING: не удалось нарисовать {row['osm_id']}: {exc}",
-                  file=sys.stderr)
-            continue
-        index.append((name, row))
-        print(f"{number}/{len(chosen)} {name}")
+        tasks.append((number, row, out_dir / name))
+
+    index = []
+    if jobs == 1:
+        _render_init(arguments.dem_cache, arguments.radius)
+        for task in tasks:
+            try:
+                _render_one(task)
+            except Exception as exc:  # noqa: BLE001
+                print(f"WARNING: не удалось нарисовать {task[1]['osm_id']}: {exc}",
+                      file=sys.stderr)
+                continue
+            index.append((task[2].name, task[1]))
+            print(f"{task[0]}/{len(tasks)} {task[2].name}", flush=True)
+    else:
+        with ProcessPoolExecutor(
+            max_workers=jobs,
+            initializer=_render_init,
+            initargs=(arguments.dem_cache, arguments.radius),
+        ) as pool:
+            futures = {pool.submit(_render_one, task): task for task in tasks}
+            for future in as_completed(futures):
+                task = futures[future]
+                try:
+                    number, osm_id, path = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"WARNING: не удалось нарисовать {task[1]['osm_id']}: {exc}",
+                          file=sys.stderr)
+                    continue
+                index.append((path.name, task[1]))
+                print(f"{len(index)}/{len(tasks)} {path.name}", flush=True)
+    index.sort(key=lambda item: item[0])
 
     html_path = out_dir / "index.html"
     parts = [

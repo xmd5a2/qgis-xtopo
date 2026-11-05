@@ -88,6 +88,7 @@ def load_peaks(csv_path):
 
             peaks.append({
                 "id": row["osm_id"],
+                "category": row.get("category", ""),
                 "lon": number("lon"),
                 "lat": number("lat"),
                 "verdict": row["verdict"],
@@ -95,6 +96,7 @@ def load_peaks(csv_path):
                 "summit_distance": number("summit_distance"),
                 "summit_drop": number("summit_drop"),
                 "drop600": number("drop600"),
+                "ridge_distance": number("ridge_distance"),
                 "flags": row.get("flags", ""),
                 "timestamp": row.get("timestamp", "")[:10],
                 "file": row.get("file", ""),
@@ -107,6 +109,7 @@ def build_html(peaks, out_dir):
     for peak in peaks:
         markers.append({
             "id": peak["id"],
+            "cat": peak["category"],
             "lat": peak["lat"],
             "lon": peak["lon"],
             "v": peak["verdict"],
@@ -114,6 +117,7 @@ def build_html(peaks, out_dir):
             "sd": round(peak["summit_distance"]) if peak["summit_distance"] == peak["summit_distance"] else None,
             "sp": round(peak["summit_drop"]) if peak["summit_drop"] == peak["summit_drop"] else None,
             "d600": round(peak["drop600"]) if peak["drop600"] == peak["drop600"] else None,
+            "rd": round(peak["ridge_distance"]) if peak["ridge_distance"] == peak["ridge_distance"] else None,
             "flags": peak["flags"],
             "date": peak["timestamp"],
             "file": peak["file"],
@@ -185,9 +189,10 @@ function popup(peak) {{
   const rows = [
     ['id', 'node/' + peak.id],
     ['координаты', peak.lat.toFixed(5) + ', ' + peak.lon.toFixed(5)],
+    ['категория', peak.cat === 'anonymous' ? 'без названия и ele' : 'без названия, с ele'],
     ['высота DEM', peak.dem === null ? '—' : peak.dem + ' м'],
     ['ближайшая вершина', peak.sd === null ? '—' : peak.sd + ' м, +' + peak.sp + ' м'],
-    ['провал в 600 м', peak.d600 === null ? '—' : peak.d600 + ' м'],
+    ['до гребня', peak.rd === null ? '—' : peak.rd + ' м'],
     ['правка', peak.date + (peak.file ? ' · ' + peak.file : '')],
   ];
   return '<div class="popup"><h3 style="color:' + colours[peak.v] + '">' +
@@ -198,9 +203,13 @@ function popup(peak) {{
 }}
 
 const list = document.getElementById('list');
-peaks.slice().sort((a, b) => (b.sd || 0) - (a.sd || 0)).forEach(peak => {{
+const shown = peaks.filter(p => p.v === 'error');
+document.getElementById('list').insertAdjacentHTML('beforebegin',
+  '<div style="color:#666;margin-bottom:6px;font-size:12px">В списке ошибки: ' +
+  shown.length + ' из ' + peaks.length + ' проверенных пиков</div>');
+shown.sort((a, b) => (b.rd || 0) - (a.rd || 0)).forEach(peak => {{
   const marker = L.circleMarker([peak.lat, peak.lon], {{
-    radius: 6, color: '#222', weight: 1,
+    radius: peak.v === 'error' ? 6 : 3, color: '#222', weight: 1,
     fillColor: colours[peak.v], fillOpacity: 0.9
   }}).addTo(map);
   marker.bindPopup(popup(peak));
@@ -211,7 +220,7 @@ peaks.slice().sort((a, b) => (b.sd || 0) - (a.sd || 0)).forEach(peak => {{
     '<span class="id">node/' + peak.id + '</span><br>' +
     '<span class="meta">' + peak.lat.toFixed(4) + ', ' + peak.lon.toFixed(4) +
     (peak.dem === null ? '' : ' · ' + peak.dem + ' м') +
-    (peak.sd === null ? '' : ' · вершина в ' + peak.sd + ' м') + '</span>';
+    (peak.rd === null ? '' : ' · гребень в ' + peak.rd + ' м') + '</span>';
   item.addEventListener('click', () => {{
     map.flyTo([peak.lat, peak.lon], 14, {{duration: 0.8}});
     setTimeout(() => marker.openPopup(), 900);
