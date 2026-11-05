@@ -1075,7 +1075,7 @@ def main(argv=None):
         help="предельное расстояние до ближайшего локального максимума, м",
     )
     parser.add_argument(
-        "--ridge-distance", type=float, default=50.0,
+        "--ridge-distance", type=float, default=60.0,
         help="предельное расстояние до ближайшего гребня, м",
     )
     parser.add_argument(
