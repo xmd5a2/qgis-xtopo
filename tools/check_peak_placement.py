@@ -773,7 +773,19 @@ def classify(peak, metrics, thresholds, neighbour=None):
         not math.isnan(metrics.ridge_distance)
         and metrics.ridge_distance > thresholds["ridge_distance"]
     )
-    verdict = "error" if far_from_ridge else "ok"
+    # Запасной признак: рельеф заметно выше уже в пределах 90 м, а на
+    # 600 м поперёк склона — ещё выше.  Это крутой склон, а не вершина.
+    steep = (
+        not math.isnan(metrics.max3)
+        and not math.isnan(metrics.cross600)
+        and metrics.max3 - metrics.dem >= thresholds["slope_drop"]
+        and metrics.cross600 > thresholds["slope_cross"]
+    )
+    if steep:
+        flags.append(
+            f"рельеф выше на {metrics.max3 - metrics.dem:.0f} м уже в 90 м"
+        )
+    verdict = "error" if (far_from_ridge or steep) else "ok"
     return verdict, flags, None
 
 
@@ -954,9 +966,11 @@ def build_report(peaks, results, radii, thresholds):
     lines.append("")
     lines.append(
         "Ошибка: ближайший гребень дальше "
-        f"{thresholds['ridge_distance']:.0f} м.  Выпуклость гребня ищется "
-        "на нескольких масштабах (60–500 м), поэтому широкие и пологие "
-        "хребты тоже распознаются."
+        f"{thresholds['ridge_distance']:.0f} м, либо рельеф выше пика на "
+        f"{thresholds['slope_drop']:.0f} м уже в 90 м при поперечном "
+        f"профиле больше {thresholds['slope_cross']:.0f} м.  Выпуклость "
+        "гребня ищется на нескольких масштабах (60–500 м), поэтому широкие "
+        "и пологие хребты тоже распознаются."
     )
     lines.append("")
 
@@ -1079,6 +1093,14 @@ def main(argv=None):
         help="предельное расстояние до ближайшего гребня, м",
     )
     parser.add_argument(
+        "--slope-drop", type=float, default=40.0,
+        help="превышение рельефа в 90 м для признака крутого склона, м",
+    )
+    parser.add_argument(
+        "--slope-cross", type=float, default=50.0,
+        help="поперечный профиль в 600 м для признака крутого склона, м",
+    )
+    parser.add_argument(
         "--ridge-radius", type=int, default=0,
         help="один радиус поиска гребня, м (0 — несколько масштабов)",
     )
@@ -1098,6 +1120,8 @@ def main(argv=None):
         "ridge_cross": arguments.ridge_cross,
         "summit_distance": arguments.summit_distance,
         "ridge_distance": arguments.ridge_distance,
+        "slope_drop": arguments.slope_drop,
+        "slope_cross": arguments.slope_cross,
         "ridge_radius": arguments.ridge_radius,
     }
     radii = sorted({arguments.radius, arguments.deep_radius, 1500})
