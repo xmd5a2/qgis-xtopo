@@ -166,7 +166,7 @@ def build_html(peaks, out_dir):
   <h1>Пики OSM на Кавказе</h1>
   <div style="margin-bottom:8px">{legend}</div>
   <div style="color:#666;margin-bottom:10px;font-size:12px">
-    Проверялись только пики без названия и без ele. Клик по строке или
+    Проверяются пики без названия: без ele и с ele. Клик по строке или
     точке центрирует карту; в подсказке — id, координаты и метрики.
   </div>
   <div id="list"></div>
@@ -202,18 +202,26 @@ function popup(peak) {{
     '<a target="_blank" href="https://www.openstreetmap.org/node/' + peak.id + '">открыть в OSM</a></div>';
 }}
 
-const list = document.getElementById('list');
-const shown = peaks.filter(p => p.v === 'error');
-document.getElementById('list').insertAdjacentHTML('beforebegin',
-  '<div style="color:#666;margin-bottom:6px;font-size:12px">В списке ошибки: ' +
-  shown.length + ' из ' + peaks.length + ' проверенных пиков</div>');
-shown.sort((a, b) => (b.rd || 0) - (a.rd || 0)).forEach(peak => {{
+// Точки на карте — все проверенные пики.
+const markers = {{}};
+peaks.forEach(peak => {{
   const marker = L.circleMarker([peak.lat, peak.lon], {{
-    radius: peak.v === 'error' ? 6 : 3, color: '#222', weight: 1,
-    fillColor: colours[peak.v], fillOpacity: 0.9
+    radius: peak.v === 'error' ? 6 : 4,
+    color: '#222', weight: 1,
+    fillColor: colours[peak.v],
+    fillOpacity: peak.v === 'error' ? 0.9 : 0.55
   }}).addTo(map);
   marker.bindPopup(popup(peak));
+  markers[peak.id] = marker;
+}});
 
+// Список — только ошибки, самые далёкие от гребня сверху.
+const list = document.getElementById('list');
+const shown = peaks.filter(p => p.v === 'error');
+list.insertAdjacentHTML('beforebegin',
+  '<div style="color:#666;margin-bottom:6px;font-size:12px">На карте ' +
+  peaks.length + ' проверенных пиков; в списке ошибки: ' + shown.length + '</div>');
+shown.sort((a, b) => (b.rd || 0) - (a.rd || 0)).forEach(peak => {{
   const item = document.createElement('div');
   item.className = 'item';
   item.innerHTML = '<span class="dot" style="background:' + colours[peak.v] + '"></span>' +
@@ -223,7 +231,7 @@ shown.sort((a, b) => (b.rd || 0) - (a.rd || 0)).forEach(peak => {{
     (peak.rd === null ? '' : ' · гребень в ' + peak.rd + ' м') + '</span>';
   item.addEventListener('click', () => {{
     map.flyTo([peak.lat, peak.lon], 14, {{duration: 0.8}});
-    setTimeout(() => marker.openPopup(), 900);
+    setTimeout(() => markers[peak.id].openPopup(), 900);
   }});
   list.appendChild(item);
 }});
