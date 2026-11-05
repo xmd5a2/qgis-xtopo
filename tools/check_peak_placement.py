@@ -543,10 +543,27 @@ def cross_profile(smoothed, lat, radius):
     return np.maximum(sides[0] - smoothed, sides[1] - smoothed)
 
 
-def ridge_mask(window, lat, ridge_cross=-20.0, radius=600):
-    """Ячейки-гребни: поперёк склона рельеф ниже с обеих сторон."""
+# Радиусы (в метрах), на которых ищется выпуклость гребня.  Мелкие
+# ловят острые гребни, крупные — широкие и пологие.
+RIDGE_SCALES = (60.0, 90.0, 150.0, 240.0, 360.0, 500.0)
+
+
+def ridge_mask(window, lat, ridge_cross=-10.0, radius=None):
+    """Ячейки-гребни: поперёк склона рельеф ниже с обеих сторон.
+
+    Выпуклость проверяется на нескольких масштабах: ячейка считается
+    гребнем, если хотя бы на одном из них обе стороны поперёк склона
+    ниже.  Иначе широкие и пологие гребни оставались бы незамеченными.
+    """
     smoothed = ndimage.gaussian_filter(window, 1.0)
-    return cross_profile(smoothed, lat, radius) <= ridge_cross
+    scales = (radius,) if radius else RIDGE_SCALES
+    cross = None
+    for scale in scales:
+        current = cross_profile(smoothed, lat, scale)
+        cross = current if cross is None else np.minimum(cross, current)
+    mask = cross <= ridge_cross
+    # Закрываем разрывы от шума, чтобы гребень был линией, а не точками.
+    return ndimage.binary_closing(mask, structure=np.ones((3, 3)))
 
 
 def measure(peak, dem, radii, thresholds):
@@ -611,7 +628,8 @@ def measure(peak, dem, radii, thresholds):
         cross_profile(smoothed, peak.lat, 600)[row_center, column_center]
     )
     ridges = ridge_mask(
-        window, peak.lat, thresholds["ridge_cross"], thresholds["ridge_radius"]
+        window, peak.lat, thresholds["ridge_cross"],
+        thresholds["ridge_radius"] or None,
     )
     metres_lat = 111320.0 / 3600.0
     metres_lon = 111320.0 * math.cos(math.radians(peak.lat)) / 3600.0
@@ -746,19 +764,16 @@ def classify(peak, metrics, thresholds, neighbour=None):
                 f"ниже соседних пиков OSM на {neighbour_drop:.0f} м{where}"
             )
 
-    # Ошибка — пик далеко от ближайшего локального максимума или далеко
-    # от ближайшего гребня.  Небольшое смещение от гребня (до 100 м) и
-    # вершина в стороне (до 400 м) допустимы: такие узлы стоят на
-    # отрогах и в OSM считаются нормальными.
-    far_from_max = (
-        not math.isnan(distance) and distance > thresholds["summit_distance"]
-    )
+    # Ошибка — пик далеко от ближайшего гребня.  Небольшое смещение
+    # (до 100 м) допустимо: пики в OSM часто стоят на отрогах, чуть в
+    # стороне от линии гребня.  Расстояние до локального максимума
+    # пишется в метрики, но в вердикт не входит: на широких хребтах
+    # вершина законно бывает в километре.
     far_from_ridge = (
         not math.isnan(metrics.ridge_distance)
         and metrics.ridge_distance > thresholds["ridge_distance"]
     )
-    wrong_place = far_from_max or far_from_ridge
-    verdict = "error" if wrong_place else "ok"
+    verdict = "error" if far_from_ridge else "ok"
     return verdict, flags, None
 
 
@@ -939,9 +954,9 @@ def build_report(peaks, results, radii, thresholds):
     lines.append("")
     lines.append(
         "Ошибка: ближайший гребень дальше "
-        f"{thresholds['ridge_distance']:.0f} м (гребень ищется на "
-        f"{thresholds['ridge_radius']:.0f} м) или ближайший локальный "
-        f"максимум дальше {thresholds['summit_distance']:.0f} м."
+        f"{thresholds['ridge_distance']:.0f} м.  Выпуклость гребня ищется "
+        "на нескольких масштабах (60–500 м), поэтому широкие и пологие "
+        "хребты тоже распознаются."
     )
     lines.append("")
 
@@ -1056,19 +1071,19 @@ def main(argv=None):
         help="провал от вершины, за которым считаем ошибкой, м",
     )
     parser.add_argument(
-        "--summit-distance", type=float, default=600.0,
+        "--summit-distance", type=float, default=200.0,
         help="предельное расстояние до ближайшего локального максимума, м",
     )
     parser.add_argument(
-        "--ridge-distance", type=float, default=100.0,
+        "--ridge-distance", type=float, default=50.0,
         help="предельное расстояние до ближайшего гребня, м",
     )
     parser.add_argument(
-        "--ridge-radius", type=int, default=300,
-        help="радиус, на котором ищется гребень, м",
+        "--ridge-radius", type=int, default=0,
+        help="один радиус поиска гребня, м (0 — несколько масштабов)",
     )
     parser.add_argument(
-        "--ridge-cross", type=float, default=-20.0,
+        "--ridge-cross", type=float, default=-10.0,
         help="поперечный профиль (600 м), при котором ячейка считается "
              "гребнем, м",
     )
