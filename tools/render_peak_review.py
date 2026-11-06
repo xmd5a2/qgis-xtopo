@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_peak_placement import (  # noqa: E402
     DemTiles, fill_nan, find_osmium, find_summit, half_pixels, read_waterways,
     ridge_mask,
+    divide_mask,
 )
 
 METRES_PER_DEGREE = 111320.0
@@ -50,7 +51,8 @@ def load_rows(csv_path):
     """Читает CSV с метриками пиков."""
     numeric = (
         "lon", "lat", "dem", "max3", "min3", "max5", "summit_distance",
-        "summit_drop", "cross300", "cross600", "ridge_distance", "ele",
+        "summit_drop", "cross300", "cross600", "ridge_distance",
+        "divide_distance", "sharp_distance", "ring_higher", "ele",
     )
     rows = []
     with Path(csv_path).open(encoding="utf-8") as handle:
@@ -148,6 +150,13 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
     overlay = np.zeros((*ridges.shape, 4), dtype="float32")
     overlay[ridges] = (0.15, 0.65, 0.25, 0.35)
     axes.imshow(overlay, extent=extent, origin="lower", interpolation="nearest")
+    # Водораздел — линия хребта, по которой принимается вердикт.
+    # На картинке показываем только те его ячейки, что лежат на гребне:
+    # на выпуклых склонах сток тоже расходится и заливает всё оранжевым.
+    divides = divide_mask(window, lat) & ridges
+    line = np.zeros((*divides.shape, 4), dtype="float32")
+    line[divides] = (1.0, 0.55, 0.0, 0.95)
+    axes.imshow(line, extent=extent, origin="lower", interpolation="nearest")
 
     span = float(np.nanmax(smooth) - np.nanmin(smooth))
     if span > 500:
@@ -238,7 +247,10 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
     axes.text(
         0.015, 0.985,
         "\n".join([
-            f"до ближайшего гребня: {row['ridge_distance']:.0f} м",
+            f"до гребня: {row['ridge_distance']:.0f} м, "
+            f"водораздел: {row['divide_distance']:.0f} м, "
+            f"острый гребень: {row['sharp_distance']:.0f} м",
+            f"кольцо 200 м выше точки на {row['ring_higher']:.0%}",
             f"поперёк склона (600 м): {row['cross600']:+.0f} м",
             ("ближайшая вершина рельефа: "
              f"{row['summit_distance']:.0f} м, +{row['summit_drop']:.0f} м")

@@ -459,6 +459,20 @@ class Metrics:
     cross300: float = float("nan")
     cross600: float = float("nan")
     ridge_distance: float = float("nan")
+    divide_distance: float = float("nan")
+    sharp_distance: float = float("nan")
+    sharp_100_distance: float = float("nan")
+    sharp_300_distance: float = float("nan")
+    ridge_strict_distance: float = float("nan")
+    divide_strict_distance: float = float("nan")
+    sharp_300_strict_distance: float = float("nan")
+    sharp_450_distance: float = float("nan")
+    near_max_distance: float = float("nan")
+    near_max_drop: float = float("nan")
+    ring_higher: float = float("nan")
+    ring_700_higher: float = float("nan")
+    ring_150_lower: float = float("nan")
+    ring_600_lower: float = float("nan")
 
     @property
     def on_summit(self):
@@ -518,6 +532,34 @@ def find_summit(window, lat, dem_value, tolerance=50.0):
     return best
 
 
+def find_near_max(smoothed, lat, height, tolerance=60.0):
+    """Ближайший локальный максимум сглаженной поверхности.
+
+    Отличается от find_summit тем, что работает по сглаженному DEM:
+    одиночные шумовые выбросы SRTM не создают лишних «вершин».
+    Возвращает (расстояние, превышение над точкой) либо None.
+    """
+    maximum = ndimage.maximum_filter(smoothed, size=3, mode="nearest")
+    is_peak = smoothed >= maximum - 1e-6
+    rows, columns = smoothed.shape
+    row_center = rows // 2
+    column_center = columns // 2
+    rows_index, columns_index = np.nonzero(is_peak)
+    best = None
+    metres_lat = 111320.0
+    metres_lon = metres_lat * math.cos(math.radians(lat))
+    for row, column in zip(rows_index, columns_index):
+        value = float(smoothed[row, column])
+        if value < height - tolerance:
+            continue
+        dy = (row - row_center) * metres_lat / 3600.0
+        dx = (column - column_center) * metres_lon / 3600.0
+        distance = math.hypot(dx, dy)
+        if best is None or distance < best[0]:
+            best = (distance, value - height)
+    return best
+
+
 def cross_profile(smoothed, lat, radius):
     """Поперечный профиль склона для каждой ячейки окна.
 
@@ -564,6 +606,121 @@ def ridge_mask(window, lat, ridge_cross=-10.0, radius=None):
     mask = cross <= ridge_cross
     # Закрываем разрывы от шума, чтобы гребень был линией, а не точками.
     return ndimage.binary_closing(mask, structure=np.ones((3, 3)))
+
+
+# Соседние ячейки в порядке обхода для стока по D8.
+FLOW_NEIGHBOURS = (
+    (-1, -1), (-1, 0), (-1, 1), (0, -1),
+    (0, 1), (1, -1), (1, 0), (1, 1),
+)
+
+
+def flow_accumulation(surface, lat):
+    """Площадь водосбора каждой ячейки по D8, в числе ячеек.
+
+    Ячейка, в которую не притекает вода, имеет площадь 1.  Настоящий
+    хребет — это водораздел: с него вода только стекает, поэтому
+    площадь минимальна.  Склон ниже гребня собирает воду с части
+    склона и имеет площадь заметно больше.
+    """
+    rows, columns = surface.shape
+    metres_lat = 111320.0 / 3600.0
+    metres_lon = 111320.0 * math.cos(math.radians(lat)) / 3600.0
+    steepest = np.zeros(surface.shape, dtype=np.int8)
+    slope = np.zeros(surface.shape)
+    for index, (dy, dx) in enumerate(FLOW_NEIGHBOURS):
+        distance = math.hypot(dy * metres_lat, dx * metres_lon)
+        neighbour = np.full(surface.shape, np.nan)
+        source_rows = slice(max(0, dy), rows + min(0, dy))
+        source_columns = slice(max(0, dx), columns + min(0, dx))
+        target_rows = slice(max(0, -dy), rows + min(0, -dy))
+        target_columns = slice(max(0, -dx), columns + min(0, -dx))
+        neighbour[target_rows, target_columns] = surface[
+            source_rows, source_columns
+        ]
+        drop = np.nan_to_num((surface - neighbour) / distance, nan=-1e9)
+        better = drop > slope
+        slope = np.where(better, drop, slope)
+        steepest = np.where(better, index, steepest)
+    area = np.ones(surface.shape, dtype=np.float64)
+    order = np.argsort(surface, axis=None)[::-1]
+    flat_steepest = steepest.ravel()
+    flat_area = area.ravel()
+    for cell in order:
+        dy, dx = FLOW_NEIGHBOURS[int(flat_steepest[cell])]
+        row, column = divmod(int(cell), columns)
+        target_row = row + dy
+        target_column = column + dx
+        if 0 <= target_row < rows and 0 <= target_column < columns:
+            flat_area[target_row * columns + target_column] += flat_area[cell]
+    return area
+
+
+def divide_mask(window, lat, threshold=3, sigma=2.0):
+    """Ячейки водоразделов: собирают не больше threshold ячеек.
+
+    Поверхность сглаживается, иначе шум SRTM плодит ложные водоразделы
+    на ровном месте.
+    """
+    surface = ndimage.gaussian_filter(window, sigma)
+    return flow_accumulation(surface, lat) <= threshold
+
+
+def mask_distance(mask, lat, fallback=float("nan")):
+    """Расстояние от центра окна до ближайшей ячейки маски, м."""
+    if not mask.any():
+        return fallback
+    metres_lat = 111320.0 / 3600.0
+    metres_lon = 111320.0 * math.cos(math.radians(lat)) / 3600.0
+    distances = ndimage.distance_transform_edt(
+        ~mask, sampling=(metres_lat, metres_lon)
+    )
+    return float(distances[distances.shape[0] // 2, distances.shape[1] // 2])
+
+
+def divide_distance(window, lat, threshold=3, sigma=2.0):
+    """Расстояние до ближайшей ячейки водораздела, м."""
+    return mask_distance(divide_mask(window, lat, threshold, sigma), lat)
+
+
+def ring_higher_fraction(surface, lat, radius=200.0, samples=180):
+    """Доля кольца вокруг точки, где рельеф выше неё.
+
+    На вершине доля нулевая, на хребте выше только дуга вверх по
+    гребню, на склоне — примерно половина кольца, в долине — почти всё.
+    """
+    rows, columns = surface.shape
+    row_center, column_center = rows // 2, columns // 2
+    height = float(surface[row_center, column_center])
+    metres_lat = 111320.0 / 3600.0
+    metres_lon = 111320.0 * math.cos(math.radians(lat)) / 3600.0
+    angles = np.linspace(0, 2 * math.pi, samples, endpoint=False)
+    rows_ring = row_center + np.sin(angles) * radius / metres_lat
+    columns_ring = column_center + np.cos(angles) * radius / metres_lon
+    values = ndimage.map_coordinates(
+        surface, [rows_ring, columns_ring], order=1, mode="nearest"
+    )
+    return float(np.mean(values > height + 1.0))
+
+
+def ring_lower_drop(surface, lat, radius=150.0, samples=180):
+    """Насколько точка выше самой низкой точки кольца вокруг неё, м.
+
+    Большое значение означает, что точка стоит на краю обрыва, а не в
+    седловине.
+    """
+    rows, columns = surface.shape
+    row_center, column_center = rows // 2, columns // 2
+    height = float(surface[row_center, column_center])
+    metres_lat = 111320.0 / 3600.0
+    metres_lon = 111320.0 * math.cos(math.radians(lat)) / 3600.0
+    angles = np.linspace(0, 2 * math.pi, samples, endpoint=False)
+    rows_ring = row_center + np.sin(angles) * radius / metres_lat
+    columns_ring = column_center + np.cos(angles) * radius / metres_lon
+    values = ndimage.map_coordinates(
+        surface, [rows_ring, columns_ring], order=1, mode="nearest"
+    )
+    return float(height - np.min(values))
 
 
 def measure(peak, dem, radii, thresholds):
@@ -640,6 +797,63 @@ def measure(peak, dem, radii, thresholds):
         metrics.ridge_distance = float(distances[row_center, column_center])
     else:
         metrics.ridge_distance = float(outer)
+    # Тот же гребень, но с более строгим порогом: обе стороны ниже
+    # сразу на 20 м.  Отсекает пологие выпуклости, которые гребнем
+    # считать нельзя.
+    strict_ridges = ridge_mask(window, peak.lat, -20.0, None)
+    metrics.ridge_strict_distance = mask_distance(
+        strict_ridges, peak.lat, float(outer)
+    )
+
+    surface = ndimage.gaussian_filter(window, thresholds["divide_sigma"])
+    area = flow_accumulation(surface, peak.lat)
+    divides = area <= thresholds["divide_acc"]
+    metrics.divide_distance = mask_distance(divides, peak.lat, float(outer))
+    # Строгий водораздел: в ячейку не собирается вовсе (площадь 1).
+    metrics.divide_strict_distance = mask_distance(
+        area <= 1, peak.lat, float(outer)
+    )
+    # Острый гребень: поперёк склона рельеф заметно ниже уже на 150 м.
+    # Отдельно от широких гребней: пик должен стоять и у такого гребня.
+    sharp = cross_profile(
+        smoothed, peak.lat, thresholds["sharp_radius"]
+    ) <= thresholds["sharp_cross"]
+    metrics.sharp_distance = mask_distance(sharp, peak.lat, float(outer))
+    # Тот же признак на других масштабах: острый перепад на 100 м и на
+    # 300 м поперёк склона.
+    for scale, name in ((100.0, "sharp_100_distance"),
+                        (300.0, "sharp_300_distance")):
+        profile = cross_profile(smoothed, peak.lat, scale)
+        setattr(
+            metrics, name,
+            mask_distance(
+                profile <= thresholds["sharp_cross"], peak.lat, float(outer)
+            ),
+        )
+    # Крутой гребень: перепад 25 м на 300 м, и гребень на 450 м.
+    metrics.sharp_300_strict_distance = mask_distance(
+        cross_profile(smoothed, peak.lat, 300.0) <= -25.0,
+        peak.lat, float(outer),
+    )
+    metrics.sharp_450_distance = mask_distance(
+        cross_profile(smoothed, peak.lat, 450.0) <= -15.0,
+        peak.lat, float(outer),
+    )
+    metrics.ring_higher = ring_higher_fraction(
+        smoothed, peak.lat, thresholds["ring_radius"]
+    )
+    metrics.ring_700_higher = ring_higher_fraction(
+        smoothed, peak.lat, thresholds["ring_700_radius"]
+    )
+    metrics.ring_150_lower = ring_lower_drop(
+        smoothed, peak.lat, thresholds["ring_150_radius"]
+    )
+    metrics.ring_600_lower = ring_lower_drop(smoothed, peak.lat, 600.0)
+
+    near_max = find_near_max(smoothed, peak.lat, metrics.dem)
+    if near_max is not None:
+        metrics.near_max_distance = near_max[0]
+        metrics.near_max_drop = near_max[1]
 
     summit = find_summit(window, peak.lat, metrics.dem)
     if summit is not None:
@@ -745,12 +959,20 @@ def classify(peak, metrics, thresholds, neighbour=None):
                 "на хребте: поперёк склона ниже на "
                 f"{-metrics.cross600:.0f} м (600 м)"
             )
-    if not math.isnan(distance) and distance > thresholds["summit_distance"]:
+    if not math.isnan(distance) and distance > thresholds["summit_limit"]:
         flags.append(
             f"ближайший локальный максимум дальше {distance:.0f} м"
         )
     if not math.isnan(metrics.ridge_distance):
         flags.append(f"до ближайшего гребня {metrics.ridge_distance:.0f} м")
+    if not math.isnan(metrics.divide_distance):
+        flags.append(
+            f"до ближайшего водораздела {metrics.divide_distance:.0f} м"
+        )
+    if not math.isnan(metrics.sharp_distance):
+        flags.append(f"до острого гребня {metrics.sharp_distance:.0f} м")
+    if not math.isnan(metrics.ring_higher):
+        flags.append(f"выше точки {metrics.ring_higher:.0%} кольца в 200 м")
 
     if neighbour is not None:
         _count, neighbour_drop, nearest = neighbour
@@ -764,28 +986,59 @@ def classify(peak, metrics, thresholds, neighbour=None):
                 f"ниже соседних пиков OSM на {neighbour_drop:.0f} м{where}"
             )
 
-    # Ошибка — пик далеко от ближайшего гребня.  Небольшое смещение
-    # (до 100 м) допустимо: пики в OSM часто стоят на отрогах, чуть в
-    # стороне от линии гребня.  Расстояние до локального максимума
-    # пишется в метрики, но в вердикт не входит: на широких хребтах
-    # вершина законно бывает в километре.
-    far_from_ridge = (
-        not math.isnan(metrics.ridge_distance)
-        and metrics.ridge_distance > thresholds["ridge_distance"]
+    # Вердикт: пик считается ошибочным, если он не на вершине и не на
+    # хребте.  Правило — набор признаков, каждый из которых требует
+    # выполнения двух условий: одиночное условие слишком часто
+    # срабатывает на настоящих вершинах (например, «нет острого гребня
+    # в 100 м» — у настоящей круглой вершины его и не бывает).
+    # Все признаки считаются по рельефу SRTM.
+
+    def far(value, limit):
+        return not math.isnan(value) and value > limit
+
+    # 1. Пик не на гребне (обе стороны ниже на 20 м) и рядом нет крутого
+    #    гребня (перепад 25 м на 300 м).
+    off_ridge = far(metrics.ridge_strict_distance, thresholds["off_ridge"])
+    no_steep_crest = far(
+        metrics.sharp_300_strict_distance, thresholds["no_steep_crest"]
     )
-    # Запасной признак: рельеф заметно выше уже в пределах 90 м, а на
-    # 600 м поперёк склона — ещё выше.  Это крутой склон, а не вершина.
-    steep = (
-        not math.isnan(metrics.max3)
-        and not math.isnan(metrics.cross600)
-        and metrics.max3 - metrics.dem >= thresholds["slope_drop"]
-        and metrics.cross600 > thresholds["slope_cross"]
+    # 2. Пик не на водоразделе, но почти половина кольца в 700 м выше:
+    #    глубокая долина.
+    off_divide = far(metrics.divide_distance, thresholds["off_divide"])
+    in_valley = far(metrics.ring_700_higher, thresholds["valley_ring"])
+    # 3. Пик не на гребне и далеко от настоящего водораздела.
+    no_true_divide = far(
+        metrics.divide_strict_distance, thresholds["true_divide"]
     )
-    if steep:
-        flags.append(
-            f"рельеф выше на {metrics.max3 - metrics.dem:.0f} м уже в 90 м"
-        )
-    verdict = "error" if (far_from_ridge or steep) else "ok"
+    # 4. Точка на 180 м выше самой низкой в 150 м (край обрыва) и рядом
+    #    есть вершина выше на 120 м.
+    on_cliff = far(metrics.ring_150_lower, thresholds["cliff_drop"])
+    higher_nearby = far(metrics.near_max_drop, thresholds["higher_nearby"])
+    # 5. Далеко от строгого водораздела и нет острого гребня на 100 м.
+    far_divide = far(metrics.divide_strict_distance, thresholds["far_divide"])
+    no_sharp_100 = far(
+        metrics.sharp_100_distance, thresholds["no_sharp_100"]
+    )
+    # 6. Точка на 450 м выше самой низкой в 600 м и нет гребня на 450 м.
+    deep_drop = far(metrics.ring_600_lower, thresholds["deep_drop"])
+    no_crest_450 = far(metrics.sharp_450_distance, thresholds["no_crest_450"])
+
+    reasons = []
+    if off_ridge and no_steep_crest:
+        reasons.append("не на гребне и рядом нет крутого гребня")
+    if off_divide and in_valley:
+        reasons.append("не на водоразделе, вокруг глубокая долина")
+    if off_ridge and no_true_divide:
+        reasons.append("не на гребне и далеко от водораздела")
+    if on_cliff and higher_nearby:
+        reasons.append("на краю обрыва под более высокой вершиной")
+    if far_divide and no_sharp_100:
+        reasons.append("далеко от водораздела и нет острого гребня")
+    if deep_drop and no_crest_450:
+        reasons.append("глубокий провал и нет гребня рядом")
+    for reason in reasons:
+        flags.append(reason)
+    verdict = "error" if reasons else "ok"
     return verdict, flags, None
 
 
@@ -831,7 +1084,13 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
     header = [
         "osm_id", "lon", "lat", "category", "name", "ele", "dem", "max3", "min3", "max5",
         "on_summit", "on_summit_wide", "in_pit", "summit_distance", "summit_drop",
-        "cross300", "cross600", "ridge_distance", "verdict", "flags", "timestamp", "user", "changeset", "source", "file",
+        "cross300", "cross600", "ridge_distance", "divide_distance",
+        "sharp_distance", "sharp_100_distance", "sharp_300_distance",
+        "ridge_strict_distance", "divide_strict_distance",
+        "sharp_300_strict_distance", "sharp_450_distance",
+        "near_max_distance", "near_max_drop",
+        "ring_higher", "ring_700_higher", "ring_150_lower", "ring_600_lower",
+        "verdict", "flags", "timestamp", "user", "changeset", "source", "file",
     ]
     for radius in radii:
         header.append(f"drop{radius}")
@@ -858,6 +1117,20 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
                 f"{metrics.cross300:.0f}",
                 f"{metrics.cross600:.0f}",
                 f"{metrics.ridge_distance:.0f}",
+                f"{metrics.divide_distance:.0f}",
+                f"{metrics.sharp_distance:.0f}",
+                f"{metrics.sharp_100_distance:.0f}",
+                f"{metrics.sharp_300_distance:.0f}",
+                f"{metrics.ridge_strict_distance:.0f}",
+                f"{metrics.divide_strict_distance:.0f}",
+                f"{metrics.sharp_300_strict_distance:.0f}",
+                f"{metrics.sharp_450_distance:.0f}",
+                f"{metrics.near_max_distance:.0f}",
+                f"{metrics.near_max_drop:.0f}",
+                f"{metrics.ring_higher:.2f}",
+                f"{metrics.ring_700_higher:.2f}",
+                f"{metrics.ring_150_lower:.0f}",
+                f"{metrics.ring_600_lower:.0f}",
                 verdict,
                 "; ".join(flags),
                 peak.timestamp,
@@ -899,6 +1172,22 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
                 "cross300": round(metrics.cross300, 1),
                 "cross600": round(metrics.cross600, 1),
                 "ridge_distance": round(metrics.ridge_distance, 1),
+                "divide_distance": round(metrics.divide_distance, 1),
+                "sharp_distance": round(metrics.sharp_distance, 1),
+                "sharp_100_distance": round(metrics.sharp_100_distance, 1),
+                "sharp_300_distance": round(metrics.sharp_300_distance, 1),
+                "ridge_strict_distance": round(metrics.ridge_strict_distance, 1),
+                "divide_strict_distance": round(
+                    metrics.divide_strict_distance, 1),
+                "sharp_300_strict_distance": round(
+                    metrics.sharp_300_strict_distance, 1),
+                "sharp_450_distance": round(metrics.sharp_450_distance, 1),
+                "near_max_distance": round(metrics.near_max_distance, 1),
+                "near_max_drop": round(metrics.near_max_drop, 1),
+                "ring_600_lower": round(metrics.ring_600_lower, 1),
+                "ring_700_higher": round(metrics.ring_700_higher, 3),
+                "ring_150_lower": round(metrics.ring_150_lower, 1),
+                "ring_higher": round(metrics.ring_higher, 3),
                 "flags": "; ".join(flags),
                 "timestamp": peak.timestamp,
                 "user": peak.user,
@@ -965,12 +1254,30 @@ def build_report(peaks, results, radii, thresholds):
         lines.append(f"{label:<28}{len(group):>8}{wrong:>8}{share:>7.1f}%")
     lines.append("")
     lines.append(
-        "Ошибка: ближайший гребень дальше "
-        f"{thresholds['ridge_distance']:.0f} м, либо рельеф выше пика на "
-        f"{thresholds['slope_drop']:.0f} м уже в 90 м при поперечном "
-        f"профиле больше {thresholds['slope_cross']:.0f} м.  Выпуклость "
-        "гребня ищется на нескольких масштабах (60–500 м), поэтому широкие "
-        "и пологие хребты тоже распознаются."
+        "Ошибка: пик не на вершине и не на хребте.  Каждый признак требует "
+        "выполнения двух условий сразу — одиночное условие срабатывает "
+        "и на настоящих вершинах.  Срабатывает любое из:\n"
+        "  * пик не на гребне (обе стороны ниже на 20 м) и нет крутого "
+        f"гребня (перепад 25 м на 300 м) в "
+        f"{thresholds['no_steep_crest']:.0f} м;\n"
+        "  * пик не на водоразделе и выше точки больше "
+        f"{thresholds['valley_ring']:.0%} кольца в "
+        f"{thresholds['ring_700_radius']:.0f} м — глубокая долина;\n"
+        "  * пик не на гребне и дальше "
+        f"{thresholds['true_divide']:.0f} м от строгого водораздела;\n"
+        "  * точка на "
+        f"{thresholds['cliff_drop']:.0f} м выше самой низкой точки в "
+        f"{thresholds['ring_150_radius']:.0f} м и рядом есть вершина выше "
+        f"на {thresholds['higher_nearby']:.0f} м;\n"
+        "  * дальше "
+        f"{thresholds['far_divide']:.0f} м от строгого водораздела и "
+        f"нет острого гребня (перепад 15 м на 100 м) в "
+        f"{thresholds['no_sharp_100']:.0f} м;\n"
+        "  * точка на "
+        f"{thresholds['deep_drop']:.0f} м выше самой низкой точки в 600 м "
+        f"и нет гребня (перепад 15 м на 450 м) в "
+        f"{thresholds['no_crest_450']:.0f} м.\n"
+        "Все признаки — по рельефу SRTM."
     )
     lines.append("")
 
@@ -1077,28 +1384,41 @@ def main(argv=None):
         help="радиус «глубокой» проверки, м (по умолчанию 600)",
     )
     parser.add_argument(
-        "--drop", type=float, default=25.0,
-        help="минимальный провал от вершины для подозрения, м",
-    )
-    parser.add_argument(
         "--deep-drop", type=float, default=60.0,
         help="провал от вершины, за которым считаем ошибкой, м",
     )
     parser.add_argument(
-        "--summit-distance", type=float, default=200.0,
+        "--summit-limit", type=float, default=200.0,
         help="предельное расстояние до ближайшего локального максимума, м",
     )
     parser.add_argument(
-        "--ridge-distance", type=float, default=60.0,
-        help="предельное расстояние до ближайшего гребня, м",
+        "--sharp-radius", type=float, default=150.0,
+        help="масштаб поперечного профиля для острого гребня, м",
     )
     parser.add_argument(
-        "--slope-drop", type=float, default=40.0,
-        help="превышение рельефа в 90 м для признака крутого склона, м",
+        "--sharp-cross", type=float, default=-15.0,
+        help="поперечный профиль острого гребня, м",
     )
     parser.add_argument(
-        "--slope-cross", type=float, default=50.0,
-        help="поперечный профиль в 600 м для признака крутого склона, м",
+        "--ring-radius", type=float, default=200.0,
+        help="радиус кольца для доли более высокого рельефа, м",
+    )
+    parser.add_argument(
+        "--ring-700-radius", type=float, default=700.0,
+        help="радиус кольца для признака «глубокая долина», м",
+    )
+    parser.add_argument(
+        "--ring-150-radius", type=float, default=150.0,
+        help="радиус кольца для признака «край обрыва», м",
+    )
+    parser.add_argument(
+        "--divide-acc", type=int, default=3,
+        help="площадь водосбора (в ячейках), ниже которой ячейка "
+             "считается водоразделом",
+    )
+    parser.add_argument(
+        "--divide-sigma", type=float, default=2.0,
+        help="сглаживание DEM перед расчётом стока, пикселей",
     )
     parser.add_argument(
         "--ridge-radius", type=int, default=0,
@@ -1109,20 +1429,82 @@ def main(argv=None):
         help="поперечный профиль (600 м), при котором ячейка считается "
              "гребнем, м",
     )
+    # Пороги нового правила: каждое условие требует двух признаков сразу.
+    parser.add_argument(
+        "--off-ridge", type=float, default=0.0,
+        help="расстояние до строгого гребня (обе стороны ниже на 20 м), "
+             "выше которого пик считается не на гребне, м",
+    )
+    parser.add_argument(
+        "--no-steep-crest", type=float, default=90.0,
+        help="расстояние до крутого гребня (перепад 25 м на 300 м), м",
+    )
+    parser.add_argument(
+        "--off-divide", type=float, default=0.0,
+        help="расстояние до водораздела, выше которого пик не на "
+             "водоразделе, м",
+    )
+    parser.add_argument(
+        "--valley-ring", type=float, default=0.45,
+        help="доля кольца в 700 м выше точки для признака глубокой долины",
+    )
+    parser.add_argument(
+        "--true-divide", type=float, default=80.0,
+        help="расстояние до строгого водораздела, м",
+    )
+    parser.add_argument(
+        "--cliff-drop", type=float, default=180.0,
+        help="перепад до самой низкой точки в 150 м для признака края "
+             "обрыва, м",
+    )
+    parser.add_argument(
+        "--higher-nearby", type=float, default=120.0,
+        help="превышение ближайшей вершины над точкой, м",
+    )
+    parser.add_argument(
+        "--far-divide", type=float, default=30.0,
+        help="расстояние до строгого водораздела, м",
+    )
+    parser.add_argument(
+        "--no-sharp-100", type=float, default=320.0,
+        help="расстояние до острого гребня (перепад 15 м на 100 м), м",
+    )
+    parser.add_argument(
+        "--deep-ring-drop", type=float, default=450.0,
+        help="перепад до самой низкой точки в 600 м, м",
+    )
+    parser.add_argument(
+        "--no-crest-450", type=float, default=50.0,
+        help="расстояние до гребня (перепад 15 м на 450 м), м",
+    )
     arguments = parser.parse_args(argv)
 
     natural_values = [item.strip() for item in arguments.natural.split(",") if item.strip()]
     thresholds = {
         "radius": arguments.radius,
         "deep_radius": arguments.deep_radius,
-        "drop": arguments.drop,
         "deep_drop": arguments.deep_drop,
         "ridge_cross": arguments.ridge_cross,
-        "summit_distance": arguments.summit_distance,
-        "ridge_distance": arguments.ridge_distance,
-        "slope_drop": arguments.slope_drop,
-        "slope_cross": arguments.slope_cross,
+        "summit_limit": arguments.summit_limit,
+        "sharp_radius": arguments.sharp_radius,
+        "sharp_cross": arguments.sharp_cross,
+        "ring_radius": arguments.ring_radius,
+        "ring_700_radius": arguments.ring_700_radius,
+        "ring_150_radius": arguments.ring_150_radius,
+        "divide_acc": arguments.divide_acc,
+        "divide_sigma": arguments.divide_sigma,
         "ridge_radius": arguments.ridge_radius,
+        "off_ridge": arguments.off_ridge,
+        "no_steep_crest": arguments.no_steep_crest,
+        "off_divide": arguments.off_divide,
+        "valley_ring": arguments.valley_ring,
+        "true_divide": arguments.true_divide,
+        "cliff_drop": arguments.cliff_drop,
+        "higher_nearby": arguments.higher_nearby,
+        "far_divide": arguments.far_divide,
+        "no_sharp_100": arguments.no_sharp_100,
+        "deep_drop": arguments.deep_ring_drop,
+        "no_crest_450": arguments.no_crest_450,
     }
     radii = sorted({arguments.radius, arguments.deep_radius, 1500})
 

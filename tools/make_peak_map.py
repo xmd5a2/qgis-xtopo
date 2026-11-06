@@ -73,6 +73,31 @@ def fetch(url, destination, proxy, timeout=30):
     return True
 
 
+# Понятные названия регионов по имени файла OSM.
+REGIONS = (
+    ("caucasus", "Кавказ"),
+    ("georgia", "Кавказ"),
+    ("armenia", "Кавказ"),
+    ("azerbaijan", "Кавказ"),
+    ("switzerland", "Швейцария"),
+    ("pakistan", "Пакистан"),
+    ("nepal", "Непал"),
+)
+
+
+def region_name(source_file, csv_path):
+    """Название региона по имени файла OSM или по имени CSV."""
+    name = (source_file or "").lower()
+    for marker, label in REGIONS:
+        if marker in name:
+            return label
+    stem = Path(csv_path).stem.lower()
+    for marker, label in REGIONS:
+        if marker in stem:
+            return label
+    return Path(csv_path).stem
+
+
 def load_peaks(csv_path):
     peaks = []
     with Path(csv_path).open(encoding="utf-8") as handle:
@@ -97,9 +122,17 @@ def load_peaks(csv_path):
                 "summit_drop": number("summit_drop"),
                 "drop600": number("drop600"),
                 "ridge_distance": number("ridge_distance"),
+                "divide_distance": number("divide_distance"),
+                "sharp_distance": number("sharp_distance"),
+                "ring_higher": number("ring_higher"),
+                "ridge_strict_distance": number("ridge_strict_distance"),
+                "divide_strict_distance": number("divide_strict_distance"),
+                "ring_700_higher": number("ring_700_higher"),
+                "ring_150_lower": number("ring_150_lower"),
                 "flags": row.get("flags", ""),
                 "timestamp": row.get("timestamp", "")[:10],
                 "file": row.get("file", ""),
+                "region": region_name(row.get("file", ""), csv_path),
             })
     return peaks
 
@@ -118,9 +151,17 @@ def build_html(peaks, out_dir):
             "sp": round(peak["summit_drop"]) if peak["summit_drop"] == peak["summit_drop"] else None,
             "d600": round(peak["drop600"]) if peak["drop600"] == peak["drop600"] else None,
             "rd": round(peak["ridge_distance"]) if peak["ridge_distance"] == peak["ridge_distance"] else None,
+            "dd": round(peak["divide_distance"]) if peak["divide_distance"] == peak["divide_distance"] else None,
+            "sh": round(peak["sharp_distance"]) if peak["sharp_distance"] == peak["sharp_distance"] else None,
+            "rh": round(peak["ring_higher"] * 100) if peak["ring_higher"] == peak["ring_higher"] else None,
+            "rs": round(peak["ridge_strict_distance"]) if peak["ridge_strict_distance"] == peak["ridge_strict_distance"] else None,
+            "ds": round(peak["divide_strict_distance"]) if peak["divide_strict_distance"] == peak["divide_strict_distance"] else None,
+            "r7": round(peak["ring_700_higher"] * 100) if peak["ring_700_higher"] == peak["ring_700_higher"] else None,
+            "l1": round(peak["ring_150_lower"]) if peak["ring_150_lower"] == peak["ring_150_lower"] else None,
             "flags": peak["flags"],
             "date": peak["timestamp"],
             "file": peak["file"],
+            "region": peak["region"],
         })
     counts = {}
     for peak in peaks:
@@ -136,7 +177,7 @@ def build_html(peaks, out_dir):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Пики OSM на Кавказе — проверка положения</title>
+<title>Пики OSM — проверка положения</title>
 <link rel="stylesheet" href="leaflet.css">
 <style>
   html, body {{ margin: 0; padding: 0; height: 100%; font-family: sans-serif; }}
@@ -154,6 +195,11 @@ def build_html(peaks, out_dir):
   .item .meta {{ color: #666; font-size: 12px; }}
   .dot {{ display: inline-block; width: 9px; height: 9px; border-radius: 50%;
           margin-right: 5px; }}
+  #regions {{ margin-bottom: 8px; }}
+  .chip {{ display: inline-block; margin: 0 4px 4px 0; padding: 2px 7px;
+           border: 1px solid #bbb; border-radius: 10px; cursor: pointer;
+           background: #fff; font-size: 12px; }}
+  .chip:hover {{ background: #eef4ff; }}
   .popup h3 {{ margin: 0 0 6px; font-size: 14px; }}
   .popup table {{ border-collapse: collapse; font-size: 12px; }}
   .popup td {{ padding: 1px 6px 1px 0; vertical-align: top; }}
@@ -163,12 +209,13 @@ def build_html(peaks, out_dir):
 </head>
 <body>
 <div id="sidebar">
-  <h1>Пики OSM на Кавказе</h1>
+  <h1>Пики OSM — проверка положения</h1>
   <div style="margin-bottom:8px">{legend}</div>
   <div style="color:#666;margin-bottom:10px;font-size:12px">
     Проверяются пики без названия: без ele и с ele. Клик по строке или
     точке центрирует карту; в подсказке — id, координаты и метрики.
   </div>
+  <div id="regions"></div>
   <div id="list"></div>
 </div>
 <div id="map"></div>
@@ -178,9 +225,9 @@ const peaks = {data};
 const colours = {json.dumps(VERDICT_COLOURS)};
 const labels = {json.dumps(VERDICT_LABELS, ensure_ascii=False)};
 
-const map = L.map('map', {{minZoom: 7, maxZoom: 14}}).setView([42.6, 44.3], 8);
+const map = L.map('map', {{minZoom: 7, maxZoom: 18}});
 L.tileLayer('tiles/{{z}}/{{x}}/{{y}}.png', {{
-  minZoom: 7, maxZoom: 14,
+  minZoom: 7, maxZoom: 18,
   errorTileUrl: '{TRANSPARENT_GIF}',
   attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA), &copy; OpenStreetMap'
 }}).addTo(map);
@@ -193,6 +240,13 @@ function popup(peak) {{
     ['высота DEM', peak.dem === null ? '—' : peak.dem + ' м'],
     ['ближайшая вершина', peak.sd === null ? '—' : peak.sd + ' м, +' + peak.sp + ' м'],
     ['до гребня', peak.rd === null ? '—' : peak.rd + ' м'],
+    ['до водораздела', peak.dd === null ? '—' : peak.dd + ' м'],
+    ['до острого гребня', peak.sh === null ? '—' : peak.sh + ' м'],
+    ['кольцо 200 м выше', peak.rh === null ? '—' : peak.rh + ' %'],
+    ['строгий гребень', peak.rs === null ? '—' : peak.rs + ' м'],
+    ['строгий водораздел', peak.ds === null ? '—' : peak.ds + ' м'],
+    ['кольцо 700 м выше', peak.r7 === null ? '—' : peak.r7 + ' %'],
+    ['низ кольца 150 м', peak.l1 === null ? '—' : peak.l1 + ' м'],
     ['правка', peak.date + (peak.file ? ' · ' + peak.file : '')],
   ];
   return '<div class="popup"><h3 style="color:' + colours[peak.v] + '">' +
@@ -217,24 +271,66 @@ peaks.forEach(peak => {{
 
 // Список — только ошибки, самые далёкие от гребня сверху.
 const list = document.getElementById('list');
-const shown = peaks.filter(p => p.v === 'error');
-list.insertAdjacentHTML('beforebegin',
-  '<div style="color:#666;margin-bottom:6px;font-size:12px">На карте ' +
-  peaks.length + ' проверенных пиков; в списке ошибки: ' + shown.length + '</div>');
-shown.sort((a, b) => (b.rd || 0) - (a.rd || 0)).forEach(peak => {{
-  const item = document.createElement('div');
-  item.className = 'item';
-  item.innerHTML = '<span class="dot" style="background:' + colours[peak.v] + '"></span>' +
-    '<span class="id">node/' + peak.id + '</span><br>' +
-    '<span class="meta">' + peak.lat.toFixed(4) + ', ' + peak.lon.toFixed(4) +
-    (peak.dem === null ? '' : ' · ' + peak.dem + ' м') +
-    (peak.rd === null ? '' : ' · гребень в ' + peak.rd + ' м') + '</span>';
-  item.addEventListener('click', () => {{
-    map.flyTo([peak.lat, peak.lon], 14, {{duration: 0.8}});
-    setTimeout(() => markers[peak.id].openPopup(), 900);
-  }});
-  list.appendChild(item);
+const regions = [...new Set(peaks.map(p => p.region))];
+const counts = {{}};
+peaks.forEach(p => {{
+  counts[p.region] = counts[p.region] || {{all: 0, error: 0}};
+  counts[p.region].all += 1;
+  if (p.v === 'error') counts[p.region].error += 1;
 }});
+
+// Кнопки регионов: показывать только один регион или все сразу.
+let active = null;
+function renderList() {{
+  list.innerHTML = '';
+  const shown = peaks
+    .filter(p => p.v === 'error' && (active === null || p.region === active))
+    .sort((a, b) => (b.rd || 0) - (a.rd || 0));
+  list.insertAdjacentHTML('beforebegin',
+    '<div style="color:#666;margin-bottom:6px;font-size:12px">На карте ' +
+    peaks.length + ' проверенных пиков; в списке ошибки: ' + shown.length + '</div>');
+  shown.forEach(peak => {{
+    const item = document.createElement('div');
+    item.className = 'item';
+    item.innerHTML = '<span class="dot" style="background:' + colours[peak.v] + '"></span>' +
+      '<span class="id">node/' + peak.id + '</span> ' +
+      '<span class="meta">' + peak.region + '</span><br>' +
+      '<span class="meta">' + peak.lat.toFixed(4) + ', ' + peak.lon.toFixed(4) +
+      (peak.dem === null ? '' : ' · ' + peak.dem + ' м') +
+      (peak.rd === null ? '' : ' · гребень в ' + peak.rd + ' м') + '</span>';
+    item.addEventListener('click', () => {{
+      map.flyTo([peak.lat, peak.lon], 14, {{duration: 0.8}});
+      setTimeout(() => markers[peak.id].openPopup(), 900);
+    }});
+    list.appendChild(item);
+  }});
+}}
+
+const chips = document.getElementById('regions');
+chips.innerHTML = '<span class="chip" data-region="">все (' +
+  peaks.length + ')</span>' + regions.map(name =>
+    '<span class="chip" data-region="' + name + '">' + name + ' (' +
+    counts[name].all + ')</span>').join('');
+chips.querySelectorAll('.chip').forEach(chip => {{
+  chip.addEventListener('click', () => {{
+    active = chip.dataset.region || null;
+    chips.querySelectorAll('.chip').forEach(c => {{
+      c.style.background = (c.dataset.region || '') === (active || '') ? '#dbe8ff' : '';
+    }});
+    renderList();
+    const part = active === null ? peaks : peaks.filter(p => p.region === active);
+    if (part.length) {{
+      const bounds = L.latLngBounds(part.map(p => [p.lat, p.lon]));
+      map.fitBounds(bounds, {{maxZoom: 12}});
+    }}
+  }});
+}});
+renderList();
+
+// Общий вид: сразу видно все регионы.
+if (peaks.length) {{
+  map.fitBounds(L.latLngBounds(peaks.map(p => [p.lat, p.lon])), {{maxZoom: 10}});
+}}
 </script>
 </body>
 </html>
@@ -305,7 +401,11 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--csv", required=True, help="CSV из check_peak_placement.py")
+    parser.add_argument(
+        "--csv", action="append", required=True,
+        help="CSV из check_peak_placement.py (можно несколько — регионы "
+             "сводятся на одной карте)",
+    )
     parser.add_argument("--out", required=True, help="каталог для карты")
     parser.add_argument(
         "--proxy", default="socks5://127.0.0.1:1122",
@@ -320,7 +420,9 @@ def main(argv=None):
 
     out_dir = Path(arguments.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    peaks = load_peaks(arguments.csv)
+    peaks = []
+    for csv_path in arguments.csv:
+        peaks.extend(load_peaks(csv_path))
     print(f"Пиков для карты: {len(peaks)}")
 
     for name, url in LEAFLET_URLS.items():
