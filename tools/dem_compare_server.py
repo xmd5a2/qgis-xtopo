@@ -38,10 +38,14 @@ from osgeo import gdal, osr
 gdal.UseExceptions()
 osr.UseExceptions()
 
+# Параллельные запросы блоков COG и многопоточная перепроекция.
+gdal.SetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS")
+gdal.SetConfigOption("GDAL_CACHEMAX", "512")
+
 TILE_SIZE = 256
 # Версия кэша тайлов: меняется, когда меняется рендер. Старые файлы не
 # удаляются, просто перестают использоваться.
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 # Подгрузка тайла с запасом, чтобы шов между тайлами не был виден.
 TILE_OVERLAP = 1
 # Ограничение на размер промежуточного растра (пиксели по стороне).
@@ -219,6 +223,35 @@ class SourceStore:
         self._lock = threading.Lock()
         self._download_locks = {}
         self._signs = {}
+        # Открытые источники: GDAL держит блоки COG в своём кэше, поэтому
+        # соседние тайлы читаются без повторной сети.
+        self._datasets = {}
+
+    def open_source(self, path):
+        """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
+        with self._lock:
+            entry = self._datasets.get(path)
+            if entry is not None:
+                dataset, lock, expiry = entry
+                if expiry == 0 or expiry > time.time() + 60:
+                    return dataset, lock
+        dataset = gdal.Open(path)
+        if dataset is None:
+            return None, None
+        lock = threading.Lock()
+        expiry = 0
+        if "?se=" in path:
+            import urllib.parse as _parse
+            query = _parse.urlparse(path).query
+            stamp = _parse.parse_qs(query).get("se", [""])[0]
+            if stamp:
+                try:
+                    expiry = time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+                except (ValueError, OverflowError):
+                    expiry = time.time() + 1800
+        with self._lock:
+            self._datasets[path] = (dataset, lock, expiry)
+        return dataset, lock
 
     def _signed(self, href):
         """Подпись SAS кэшируется: подписывать каждый раз нельзя — 429."""
@@ -277,7 +310,7 @@ class SourceStore:
                                          math.floor(lat) + 1),
                                    center_only=True)
         for path in sources:
-            dataset = gdal.Open(path)
+            dataset, _ = self.open_source(path)
             if dataset is None:
                 continue
             gt = dataset.GetGeoTransform()
@@ -510,45 +543,143 @@ def _temp_path(prefix):
     return f"/vsimem/dem_compare_{prefix}_{number}_{threading.get_ident()}.tif"
 
 
-def _prepare_dem(store, ds, bbox):
-    """Готовит DEM во временном файле: возвращает (путь, массив, geotransform)."""
-    array, gt = _dem_grid(store, ds, bbox)
-    if array is None:
-        return None, None, None
-    height, width = array.shape
-    mem = gdal.GetDriverByName("MEM").Create("", width, height, 1,
-                                             gdal.GDT_Float32)
-    mem.SetGeoTransform(gt)
-    mem.SetProjection("EPSG:4326")
-    band = mem.GetRasterBand(1)
-    band.WriteArray(np.where(np.isnan(array), -32768.0,
-                              array).astype("float32"))
-    band.SetNoDataValue(-32768.0)
-    path = _temp_path("dem")
-    gdal.GetDriverByName("GTiff").CreateCopy(path, mem,
-                                             options=["COMPRESS=DEFLATE"])
-    mem = None
-    return path, array, gt
+def _dem3857(store, ds, z, x, y):
+    """DEM набора в Web Mercator, тайл 256×256 float32.
+
+    Промежуточный растр кэшируется на диске: повторный запрос того же
+    тайла (другой режим, разность высот, соседний режим) источник не
+    читает заново.
+    """
+    cache_file = (store.cache_dir / "dem3857" / f"v{CACHE_VERSION}" / ds /
+                  str(z) / str(x) / f"{y}.npy")
+    if cache_file.exists():
+        try:
+            return np.load(cache_file)
+        except (OSError, ValueError):
+            cache_file.unlink(missing_ok=True)
+    lon1, lat1, lon2, lat2 = tile_bounds(z, x, y)
+    paths = store.sources(ds, (lon1, lat1, lon2, lat2))
+    if not paths:
+        return None
+    opened = []
+    for path in paths:
+        dataset, lock = store.open_source(path)
+        if dataset is None:
+            continue
+        opened.append((dataset, lock))
+    if not opened:
+        return None
+    bounds = _mercator_bounds(lon1, lat1, lon2, lat2)
+    options = gdal.WarpOptions(
+        format="MEM",
+        dstSRS="EPSG:3857",
+        outputBounds=bounds,
+        width=TILE_SIZE,
+        height=TILE_SIZE,
+        resampleAlg="bilinear",
+        srcNodata=DATASETS[ds].get("src_nodata"),
+        dstNodata=float("nan"),
+        multithread=True,
+    )
+    # Один исходник — один поток: GDAL-датасет не потокобезопасен.
+    for _, lock in opened:
+        lock.acquire()
+    try:
+        warped = gdal.Warp("", [dataset for dataset, _ in opened],
+                           options=options)
+    finally:
+        for _, lock in reversed(opened):
+            lock.release()
+    if warped is None:
+        return None
+    array = warped.GetRasterBand(1).ReadAsArray().astype("float32")
+    warped = None
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        np.save(cache_file, array)
+    except OSError:
+        pass
+    return array
 
 
-def _hillshade(dem_path):
-    """Отмывка штатным DEMProcessing — так же, как в плагине."""
-    options = gdal.DEMProcessingOptions(computeEdges=True, azimuth=315,
-                                        altitude=45, zFactor=1)
-    shade_path = _temp_path("shade")
-    gdal.DEMProcessing(shade_path, dem_path, "hillshade", options=options)
-    dataset = gdal.Open(shade_path)
-    shade = dataset.GetRasterBand(1).ReadAsArray()
-    dataset = None
-    gdal.Unlink(shade_path)
+def _hillshade(values, lat_center, zoom):
+    """Отмывка по растру Web Mercator.
+
+    В Mercator шаг по долготе короче наземного в cos(широты) раз — без
+    этой поправки склоны выходят плоскими.
+    """
+    if values is None:
+        return None
+    valid = ~np.isnan(values)
+    filled = np.where(valid, values, 0.0).astype("float64")
+    res = 156543.03392 / (2 ** zoom)
+    step_x = res / max(math.cos(math.radians(lat_center)), 1e-6)
+    step_y = res
+    dzdx = np.empty_like(filled)
+    dzdx[:, 1:-1] = (filled[:, 2:] - filled[:, :-2]) / 2.0
+    dzdx[:, 0] = filled[:, 1] - filled[:, 0]
+    dzdx[:, -1] = filled[:, -1] - filled[:, -2]
+    dzdy = np.empty_like(filled)
+    dzdy[1:-1, :] = (filled[:-2, :] - filled[2:, :]) / 2.0
+    dzdy[0, :] = filled[0, :] - filled[1, :]
+    dzdy[-1, :] = filled[-1, :] - filled[-2, :]
+    dzdx *= step_x
+    dzdy *= step_y
+    slope = np.arctan(np.hypot(dzdx, dzdy))
+    aspect = np.arctan2(dzdy, -dzdx)
+    zenith = math.radians(90.0 - 45.0)
+    azimuth = math.radians(315.0)
+    shade = 255.0 * (math.cos(zenith) * np.cos(slope) +
+                     math.sin(zenith) * np.sin(slope) * np.cos(azimuth - aspect))
+    shade = np.clip(shade, 0, 255).astype("uint8")
+    shade[~valid] = 0
     return shade
 
 
-def _contour_mask(array, valid, step):
-    """Маска горизонталей методом marching squares по сетке высот."""
-    if array is None or not valid.any():
+# Фиксированная гипсометрическая шкала: цвета сравнимы между тайлами.
+HYPSO_STOPS = [
+    (-200.0, (36, 78, 84)),
+    (0.0, (58, 106, 62)),
+    (300.0, (110, 155, 92)),
+    (800.0, (176, 196, 132)),
+    (1500.0, (222, 219, 168)),
+    (2500.0, (196, 172, 122)),
+    (3500.0, (146, 116, 84)),
+    (4500.0, (122, 96, 84)),
+    (5500.0, (150, 140, 138)),
+    (6500.0, (232, 232, 236)),
+]
+
+
+def _elevation_colors(values):
+    """Гипсометрия по фиксированной шкале."""
+    if values is None:
         return None
-    data = np.where(valid, array, np.nan)
+    valid = ~np.isnan(values)
+    value = np.where(valid, values, 0.0).astype("float64")
+    rgb = np.zeros(value.shape + (3,), dtype="uint8")
+    for index in range(len(HYPSO_STOPS) - 1):
+        low, color_low = HYPSO_STOPS[index]
+        high, color_high = HYPSO_STOPS[index + 1]
+        mask = (value >= low) & (value < high)
+        if not mask.any():
+            continue
+        t = ((value[mask] - low) / (high - low))[:, None]
+        rgb[mask] = (np.array(color_low)[None, :] * (1 - t) +
+                     np.array(color_high)[None, :] * t).astype("uint8")
+    rgb[value >= HYPSO_STOPS[-1][0]] = HYPSO_STOPS[-1][1]
+    rgb[~valid] = (0, 0, 0)
+    return rgb
+
+
+def _contour_mask(values, step):
+    """Маска горизонталей методом marching squares по сетке высот."""
+    if values is None:
+        return None
+    valid = ~np.isnan(values)
+    if not valid.any():
+        return None
+    data = np.where(valid, values, np.nan)
     mask = np.zeros(data.shape, dtype="uint8")
     lo = float(np.nanmin(data))
     hi = float(np.nanmax(data))
@@ -674,8 +805,8 @@ def _math_ceil(value):
     return int(math.ceil(value))
 
 
-def _array_to_dataset(rgb, alpha, gt):
-    """Собирает MEM-растр RGB(A) из массивов."""
+def _png_bytes(rgb, alpha=None):
+    """Собирает PNG из массива RGB(A) без промежуточного растра."""
     height, width = rgb.shape[:2]
     bands = 4 if alpha is not None else 3
     mem = gdal.GetDriverByName("MEM").Create("", width, height, bands,
@@ -686,28 +817,9 @@ def _array_to_dataset(rgb, alpha, gt):
         band = mem.GetRasterBand(4)
         band.WriteArray(alpha)
         band.SetColorInterpretation(gdal.GCI_AlphaBand)
-    mem.SetGeoTransform(gt)
-    mem.SetProjection("EPSG:4326")
-    return mem
-
-
-def _warp_to_png(mem, bounds_3857, size=TILE_SIZE, resample="average"):
-    """Переводит растр в Web Mercator и отдаёт PNG-байты."""
-    options = gdal.WarpOptions(
-        format="MEM",
-        dstSRS="EPSG:3857",
-        outputBounds=bounds_3857,
-        xRes=(bounds_3857[2] - bounds_3857[0]) / size,
-        yRes=-(bounds_3857[3] - bounds_3857[1]) / size,
-        resampleAlg=resample,
-        multithread=True,
-    )
-    warped = gdal.Warp("", mem, options=options)
-    if warped is None:
-        return None
     png_path = _temp_path("tile").replace(".tif", ".png")
-    png = gdal.GetDriverByName("PNG").CreateCopy(png_path, warped)
-    warped = None
+    png = gdal.GetDriverByName("PNG").CreateCopy(png_path, mem)
+    mem = None
     if png is None:
         return None
     png = None
@@ -715,7 +827,6 @@ def _warp_to_png(mem, bounds_3857, size=TILE_SIZE, resample="average"):
     if data is None:
         gdal.Unlink(png_path)
         return None
-    # Буфер — это memoryview на память GDAL: копируем до удаления файла.
     result = bytes(data)
     gdal.Unlink(png_path)
     return result
@@ -726,54 +837,48 @@ def _warp_to_png(mem, bounds_3857, size=TILE_SIZE, resample="average"):
 # ---------------------------------------------------------------------------
 
 def render_tile(store, ds, z, x, y, mode="hillshade"):
-    lon1, lat1, lon2, lat2 = tile_bounds(z, x, y)
-    pad_x = (lon2 - lon1) / TILE_SIZE * TILE_OVERLAP
-    pad_y = (lat2 - lat1) / TILE_SIZE * TILE_OVERLAP
-    bbox = (lon1 - pad_x, lat1 - pad_y, lon2 + pad_x, lat2 + pad_y)
-    dem_path, array, gt = _prepare_dem(store, ds, bbox)
-    if dem_path is None:
+    values = _dem3857(store, ds, z, x, y)
+    if values is None:
         return None, None
-    valid = ~np.isnan(array)
+    valid = ~np.isnan(values)
+    lat_center = (tile_bounds(z, x, y)[1] + tile_bounds(z, x, y)[3]) / 2
     if mode == "elevation":
-        rgb = _elevation_colors(array)
+        rgb = _elevation_colors(values)
     elif mode == "contours":
-        rgb = _elevation_colors(array)
-        shade = _hillshade(dem_path)
-        if shade is not None and shade.shape == rgb.shape[:2]:
+        rgb = _elevation_colors(values)
+        shade = _hillshade(values, lat_center, z)
+        if shade is not None:
             factor = (shade.astype("float64") / 255.0 * 0.6 + 0.4)[:, :, None]
             rgb = np.clip(rgb.astype("float64") * factor, 0, 255).astype("uint8")
-        step = _nice_step(ground_resolution(z, (lat1 + lat2) / 2) * 10)
-        mask = _contour_mask(array, valid, step)
+        step = _nice_step(156543.03392 / (2 ** z) * 8)
+        mask = _contour_mask(values, step)
         if mask is not None:
             rgb[mask > 0] = (58, 38, 28)
     else:
-        shade = _hillshade(dem_path)
-        if shade is None or shade.shape != array.shape:
+        shade = _hillshade(values, lat_center, z)
+        if shade is None:
             return None, None
         rgb = np.dstack([shade, shade, shade])
     alpha = np.where(valid, 255, 0).astype("uint8")
-    mem = _array_to_dataset(rgb, alpha, gt)
-    bounds = _mercator_bounds(lon1, lat1, lon2, lat2)
-    data = _warp_to_png(mem, bounds)
-    native = (abs(gt[1]) * 111320.0 *
-              math.cos(math.radians((lat1 + lat2) / 2)), abs(gt[5]) * 110574.0)
+    data = _png_bytes(rgb, alpha)
+    if data is None:
+        return None, None
+    native = (156543.03392 / (2 ** z) / max(math.cos(math.radians(lat_center)),
+                                            1e-6),
+              156543.03392 / (2 ** z))
     return data, native
 
 
 def render_diff(store, ds_a, ds_b, z, x, y):
-    lon1, lat1, lon2, lat2 = tile_bounds(z, x, y)
-    bbox = (lon1, lat1, lon2, lat2)
-    array_a, gt = _dem_grid(store, ds_a, bbox, pixels=TILE_SIZE)
-    array_b, _ = _dem_grid(store, ds_b, bbox, pixels=TILE_SIZE)
-    if array_a is None or array_b is None:
+    values_a = _dem3857(store, ds_a, z, x, y)
+    values_b = _dem3857(store, ds_b, z, x, y)
+    if values_a is None or values_b is None:
         return None
-    diff = array_b - array_a
-    valid = (~np.isnan(array_a)) & (~np.isnan(array_b))
+    diff = values_b - values_a
+    valid = (~np.isnan(values_a)) & (~np.isnan(values_b))
     rgb = _diff_colors(diff, valid)
     alpha = np.where(valid, 255, 0).astype("uint8")
-    mem = _array_to_dataset(rgb, alpha, gt)
-    bounds = _mercator_bounds(lon1, lat1, lon2, lat2)
-    return _warp_to_png(mem, bounds)
+    return _png_bytes(rgb, alpha)
 
 
 def _dataset_transform(dataset, lon, lat):

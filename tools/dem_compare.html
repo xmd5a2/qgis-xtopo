@@ -42,6 +42,10 @@
   }
   .badge.native { color: #0d1417; background: var(--accent); border-color: var(--accent); }
   .badge.warn { color: #14100a; background: var(--warn); border-color: var(--warn); }
+  .badge.place { color: var(--text); border-color: var(--accent); }
+  .badge.place.set { background: var(--accent); color: #10161a; }
+  .point.active { border-color: var(--accent); background: #26333a; }
+  .point.active b { color: var(--accent); }
   main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
@@ -96,6 +100,7 @@
 <body>
 <header>
   <h1>Сравнение DEM</h1>
+  <span class="badge place" id="place-badge" title="выбранное место">место не выбрано</span>
   <div class="group">
     <label for="ds-a">A</label>
     <select id="ds-a"></select>
@@ -118,6 +123,7 @@
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
   </div>
   <div class="spacer"></div>
+  <span class="badge" id="load-badge" style="display:none"></span>
   <span class="badge" id="res-badge">—</span>
   <span class="badge" id="coord-badge">—</span>
 </header>
@@ -234,6 +240,11 @@ const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const mapEl = document.getElementById("map");
 
+// Кадр предыдущей отрисовки: пока новые тайлы едут из сервера, карта не
+// распадается на куски, а остаётся прежней (с растяжением).
+const frameCanvas = document.createElement("canvas");
+let frameState = null;
+
 // ---------------------------------------------------------------------------
 // Геометрия
 // ---------------------------------------------------------------------------
@@ -340,10 +351,6 @@ function resize() {
 
 function draw() {
   const {w, h} = viewSize();
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#0d1114";
-  ctx.fillRect(0, 0, w, h);
-
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
   const scale = Math.pow(2, state.zoom - tz);
   const tileCount = Math.pow(2, tz);
@@ -351,6 +358,9 @@ function draw() {
   // Левый верхний угол видимой области в мировых пикселях тайлов.
   const left = center.x * scale - w / 2;
   const top = center.y * scale - h / 2;
+
+  let wanted = 0;
+  let loaded = 0;
 
   const drawLayer = (ds, mode, clipX) => {
     if (!ds) return;
@@ -371,14 +381,40 @@ function draw() {
         // с другого края, но на своей позиции.
         const wrapped = ((tx % tileCount) + tileCount) % tileCount;
         const entry = getTile(ds, mode, tz, wrapped, ty);
+        wanted += 1;
         if (!entry.loaded) continue;
+        loaded += 1;
         const worldX = (tx < 0 ? wrapped : tx) * TILE;
         ctx.drawImage(entry.image, worldX - left, ty * TILE - top,
                       TILE * scale + 1, TILE * scale + 1);
       }
     }
+    // Догружаем соседей, чтобы панорамирование не ждало сеть.
+    if (mode !== "diff") {
+      for (let tx = firstX - 1; tx <= lastX + 1; tx++) {
+        for (let ty = firstY - 1; ty <= lastY + 1; ty++) {
+          if (ty < 0 || ty >= tileCount) continue;
+          const wrapped = ((tx % tileCount) + tileCount) % tileCount;
+          getTile(ds, mode, tz, wrapped, ty);
+        }
+      }
+    }
     ctx.restore();
   };
+
+  const single = !state.diff && !(state.compare && state.a && state.b);
+  if (single) {
+    wanted = 0; loaded = 0;
+  }
+
+  // Фон всегда, потом прошлый кадр, пока часть тайлов не готова.
+  ctx.fillStyle = "#0d1114";
+  ctx.fillRect(0, 0, w, h);
+  if (loaded < wanted && frameState) {
+    const k = scale / frameState.scale;
+    ctx.drawImage(frameCanvas, frameState.left * scale - left,
+                  frameState.top * scale - top, w * k, h * k);
+  }
 
   if (state.diff && state.a && state.b) {
     drawLayer("__diff__", "diff", null);
@@ -406,8 +442,32 @@ function draw() {
     drawLayer(state.a || state.b, state.mode, null);
   }
 
+  // Кадр целиком собран — запоминаем его как подложку.
+  if (loaded >= wanted && wanted > 0) {
+    if (frameCanvas.width !== w || frameCanvas.height !== h) {
+      frameCanvas.width = w;
+      frameCanvas.height = h;
+    }
+    const fctx = frameCanvas.getContext("2d");
+    fctx.clearRect(0, 0, w, h);
+    fctx.drawImage(canvas, 0, 0, w, h);
+    frameState = {left, top, scale};
+  }
+
   drawScaleBar();
   updateResolutionBadge();
+  updateProgress(wanted, loaded);
+}
+
+function updateProgress(wanted, loaded) {
+  const badge = document.getElementById("load-badge");
+  if (!badge) return;
+  if (wanted > 0 && loaded < wanted) {
+    badge.textContent = `тайлы ${loaded}/${wanted}`;
+    badge.style.display = "";
+  } else {
+    badge.style.display = "none";
+  }
 }
 
 function drawScaleBar() {
@@ -636,6 +696,7 @@ canvas.addEventListener("pointermove", event => {
     const start = project(state.dragStart.center.lon, state.dragStart.center.lat, state.dragStart.zoom);
     const target = unproject(start.x - dx, start.y - dy, state.dragStart.zoom);
     state.center = target;
+    refreshPlaceBadge();
     requestRender();
   } else {
     // Курсор у разделителя шторки — двигаем границу.
@@ -674,6 +735,7 @@ canvas.addEventListener("wheel", event => {
     lon: state.center.lon + (before.lon - after.lon),
     lat: state.center.lat + (before.lat - after.lat)
   };
+  refreshPlaceBadge();
   requestRender();
   refreshReadout();
 }, {passive: false});
@@ -741,12 +803,53 @@ document.getElementById("points").addEventListener("click", event => {
   const button = event.target.closest(".point");
   if (!button) return;
   const point = POINTS[Number(button.dataset.index)];
+  selectPlace(point, Number(button.dataset.index));
   state.center = {lon: point.lon, lat: point.lat};
   state.zoom = point.zoom;
-  document.getElementById("src-note").textContent = point.note;
   requestRender();
   refreshReadout();
 });
+
+// Показывает название выбранного места и подсвечивает его в списке.
+function selectPlace(point, index) {
+  state.place = point;
+  const badge = document.getElementById("place-badge");
+  badge.textContent = point ? point.name : "место не выбрано";
+  badge.classList.toggle("set", Boolean(point));
+  document.querySelectorAll("#points .point").forEach(item => {
+    item.classList.toggle("active", Number(item.dataset.index) === index);
+  });
+  if (point) {
+    document.getElementById("src-note").textContent =
+      `${point.kind}. ${point.note}`;
+  }
+}
+
+// Если точка совпадает с одной из заготовок — показываем её название.
+function matchPlace(lon, lat) {
+  for (let index = 0; index < POINTS.length; index++) {
+    const point = POINTS[index];
+    if (Math.abs(point.lon - lon) < 0.0005 &&
+        Math.abs(point.lat - lat) < 0.0005) {
+      return {point, index};
+    }
+  }
+  return null;
+}
+
+// После перемещения карты название остаётся, но гаснет: мы уже не там.
+function refreshPlaceBadge() {
+  const badge = document.getElementById("place-badge");
+  const point = state.place;
+  if (!point) {
+    badge.textContent = "свободный обзор";
+    badge.classList.remove("set");
+    return;
+  }
+  const dx = Math.abs(point.lon - state.center.lon);
+  const dy = Math.abs(point.lat - state.center.lat);
+  badge.classList.toggle("set", dx < 0.02 && dy < 0.02);
+}
 
 // ---------------------------------------------------------------------------
 // Состояние в адресе: ссылкой можно поделиться, состояние восстанавливается
@@ -786,6 +889,10 @@ loadDatasets().then(() => {
   document.getElementById("mode").value = state.mode;
   document.getElementById("diff").classList.toggle("active", state.diff);
   document.getElementById("compare").classList.toggle("active", state.compare);
+  const found = matchPlace(state.center.lon, state.center.lat);
+  if (found) {
+    selectPlace(found.point, found.index);
+  }
   renderMeta();
   resize();
   requestRender();
