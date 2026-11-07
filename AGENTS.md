@@ -106,6 +106,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   (`terrain.py: generate_isolines`, `_water_mask_paths`): по
   `water_dissolved` и `water_intermittent_dissolved`, иначе по исходным слоям.
   Тест — `GlacierIsolinesWaterTest`.
+- **Треки на 1:50 000+**: в правилах слоя `track` для
+  `highway_integrity='3'` должен быть символ в каждом диапазоне масштаба.
+  Пропуск этой ветки оставлял треки с таким значением без отрисовки.
+  Диапазоны 50k+ дополнительно фильтруются по `@level_of_detail`
+  (50–100k ≥3, 100–200k ≥3, 200–300k ≥4, 300k+ ≥5). Проверка —
+  `TrackScaleTest`.
 
 ## Подписи и язык карты
 

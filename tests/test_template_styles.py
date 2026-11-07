@@ -149,6 +149,44 @@ class LabelPriorityTest(unittest.TestCase):
             self.assertGreater(min(self._priorities(name)), peak)
 
 
+class TrackScaleTest(unittest.TestCase):
+    """Треки рисуются на 1:50 000+ и зависят от уровня детализации."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layer = next(
+            layer for layer in _template_root().iter("maplayer")
+            if layer.findtext("layername") == "track"
+        )
+
+    def _integrity_groups(self):
+        parent = next(
+            rule for rule in self.layer.iter("rule")
+            if "highway_integrity <=" in rule.get("filter", "")
+        )
+        return parent.findall("rule")
+
+    def test_integrity_three_is_rendered_at_all_scales(self):
+        for group in self._integrity_groups():
+            filters = [rule.get("filter") for rule in group.findall("rule")]
+            self.assertIn(
+                "highway_integrity='3'", filters,
+                "нет правила integrity=3 для масштаба "
+                f"{group.get('scalemindenom')}",
+            )
+
+    def test_coarse_scales_depend_on_detail_level(self):
+        for rule in self.layer.iter("rule"):
+            if not rule.findall("rule"):
+                continue
+            scale_min = int(rule.get("scalemindenom") or 0)
+            if scale_min >= 50000:
+                self.assertIn(
+                    "@level_of_detail", rule.get("filter", ""),
+                    f"масштаб {scale_min}+ не зависит от level_of_detail",
+                )
+
+
 class IntermittentWaterStyleTest(unittest.TestCase):
     """Пересыхающая вода нарисована горизонтальной штриховкой без обводки."""
 
