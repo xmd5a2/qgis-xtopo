@@ -1242,8 +1242,12 @@ def _contour_mask(values, step):
                   np.isfinite(v11) & np.isfinite(v01))
     for level in np.arange(first, hi + step, step):
         corners = np.stack([v00, v10, v11, v01])
-        lowest = np.nanmin(corners, axis=0)
-        highest = np.nanmax(corners, axis=0)
+        # Пустые углы заменяем на бесконечности: nanmin/nanmax на ячейке,
+        # где все четыре угла — NaN, печатают «All-NaN slice encountered».
+        # Для таких ячеек lowest > highest, и пересечения всё равно нет.
+        finite = np.isfinite(corners)
+        lowest = np.min(np.where(finite, corners, np.inf), axis=0)
+        highest = np.max(np.where(finite, corners, -np.inf), axis=0)
         crossing = cell_valid & (lowest <= level) & (highest >= level)
         ys, xs = np.nonzero(crossing)
         for y, x in zip(ys, xs):
