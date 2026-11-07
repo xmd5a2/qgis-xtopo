@@ -934,6 +934,9 @@ async function buildProfile(a, b) {
   const svg = document.getElementById("profile-svg");
   box.style.display = "block";
   box.classList.add("active");
+  // Панель слева прокручиваем к графику: иначе результат остаётся
+  // ниже видимой части и кажется, что профиль не построился.
+  box.scrollIntoView({behavior: "smooth", block: "nearest"});
   const [lon1, lat1] = a;
   const [lon2, lat2] = b;
   const fetchProfile = ds => fetch(
