@@ -286,9 +286,10 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
             bbox=dict(facecolor="white", alpha=0.85, edgecolor="0.6"),
         )
 
-    # Масштабная линейка на 1 км.
+    # Масштабная линейка на 1 км.  Справа внизу: слева внизу подпись
+    # «почему», она туда не влезает.
     bar = 1000.0 / METRES_PER_DEGREE
-    x0 = extent[0] + lon_span * 0.06
+    x0 = extent[0] + lon_span * 0.76
     y0 = extent[2] + lat_span * 0.06
     axes.plot([x0, x0 + bar], [y0, y0], color="black", linewidth=2.5, zorder=7)
     axes.text(x0 + bar / 2, y0 + lat_span * 0.012, "1 км", fontsize=8,
