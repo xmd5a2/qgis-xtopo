@@ -18,6 +18,7 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 
 * ``/api/datasets`` — список наборов с метаданными;
 * ``/tile/<ds>/<z>/<x>/<y>.png?mode=hillshade|elevation|contours`` — тайл;
+* ``/osm/<z>/<x>/<y>.png`` — тайл подложки OpenStreetMap;
 * ``/diff/<a>/<b>/<z>/<x>/<y>.png`` — разность высот B−A;
 * ``/api/value?ds=&lon=&lat=`` — высота в точке;
 * ``/api/profile?ds=&lon1=&lat1=&lon2=&lat2=&n=`` — профиль по отрезку;
@@ -104,6 +105,18 @@ DEFAULT_CACHE = (
 )
 
 USER_AGENT = "qgis-xtopo-dem-compare/1.0"
+# Подложка OpenStreetMap: тайлы 256×256 в той же проекции, что и рельеф.
+OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+OSM_MAX_ZOOM = 19
+OSM_LOCKS = {}
+OSM_LOCKS_GUARD = threading.Lock()
+
+
+def _osm_lock(key):
+    with OSM_LOCKS_GUARD:
+        if key not in OSM_LOCKS:
+            OSM_LOCKS[key] = threading.Lock()
+        return OSM_LOCKS[key]
 
 # ---------------------------------------------------------------------------
 # Описание наборов данных
@@ -1439,6 +1452,7 @@ def precache(store, tile_cache, points, modes=("hillshade",),
 class Handler(BaseHTTPRequestHandler):
     store = None
     tile_cache = None
+    osm_cache = None
 
     def log_message(self, fmt, *args):
         message = fmt % args
@@ -1446,11 +1460,13 @@ class Handler(BaseHTTPRequestHandler):
             print("[dem-compare]", message)
 
     def _send(self, code, body, content_type, extra=None):
+        extra = extra or {}
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        for key, value in (extra or {}).items():
+        if "Cache-Control" not in extra:
+            self.send_header("Cache-Control", "no-store")
+        for key, value in extra.items():
             self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
@@ -1489,6 +1505,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "diff" and len(parts) == 6:
             self._diff(parts[1], parts[2], parts[3], parts[4], parts[5])
+            return
+        if head == "osm" and len(parts) == 4:
+            self._osm(parts[1], parts[2], parts[3])
             return
         self._json({"error": "not found"}, code=404)
 
@@ -1581,6 +1600,45 @@ class Handler(BaseHTTPRequestHandler):
                     "X-Tile-Status": "rendered",
                     "X-Tile-Seconds": f"{seconds:.2f}"})
 
+    def _osm(self, z, x, y):
+        """Тайл подложки OpenStreetMap, с локальным кэшем."""
+        z, x, y = int(z), int(x), int(y.split(".")[0])
+        count = 2 ** z
+        if z < 0 or z > OSM_MAX_ZOOM or not (0 <= x < count and 0 <= y < count):
+            self._send(404, b"", "text/plain")
+            return
+        cache_file = self.osm_cache / str(z) / str(x) / f"{y}.png"
+        headers = {"X-Tile-Status": "cached", "Cache-Control": "max-age=86400"}
+        if cache_file.exists():
+            self._send(200, cache_file.read_bytes(), "image/png", headers)
+            return
+        # Один и тот же тайл могут запросить соседние вкладки/потоки.
+        with _osm_lock(f"{z}/{x}/{y}"):
+            if cache_file.exists():
+                self._send(200, cache_file.read_bytes(), "image/png", headers)
+                return
+            url = OSM_TILE_URL.format(z=z, x=x, y=y)
+            request = urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT,
+                              "Referer": "http://127.0.0.1/"})
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    data = response.read()
+            except urllib.error.HTTPError as exc:
+                self._send(404 if exc.code in (403, 404) else 502,
+                           b"", "text/plain")
+                return
+            except Exception:
+                self._send(502, b"", "text/plain")
+                return
+            if not data:
+                self._send(404, b"", "text/plain")
+                return
+            write_bytes_atomic(cache_file, data)
+            self._send(200, data, "image/png",
+                       {"X-Tile-Status": "osm",
+                        "Cache-Control": "max-age=86400"})
+
     def _diff(self, ds_a, ds_b, z, x, y):
         z, x, y = int(z), int(x), int(y.split(".")[0])
         cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / "diff" /
@@ -1654,6 +1712,8 @@ def main():
     Handler.store = store
     Handler.tile_cache = cache / "tiles"
     Handler.tile_cache.mkdir(parents=True, exist_ok=True)
+    Handler.osm_cache = cache / "osm"
+    Handler.osm_cache.mkdir(parents=True, exist_ok=True)
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), Handler)

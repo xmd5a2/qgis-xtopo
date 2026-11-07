@@ -150,6 +150,8 @@
   <div class="group">
     <button id="profile-btn" title="Профиль высот по отрезку">профиль</button>
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
+    <button id="osm" class="active"
+            title="Полупрозрачная подложка OpenStreetMap">OSM</button>
   </div>
   <div class="spacer"></div>
   <span class="badge" id="res-badge">—</span>
@@ -184,6 +186,9 @@
       тянут мышью. «Δ высот» показывает разность B − A: синий — ниже,
       красный — выше. «профиль» — кликните две точки.
       <br><br>
+      <b>OSM</b> — полупрозрачная подложка OpenStreetMap: по ней видно, куда
+      вы сдвинули карту. Кнопка <b>OSM</b> в шапке отключает её.
+      <br><br>
       <b>3DEP</b> покрывает только США — в остальных точках он пуст.
       <b>NASADEM</b> не заходит выше 61° и ниже −56°.
       <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
@@ -205,7 +210,7 @@
       <div id="progress-rows"></div>
       <div class="hint" id="progress-hint"></div>
     </div>
-    <div id="legend">© ESA / NASA / JAXA / USGS · рельеф отрисован сервером</div>
+    <div id="legend">© OpenStreetMap contributors · ESA / NASA / JAXA / USGS · рельеф отрисован сервером</div>
   </div>
 </main>
 
@@ -257,6 +262,7 @@ const state = {
   mode: "hillshade",
   compare: true,
   diff: false,
+  osm: true,
   center: {lon: 7.6586, lat: 45.9763},
   zoom: 12,
   minZoom: 2,
@@ -356,7 +362,10 @@ function getTile(ds, mode, z, x, y) {
   state.tiles.set(key, entry);
   const url = ds === "__diff__"
     ? `/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`
-    : `/tile/${ds}/${z}/${x}/${y}.png?mode=${mode}`;
+    : ds === "__osm__"
+      ? `/osm/${z}/${x}/${y}.png`
+      : `/tile/${ds}/${z}/${x}/${y}.png?mode=${mode}`;
+  const log = ds !== "__osm__";
   // fetch вместо <img>: нужны заголовки — откуда тайл (кэш или рендер)
   // и сколько секунд он считался.
   fetch(url)
@@ -365,7 +374,7 @@ function getTile(ds, mode, z, x, y) {
       entry.seconds = parseFloat(response.headers.get("X-Tile-Seconds") || "0");
       if (!response.ok) {
         entry.failed = true;
-        addLog(ds, `${z}/${x}/${y}`, "нет данных", 0);
+        if (log) addLog(ds, `${z}/${x}/${y}`, "нет данных", 0);
         requestRender();
         return;
       }
@@ -374,7 +383,7 @@ function getTile(ds, mode, z, x, y) {
       image.onload = () => {
         entry.image = image;
         entry.loaded = true;
-        addLog(ds, `${z}/${x}/${y}`, entry.status, entry.seconds);
+        if (log) addLog(ds, `${z}/${x}/${y}`, entry.status, entry.seconds);
         requestRender();
       };
       image.onerror = () => { entry.failed = true; requestRender(); };
@@ -432,7 +441,6 @@ function draw() {
   const {w, h} = viewSize();
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
   const scale = Math.pow(2, state.zoom - tz);
-  const tileCount = Math.pow(2, tz);
   const center = centerPoint();
   // Левый верхний угол видимой области в мировых пикселях тайлов.
   const left = center.x * scale - w / 2;
@@ -440,35 +448,43 @@ function draw() {
 
   let wanted = 0;
   let loaded = 0;
+  let osmLoaded = 0;
   const progress = {};
 
-  const drawLayer = (ds, mode, clipX, bucket) => {
+  const drawLayer = (ds, mode, clipX, bucket, layerZoom = tz,
+                     counted = true) => {
     if (!ds) return;
-    const stats = progress[bucket] || {wanted: 0, loaded: 0};
-    progress[bucket] = stats;
+    const layerScale = Math.pow(2, state.zoom - layerZoom);
+    const layerCount = Math.pow(2, layerZoom);
+    const layerLeft = center.x * layerScale - w / 2;
+    const layerTop = center.y * layerScale - h / 2;
+    const stats = counted
+      ? (progress[bucket] || {wanted: 0, loaded: 0}) : null;
+    if (stats) progress[bucket] = stats;
     ctx.save();
     if (clipX !== null) {
       ctx.beginPath();
       ctx.rect(clipX, 0, w - clipX, h);
       ctx.clip();
     }
-    const firstX = Math.floor(left / TILE) - 1;
-    const firstY = Math.floor(top / TILE) - 1;
-    const lastX = Math.floor((left + w) / TILE) + 1;
-    const lastY = Math.floor((top + h) / TILE) + 1;
+    const firstX = Math.floor(layerLeft / TILE) - 1;
+    const firstY = Math.floor(layerTop / TILE) - 1;
+    const lastX = Math.floor((layerLeft + w) / TILE) + 1;
+    const lastY = Math.floor((layerTop + h) / TILE) + 1;
+    const size = TILE * layerScale;
     for (let tx = firstX; tx <= lastX; tx++) {
       for (let ty = firstY; ty <= lastY; ty++) {
-        if (ty < 0 || ty >= tileCount) continue;
+        if (ty < 0 || ty >= layerCount) continue;
         // Западнее нулевого меридиана мир повторяется: рисуем тот же тайл
         // с другого края, но на своей позиции.
-        const wrapped = ((tx % tileCount) + tileCount) % tileCount;
-        const entry = getTile(ds, mode, tz, wrapped, ty);
+        const wrapped = ((tx % layerCount) + layerCount) % layerCount;
+        const entry = getTile(ds, mode, layerZoom, wrapped, ty);
         const worldX = (tx < 0 ? wrapped : tx) * TILE;
-        const screenX = worldX - left;
-        const screenY = ty * TILE - top;
-        const visible = screenX + TILE * scale > 0 && screenX < w &&
-                        screenY + TILE * scale > 0 && screenY < h;
-        if (visible) {
+        const screenX = worldX - layerLeft;
+        const screenY = ty * TILE - layerTop;
+        const visible = screenX + size > 0 && screenX < w &&
+                        screenY + size > 0 && screenY < h;
+        if (visible && stats) {
           stats.wanted += 1;
           wanted += 1;
           if (entry.loaded) {
@@ -477,17 +493,17 @@ function draw() {
           }
         }
         if (!entry.loaded) continue;
-        ctx.drawImage(entry.image, screenX, screenY,
-                      TILE * scale + 1, TILE * scale + 1);
+        if (!counted) osmLoaded += 1;
+        ctx.drawImage(entry.image, screenX, screenY, size + 1, size + 1);
       }
     }
     // Догружаем соседей, чтобы панорамирование не ждало сеть.
     if (mode !== "diff") {
       for (let tx = firstX - 1; tx <= lastX + 1; tx++) {
         for (let ty = firstY - 1; ty <= lastY + 1; ty++) {
-          if (ty < 0 || ty >= tileCount) continue;
-          const wrapped = ((tx % tileCount) + tileCount) % tileCount;
-          getTile(ds, mode, tz, wrapped, ty);
+          if (ty < 0 || ty >= layerCount) continue;
+          const wrapped = ((tx % layerCount) + layerCount) % layerCount;
+          getTile(ds, mode, layerZoom, wrapped, ty);
         }
       }
     }
@@ -502,18 +518,35 @@ function draw() {
   // Фон всегда, потом прошлый кадр, пока часть тайлов не готова.
   ctx.fillStyle = "#0d1114";
   ctx.fillRect(0, 0, w, h);
+
+  // Подложка OSM лежит под рельефом, поэтому рельеф рисуем полупрозрачным.
+  // Выше 19-го зума OSM тайлов нет — растягиваем последний доступный.
+  const osmZoom = Math.min(tz, 19);
+  if (state.osm) {
+    ctx.save();
+    drawLayer("__osm__", "osm", null, "osm", osmZoom, false);
+    ctx.restore();
+  }
+
   if (loaded < wanted && frameState) {
     const k = scale / frameState.scale;
     ctx.drawImage(frameCanvas, frameState.left * scale - left,
                   frameState.top * scale - top, w * k, h * k);
   }
 
+  const demAlpha = (state.osm && osmLoaded > 0) ? 0.7 : 1;
   if (state.diff && state.a && state.b) {
+    ctx.save();
+    ctx.globalAlpha = demAlpha;
     drawLayer("__diff__", "diff", null, "diff");
+    ctx.restore();
   } else if (state.compare && state.a && state.b) {
     const split = Math.round(w * state.divider);
+    ctx.save();
+    ctx.globalAlpha = demAlpha;
     drawLayer(state.a, state.mode, null, "a");
     drawLayer(state.b, state.mode, split, "b");
+    ctx.restore();
     ctx.save();
     ctx.strokeStyle = "#6fb3d2";
     ctx.lineWidth = 2;
@@ -531,7 +564,10 @@ function draw() {
     ctx.fillText("⇔", split, h / 2 + 4);
     ctx.restore();
   } else {
+    ctx.save();
+    ctx.globalAlpha = demAlpha;
     drawLayer(state.a || state.b, state.mode, null, "a");
+    ctx.restore();
   }
 
   // Кадр целиком собран — запоминаем его как подложку.
@@ -947,6 +983,18 @@ document.getElementById("zoom-native").addEventListener("click", async () => {
   requestRender();
   refreshReadout();
 });
+document.getElementById("osm").addEventListener("click", event => {
+  state.osm = !state.osm;
+  event.target.classList.toggle("active", state.osm);
+  if (state.osm) {
+    // Неудачные тайлы подложки пробуем загрузить снова.
+    for (const key of [...state.tiles.keys()]) {
+      if (key.startsWith("__osm__/")) state.tiles.delete(key);
+    }
+  }
+  requestRender();
+  writeUrl();
+});
 
 document.getElementById("points").innerHTML = POINTS.map((point, index) =>
   `<button class="point" data-index="${index}"><b>${point.name}</b>` +
@@ -1018,6 +1066,7 @@ function readUrl() {
                     lat: parseFloat(params.get("lat"))};
   }
   if (params.get("z")) state.zoom = parseFloat(params.get("z"));
+  if (params.get("osm") === "0") state.osm = false;
 }
 
 function writeUrl() {
@@ -1026,6 +1075,7 @@ function writeUrl() {
   params.set("b", state.b);
   params.set("mode", state.mode);
   if (state.diff) params.set("diff", "1");
+  params.set("osm", state.osm ? "1" : "0");
   params.set("lon", state.center.lon.toFixed(5));
   params.set("lat", state.center.lat.toFixed(5));
   params.set("z", state.zoom.toFixed(1));
@@ -1042,6 +1092,7 @@ loadDatasets().then(() => {
   document.getElementById("mode").value = state.mode;
   document.getElementById("diff").classList.toggle("active", state.diff);
   document.getElementById("compare").classList.toggle("active", state.compare);
+  document.getElementById("osm").classList.toggle("active", state.osm);
   const found = matchPlace(state.center.lon, state.center.lat);
   if (found) {
     selectPlace(found.point, found.index);
