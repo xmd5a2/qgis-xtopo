@@ -302,7 +302,8 @@ const state = {
   profilePts: [],
   tiles: new Map(),
   cursor: null,
-  lastReadout: 0
+  lastReadout: 0,
+  native: {}
 };
 
 const canvas = document.getElementById("canvas");
@@ -356,6 +357,7 @@ async function loadDatasets() {
   const data = await response.json();
   const keepA = state.a, keepB = state.b;
   state.datasets = {};
+  state.native = {};
   data.datasets.forEach(item => { state.datasets[item.key] = item; });
   // Выбор сохраняем: список перезагружается и после добавления своего
   // каталога, и при обычном старте.
@@ -452,7 +454,15 @@ function renderLog() {
 // Отрисовка
 // ---------------------------------------------------------------------------
 let renderQueued = false;
+// Масштаб и разрешение на экране известны сразу — их не ждём от сервера.
+function updateZoomBadge() {
+  document.getElementById("coord-badge").textContent =
+    `z=${state.zoom.toFixed(1)} · ` +
+    `${groundResolution(state.center.lat, state.zoom).toFixed(1)} м/пикс`;
+}
+
 function requestRender() {
+  updateZoomBadge();
   if (renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(() => { renderQueued = false; draw(); });
@@ -736,25 +746,32 @@ function updateResolutionBadge() {
   const ds = state.a || state.b;
   if (!ds) { badge.textContent = "—"; badge.className = "badge"; return; }
   const screen = groundResolution(state.center.lat, state.zoom);
-  fetch(`/api/info?ds=${ds}&lon=${state.center.lon}&lat=${state.center.lat}`)
-    .then(r => r.json())
-    .then(info => {
-      if (!info || !info.native_y_m) {
-        badge.textContent = "нет данных";
-        badge.className = "badge warn";
-        return;
-      }
-      const native = Math.max(info.native_y_m, info.native_x_m);
-      const ratio = screen / native;
-      if (ratio <= 1.05) {
-        badge.textContent = `полное разрешение · ${native.toFixed(0)} м/пикс`;
-        badge.className = "badge native";
-      } else {
-        badge.textContent = `×${ratio.toFixed(1)} к нативным ${native.toFixed(0)} м/пикс`;
-        badge.className = "badge";
-      }
-    })
-    .catch(() => { badge.textContent = "—"; });
+  const native = state.native[ds];
+  if (!native) {
+    // Разрешение источника от набора не зависит от места: спрашиваем один
+    // раз и дальше считаем соотношение сразу, без ожидания сети.
+    fetch(`/api/info?ds=${ds}&lon=${state.center.lon}&lat=${state.center.lat}`)
+      .then(r => r.json())
+      .then(info => {
+        if (!info || !info.native_y_m) {
+          badge.textContent = "нет данных";
+          badge.className = "badge warn";
+          return;
+        }
+        state.native[ds] = Math.max(info.native_y_m, info.native_x_m);
+        updateResolutionBadge();
+      })
+      .catch(() => { badge.textContent = "—"; });
+    return;
+  }
+  const ratio = screen / native;
+  if (ratio <= 1.05) {
+    badge.textContent = `полное разрешение · ${native.toFixed(0)} м/пикс`;
+    badge.className = "badge native";
+  } else {
+    badge.textContent = `×${ratio.toFixed(1)} к нативным ${native.toFixed(0)} м/пикс`;
+    badge.className = "badge";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -789,8 +806,6 @@ async function refreshReadout() {
   document.getElementById("readout").innerHTML =
     `<span class="coord">${lon.toFixed(5)}°, ${lat.toFixed(5)}°</span><br>` +
     parts.join("<br>");
-  document.getElementById("coord-badge").textContent =
-    `z=${state.zoom.toFixed(1)} · ${groundResolution(state.center.lat, state.zoom).toFixed(1)} м/пикс`;
 }
 
 // ---------------------------------------------------------------------------
