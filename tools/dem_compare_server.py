@@ -1839,6 +1839,11 @@ class Handler(BaseHTTPRequestHandler):
         if head == "osm" and len(parts) == 4:
             self._osm(parts[1], parts[2], parts[3])
             return
+        if head == "favicon.ico":
+            # Иконка уже в странице (data-URI); старые вкладки могут
+            # попросить её отдельно — отвечаем без тела и без записи в лог.
+            self._send(204, b"", "image/x-icon")
+            return
         self._json({"error": "not found"}, code=404)
 
     def _api(self, parts, query):
