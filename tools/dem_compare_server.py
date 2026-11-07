@@ -71,6 +71,9 @@ TILE_SIZE = 256
 # Версия кэша: старые каталоги не удаляются, но и не используются, чтобы
 # после правок рендера не отдавать тайлы, нарисованные прежним кодом.
 CACHE_VERSION = 5
+# Версия только готовых PNG: отмывка и гипсометрия меняются чаще, чем
+# исходные окна DEM. Отдельный номер не заставит заново качать prepared.
+TILE_CACHE_VERSION = 6
 # Подгрузка тайла с запасом, чтобы шов между тайлами не был виден.
 TILE_OVERLAP = 1
 # Ограничение на размер промежуточного растра (пиксели по стороне).
@@ -450,7 +453,7 @@ def register_local_source(store, directory, key=LOCAL_KEY):
         previous = ""
     if previous and Path(previous).expanduser() != folder:
         _purge_tree(store.cache_dir / "dem3857" / f"v{CACHE_VERSION}" / key)
-        _purge_tree(store.cache_dir / "tiles" / f"v{CACHE_VERSION}" / key)
+        _purge_tree(store.cache_dir / "tiles" / f"v{TILE_CACHE_VERSION}" / key)
     try:
         marker.write_text(json.dumps({"directory": str(folder)}),
                           encoding="utf-8")
@@ -1271,19 +1274,20 @@ def _render_dem3857(store, ds, z, x, y, cache_file):
     return array
 
 
-def _hillshade(values, lat_center, zoom):
-    """Отмывка по растру Web Mercator.
+def _hillshade(values, zoom):
+    """Отмывка по растру Web Mercator, как у ``gdaldem hillshade``.
 
-    В Mercator шаг по долготе короче наземного в cos(широты) раз — без
-    этой поправки склоны выходят плоскими.
+    Пиксель EPSG:3857 — это ``res`` метров проекции по обеим осям, поэтому
+    шаг одинаковый. Направление склона берётся от вектора вниз: раньше
+    аспект считался повёрнутым на 180°, и склоны, обращённые к солнцу,
+    уходили в чёрный — чёрными становились до 60 % тайла.
     """
     if values is None:
         return None
     valid = ~np.isnan(values)
     filled = np.where(valid, values, 0.0).astype("float64")
     res = 156543.03392 / (2 ** zoom)
-    step_x = res / max(math.cos(math.radians(lat_center)), 1e-6)
-    step_y = res
+    step = res
     dzdx = np.empty_like(filled)
     dzdx[:, 1:-1] = (filled[:, 2:] - filled[:, :-2]) / 2.0
     dzdx[:, 0] = filled[:, 1] - filled[:, 0]
@@ -1292,14 +1296,18 @@ def _hillshade(values, lat_center, zoom):
     dzdy[1:-1, :] = (filled[:-2, :] - filled[2:, :]) / 2.0
     dzdy[0, :] = filled[0, :] - filled[1, :]
     dzdy[-1, :] = filled[-1, :] - filled[-2, :]
-    dzdx *= step_x
-    dzdy *= step_y
+    dzdx /= step
+    dzdy /= step
     slope = np.arctan(np.hypot(dzdx, dzdy))
-    aspect = np.arctan2(dzdy, -dzdx)
+    # Азимут склона: atan2(восток, север) от вектора вниз.
+    aspect = np.arctan2(-dzdx, -dzdy)
     zenith = math.radians(90.0 - 45.0)
     azimuth = math.radians(315.0)
     shade = 255.0 * (math.cos(zenith) * np.cos(slope) +
                      math.sin(zenith) * np.sin(slope) * np.cos(azimuth - aspect))
+    # Небольшая подсветка теней: совсем чёрные провалы на карте читаются
+    # как дыры, особенно на крутых северных склонах.
+    shade = 255.0 * (0.10 + 0.90 * np.clip(shade / 255.0, 0.0, 1.0))
     shade = np.clip(shade, 0, 255).astype("uint8")
     shade[~valid] = 0
     return shade
@@ -1514,7 +1522,7 @@ def _png_bytes(rgb, alpha=None):
 
 def tile_cache_path(tile_cache, ds, mode, z, x, y):
     """Путь готового тайла в кэше (общий для сервера и прогрева)."""
-    return (Path(tile_cache) / f"v{CACHE_VERSION}" / ds / mode /
+    return (Path(tile_cache) / f"v{TILE_CACHE_VERSION}" / ds / mode /
             str(z) / str(x) / f"{y}.png")
 
 
@@ -1537,7 +1545,7 @@ def render_tile(store, ds, z, x, y, mode="hillshade"):
         rgb = _elevation_colors(values)
     elif mode == "contours":
         rgb = _elevation_colors(values)
-        shade = _hillshade(values, lat_center, z)
+        shade = _hillshade(values, z)
         if shade is not None:
             factor = (shade.astype("float64") / 255.0 * 0.6 + 0.4)[:, :, None]
             rgb = np.clip(rgb.astype("float64") * factor, 0, 255).astype("uint8")
@@ -1546,7 +1554,7 @@ def render_tile(store, ds, z, x, y, mode="hillshade"):
         if mask is not None:
             rgb[mask > 0] = (58, 38, 28)
     else:
-        shade = _hillshade(values, lat_center, z)
+        shade = _hillshade(values, z)
         if shade is None:
             return None, None
         rgb = np.dstack([shade, shade, shade])
@@ -2163,7 +2171,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _diff(self, ds_a, ds_b, z, x, y):
         z, x, y = int(z), int(x), int(y.split(".")[0])
-        cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / "diff" /
+        cache_file = (self.tile_cache / f"v{TILE_CACHE_VERSION}" / "diff" /
                       f"{ds_a}_{ds_b}" / str(z) / str(x) / f"{y}.png")
         if cache_file.exists():
             self._send(200, cache_file.read_bytes(), "image/png",
