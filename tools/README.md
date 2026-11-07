@@ -33,13 +33,16 @@ python3 tools/dem_compare_server.py --port 9000 --cache ~/qgis_projects/qgisxtop
 
 ```sh
 python3 tools/dem_compare_server.py --precache
+python3 tools/dem_compare_server.py --precache --jobs 16
 python3 tools/dem_compare_server.py --precache --precache-modes hillshade,elevation
 python3 tools/dem_compare_server.py --precache --precache-view 1600x1000
 ```
 
 Прогрев берёт список точек из `dem_compare.html`, для каждой точки и набора
 скачивает исходные данные в локальный кэш и рисует тайлы. Сервер при этом
-не запускается. Для SRTM скачиваются `.hgt.gz` и сохраняются как GeoTIFF
+не запускается. Области и тайлы готовятся параллельно (`--jobs`, по
+умолчанию 8 потоков): узкое место — сеть, поэтому потоки заметно ускоряют
+первый запуск. Для SRTM скачиваются `.hgt.gz` и сохраняются как GeoTIFF
 (`<cache>/srtm3`), для COG-наборов вырезается окно области в родном
 разрешении (`<cache>/prepared/vN/<набор>`): целиком такие файлы не
 качаются. Тайлы кладутся в `<cache>/tiles`, промежуточный DEM — в

@@ -29,12 +29,14 @@ import gzip
 import hashlib
 import json
 import math
+import os
 import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -49,8 +51,8 @@ gdal.SetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS")
 gdal.SetConfigOption("GDAL_CACHEMAX", "512")
 
 TILE_SIZE = 256
-# Версия кэша тайлов: меняется, когда меняется рендер. Старые файлы не
-# удаляются, просто перестают использоваться.
+# Версия кэша: старые каталоги не удаляются, но и не используются, чтобы
+# после правок рендера не отдавать тайлы, нарисованные прежним кодом.
 CACHE_VERSION = 5
 # Подгрузка тайла с запасом, чтобы шов между тайлами не был виден.
 TILE_OVERLAP = 1
@@ -272,12 +274,15 @@ class SourceStore:
         self._lock = threading.Lock()
         self._download_locks = {}
         self._signs = {}
+        self._sign_lock = threading.Lock()
         # Открытые источники: GDAL держит блоки COG в своём кэше, поэтому
         # соседние тайлы читаются без повторной сети.
         self._datasets = {}
         # Локальные копии исходников (см. prepare_region): индекс и его mtime.
         self._prepared_lock = threading.Lock()
         self._prepared_cache = {}
+        self._prep_locks = {}
+        self._pc_locks = {}
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
@@ -308,20 +313,29 @@ class SourceStore:
 
     def _signed(self, href):
         """Подпись SAS кэшируется: подписывать каждый раз нельзя — 429."""
-        with self._lock:
-            entry = self._signs.get(href)
-            if entry and entry[0] > time.time() + 120:
-                return entry[1]
-        signed = _sign_pc(href)
-        with self._lock:
-            self._signs[href] = (time.time() + 1800, signed)
-        return signed
+        # Подпись — сетевой запрос; при параллельном прогреве два потока
+        # могут одновременно промахнуться по кэшу и получить 429.
+        with self._sign_lock:
+            with self._lock:
+                entry = self._signs.get(href)
+                if entry and entry[0] > time.time() + 120:
+                    return entry[1]
+            signed = _sign_pc(href)
+            with self._lock:
+                self._signs[href] = (time.time() + 1800, signed)
+            return signed
 
     def _tile_lock(self, key):
         with self._lock:
             if key not in self._download_locks:
                 self._download_locks[key] = threading.Lock()
             return self._download_locks[key]
+
+    def _named_lock(self, table, key):
+        with self._lock:
+            if key not in table:
+                table[key] = threading.Lock()
+            return table[key]
 
     def local_path(self, ds, lat, lon):
         folder = self.cache_dir / ds
@@ -434,13 +448,21 @@ class SourceStore:
         found = self._prepared_exact(ds, bbox)
         if found:
             return found
+        digest = hashlib.md5(
+            ",".join(f"{v:.8f}" for v in bbox).encode("ascii")).hexdigest()[:8]
+        # Параллельные потоки не должны качать одну и ту же область дважды.
+        with self._named_lock(self._prep_locks, f"{ds}:{digest}"):
+            found = self._prepared_exact(ds, bbox)
+            if found:
+                return found
+            return self._prepare_region_locked(ds, bbox, name, digest)
+
+    def _prepare_region_locked(self, ds, bbox, name, digest):
         sources = self._remote_sources(ds, bbox)
         if not sources:
             return None
         folder = self.prepared_dir(ds)
         folder.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.md5(
-            ",".join(f"{v:.8f}" for v in bbox).encode("ascii")).hexdigest()[:8]
         target = folder / f"{name}_{digest}.tif"
         temporary = folder / f"{name}_{digest}.tmp.tif"
         options = gdal.WarpOptions(
@@ -579,19 +601,24 @@ class SourceStore:
         query_bbox = bbox or (0, 0, 1, 1)
         key = self.cache_dir / f"pc_{collection}_{int(query_bbox[0])}_" \
                                  f"{int(query_bbox[1])}.json"
-        if key.exists():
-            try:
-                items = json.loads(key.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+        # Один запрос STAC на ячейку: параллельные потоки ждут его, а не
+        # дублируют и не пишут файл одновременно.
+        with self._named_lock(self._pc_locks, str(key)):
+            if key.exists():
+                try:
+                    items = json.loads(key.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    items = []
+            else:
                 items = []
-        else:
-            items = []
-        if not items:
-            url = ("https://planetarycomputer.microsoft.com/api/stac/v1/search"
-                   f"?collections={collection}"
-                   f"&bbox={','.join(str(v) for v in query_bbox)}&limit=100")
-            items = _http_json(url).get("features", [])
-            key.write_text(json.dumps(items), encoding="utf-8")
+            if not items:
+                url = ("https://planetarycomputer.microsoft.com/api/stac/v1/"
+                       f"search?collections={collection}"
+                       f"&bbox={','.join(str(v) for v in query_bbox)}&limit=100")
+                items = _http_json(url).get("features", [])
+                temporary = key.with_name(key.name + ".tmp")
+                temporary.write_text(json.dumps(items), encoding="utf-8")
+                temporary.replace(key)
         if suffix:
             preferred = [item for item in items
                          if item.get("id", "").endswith(suffix)]
@@ -770,6 +797,7 @@ def _dem3857(store, ds, z, x, y):
     if not opened:
         return None
     bounds = _mercator_bounds(lon1, lat1, lon2, lat2)
+    src_nodata = DATASETS[ds].get("src_nodata")
     options = gdal.WarpOptions(
         format="MEM",
         dstSRS="EPSG:3857",
@@ -777,7 +805,10 @@ def _dem3857(store, ds, z, x, y):
         width=TILE_SIZE,
         height=TILE_SIZE,
         resampleAlg="bilinear",
-        srcNodata=DATASETS[ds].get("src_nodata"),
+        # Явно Float32: в целочисленный растр NaN не помещается, и GDAL
+        # округляет его до 0 — по краям тайла появляется ложная высота.
+        outputType=gdal.GDT_Float32,
+        srcNodata=src_nodata,
         dstNodata=float("nan"),
         multithread=True,
     )
@@ -794,9 +825,16 @@ def _dem3857(store, ds, z, x, y):
         return None
     array = warped.GetRasterBand(1).ReadAsArray().astype("float32")
     warped = None
+    if src_nodata is not None:
+        array[array == src_nodata] = np.nan
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        np.save(cache_file, array)
+        # Атомарно: сервер и прогрев могут писать один и тот же тайл.
+        temporary = cache_file.with_name(
+            f"{cache_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(temporary, "wb") as handle:
+            np.save(handle, array)
+        temporary.replace(cache_file)
     except OSError:
         pass
     return array
@@ -1042,6 +1080,15 @@ def tile_cache_path(tile_cache, ds, mode, z, x, y):
             str(z) / str(x) / f"{y}.png")
 
 
+def write_bytes_atomic(path, data):
+    """Пишет файл через временное имя: читатель не увидит половину."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
 def render_tile(store, ds, z, x, y, mode="hillshade"):
     values = _dem3857(store, ds, z, x, y)
     if values is None:
@@ -1261,71 +1308,127 @@ def zoom_range(point_zoom, lat, resolution_m):
 
 
 def precache(store, tile_cache, points, modes=("hillshade",),
-             view=(1400, 900)):
+             view=(1400, 900), jobs=8):
     """Скачивает исходники и рисует тайлы для всех точек страницы.
 
-    Сначала для каждого зума сохраняется локальная копия области в родном
+    Сначала параллельно сохраняются локальные копии областей в родном
     разрешении источника (для SRTM — просто скачиваются .hgt.gz), потом
-    рисуются тайлы. После этого страница открывается без обращений в сеть.
+    параллельно рисуются тайлы. После этого страница открывается без
+    обращений в сеть.
     """
     width, height = view
+    jobs = max(1, int(jobs))
     started = time.monotonic()
-    total_rendered = 0
-    total_cached = 0
-    total_empty = 0
-    print(f"Прогрев кэша: точек {len(points)}, наборов {len(DATASETS)}, "
-          f"режимы {', '.join(modes)}, окно {width}×{height}")
+    print_lock = threading.Lock()
+
+    # Параллелизм даёт пул потоков; вложенные потоки GDAL только мешают.
+    if jobs > 1:
+        gdal.SetConfigOption("GDAL_NUM_THREADS", "1")
+
+    source_tasks = []
     for index, point in enumerate(points, 1):
-        lon, lat, zoom = point["lon"], point["lat"], point["zoom"]
-        print(f"\n[{index}/{len(points)}] {point['name']}")
         for key, spec in DATASETS.items():
-            low, high = zoom_range(zoom, lat, spec["resolution_m"])
-            print(f"  {spec['short']:<18} z{low}–{high}")
-            source_seconds = 0.0
-            ready = True
+            low, high = zoom_range(point["zoom"], point["lat"],
+                                   spec["resolution_m"])
             for z in range(low, high + 1):
-                bbox = view_bbox(lon, lat, z, width, height)
-                moment = time.monotonic()
-                if spec["source"] == "skadi":
-                    ok = bool(store.sources(key, bbox))
-                else:
-                    ok = store.prepare_region(
-                        key, bbox, f"p{index:02d}_z{z}") is not None
-                source_seconds += time.monotonic() - moment
-                if not ok:
-                    ready = False
-                    break
-            if not ready:
-                print(f"    исходники: нет данных ({source_seconds:.1f} с)")
-                continue
-            print(f"    исходники: готовы ({source_seconds:.1f} с)")
-            for z in range(low, high + 1):
-                tiles = list(visible_tiles(lon, lat, z, width, height))
-                for done, (x, y) in enumerate(tiles, 1):
-                    for mode in modes:
-                        path = tile_cache_path(tile_cache, key, mode, z, x, y)
-                        if path.exists():
-                            total_cached += 1
-                            continue
-                        try:
-                            data, _native = render_tile(store, key, z, x, y,
-                                                        mode)
-                        except Exception as exc:
-                            print(f"\n      ошибка {z}/{x}/{y}: {exc}")
-                            continue
-                        if data is None or len(data) < 256:
-                            total_empty += 1
-                            continue
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(data)
-                        total_rendered += 1
-                    if done % 8 == 0 or done == len(tiles):
-                        print(f"\r    тайлы z{z}: {done}/{len(tiles)}",
-                              end="", flush=True)
-                print()
+                bbox = view_bbox(point["lon"], point["lat"], z, width, height)
+                source_tasks.append((index, point, key, spec, z, bbox))
+
+    print(f"Прогрев кэша: точек {len(points)}, наборов {len(DATASETS)}, "
+          f"режимы {', '.join(modes)}, окно {width}×{height}, потоков {jobs}")
+    print(f"\nИсходные данные: {len(source_tasks)} областей")
+
+    def prepare(task):
+        index, point, key, spec, z, bbox = task
+        moment = time.monotonic()
+        error = ""
+        try:
+            if spec["source"] == "skadi":
+                ok = bool(store.sources(key, bbox))
+            else:
+                ok = store.prepare_region(
+                    key, bbox, f"p{index:02d}_z{z}") is not None
+        except Exception as exc:
+            ok = False
+            error = str(exc)
+        return task, ok, time.monotonic() - moment, error
+
+    ready = set()
+    total_sources = len(source_tasks)
+    done = 0
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(prepare, task) for task in source_tasks]
+        for future in as_completed(futures):
+            task, ok, seconds, error = future.result()
+            index, point, key, spec, z, _bbox = task
+            done += 1
+            if ok:
+                ready.add((index, key, z))
+                status = f"готово за {seconds:.1f} с"
+            elif error:
+                status = f"ошибка: {error}"
+            else:
+                status = f"нет данных за {seconds:.1f} с"
+            with print_lock:
+                print(f"  [{done:>3}/{total_sources}] {point['name']} · "
+                      f"{spec['short']} z{z} — {status}", flush=True)
+
+    # Тайлы рисуем только там, где исходники действительно есть.
+    tile_tasks = []
+    for index, key, z in sorted(ready):
+        point = points[index - 1]
+        for x, y in visible_tiles(point["lon"], point["lat"], z, width, height):
+            for mode in modes:
+                tile_tasks.append((index, point, key, z, x, y, mode))
+
+    total_tiles = len(tile_tasks)
+    print(f"\nТайлы: {total_tiles}")
+    rendered = cached = empty = failed = 0
+    done_tiles = 0
+    tile_started = time.monotonic()
+
+    def render(task):
+        index, point, key, z, x, y, mode = task
+        path = tile_cache_path(tile_cache, key, mode, z, x, y)
+        if path.exists():
+            return task, "cached", ""
+        try:
+            data, _native = render_tile(store, key, z, x, y, mode)
+        except Exception as exc:
+            return task, "error", str(exc)
+        if data is None or len(data) < 256:
+            return task, "empty", ""
+        write_bytes_atomic(path, data)
+        return task, "rendered", ""
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(render, task) for task in tile_tasks]
+        for future in as_completed(futures):
+            task, status, error = future.result()
+            done_tiles += 1
+            if status == "cached":
+                cached += 1
+            elif status == "empty":
+                empty += 1
+            elif status == "error":
+                failed += 1
+                with print_lock:
+                    print(f"\n  ошибка {task[3]}/{task[4]}/{task[5]}: {error}")
+            else:
+                rendered += 1
+            if done_tiles % 50 == 0 or done_tiles == total_tiles:
+                elapsed = time.monotonic() - tile_started
+                rate = done_tiles / elapsed if elapsed else 0.0
+                with print_lock:
+                    print(f"\r  {done_tiles}/{total_tiles} "
+                          f"({rate:.1f} тайла/с, отрисовано {rendered}, "
+                          f"из кэша {cached})", end="", flush=True)
+    if total_tiles:
+        print()
+
     elapsed = time.monotonic() - started
-    print(f"\nГотово за {elapsed:.0f} с: отрисовано {total_rendered}, "
-          f"из кэша {total_cached}, без данных {total_empty}")
+    print(f"\nГотово за {elapsed:.0f} с: отрисовано {rendered}, "
+          f"из кэша {cached}, без данных {empty}, ошибок {failed}")
     print(f"Кэш: {store.cache_dir}")
 
 
@@ -1470,7 +1573,7 @@ class Handler(BaseHTTPRequestHandler):
                        {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
             return
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_bytes(data)
+        write_bytes_atomic(cache_file, data)
         print(f"[dem-compare] tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s")
         self._send(200, data, "image/png",
                    {"X-Native-X": f"{native[0]:.2f}",
@@ -1499,7 +1602,7 @@ class Handler(BaseHTTPRequestHandler):
                        {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
             return
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_bytes(data)
+        write_bytes_atomic(cache_file, data)
         self._send(200, data, "image/png",
                    {"X-Tile-Status": "rendered",
                     "X-Tile-Seconds": f"{seconds:.2f}"})
@@ -1528,6 +1631,8 @@ def main():
                         help="режимы через запятую: hillshade,elevation,contours")
     parser.add_argument("--precache-view", default="1400x900",
                         help="размер окна страницы для прогрева (ШxВ)")
+    parser.add_argument("--jobs", type=int, default=8,
+                        help="сколько областей и тайлов готовить параллельно")
     args = parser.parse_args()
 
     cache = Path(args.cache).expanduser()
@@ -1542,7 +1647,8 @@ def main():
             raise SystemExit(f"Неизвестный режим: {', '.join(unknown)}")
         precache(store, cache / "tiles", load_points(),
                  modes=modes or ("hillshade",),
-                 view=parse_view(args.precache_view))
+                 view=parse_view(args.precache_view),
+                 jobs=args.jobs)
         return
 
     Handler.store = store
