@@ -77,22 +77,23 @@
     display: flex; align-items: center; gap: 12px;
     padding: 3px 10px; min-height: 28px;
     background: rgba(20,23,26,.84); border-top: 1px solid var(--line);
-    font-size: 11px; pointer-events: none;
+    font-size: 11px; pointer-events: none; overflow: hidden;
   }
   #statusbar #readout {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    min-width: 0; flex: 0 1 auto;
+    min-width: 0; flex: 1 1 auto;
   }
   #statusbar .coord { color: var(--muted); }
-  #statusbar .grow { flex: 1; }
   #statusbar #progress {
     position: static; min-width: 0; background: none; border: 0; padding: 0;
     display: flex; align-items: center; gap: 8px; font-size: 11px;
+    flex: 0 0 auto;
   }
+  #statusbar .badge { flex: 0 0 auto; }
   #statusbar #progress h4 { display: none; }
-  #statusbar #progress-rows { display: flex; gap: 10px; }
+  #statusbar #progress-rows { display: flex; gap: 10px; flex: 0 0 auto; }
   #statusbar #progress .row {
-    display: flex; align-items: center; gap: 5px; margin: 0;
+    display: flex; align-items: center; gap: 5px; margin: 0; flex: 0 0 auto;
   }
   #statusbar #progress .row .name {
     flex: 0 1 auto; max-width: 130px; overflow: hidden; text-overflow: ellipsis;
@@ -111,6 +112,7 @@
   }
   #statusbar #progress .hint {
     color: var(--muted); font-size: 10px; margin: 0; white-space: nowrap;
+    flex: 0 0 auto;
   }
   #statusbar #progress .hint.net { color: var(--warn); }
   #statusbar #progress .hint.net::before {
@@ -238,7 +240,6 @@
 
   <div id="statusbar">
     <div id="readout">—</div>
-    <div class="grow"></div>
     <div id="progress">
       <div id="progress-rows"></div>
       <div class="hint" id="progress-hint"></div>
@@ -885,11 +886,13 @@ function updateResolutionBadge() {
   }
   const ratio = screen / native;
   if (ratio <= 1.05) {
-    badge.textContent = `полное разрешение · ${native.toFixed(0)} м/пикс`;
+    badge.textContent = `${native.toFixed(0)} м/пикс`;
     badge.className = "badge native";
+    badge.title = "полное разрешение источника";
   } else {
-    badge.textContent = `×${ratio.toFixed(1)} к нативным ${native.toFixed(0)} м/пикс`;
+    badge.textContent = `×${ratio.toFixed(1)} · ${native.toFixed(0)} м/пикс`;
     badge.className = "badge";
+    badge.title = `кратность к разрешению источника ${native.toFixed(0)} м/пикс`;
   }
 }
 
