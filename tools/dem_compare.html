@@ -205,8 +205,8 @@
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
     <button id="osm" class="active"
             title="Полупрозрачная подложка OpenStreetMap">OSM</button>
-    <input id="osm-alpha" type="range" min="0" max="100" value="100"
-           title="Непрозрачность подложки OSM">
+    <input id="osm-alpha" type="range" min="0" max="100" value="30"
+           title="Доля подложки OSM: 100 % — только OSM, без рельефа">
   </div>
   <div class="spacer"></div>
 </header>
@@ -258,7 +258,8 @@
       <br><br>
       <b>OSM</b> — полупрозрачная подложка OpenStreetMap: по ней видно, куда
       вы сдвинули карту. Кнопка <b>OSM</b> в шапке отключает её, ползунок
-      рядом задаёт непрозрачность.
+      задаёт долю подложки: на 100 % остаётся только OSM, рельеф скрывается
+      и не считается.
       <br><br>
       <b>Свой рельеф</b> — укажите каталог с GeoTIFF, HGT или VRT: сервер
       проиндексирует файлы, и набор появится в списках A и B. Данные
@@ -375,7 +376,7 @@ const state = {
   compare: true,
   diff: false,
   osm: true,
-  osmAlpha: 1,
+  osmAlpha: 0.3,
   center: {lon: 7.6586, lat: 45.9763},
   zoom: 12,
   minZoom: 2,
@@ -750,7 +751,6 @@ function draw() {
   const osmZoom = Math.min(tz, 19);
   if (state.osm && state.osmAlpha > 0) {
     ctx.save();
-    ctx.globalAlpha = state.osmAlpha;
     drawLayer("__osm__", "osm", null, "osm", osmZoom, false);
     ctx.restore();
   }
@@ -761,11 +761,14 @@ function draw() {
                   frameState.top * scale - top, w * k, h * k);
   }
 
-  const demAlpha = (state.osm && state.osmAlpha > 0 && osmLoaded > 0) ? 0.7 : 1;
+  // Ползунок задаёт долю подложки: при 100 % рельеф не рисуем совсем и
+  // тайлы не запрашиваем, при 0 % — подложка не видна.
+  const reliefHidden = state.osm && state.osmAlpha >= 0.995;
+  const demAlpha = !state.osm ? 1 : Math.max(0, 1 - state.osmAlpha);
   let splitAt = null;
-  if (state.zoom < RELIEF_MIN_ZOOM) {
-    // Ниже z9 рельеф не рисуем: обобщённые тайлы дают кашу, остаётся
-    // подложка OSM для ориентирования.
+  if (reliefHidden || state.zoom < RELIEF_MIN_ZOOM) {
+    // Рельеф не рисуем и тайлы не запрашиваем: либо подложка OSM на 100 %,
+    // либо зум ниже z9 — там обобщённые тайлы только мешают.
   } else if (state.diff && state.a && state.b) {
     ctx.save();
     ctx.globalAlpha = demAlpha;
@@ -864,7 +867,10 @@ function renderProgress() {
     return `скачивание с сервера: ${first.label}${extra} · ` +
       `${Math.round(first.seconds)} с`;
   };
-  if (state.zoom < RELIEF_MIN_ZOOM) {
+  if (state.osm && state.osmAlpha >= 0.995) {
+    hint.className = "hint";
+    hint.textContent = "подложка OSM 100 % — рельеф скрыт";
+  } else if (state.zoom < RELIEF_MIN_ZOOM) {
     hint.className = "hint";
     hint.textContent = "рельеф рисуется с z9";
   } else if (downloads.length) {
