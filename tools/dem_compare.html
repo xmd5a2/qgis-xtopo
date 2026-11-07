@@ -211,6 +211,9 @@
       проиндексирует файлы, и набор появится в списках A и B. Данные
       локальные, сеть и прогрев не нужны.
       <br><br>
+      Пунктир — границы градусных тайлов 1×1°, подписаны как <b>N45E007</b>:
+      так же называются исходники SRTM и Copernicus.
+      <br><br>
       <b>3DEP</b> покрывает только США — в остальных точках он пуст.
       <b>NASADEM</b> не заходит выше 61° и ниже −56°.
       <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
@@ -487,6 +490,94 @@ function resize() {
   requestRender();
 }
 
+// ---------------------------------------------------------------------------
+// Границы градусных тайлов 1×1: так же называются исходники SRTM и
+// Copernicus — N45E007, S03W062.
+// ---------------------------------------------------------------------------
+function tileLabel(lat, lon) {
+  const ns = lat >= 0 ? "N" : "S";
+  const ew = lon >= 0 ? "E" : "W";
+  return `${ns}${String(Math.abs(lat)).padStart(2, "0")}` +
+         `${ew}${String(Math.abs(lon)).padStart(3, "0")}`;
+}
+
+function drawTileGrid(left, top, w, h) {
+  const zoom = state.zoom;
+  const nw = unproject(left, top, zoom);
+  const se = unproject(left + w, top + h, zoom);
+  const lonFrom = Math.floor(Math.min(nw.lon, se.lon));
+  const lonTo = Math.ceil(Math.max(nw.lon, se.lon));
+  const latFrom = Math.floor(Math.min(nw.lat, se.lat));
+  const latTo = Math.ceil(Math.max(nw.lat, se.lat));
+  const cell = TILE * Math.pow(2, zoom) / 360;  // ширина 1° на экране
+  // На мелком зуме сетка превращается в частую решётку — не рисуем.
+  if (cell < 24 || latTo - latFrom > 60 || lonTo - lonFrom > 120) return;
+
+  const screenX = lon => project(lon, 0, zoom).x - left;
+  const screenY = lat => project(0, lat, zoom).y - top;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(230,233,236,0.16)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  for (let lon = lonFrom; lon <= lonTo; lon++) {
+    const x = screenX(lon);
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  for (let lat = latFrom; lat <= latTo; lat++) {
+    const y = screenY(lat);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Подписи только там, где ячейка достаточно крупная и её левый верхний
+  // угол виден: иначе они налезают друг на друга.
+  if (cell >= 70) {
+    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.lineWidth = 3;
+    for (let lon = lonFrom; lon < lonTo; lon++) {
+      for (let lat = latFrom; lat < latTo; lat++) {
+        const x = screenX(lon);
+        const y = screenY(lat);
+        if (x < -2 || y < -2 || x > w || y > h) continue;
+        const name = tileLabel(lat, lon);
+        ctx.strokeStyle = "rgba(13,17,20,0.85)";
+        ctx.strokeText(name, x + 4, y + 3);
+        ctx.fillStyle = "rgba(230,233,236,0.82)";
+        ctx.fillText(name, x + 4, y + 3);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawDivider(split, h) {
+  ctx.save();
+  ctx.strokeStyle = "#6fb3d2";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(split, 0);
+  ctx.lineTo(split, h);
+  ctx.stroke();
+  ctx.fillStyle = "#6fb3d2";
+  ctx.beginPath();
+  ctx.arc(split, h / 2, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#10161a";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("⇔", split, h / 2 + 4);
+  ctx.restore();
+}
+
 function draw() {
   const {w, h} = viewSize();
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
@@ -590,6 +681,7 @@ function draw() {
   }
 
   const demAlpha = (state.osm && state.osmAlpha > 0 && osmLoaded > 0) ? 0.7 : 1;
+  let splitAt = null;
   if (state.diff && state.a && state.b) {
     ctx.save();
     ctx.globalAlpha = demAlpha;
@@ -604,28 +696,16 @@ function draw() {
     drawLayer(state.a, state.mode, [0, split], "a");
     drawLayer(state.b, state.mode, [split, w], "b");
     ctx.restore();
-    ctx.save();
-    ctx.strokeStyle = "#6fb3d2";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(split, 0);
-    ctx.lineTo(split, h);
-    ctx.stroke();
-    ctx.fillStyle = "#6fb3d2";
-    ctx.beginPath();
-    ctx.arc(split, h / 2, 9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#10161a";
-    ctx.font = "11px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("⇔", split, h / 2 + 4);
-    ctx.restore();
+    splitAt = split;
   } else {
     ctx.save();
     ctx.globalAlpha = demAlpha;
     drawLayer(state.a || state.b, state.mode, null, "a");
     ctx.restore();
   }
+
+  drawTileGrid(left, top, w, h);
+  if (splitAt !== null) drawDivider(splitAt, h);
 
   // Кадр целиком собран — запоминаем его как подложку.
   if (loaded >= wanted && wanted > 0) {
