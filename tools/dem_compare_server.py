@@ -298,6 +298,10 @@ class SourceStore:
         self._pc_locks = {}
         # Один и тот же тайл могут запросить несколько вкладок сразу.
         self._render_locks = {}
+        # Отсутствующие тайлы COG: запрос 404 стоит секунды, а спрашивают
+        # его на каждом тайле области. Помним, что источника нет.
+        self._missing = {}
+        self._missing_ttl = 3600.0
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
@@ -308,8 +312,14 @@ class SourceStore:
                 dataset, lock, expiry = entry
                 if expiry == 0 or expiry > time.time() + 60:
                     return dataset, lock
-        dataset = gdal.Open(path)
+        try:
+            dataset = gdal.Open(path)
+        except RuntimeError:
+            # Нет файла в хранилище: это нормальный случай, у GLO-30 часть
+            # тайлов не опубликована.
+            dataset = None
         if dataset is None:
+            self._remember_missing(path)
             return None, None
         lock = threading.Lock()
         expiry = 0
@@ -325,6 +335,22 @@ class SourceStore:
         with self._lock:
             self._datasets[path] = (dataset, lock, expiry)
         return dataset, lock
+
+    def _remember_missing(self, path):
+        with self._lock:
+            self._missing[path] = time.time()
+
+    def is_missing(self, path):
+        """Источник уже проверяли и его нет (404 или нет файла)."""
+        path = str(path)
+        with self._lock:
+            stamp = self._missing.get(path)
+            if stamp is None:
+                return False
+            if time.time() - stamp > self._missing_ttl:
+                self._missing.pop(path, None)
+                return False
+            return True
 
     def _signed(self, href):
         """Подпись SAS кэшируется: подписывать каждый раз нельзя — 429."""
@@ -378,10 +404,24 @@ class SourceStore:
         prepared = self._prepared_for(ds, bbox)
         if prepared:
             return prepared
-        block = self._auto_block(ds, bbox)
-        if block:
-            return block
+        if self._auto_block_fits(ds, bbox):
+            block = self._auto_block(ds, bbox)
+            if block:
+                return block
         return self._remote_sources(ds, bbox)
+
+    def _auto_block_fits(self, ds, bbox):
+        """Автоблок имеет смысл только у родного разрешения.
+
+        На мелком зуме COG отдаёт обзорные уровни: выкачивать окно в полном
+        разрешении — в разы больше данных, чем нужно для 256-пиксельного
+        тайла.
+        """
+        resolution = DATASETS[ds].get("resolution_m") or 30.0
+        lon1, lat1, lon2, lat2 = bbox
+        pixel = (lon2 - lon1) * 111320.0 * max(
+            math.cos(math.radians((lat1 + lat2) / 2.0)), 0.05) / TILE_SIZE
+        return pixel <= resolution * 3.0
 
     def _auto_block(self, ds, bbox):
         spec = DATASETS[ds]
@@ -516,7 +556,16 @@ class SourceStore:
             return self._prepare_region_locked(ds, bbox, name, digest)
 
     def _prepare_region_locked(self, ds, bbox, name, digest):
-        sources = self._remote_sources(ds, bbox)
+        # Часть тайлов COG может отсутствовать (GLO-30 публикует не всё):
+        # берём только те, что реально открываются, иначе warp падает
+        # целиком и блок качается заново на каждом тайле.
+        sources = []
+        for path in self._remote_sources(ds, bbox):
+            if self.is_missing(path):
+                continue
+            dataset, _lock = self.open_source(path)
+            if dataset is not None:
+                sources.append(path)
         if not sources:
             return None
         folder = self.prepared_dir(ds)
@@ -529,7 +578,12 @@ class SourceStore:
             outputBounds=tuple(bbox),
             resampleAlg="bilinear",
             srcNodata=DATASETS[ds].get("src_nodata"),
-            dstNodata=DATASETS[ds].get("src_nodata"),
+            # Если у набора нет nodata, пустые места (неопубликованный тайл)
+            # иначе записались бы нулём и выглядели как настоящая высота.
+            # Все COG-наборы здесь Int16, поэтому минимум Int16 безопасен.
+            dstNodata=(DATASETS[ds].get("src_nodata")
+                       if DATASETS[ds].get("src_nodata") is not None
+                       else -32768),
             multithread=True,
             creationOptions=["COMPRESS=DEFLATE", "TILED=YES",
                              "BIGTIFF=IF_SAFER"],
@@ -881,7 +935,8 @@ def _dem3857(store, ds, z, x, y):
 
 def _render_dem3857(store, ds, z, x, y, cache_file):
     lon1, lat1, lon2, lat2 = tile_bounds(z, x, y)
-    paths = store.tile_sources(ds, (lon1, lat1, lon2, lat2))
+    paths = [path for path in store.tile_sources(ds, (lon1, lat1, lon2, lat2))
+             if not store.is_missing(path)]
     if not paths:
         return None
     opened = []
