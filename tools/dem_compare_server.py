@@ -296,6 +296,8 @@ class SourceStore:
         self._prepared_cache = {}
         self._prep_locks = {}
         self._pc_locks = {}
+        # Один и тот же тайл могут запросить несколько вкладок сразу.
+        self._render_locks = {}
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
@@ -361,6 +363,49 @@ class SourceStore:
         if prepared:
             return prepared
         return self._remote_sources(ds, bbox)
+
+    # Промах мимо прогретого окна раньше уходил в /vsicurl на каждый тайл:
+    # сдвиг карты на пару десятых градуса стоил 20–50 с на тайл. Поэтому
+    # недостающая область один раз сохраняется локально блоком примерно в
+    # AUTO_BLOCK_PIXELS пикселей источника — соседние тайлы попадают в один
+    # блок и сеть дёргается один раз.
+    AUTO_BLOCK_PIXELS = 1024
+    AUTO_BLOCK_PAD = 0.01
+    AUTO_BLOCK_LIMIT = 160
+
+    def tile_sources(self, ds, bbox):
+        """Источники для одного тайла: прогретое окно или автоблок."""
+        prepared = self._prepared_for(ds, bbox)
+        if prepared:
+            return prepared
+        block = self._auto_block(ds, bbox)
+        if block:
+            return block
+        return self._remote_sources(ds, bbox)
+
+    def _auto_block(self, ds, bbox):
+        spec = DATASETS[ds]
+        if spec["source"] == "skadi":
+            # SRTM качается целыми градусными тайлами и уже кэшируется.
+            return None
+        resolution = spec.get("resolution_m") or 30.0
+        block = self.AUTO_BLOCK_PIXELS * resolution / 111320.0
+        block = min(0.5, max(0.05, block))
+        lon1, lat1, lon2, lat2 = bbox
+        x1, y1 = math.floor(lon1 / block), math.floor(lat1 / block)
+        x2, y2 = math.floor(lon2 / block), math.floor(lat2 / block)
+        # Тайл, кончающийся ровно на границе блока, не должен занимать два.
+        if lon2 <= x2 * block + 1e-9:
+            x2 -= 1
+        if lat2 <= y2 * block + 1e-9:
+            y2 -= 1
+        pad = self.AUTO_BLOCK_PAD
+        area = (max(-180.0, x1 * block - pad),
+                max(-90.0, y1 * block - pad),
+                min(180.0, (x2 + 1) * block + pad),
+                min(90.0, (y2 + 1) * block + pad))
+        path = self.prepare_region(ds, area, f"auto_{x1}_{y1}")
+        return [str(path)] if path else None
 
     def _remote_sources(self, ds, bbox):
         """Источники в хранилище: без локальной копии, только сеть."""
@@ -517,6 +562,23 @@ class SourceStore:
             items = [item for item in items if item.get("file") != filename]
             items.append({"file": filename,
                           "bbox": [round(float(v), 8) for v in bbox]})
+            # Автоблоки появляются при панорамировании и могут копиться
+            # гигабайтами: держим последние, старые удаляем.
+            auto = [item for item in items
+                    if str(item.get("file", "")).startswith("auto_")]
+            if len(auto) > self.AUTO_BLOCK_LIMIT:
+                def _stamp(item):
+                    try:
+                        return (folder / item.get("file", "")).stat().st_mtime
+                    except OSError:
+                        return 0.0
+                auto.sort(key=_stamp)
+                drop = auto[:len(auto) - self.AUTO_BLOCK_LIMIT]
+                dropped = {item.get("file") for item in drop}
+                for item in drop:
+                    (folder / item.get("file", "")).unlink(missing_ok=True)
+                items = [item for item in items
+                         if item.get("file") not in dropped]
             temporary = index_path.with_name("index.tmp")
             temporary.write_text(json.dumps(items, ensure_ascii=False, indent=1),
                                  encoding="utf-8")
@@ -757,6 +819,9 @@ def _dem_grid(store, ds, bbox, pixels=None):
         height=pixels,
         resampleAlg="bilinear",
         srcNodata=DATASETS[ds].get("src_nodata"),
+        # Float32: в Int16 NaN округляется до 0 и профиль показывает
+        # ложные нулевые высоты на краях.
+        outputType=gdal.GDT_Float32,
         dstNodata=float("nan"),
         multithread=True,
     )
@@ -783,6 +848,16 @@ def _temp_path(prefix):
     return f"/vsimem/dem_compare_{prefix}_{number}_{threading.get_ident()}.tif"
 
 
+def _load_dem3857(cache_file):
+    if not cache_file.exists():
+        return None
+    try:
+        return np.load(cache_file)
+    except (OSError, ValueError):
+        cache_file.unlink(missing_ok=True)
+        return None
+
+
 def _dem3857(store, ds, z, x, y):
     """DEM набора в Web Mercator, тайл 256×256 float32.
 
@@ -792,13 +867,21 @@ def _dem3857(store, ds, z, x, y):
     """
     cache_file = (store.cache_dir / "dem3857" / f"v{CACHE_VERSION}" / ds /
                   str(z) / str(x) / f"{y}.npy")
-    if cache_file.exists():
-        try:
-            return np.load(cache_file)
-        except (OSError, ValueError):
-            cache_file.unlink(missing_ok=True)
+    cached = _load_dem3857(cache_file)
+    if cached is not None:
+        return cached
+    # Страница просит тайл дважды (повтор после смены зума, вторая вкладка).
+    # Без блокировки оба потока тянули одни и те же данные из сети.
+    with store._named_lock(store._render_locks, f"{ds}/{z}/{x}/{y}"):
+        cached = _load_dem3857(cache_file)
+        if cached is not None:
+            return cached
+        return _render_dem3857(store, ds, z, x, y, cache_file)
+
+
+def _render_dem3857(store, ds, z, x, y, cache_file):
     lon1, lat1, lon2, lat2 = tile_bounds(z, x, y)
-    paths = store.sources(ds, (lon1, lat1, lon2, lat2))
+    paths = store.tile_sources(ds, (lon1, lat1, lon2, lat2))
     if not paths:
         return None
     opened = []
@@ -1320,8 +1403,9 @@ def zoom_range(point_zoom, lat, resolution_m):
     return min(point_zoom, native), max(point_zoom, native)
 
 
-def precache(store, tile_cache, points, modes=("hillshade",),
-             view=(1400, 900), jobs=8):
+def precache(store, tile_cache, points, modes=("hillshade", "elevation",
+                                               "contours"),
+             view=(1400, 900), jobs=8, margin=2):
     """Скачивает исходники и рисует тайлы для всех точек страницы.
 
     Сначала параллельно сохраняются локальные копии областей в родном
@@ -1344,7 +1428,8 @@ def precache(store, tile_cache, points, modes=("hillshade",),
             low, high = zoom_range(point["zoom"], point["lat"],
                                    spec["resolution_m"])
             for z in range(low, high + 1):
-                bbox = view_bbox(point["lon"], point["lat"], z, width, height)
+                bbox = view_bbox(point["lon"], point["lat"], z, width, height,
+                                 margin=margin)
                 source_tasks.append((index, point, key, spec, z, bbox))
 
     print(f"Прогрев кэша: точек {len(points)}, наборов {len(DATASETS)}, "
@@ -1390,7 +1475,8 @@ def precache(store, tile_cache, points, modes=("hillshade",),
     tile_tasks = []
     for index, key, z in sorted(ready):
         point = points[index - 1]
-        for x, y in visible_tiles(point["lon"], point["lat"], z, width, height):
+        for x, y in visible_tiles(point["lon"], point["lat"], z, width, height,
+                                  margin=margin):
             for mode in modes:
                 tile_tasks.append((index, point, key, z, x, y, mode))
 
@@ -1468,9 +1554,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
         for key, value in extra.items():
             self.send_header(key, value)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        try:
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Браузер закрыл вкладку или отменил тайл, который уже не нужен.
+            self.close_connection = True
 
     def _json(self, payload, code=200):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1483,10 +1573,15 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             self._route(parts, query)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
         except Exception as exc:
             import traceback
             traceback.print_exc()
-            self._json({"error": str(exc)}, code=500)
+            try:
+                self._json({"error": str(exc)}, code=500)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
 
     def do_HEAD(self):
         self.do_GET()
@@ -1685,10 +1780,12 @@ def main():
     parser.add_argument("--precache", action="store_true",
                         help="скачать исходники и отрисовать тайлы для точек "
                              "страницы, затем выйти")
-    parser.add_argument("--precache-modes", default="hillshade",
+    parser.add_argument("--precache-modes", default="hillshade,elevation,contours",
                         help="режимы через запятую: hillshade,elevation,contours")
     parser.add_argument("--precache-view", default="1400x900",
                         help="размер окна страницы для прогрева (ШxВ)")
+    parser.add_argument("--precache-margin", type=int, default=2,
+                        help="запас в тайлах вокруг окна при прогреве")
     parser.add_argument("--jobs", type=int, default=8,
                         help="сколько областей и тайлов готовить параллельно")
     args = parser.parse_args()
@@ -1706,7 +1803,7 @@ def main():
         precache(store, cache / "tiles", load_points(),
                  modes=modes or ("hillshade",),
                  view=parse_view(args.precache_view),
-                 jobs=args.jobs)
+                 jobs=args.jobs, margin=max(0, args.precache_margin))
         return
 
     Handler.store = store
