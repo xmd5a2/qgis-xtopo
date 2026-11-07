@@ -93,13 +93,28 @@
     display: grid; grid-template-columns: 320px 1fr;
     grid-template-rows: auto 1fr; min-height: 0;
   }
-  main.sidebar-hidden { grid-template-columns: 0 1fr; }
+  main.sidebar-hidden { grid-template-columns: 30px 1fr; }
   main.sidebar-hidden aside,
   main.sidebar-hidden #tools { display: none; }
   /* Карта всегда во второй колонке: при свёрнутой панели первая колонка
-     нулевой ширины, и автоматическое размещение оставило бы карту без
-     места. */
+     узкая, и автоматическое размещение оставило бы карту без места. */
   #map { grid-column: 2; grid-row: 1 / span 2; }
+  #sidebar-rail {
+    display: none; grid-column: 1; grid-row: 1 / span 2;
+    background: var(--panel); border-right: 1px solid var(--line);
+    padding: 8px 0; justify-content: center; align-items: flex-start;
+  }
+  main.sidebar-hidden #sidebar-rail { display: flex; }
+  #sidebar-rail button,
+  #sidebar-collapse { padding: 2px 7px; line-height: 1.2; }
+  #sidebar-head {
+    display: flex; justify-content: flex-end; margin-bottom: 4px;
+  }
+  #sidebar-head button {
+    background: none; border-color: transparent; color: var(--muted);
+    font-size: 11px; padding: 2px 6px;
+  }
+  #sidebar-head button:hover { color: var(--accent); border-color: var(--line); }
   #tools {
     grid-column: 1; grid-row: 1;
     display: flex; align-items: center; gap: 6px;
@@ -107,7 +122,6 @@
     border-right: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
   }
-  #sidebar-toggle { padding: 2px 9px; line-height: 1.2; }
   aside {
     grid-column: 1; grid-row: 2;
     background: var(--panel); border-right: 1px solid var(--line);
@@ -215,8 +229,6 @@
 </head>
 <body>
 <header>
-  <button id="sidebar-toggle" title="Свернуть панель"
-          aria-label="Свернуть панель">⟨</button>
   <h1>Сравнение DEM</h1>
   <span class="badge place" id="place-badge" title="выбранное место">место не выбрано</span>
   <div class="group">
@@ -249,6 +261,10 @@
            title="Доля подложки OSM: 100 % — только OSM, без рельефа">
   </div>
   <aside>
+    <div id="sidebar-head">
+      <button id="sidebar-collapse" title="Свернуть панель"
+              aria-label="Свернуть панель">« свернуть</button>
+    </div>
     <h2 class="toggle" id="points-toggle">Ключевые точки
       <span class="chev">▾</span></h2>
     <div id="points"></div>
@@ -317,6 +333,11 @@
     <h2>Журнал тайлов</h2>
     <div id="log" class="note">пока ничего не загружено</div>
   </aside>
+
+  <div id="sidebar-rail">
+    <button id="sidebar-expand" title="Показать панель"
+            aria-label="Показать панель">»</button>
+  </div>
 
   <div id="map">
     <canvas id="canvas"></canvas>
@@ -1589,10 +1610,6 @@ function storeFlag(name, value) {
 
 function setSidebarCollapsed(collapsed) {
   document.querySelector("main").classList.toggle("sidebar-hidden", collapsed);
-  const button = document.getElementById("sidebar-toggle");
-  button.textContent = collapsed ? "⟩" : "⟨";
-  button.title = collapsed ? "Показать панель" : "Свернуть панель";
-  button.setAttribute("aria-label", button.title);
   storeFlag("dem-compare.sidebar-hidden", collapsed);
   resize();
 }
@@ -1604,9 +1621,11 @@ function setPointsCollapsed(collapsed) {
   storeFlag("dem-compare.points-hidden", collapsed);
 }
 
-document.getElementById("sidebar-toggle").addEventListener("click", () => {
-  const main = document.querySelector("main");
-  setSidebarCollapsed(!main.classList.contains("sidebar-hidden"));
+document.getElementById("sidebar-collapse").addEventListener("click", () => {
+  setSidebarCollapsed(true);
+});
+document.getElementById("sidebar-expand").addEventListener("click", () => {
+  setSidebarCollapsed(false);
 });
 document.getElementById("points-toggle").addEventListener("click", () => {
   setPointsCollapsed(!document.getElementById("points").hidden);
