@@ -14,7 +14,7 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsRectangle
 
-from . import osmium_tool
+from . import i18n, osmium_tool
 
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
@@ -487,12 +487,29 @@ def _looks_like_pbf(path):
         return False
 
 
+def _format_mb(value):
+    """Мегабайты без лишней точности: крупные суммы — целыми."""
+    megabytes = value / 1048576
+    return f"{megabytes:.0f}" if megabytes >= 100 else f"{megabytes:.1f}"
+
+
+def _format_eta(seconds):
+    """Оставшееся время короткой строкой: «~4 мин»."""
+    seconds = max(1, int(round(seconds)))
+    if seconds < 60:
+        return i18n.trf("~{} с", seconds)
+    minutes = seconds // 60
+    if minutes < 60:
+        return i18n.trf("~{} мин", minutes)
+    return i18n.trf("~{} ч {} мин", minutes // 60, minutes % 60)
+
+
 class _Transfer:
     """Aggregated byte counter for parallel downloads.
 
     Reporting is global and throttled, so the progress text does not flicker
     between maps: one line shows the combined percentage for all downloads
-    together with the current download speed.
+    together with the current download speed and the estimated time left.
     """
 
     def __init__(self, total, total_maps, percent=None):
@@ -551,14 +568,17 @@ class _Transfer:
             value = min(100, self.done * 100 // self.total)
             text = (
                 f"Загрузка карт: {value}% "
-                f"({self.done / 1048576:.1f}/{self.total / 1048576:.1f} МБ)"
+                f"({_format_mb(self.done)}/{_format_mb(self.total)} МБ)"
             )
         else:
             value = -1
-            text = f"Загрузка карт: {self.done / 1048576:.1f} МБ"
+            text = f"Загрузка карт: {_format_mb(self.done)} МБ"
         parts = [text, f"{self.maps}/{self.total_maps}"]
         if self.speed > 0:
             parts.append(f"{self.speed / 1048576:.1f} МБ/с")
+            remaining = self.total - self.done
+            if self.total and remaining > 0:
+                parts.append(_format_eta(remaining / self.speed))
         self.percent(value, " · ".join(parts))
 
 

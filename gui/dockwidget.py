@@ -69,10 +69,12 @@ def _log_expand_icon(style):
 def _short_status(text, limit=58):
     """Сокращает длинный текст статуса, оставляя конец пути.
 
-    Строка статуса имеет фиксированную высоту в две строки, и длинный
-    путь к проекту в ней обрезался.  Полный текст остаётся в подсказке
-    и в журнале.
+    Длинный путь к проекту в строке статуса обрезался.  Полный текст
+    остаётся в подсказке и в журнале.  Прогресс загрузки не сокращается:
+    обрезка съела бы хвост с расчётным временем.
     """
+    if text.startswith(("Загрузка карт:", "Downloading maps:")):
+        return text
     if len(text) <= limit:
         return text
     head, separator, tail = text.rpartition(": ")
@@ -857,12 +859,11 @@ class XtopoDockWidget(QDockWidget):
         buttons.addWidget(self.close_button, 1, 1)
         layout.addLayout(buttons)
 
-        self.status = QLabel("Готово")
+        self.status = WrappedLabel("Готово")
         self.status.setWordWrap(True)
-        self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.status.setFixedHeight(
-            self.status.fontMetrics().lineSpacing() * 2 + 4
-        )
+        # Высота следует за переносами: длинный прогресс с ETA не
+        # обрезается, а при коротком статусе строка занимает одну строку.
+        self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)

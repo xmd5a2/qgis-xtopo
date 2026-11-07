@@ -307,6 +307,19 @@ class GeofabrikDownloadTest(unittest.TestCase):
         self.assertIn("МБ/с", values[-1][1])
         self.assertIn("4.0 МБ/с", values[-1][1])
 
+    def test_transfer_reports_eta(self):
+        values = []
+        transfer = geofabrik._Transfer(
+            100 * 1048576, 1, lambda value, text: values.append((value, text))
+        )
+        # Скачано 10 МБ за секунду: осталось 90 МБ, время считается от
+        # фактической (сглаженной) скорости.
+        transfer._speed_time = time.monotonic() - 1.0
+        transfer._speed_done = 0
+        transfer.add(10 * 1048576)
+        eta = round(90 * 1048576 / transfer.speed)
+        self.assertIn(f"~{eta} с", values[-1][1])
+
     def test_transfer_speed_is_smoothed(self):
         values = []
         transfer = geofabrik._Transfer(100 * 1048576, 1, lambda value, text: values.append((value, text)))

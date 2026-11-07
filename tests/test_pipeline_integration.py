@@ -235,8 +235,10 @@ class PipelineIntegrationTest(unittest.TestCase):
         button_texts = [button.text() for button in dock.findChildren(QPushButton)]
         self.assertNotIn("Текущий вид", button_texts)
         self.assertNotIn("Загрузить карты", button_texts)
-        self.assertEqual(
-            dock.status.minimumHeight(), dock.status.maximumHeight()
+        # Строка статуса больше не фиксирована по высоте: длинный
+        # прогресс с ETA переносится и не обрезается.
+        self.assertGreater(
+            dock.status.maximumHeight(), dock.status.minimumHeight()
         )
         self.assertTrue(dock.prepare_button.styleSheet())
         dock.deleteLater()
@@ -513,6 +515,12 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertLessEqual(len(long), 58)
         self.assertIn("…", long)
         self.assertTrue(long.endswith("automap_test.qgz"))
+
+        # Прогресс не сокращается: иначе обрежется ETA в конце строки.
+        progress = (
+            "Загрузка карт: 18% (117/623 МБ) · 0/1 · 2.2 МБ/с · ~4 мин"
+        )
+        self.assertEqual(_short_status(progress), progress)
 
     def test_isolines_availability_respects_step(self):
         from qgis.core import (

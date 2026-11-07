@@ -911,6 +911,13 @@ class CoreMessagesTest(unittest.TestCase):
         ]
         self.assertEqual(left, [])
 
+    def test_eta_is_translated(self):
+        from qgis_xtopo.core.geofabrik import _format_eta
+
+        self.assertEqual(_format_eta(5), "~5 s")
+        self.assertEqual(_format_eta(120), "~2 min")
+        self.assertEqual(_format_eta(3900), "~1 h 5 min")
+
     def test_gdal_summary(self):
         description = self.i18n.tr(
             "незамкнутые кольца в данных OSM (GDAL закрывает их сам)"

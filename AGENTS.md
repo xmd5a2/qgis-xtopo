@@ -83,6 +83,10 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   обёрнуты в `try(..., запасное значение)` (`patch_overlay_filters`).
 - **Панель ≤ 600 px по высоте** — тест `test_dock_is_compact`
   (`tests/test_pipeline_integration.py`). Сжимайте spacing/высоту, а не тест.
+- **Строка статуса — `WrappedLabel`, высота не фиксирована**: длинный
+  прогресс Geofabrik с ETA переносится и не обрезается. Прогресс
+  (`Загрузка карт:`) не проходит через `_short_status`, иначе обрежется
+  хвост с расчётным временем.
 - **Рабочие данные пользователя** (`~/qgis_projects/...`, кэш Geofabrik) не
   использовать как тестовые полигоны; чтение и offscreen-открытие допустимы.
 
