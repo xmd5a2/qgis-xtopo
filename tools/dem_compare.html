@@ -167,6 +167,15 @@
     <h2>Ключевые точки</h2>
     <div id="points"></div>
 
+    <h2>Ссылка OSM</h2>
+    <div class="local-form">
+      <input id="osm-link" type="text" spellcheck="false"
+             placeholder="openstreetmap.org/#map=13/45.98/7.66">
+      <button id="osm-go" title="Перейти к координатам из ссылки">перейти</button>
+    </div>
+    <div class="note" id="osm-link-note">Вставьте ссылку OpenStreetMap —
+      координаты и зум возьмутся из неё.</div>
+
     <h2>Свой рельеф</h2>
     <div class="local-form">
       <input id="local-dir" type="text" placeholder="/путь/к/каталогу"
@@ -1116,6 +1125,90 @@ function matchPlace(lon, lat) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Переход по ссылке OpenStreetMap
+// ---------------------------------------------------------------------------
+// Понимает #map=зум/широта/долгота, mlat/mlon, lat/lon, geo:широта,долгота
+// и просто пару «широта, долгота». Короткие ссылки osm.org/go/… раскрывает
+// сервер: браузер не может прочитать адрес после кросс-доменного редиректа.
+function parseOsmLink(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  let match = value.match(/^geo:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i);
+  if (match) {
+    const zoom = value.match(/[?&]z=(\d+(?:\.\d+)?)/);
+    return {lat: Number(match[1]), lon: Number(match[2]),
+            zoom: zoom ? Number(zoom[1]) : null};
+  }
+  match = value.match(
+    /[#&?]map=(\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/);
+  if (match) {
+    return {zoom: Number(match[1]), lat: Number(match[2]), lon: Number(match[3])};
+  }
+  const mlat = value.match(/[?&]mlat=(-?\d+(?:\.\d+)?)/);
+  const mlon = value.match(/[?&]mlon=(-?\d+(?:\.\d+)?)/);
+  const lat = mlat || value.match(/[?&]lat=(-?\d+(?:\.\d+)?)/);
+  const lon = mlon || value.match(/[?&]lon=(-?\d+(?:\.\d+)?)/);
+  if (lat && lon) {
+    const zoom = value.match(/[?&]zoom=(\d+(?:\.\d+)?)/);
+    return {lat: Number(lat[1]), lon: Number(lon[1]),
+            zoom: zoom ? Number(zoom[1]) : null};
+  }
+  match = value.match(/^(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)$/);
+  if (match) {
+    return {lat: Number(match[1]), lon: Number(match[2]), zoom: null};
+  }
+  return null;
+}
+
+async function openOsmLink() {
+  const field = document.getElementById("osm-link");
+  const note = document.getElementById("osm-link-note");
+  const raw = field.value.trim();
+  if (!raw) {
+    note.textContent = "вставьте ссылку";
+    return;
+  }
+  let point = parseOsmLink(raw);
+  if (!point && /^https?:\/\//i.test(raw)) {
+    note.textContent = "раскрываю короткую ссылку…";
+    try {
+      const response = await fetch(
+        `/api/osm-resolve?url=${encodeURIComponent(raw)}`);
+      const info = await response.json();
+      if (response.ok && info.url) point = parseOsmLink(info.url);
+    } catch (error) {
+      point = null;
+    }
+  }
+  if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lon) ||
+      Math.abs(point.lat) > 90 || Math.abs(point.lon) > 180) {
+    note.textContent = "не удалось найти координаты в ссылке";
+    return;
+  }
+  state.center = {lon: point.lon, lat: point.lat};
+  if (Number.isFinite(point.zoom)) {
+    state.zoom = Math.min(state.maxZoom, Math.max(state.minZoom, point.zoom));
+  }
+  const found = matchPlace(state.center.lon, state.center.lat);
+  if (found) {
+    selectPlace(found.point, found.index);
+  } else {
+    state.place = null;
+    refreshPlaceBadge();
+  }
+  note.textContent = `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} · ` +
+    `z=${state.zoom.toFixed(1)}`;
+  requestRender();
+  refreshReadout();
+  writeUrl();
+}
+
+document.getElementById("osm-go").addEventListener("click", openOsmLink);
+document.getElementById("osm-link").addEventListener("keydown", event => {
+  if (event.key === "Enter") openOsmLink();
+});
 
 // После перемещения карты название остаётся, но гаснет: мы уже не там.
 function refreshPlaceBadge() {

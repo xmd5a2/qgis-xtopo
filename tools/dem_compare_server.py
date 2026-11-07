@@ -1869,6 +1869,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json(info)
             return
+        if action == "osm-resolve":
+            # Короткие ссылки osm.org/go/… редиректят на #map=…; браузер
+            # не может прочитать адрес после кросс-доменного редиректа.
+            url = query.get("url", [""])[0].strip()
+            host = (urllib.parse.urlparse(url).hostname or "").lower()
+            if host not in ("openstreetmap.org", "www.openstreetmap.org",
+                            "osm.org", "www.osm.org"):
+                self._json({"error": "не ссылка OpenStreetMap"}, code=400)
+                return
+            try:
+                request = urllib.request.Request(
+                    url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    final = response.geturl()
+            except Exception as exc:
+                self._json({"error": str(exc)}, code=502)
+                return
+            self._json({"url": final})
+            return
         ds = query.get("ds", [""])[0]
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
