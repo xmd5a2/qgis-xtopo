@@ -141,6 +141,7 @@ def dem_signature(config, bbox, source_digest=None):
     parts = [
         plugin_version(),
         bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        config.resolved_terrain_source(),
         config.terrain_resample_method,
         config.generate_terrain_hillshade_slope,
         source_digest,

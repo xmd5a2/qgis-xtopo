@@ -592,8 +592,10 @@ class PipelineIntegrationTest(unittest.TestCase):
                 ["cubicspline", "lanczos"],
             )
             dock.generate_terrain.setChecked(True)
+            dock.dem_source.setCurrentIndex(
+                dock.dem_source.findData("srtm")
+            )
             dock.dem_dir.clear()
-            dock.download_terrain.setChecked(False)
             dock._set_isolines_step(10)
             self.assertEqual(dock._current_isolines_step(), 10)
             self.assertFalse(dock.isolines_steps[5].isChecked())
@@ -627,20 +629,20 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock.isolines_steps[200].setChecked(False)
             self.assertTrue(dock.isolines_steps[200].isChecked())
 
+            dock.dem_source.setCurrentIndex(
+                dock.dem_source.findData("manual")
+            )
+            self.assertFalse(dock.dem_dir_row.isHidden())
             dock.dem_dir.setText("/tmp/dem")
-            self.assertFalse(dock.download_terrain.isChecked())
-            self.assertFalse(dock.download_terrain.isEnabled())
-            self.assertIn("не найден", dock.dem_hint.text())
+            self.assertIn("не найден", dock.dem_info.text())
             with tempfile.TemporaryDirectory() as dem:
                 dock.dem_dir.setText(dem)
-                self.assertFalse(dock.download_terrain.isChecked())
-                self.assertFalse(dock.download_terrain.isEnabled())
-                self.assertIn("Используется рельеф", dock.dem_hint.text())
-            dock.dem_dir.clear()
-            self.assertTrue(dock.download_terrain.isEnabled())
-            dock.download_terrain.setChecked(True)
-            dock.dem_dir.setText("/tmp/dem")
-            self.assertFalse(dock.download_terrain.isChecked())
+                self.assertIn("Каталог:", dock.dem_info.text())
+            dock.dem_source.setCurrentIndex(
+                dock.dem_source.findData("srtm")
+            )
+            self.assertTrue(dock.dem_dir_row.isHidden())
+            self.assertIn("SRTM", dock.dem_info.text())
             with tempfile.TemporaryDirectory() as directory:
                 dock.projects_dir.setText(directory)
                 dock.project_name.setText("demo")
@@ -648,6 +650,10 @@ class PipelineIntegrationTest(unittest.TestCase):
                 dock.source_mode.setCurrentIndex(
                     dock.source_mode.findData("geofabrik")
                 )
+                dock.dem_source.setCurrentIndex(
+                    dock.dem_source.findData("manual")
+                )
+                dock.dem_dir.setText(str(Path(directory) / "missing"))
                 with self.assertRaises(ValueError):
                     dock._build_config()
         finally:

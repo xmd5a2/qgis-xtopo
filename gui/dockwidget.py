@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QStyleOptionViewItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core import geofabrik, i18n
+from ..core import dem_sources, geofabrik, i18n
 from ..core.bbox import parse_bbox
 from ..core.config import (
     Config, default_projects_dir, default_queries, project_name_error,
@@ -344,6 +344,34 @@ class PbfProbeWorker(QThread):
         self.cancel_event.set()
 
 
+class DemAvailabilityWorker(QThread):
+    """Проверка покрытия источников рельефа для выбранного охвата."""
+
+    result = pyqtSignal(int, object)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, bbox, generation, parent=None):
+        super().__init__(parent)
+        self.bbox = bbox
+        self.generation = generation
+        self.cancel_event = threading.Event()
+
+    def run(self):
+        try:
+            availability = dem_sources.check_availability(
+                self.bbox, cancel=self.cancel_event, timeout=10
+            )
+        except InterruptedError:
+            return
+        except Exception as exc:  # noqa: BLE001 - сеть не должна ломать панель
+            self.failed.emit(self.generation, str(exc))
+        else:
+            self.result.emit(self.generation, availability)
+
+    def cancel(self):
+        self.cancel_event.set()
+
+
 class GeofabrikPlanWorker(QThread):
     result = pyqtSignal(object)
     failed = pyqtSignal(str)
@@ -380,6 +408,13 @@ class XtopoDockWidget(QDockWidget):
         self.server_workers = []
         self.pbf_probe = None
         self.geofabrik_worker = None
+        self.dem_availability_worker = None
+        self._dem_availability = {}
+        self._dem_check_message = ""
+        self._dem_availability_generation = 0
+        self._dem_check_timer = QTimer(self)
+        self._dem_check_timer.setSingleShot(True)
+        self._dem_check_timer.timeout.connect(self._start_dem_availability)
         self._geofabrik_plan = None
         self._geofabrik_plan_bbox = ""
         self._geofabrik_stats_maps = ()
@@ -662,23 +697,33 @@ class XtopoDockWidget(QDockWidget):
         self.generate_terrain = QCheckBox("Обрабатывать рельеф")
         self.generate_terrain.toggled.connect(self._terrain_changed)
         terrain_form.addRow(self.generate_terrain)
-        self.download_terrain = QCheckBox("Скачать SRTM 30 м автоматически")
-        terrain_form.addRow(self.download_terrain)
+        self.dem_source = QComboBox()
+        for item in dem_sources.SOURCES:
+            self.dem_source.addItem(i18n.tr(item.title), item.key)
+        self.dem_source.currentIndexChanged.connect(self._dem_source_changed)
+        terrain_form.addRow("Источник:", self.dem_source)
+        self.dem_info = QLabel()
+        self.dem_info.setWordWrap(True)
+        try:
+            self.dem_info.setTextFormat(Qt.TextFormat.PlainText)
+        except AttributeError:
+            self.dem_info.setTextFormat(Qt.PlainText)
+        terrain_form.addRow(self.dem_info)
         self.dem_dir = QLineEdit()
         self.dem_dir.textChanged.connect(self._dem_dir_changed)
-        browse_dem = QPushButton("…")
-        browse_dem.setMaximumWidth(32)
-        browse_dem.clicked.connect(self._browse_dem)
-        row = QHBoxLayout()
-        row.addWidget(self.dem_dir)
-        row.addWidget(browse_dem)
-        terrain_form.addRow("Каталог DEM:", row)
-        self.dem_hint = QLabel(
-            "Если каталог указан, используется рельеф из него — "
-            "скачивание SRTM отключается."
-        )
-        self.dem_hint.setWordWrap(True)
-        terrain_form.addRow(self.dem_hint)
+        self.browse_dem = QPushButton("…")
+        self.browse_dem.setMaximumWidth(32)
+        self.browse_dem.clicked.connect(self._browse_dem)
+        self.dem_dir_row = QWidget()
+        dem_row = QHBoxLayout(self.dem_dir_row)
+        dem_row.setContentsMargins(0, 0, 0, 0)
+        dem_row.addWidget(self.dem_dir)
+        dem_row.addWidget(self.browse_dem)
+        terrain_form.addRow("Каталог DEM:", self.dem_dir_row)
+        self.dem_dir_label = terrain_form.labelForField(self.dem_dir_row)
+        self.dem_dir_row.setVisible(False)
+        if self.dem_dir_label is not None:
+            self.dem_dir_label.setVisible(False)
         self.hillshade_slope = QCheckBox("Затенение рельефа и уклоны")
         self.hillshade_slope.setChecked(True)
         self.hillshade_slope.toggled.connect(
@@ -1069,6 +1114,7 @@ class XtopoDockWidget(QDockWidget):
                 self.pbf_probe.cancel()
             self.pbf_info.setText("")
             self._schedule_geofabrik()
+        self._schedule_dem_availability()
 
     def _queries_changed(self, _item):
         mode = self.source_mode.currentData()
@@ -1709,55 +1755,164 @@ class XtopoDockWidget(QDockWidget):
             self._schedule_geofabrik()
 
     def _terrain_changed(self, enabled):
-        has_dem = bool(self.dem_dir.text().strip())
+        manual = self.dem_source.currentData() == dem_sources.MANUAL_SOURCE
         for widget in (
-            self.dem_dir, self.hillshade_slope, self.isolines,
+            self.dem_source, self.hillshade_slope, self.isolines,
             self.smooth_isolines,
         ):
             widget.setEnabled(enabled)
+        self.dem_dir.setEnabled(enabled and manual)
+        self.browse_dem.setEnabled(enabled and manual)
+        self.dem_dir_row.setVisible(enabled and manual)
+        if self.dem_dir_label is not None:
+            self.dem_dir_label.setVisible(enabled and manual)
         self.resample_method.setEnabled(
             enabled and self.hillshade_slope.isChecked()
-        )
-        self.download_terrain.setEnabled(enabled and not has_dem)
-        self.download_terrain.setToolTip(
-            "Отключено: используется DEM из указанного каталога."
-            if has_dem else ""
         )
         steps_enabled = enabled and self.isolines.isChecked()
         for box in self.isolines_steps.values():
             box.setEnabled(steps_enabled)
+        self._update_dem_info()
 
-    def _dem_dir_changed(self, text):
-        if text.strip() and self.download_terrain.isChecked():
-            self.download_terrain.setChecked(False)
-        self._update_dem_hint(text)
+    def _dem_source_changed(self, _index):
         self._terrain_changed(self.generate_terrain.isChecked())
 
-    def _update_dem_hint(self, text=None):
-        value = self.dem_dir.text().strip() if text is None else text.strip()
+    def _dem_dir_changed(self, _text):
+        self._update_dem_info()
+
+    def _dem_manual_availability(self):
+        value = self.dem_dir.text().strip()
         if not value:
-            self.dem_hint.setText(
-                "Если каталог указан, используется рельеф из него — "
-                "скачивание SRTM отключается."
-            )
-            self.dem_hint.setStyleSheet("")
-            return True
-        path = Path(value).expanduser()
-        if not path.exists():
-            self.dem_hint.setText(f"Каталог DEM не найден: {path}")
-            self.dem_hint.setStyleSheet("color: #b00020;")
-            return False
-        if not path.is_dir():
-            self.dem_hint.setText(
-                f"Указанный путь не является каталогом: {path}"
-            )
-            self.dem_hint.setStyleSheet("color: #b00020;")
-            return False
-        self.dem_hint.setText(
-            f"Используется рельеф из каталога: {path}. SRTM не скачивается."
+            message = "Свой каталог: каталог не выбран"
+        else:
+            path = Path(value).expanduser()
+            if not path.exists():
+                message = f"Каталог DEM не найден: {path}"
+            elif not path.is_dir():
+                message = f"Указанный путь не является каталогом: {path}"
+            else:
+                message = f"Каталог: {path}"
+        return dem_sources.Availability(
+            available=True, checked=True, message=message,
         )
-        self.dem_hint.setStyleSheet("")
-        return True
+
+    def _update_dem_info(self):
+        key = self.dem_source.currentData()
+        if not key:
+            self.dem_info.clear()
+            self.dem_info.setToolTip("")
+            return
+        if key == dem_sources.MANUAL_SOURCE:
+            availability = self._dem_manual_availability()
+        else:
+            availability = self._dem_availability.get(key)
+            if availability is None:
+                availability = dem_sources.Availability(
+                    available=True, checked=False,
+                    message=self._dem_check_message
+                    or "Охват не выбран — доступность не проверена",
+                )
+        text, tooltip = dem_sources.describe(key, availability)
+        self.dem_info.setText(text)
+        self.dem_info.setToolTip(tooltip)
+
+    def _schedule_dem_availability(self):
+        self._dem_availability_generation += 1
+        self._dem_availability = {}
+        if not self.bbox.text().strip():
+            self._dem_check_timer.stop()
+            self._dem_check_message = "Охват не выбран — доступность не проверена"
+            self._update_dem_info()
+            return
+        self._dem_check_message = "Проверка доступности…"
+        self._update_dem_info()
+        self._dem_check_timer.start(600)
+
+    def _start_dem_availability(self):
+        self._dem_check_timer.stop()
+        if self.iface is None:
+            self._dem_check_message = ""
+            self._update_dem_info()
+            return
+        try:
+            bbox = parse_bbox(self.bbox.text().strip())
+        except Exception as exc:  # noqa: BLE001 - в поле может быть что угодно
+            self._dem_availability = {}
+            self._dem_check_message = f"Охват не задан: {exc}"
+            self._update_dem_info()
+            return
+        if self.dem_availability_worker is not None:
+            try:
+                running = self.dem_availability_worker.isRunning()
+            except RuntimeError:
+                running = False
+                self.dem_availability_worker = None
+            if running:
+                self.dem_availability_worker.cancel()
+        generation = self._dem_availability_generation
+        worker = DemAvailabilityWorker(bbox, generation, self)
+        worker.result.connect(self._dem_availability_ready)
+        worker.failed.connect(self._dem_availability_failed)
+        worker.finished.connect(lambda: self._dem_worker_finished(worker))
+        worker.finished.connect(worker.deleteLater)
+        self.dem_availability_worker = worker
+        worker.start()
+
+    def _dem_worker_finished(self, worker):
+        if self.dem_availability_worker is worker:
+            self.dem_availability_worker = None
+
+    def _dem_availability_ready(self, generation, availability):
+        if generation != self._dem_availability_generation:
+            return
+        self._dem_availability = availability
+        self._dem_check_message = ""
+        self._apply_dem_availability(availability)
+        self._update_dem_info()
+
+    def _dem_availability_failed(self, generation, message):
+        if generation != self._dem_availability_generation:
+            return
+        self._dem_availability = {}
+        self._dem_check_message = f"Не удалось проверить доступность: {message}"
+        self._update_dem_info()
+
+    def _apply_dem_availability(self, availability):
+        current = self.dem_source.currentData()
+        for index in range(self.dem_source.count()):
+            key = self.dem_source.itemData(index)
+            state = availability.get(key)
+            if state is None:
+                enabled = True
+                tooltip = ""
+            else:
+                enabled = state.available or not state.checked
+                tooltip = state.message
+            model = self.dem_source.model()
+            item = model.item(index) if hasattr(model, "item") else None
+            if item is not None:
+                item.setEnabled(enabled)
+            self.dem_source.setItemData(index, tooltip, _tooltip_role())
+        if current:
+            state = availability.get(current)
+            if state is not None and state.checked and not state.available:
+                index = self.dem_source.findData(
+                    self._fallback_dem_source(availability)
+                )
+                if index >= 0:
+                    self.dem_source.setCurrentIndex(index)
+
+    def _fallback_dem_source(self, availability):
+        for key in (
+            "srtm", "cop30", "nasadem", "alos", "3dep",
+            dem_sources.MANUAL_SOURCE,
+        ):
+            state = availability.get(key)
+            if key == dem_sources.MANUAL_SOURCE:
+                return key
+            if state is None or state.available or not state.checked:
+                return key
+        return dem_sources.MANUAL_SOURCE
 
     def _current_isolines_step(self):
         checked = [
@@ -1837,9 +1992,15 @@ class XtopoDockWidget(QDockWidget):
             self.source_value.setEnabled(True)
         self._mode_values[mode] = self.source_value.text()
         self.dem_dir.setText(self.settings.value("dem_dir", ""))
-        self.download_terrain.setChecked(self.settings.value("download_terrain", "false") == "true")
-        if self.dem_dir.text().strip():
-            self.download_terrain.setChecked(False)
+        saved_source = str(self.settings.value("terrain_source", "") or "")
+        if not saved_source:
+            saved_source = (
+                dem_sources.MANUAL_SOURCE
+                if self.dem_dir.text().strip()
+                else dem_sources.DEFAULT_SOURCE
+            )
+        source_index = self.dem_source.findData(saved_source)
+        self.dem_source.setCurrentIndex(max(0, source_index))
         saved_steps = str(self.settings.value("isolines_steps", "") or "")
         checked = []
         for item in saved_steps.split(","):
@@ -1884,7 +2045,10 @@ class XtopoDockWidget(QDockWidget):
         for name, value in values.items():
             self.settings.setValue(f"source_value_{name}", value)
         self.settings.setValue("dem_dir", self.dem_dir.text())
-        self.settings.setValue("download_terrain", str(self.download_terrain.isChecked()).lower())
+        self.settings.setValue(
+            "terrain_source",
+            self.dem_source.currentData() or dem_sources.DEFAULT_SOURCE,
+        )
         self.settings.setValue("generate_terrain", str(self.generate_terrain.isChecked()).lower())
         self.settings.setValue("isolines_step", str(self._current_isolines_step()))
         checked_steps = ",".join(
@@ -2049,6 +2213,7 @@ class XtopoDockWidget(QDockWidget):
     def _retranslate_dynamic(self):
         """Пересобирает динамические подписи на текущем языке."""
         self._render_pbf_info()
+        self._update_dem_info()
         plan = self._geofabrik_plan
         if plan is None:
             return
@@ -2119,8 +2284,10 @@ class XtopoDockWidget(QDockWidget):
             if endpoint in endpoints:
                 endpoints.remove(endpoint)
             endpoints.insert(0, endpoint)
-        dem_dir = self.dem_dir.text().strip()
-        if dem_dir:
+        source_key = self.dem_source.currentData() or dem_sources.DEFAULT_SOURCE
+        manual = source_key == dem_sources.MANUAL_SOURCE
+        dem_dir = self.dem_dir.text().strip() if manual else ""
+        if manual and dem_dir:
             dem_path = Path(dem_dir).expanduser()
             if not dem_path.exists():
                 raise ValueError(f"Каталог DEM не найден: {dem_path}")
@@ -2144,8 +2311,9 @@ class XtopoDockWidget(QDockWidget):
             overpass_endpoint_local=value if mode == "local" else "",
             overpass_endpoint_ssh=value if mode == "ssh" else "",
             generate_terrain=self.generate_terrain.isChecked(),
-            download_terrain_tiles=self.download_terrain.isChecked(),
-            get_terrain_tiles=bool(dem_dir) and not self.download_terrain.isChecked(),
+            terrain_source=source_key,
+            download_terrain_tiles=not manual,
+            get_terrain_tiles=manual,
             terrain_src_dir=dem_dir,
             generate_terrain_hillshade_slope=self.hillshade_slope.isChecked(),
             terrain_resample_method=(
@@ -2323,11 +2491,19 @@ class XtopoDockWidget(QDockWidget):
             worker.wait(12000)
         self._pbf_probe_timer.stop()
         self._geofabrik_timer.stop()
+        self._dem_check_timer.stop()
         if self.pbf_probe is not None and self.pbf_probe.isRunning():
             self.pbf_probe.cancel()
             self.pbf_probe.wait(3000)
         if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
             self.geofabrik_worker.cancel()
             self.geofabrik_worker.wait(12000)
+        if self.dem_availability_worker is not None:
+            try:
+                if self.dem_availability_worker.isRunning():
+                    self.dem_availability_worker.cancel()
+                    self.dem_availability_worker.wait(12000)
+            except RuntimeError:
+                self.dem_availability_worker = None
         self._save_settings()
         super().closeEvent(event)

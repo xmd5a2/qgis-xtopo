@@ -66,6 +66,43 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(Config().qgis_projects_dir, default_projects_dir())
 
+    def test_terrain_source_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.ini"
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="demo",
+                bbox="1,2,3,4",
+                array_queries=[],
+                generate_terrain=True,
+                terrain_source="cop30",
+                download_terrain_tiles=True,
+            )
+            config.to_file(path)
+            loaded = Config.from_file(path)
+        self.assertEqual(loaded.resolved_terrain_source(), "cop30")
+        self.assertTrue(loaded.download_terrain_tiles)
+
+    def test_old_config_resolves_manual_source(self):
+        config = Config(
+            project_name="demo",
+            bbox="1,2,3,4",
+            generate_terrain=True,
+            get_terrain_tiles=True,
+            terrain_src_dir="/tmp/dem",
+        )
+        self.assertEqual(config.resolved_terrain_source(), "manual")
+
+    def test_manual_source_requires_directory(self):
+        config = Config(
+            project_name="demo",
+            bbox="1,2,3,4",
+            generate_terrain=True,
+            terrain_source="manual",
+        )
+        with self.assertRaises(ValueError):
+            config.validate()
+
     def test_validate(self):
         config = Config(project_name="demo", bbox="1,2,3,4", array_queries=["water"])
         config.validate()

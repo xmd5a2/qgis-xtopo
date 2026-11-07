@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 from .bbox import parse_bbox
+from . import dem_sources
 from .map_language import DETAIL_VARIABLE
 from .resources import resource_path, template_path
 
@@ -101,6 +102,10 @@ def prepare_project(config):
         template_path(),
         path,
         config.project_name,
+        dem_attribution=(
+            dem_sources.attribution_for(config.resolved_terrain_source())
+            if config.generate_terrain else ""
+        ),
     )
     config.to_file(config.config_dir / "config.ini")
     return path
@@ -374,7 +379,44 @@ def _set_detail_variable(text, level=None):
     return f"{text[:start]}<value>{level}</value>{text[end:]}"
 
 
-def rewrite_project_archive(source, destination, project_name):
+def _set_project_variable(text, name, value):
+    """Записывает переменную проекта, добавляя её при отсутствии.
+
+    Значения переменных лежат отдельным списком и связаны с именами по
+    позиции.  Если переменной в шаблоне нет, она добавляется в конец
+    обоих списков.
+    """
+    names = VARIABLE_NAMES_PATTERN.search(text)
+    values = VARIABLE_VALUES_PATTERN.search(text)
+    if names is None or values is None:
+        return text
+    names_list = [item.group(1) for item in
+                  VARIABLE_VALUE_PATTERN.finditer(names.group(1))]
+    entries = list(VARIABLE_VALUE_PATTERN.finditer(values.group(1)))
+    escaped = html.escape(str(value), quote=False)
+    if name in names_list:
+        position = names_list.index(name)
+        if position >= len(entries):
+            return text
+        start = values.start(1) + entries[position].start()
+        end = values.start(1) + entries[position].end()
+        return f"{text[:start]}<value>{escaped}</value>{text[end:]}"
+    names_insert = names.end(1)
+    values_insert = values.end(1)
+    text = (
+        text[:values_insert]
+        + f"\n        <value>{escaped}</value>"
+        + text[values_insert:]
+    )
+    text = (
+        text[:names_insert]
+        + f"\n        <value>{html.escape(name, quote=False)}</value>"
+        + text[names_insert:]
+    )
+    return text
+
+
+def rewrite_project_archive(source, destination, project_name, dem_attribution=""):
     source = Path(source)
     destination = Path(destination)
     if not source.exists():
@@ -403,6 +445,7 @@ def rewrite_project_archive(source, destination, project_name):
                     if new_font:
                         text = text.replace(old_font, new_font)
                     text = _set_detail_variable(text)
+                    text = _set_project_variable(text, "dem_attribution", dem_attribution)
                     data = text.encode("utf-8")
                     name = f"{project_name}.qgs"
                 elif name.endswith(".qgd"):

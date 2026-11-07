@@ -8,13 +8,22 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .bbox import parse_bbox
-from . import terrain_cache
+from .bbox import BBox
+from . import dem_sources, terrain_cache
 
 CHUNK = 256 * 1024
 
 # Сколько тайлов SRTM качаем одновременно.
 DEM_DOWNLOAD_WORKERS = 4
+
+# Запас вокруг области для растровых наборов: тайлы Copernicus сдвинуты
+# относительно целых градусов, и без запаса у края остаётся полоса nodata.
+COG_PADDING = 0.002
+
+# Предел размера окна DEM (пикселей).  Для 3DEP 10 м на большой охват
+# окно иначе занимает гигабайты; разрешение в этом случае немного
+# снижается, а сообщение об этом выводится в журнал.
+MAX_DEM_PIXELS = 120_000_000
 
 
 def _gdal():
@@ -32,15 +41,7 @@ def _numpy():
 
 
 def srtm_tile_names(bbox):
-    if isinstance(bbox, str):
-        bbox = parse_bbox(bbox)
-    names = []
-    for lat in range(math.floor(bbox.lat_min), math.floor(bbox.lat_max) + 1):
-        for lon in range(math.floor(bbox.lon_min), math.floor(bbox.lon_max) + 1):
-            north = f"N{lat:02d}" if lat >= 0 else f"S{abs(lat):02d}"
-            east = f"E{lon:03d}" if lon >= 0 else f"W{abs(lon):03d}"
-            names.append(f"{north}{east}")
-    return names
+    return dem_sources.tile_names(bbox)
 
 
 def _tile_directory(tile):
@@ -166,6 +167,196 @@ def copy_dem_tiles(bbox, source_dir, destination, progress=None):
         else:
             if progress:
                 progress(f"WARNING: DEM tile not found: {tile}")
+
+
+def _padded_bbox(bbox, padding=COG_PADDING):
+    """Область с запасом вокруг: у края не остаётся полосы nodata."""
+    return BBox(
+        max(-180.0, bbox.lon_min - padding),
+        max(-90.0, bbox.lat_min - padding),
+        min(180.0, bbox.lon_max + padding),
+        min(90.0, bbox.lat_max + padding),
+    )
+
+
+def _cached_cog(cache_dir, source_key, bbox):
+    if not cache_dir:
+        return None
+    folder = Path(cache_dir) / "cog" / source_key
+    name = (
+        f"v1_{bbox.lon_min:.6f}_{bbox.lat_min:.6f}_"
+        f"{bbox.lon_max:.6f}_{bbox.lat_max:.6f}.tif"
+    )
+    return folder / name
+
+
+def _cog_sources(source_key, bbox, progress=None, cancel=None):
+    """Ссылки на растровые источники набора для области."""
+    item = dem_sources.source(source_key)
+    items = dem_sources.stac_items(
+        item.collection,
+        (bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max),
+        timeout=60,
+    )
+    if source_key == "3dep":
+        # В коллекции есть и 1″, и 1/3″; нужен более подробный слой.
+        preferred = [entry for entry in items
+                     if entry.get("id", "").endswith("-13")]
+        if preferred:
+            items = preferred
+    if progress:
+        progress(f"Найдено тайлов {item.short}: {len(items)}")
+    sources = []
+    for entry in items:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        href = dem_sources.item_asset_href(entry)
+        if not href:
+            continue
+        if source_key == "cop30":
+            tile = dem_sources.item_tile(entry)
+            if tile is None:
+                continue
+            url = dem_sources.aws_tile_url("cop30", *tile)
+        else:
+            url = dem_sources.sign_pc(href)
+        sources.append("/vsicurl/" + url)
+    return sources
+
+
+def _native_resolution(path):
+    """Шаг сетки источника в градусах (None — не удалось открыть)."""
+    gdal, _, _ = _gdal()
+    dataset = gdal.Open(str(path))
+    if dataset is None:
+        return None
+    try:
+        transform = dataset.GetGeoTransform()
+        spatial_ref = dataset.GetSpatialRef()
+        step = max(abs(transform[1]), abs(transform[5]))
+        if spatial_ref is not None and spatial_ref.IsGeographic():
+            return step
+        return step / 111320.0
+    finally:
+        dataset = None
+
+
+def _warp_callback(cancel, status, label):
+    """Обратный вызов GDAL: отмена и проценты в строке состояния."""
+    state = {"last": 0.0}
+
+    def callback(complete, message, data):
+        if cancel is not None and cancel.is_set():
+            return 0
+        now = time.monotonic()
+        if status and now - state["last"] >= 0.5:
+            state["last"] = now
+            status(f"Загрузка рельефа {label}: {complete:.0%}")
+        return 1
+
+    return callback
+
+
+def download_cog_dem(source_key, bbox, destination, progress=None, cancel=None,
+                     cache_dir=None, status=None):
+    """Скачивает окно растрового набора (COG) в локальный GeoTIFF.
+
+    Целиком многогигабайтные тайлы не качаются: GDAL читает нужные блоки
+    по HTTP Range.  Результат — один файл на область в EPSG:4326.
+    """
+    gdal, _, _ = _gdal()
+    item = dem_sources.source(source_key)
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / f"dem_{source_key}.tif"
+    cached = _cached_cog(cache_dir, source_key, bbox)
+    if cached is not None and cached.exists() and cached.stat().st_size > 0:
+        shutil.copy2(cached, target)
+        if progress:
+            progress(f"Использован кэш рельефа: {item.short}")
+        return target
+
+    padded = _padded_bbox(bbox)
+    if progress:
+        progress(f"Загрузка рельефа {item.short}")
+    sources = _cog_sources(source_key, bbox, progress=progress, cancel=cancel)
+    if not sources:
+        raise RuntimeError(
+            f"Нет данных {item.short} для выбранного охвата"
+        )
+
+    resolution = _native_resolution(sources[0]) or item.native_resolution
+    span_x = padded.lon_max - padded.lon_min
+    span_y = padded.lat_max - padded.lat_min
+    width = max(1, int(math.ceil(span_x / resolution)))
+    height = max(1, int(math.ceil(span_y / resolution)))
+    if width * height > MAX_DEM_PIXELS:
+        factor = math.sqrt(width * height / MAX_DEM_PIXELS)
+        width = max(1, int(width / factor))
+        height = max(1, int(height / factor))
+        reduced = max(span_x / width, span_y / height)
+        if progress:
+            progress(
+                "Большой охват: разрешение снижено до "
+                f"~{reduced * 111320:.0f} м"
+            )
+
+    temporary = target.with_name(target.name + ".part")
+    options = gdal.WarpOptions(
+        format="GTiff",
+        dstSRS="EPSG:4326",
+        outputBounds=(padded.lon_min, padded.lat_min,
+                      padded.lon_max, padded.lat_max),
+        width=width,
+        height=height,
+        resampleAlg="bilinear",
+        outputType=gdal.GDT_Int16,
+        dstNodata=-32768,
+        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES", "TILED=YES"],
+        multithread=True,
+        callback=_warp_callback(cancel, status, item.short),
+    )
+    result = gdal.Warp(str(temporary), sources, options=options)
+    if result is None:
+        temporary.unlink(missing_ok=True)
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        raise RuntimeError(f"Не удалось собрать рельеф {item.short}")
+    result = None
+    temporary.replace(target)
+    if cached is not None:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        temporary_cache = cached.with_name(cached.name + ".tmp")
+        shutil.copy2(target, temporary_cache)
+        temporary_cache.replace(cached)
+    return target
+
+
+def download_dem(source_key, bbox, destination, progress=None, cancel=None,
+                 cache_dir=None, status=None):
+    """Скачивает рельеф выбранного источника для области."""
+    if source_key == dem_sources.MANUAL_SOURCE:
+        raise ValueError("Manual DEM source does not download tiles")
+    if source_key == "srtm":
+        return download_srtm(
+            bbox, destination, progress=progress, cancel=cancel,
+            cache_dir=cache_dir, status=status,
+        )
+    return download_cog_dem(
+        source_key, bbox, destination, progress=progress, cancel=cancel,
+        cache_dir=cache_dir, status=status,
+    )
+
+
+def _clear_terrain_input(config):
+    """Убирает прошлые тайлы: иначе в сборку попадут данные другого набора."""
+    try:
+        entries = list(config.terrain_input_dir.iterdir())
+    except OSError:
+        return
+    for path in entries:
+        if path.is_file() and path.suffix.lower() in (".tif", ".hgt", ".zip", ".vrt"):
+            path.unlink(missing_ok=True)
 
 
 def _write_raster(path, array, template):
@@ -778,8 +969,17 @@ def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
     if not config.generate_terrain:
         return
     config.terrain_input_dir.mkdir(parents=True, exist_ok=True)
-    if config.download_terrain_tiles:
-        download_srtm(
+    source_key = config.resolved_terrain_source()
+    source = dem_sources.source(source_key)
+    if source.manual:
+        if not config.terrain_src_dir:
+            raise RuntimeError("terrain_src_dir is required for the manual DEM source")
+        _clear_terrain_input(config)
+        copy_dem_tiles(bbox, config.terrain_src_dir, config.terrain_input_dir, progress=progress)
+    elif config.download_terrain_tiles:
+        _clear_terrain_input(config)
+        download_dem(
+            source_key,
             bbox,
             config.terrain_input_dir,
             progress=progress,
@@ -787,10 +987,6 @@ def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
             cache_dir=config.terrain_cache_dir,
             status=status,
         )
-    elif config.get_terrain_tiles:
-        if not config.terrain_src_dir:
-            raise RuntimeError("terrain_src_dir is required when get_terrain_tiles=true")
-        copy_dem_tiles(bbox, config.terrain_src_dir, config.terrain_input_dir, progress=progress)
 
     for archive in list(config.terrain_input_dir.glob("*.zip")):
         shutil.unpack_archive(str(archive), str(config.terrain_input_dir))

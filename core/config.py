@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import i18n
+from . import dem_sources, i18n
 from .overpass_servers import DEFAULT_OVERPASS_SERVERS
 from .resources import resource_path
 
@@ -132,6 +132,7 @@ class Config:
     overpass_endpoint_ssh: str = ""
 
     generate_terrain: bool = False
+    terrain_source: str = ""
     download_terrain_tiles: bool = False
     get_terrain_tiles: bool = False
     terrain_src_dir: str = ""
@@ -198,6 +199,18 @@ class Config:
     def terrain_result_cache_dir(self):
         return self.projects_dir / "qgisxtopo-cache" / "terrain"
 
+    def resolved_terrain_source(self):
+        """Ключ источника рельефа.
+
+        В старых config.ini поля terrain_source нет: если включён
+        get_terrain_tiles, это ручной каталог, иначе SRTM.
+        """
+        if self.terrain_source:
+            return self.terrain_source
+        if self.get_terrain_tiles:
+            return dem_sources.MANUAL_SOURCE
+        return dem_sources.DEFAULT_SOURCE
+
     def validate(self):
         if not self.project_name:
             raise ValueError("Укажите имя проекта")
@@ -214,6 +227,12 @@ class Config:
             raise ValueError("Select at least one query or enable terrain processing")
         if self.generate_terrain and self.download_terrain_tiles and self.get_terrain_tiles:
             raise ValueError("download_terrain_tiles and get_terrain_tiles are mutually exclusive")
+        if self.generate_terrain:
+            source = self.resolved_terrain_source()
+            if source not in dem_sources.SOURCE_KEYS:
+                raise ValueError(f"Unknown terrain source: {source}")
+            if source == dem_sources.MANUAL_SOURCE and not self.terrain_src_dir:
+                raise ValueError("Укажите каталог DEM для источника «Свой каталог DEM»")
 
     @classmethod
     def from_file(cls, path):
@@ -249,6 +268,7 @@ class Config:
             overpass_endpoint_local=values.get("overpass_endpoint_local", ""),
             overpass_endpoint_ssh=values.get("overpass_endpoint_ssh", ""),
             generate_terrain=_as_bool(values.get("generate_terrain")),
+            terrain_source=values.get("terrain_source", ""),
             download_terrain_tiles=_as_bool(values.get("download_terrain_tiles")),
             get_terrain_tiles=_as_bool(values.get("get_terrain_tiles")),
             terrain_src_dir=values.get("terrain_src_dir", ""),
@@ -292,6 +312,7 @@ overpass_endpoint_local="{self.overpass_endpoint_local}"
 overpass_endpoint_ssh="{self.overpass_endpoint_ssh}"
 
 generate_terrain={str(self.generate_terrain).lower()}
+terrain_source={self.resolved_terrain_source()}
 download_terrain_tiles={str(self.download_terrain_tiles).lower()}
 get_terrain_tiles={str(self.get_terrain_tiles).lower()}
 terrain_src_dir="{self.terrain_src_dir}"

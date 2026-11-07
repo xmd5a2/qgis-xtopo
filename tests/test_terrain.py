@@ -610,5 +610,128 @@ class GlacierIsolinesWaterTest(unittest.TestCase):
             self.assertGreater(inside, 0.1)
 
 
+class DemSourceTest(unittest.TestCase):
+    def test_tiles_do_not_include_upper_boundary(self):
+        from qgis_xtopo.core import dem_sources
+
+        self.assertEqual(
+            dem_sources.tile_names(BBox(7.0, 45.9, 7.2, 46.0)),
+            ["N45E007"],
+        )
+        self.assertEqual(
+            dem_sources.tile_names(BBox(7.0, 46.0, 7.2, 46.1)),
+            ["N46E007"],
+        )
+
+    def test_range_source_outside_coverage(self):
+        from qgis_xtopo.core import dem_sources
+
+        state = dem_sources._range_availability(
+            dem_sources.source("srtm"), BBox(15.0, 78.0, 16.0, 79.0)
+        )
+        self.assertFalse(state.available)
+        self.assertIn("вне покрытия", state.message)
+
+    def test_stac_source_without_items(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        with mock.patch.object(dem_sources, "stac_items", return_value=[]):
+            state = dem_sources._stac_availability(
+                dem_sources.source("3dep"), BBox(7.0, 46.0, 8.0, 47.0),
+                timeout=1,
+            )
+        self.assertFalse(state.available)
+        self.assertEqual(state.total, 1)
+
+    def test_stac_source_partial_coverage(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        item = {"bbox": [7.0, 46.0, 8.0, 47.0], "assets": {}}
+        with mock.patch.object(dem_sources, "stac_items", return_value=[item]):
+            state = dem_sources._stac_availability(
+                dem_sources.source("cop30"),
+                BBox(7.0, 45.9, 8.0, 46.9), timeout=1,
+            )
+        self.assertTrue(state.available)
+        self.assertTrue(state.partial)
+        self.assertEqual(state.total, 2)
+        self.assertEqual(state.missing, 1)
+
+    def test_stac_source_full_coverage(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        items = [
+            {"bbox": [7.0, 46.0, 8.0, 47.0], "assets": {}},
+            {"bbox": [7.0, 45.0, 8.0, 46.0], "assets": {}},
+        ]
+        with mock.patch.object(dem_sources, "stac_items", return_value=items):
+            state = dem_sources._stac_availability(
+                dem_sources.source("cop30"),
+                BBox(7.0, 45.9, 8.0, 46.9), timeout=1,
+            )
+        self.assertTrue(state.available)
+        self.assertFalse(state.partial)
+        self.assertEqual(state.missing, 0)
+
+
+class CogDownloadTest(unittest.TestCase):
+    def test_download_cog_dem_uses_cache(self):
+        from unittest import mock
+
+        import numpy
+        from osgeo import gdal, osr
+
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.tif"
+            size = 360
+            array = numpy.fromfunction(
+                lambda y, x: 1000 + x + y, (size, size), dtype="float32"
+            )
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(source), size, size, 1, gdal.GDT_Float32
+            )
+            dataset.SetGeoTransform((7.0, 1 / 360, 0, 47.0, 0, -1 / 360))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset.SetProjection(srs.ExportToWkt())
+            dataset.GetRasterBand(1).WriteArray(array)
+            dataset = None
+
+            bbox = BBox(7.0, 46.0, 7.03, 46.03)
+            cache = root / "cache"
+            messages = []
+            with mock.patch.object(
+                terrain, "_cog_sources", return_value=[str(source)]
+            ):
+                first = terrain.download_cog_dem(
+                    "cop30", bbox, root / "first",
+                    progress=messages.append, cache_dir=cache,
+                )
+                second = terrain.download_cog_dem(
+                    "cop30", bbox, root / "second",
+                    progress=messages.append, cache_dir=cache,
+                )
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertTrue(any("Использован кэш" in item for item in messages))
+            self.assertTrue(list((cache / "cog" / "cop30").glob("*.tif")))
+
+            dataset = gdal.Open(str(first))
+            band = dataset.GetRasterBand(1)
+            self.assertEqual(band.GetNoDataValue(), -32768)
+            values = band.ReadAsArray()
+            self.assertGreater(int(values.max()), 1000)
+            dataset = None
+
+
 if __name__ == "__main__":
     unittest.main()

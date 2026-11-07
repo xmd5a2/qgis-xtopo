@@ -224,6 +224,70 @@ class ProjectDetailLevelTest(unittest.TestCase):
         self.assertEqual(self._variables(text)["level_of_detail"], "6")
 
 
+class ProjectAttributionTest(unittest.TestCase):
+    """Атрибуция источника рельефа попадает в подпись макета атласа."""
+
+    def _variables(self, text):
+        start = text.rfind("<Variables>")
+        block = text[start:text.find("</Variables>", start)]
+        names, values = block.split("</variableNames>")
+        return dict(zip(
+            re.findall(r"<value>(.*?)</value>", names),
+            re.findall(r"<value>(.*?)</value>", values),
+        ))
+
+    def test_template_has_attribution_expression(self):
+        with zipfile.ZipFile(template_path()) as archive:
+            text = archive.read("automap.qgs").decode("utf-8")
+        self.assertIn("@dem_attribution", text)
+        self.assertIn("dem_attribution", self._variables(text))
+
+    def test_rewrite_writes_attribution(self):
+        attribution = (
+            "Produced using Copernicus data and information funded by "
+            "the European Union and ESA"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "demo.qgz"
+            rewrite_project_archive(
+                template_path(), destination, "demo",
+                dem_attribution=attribution,
+            )
+            with zipfile.ZipFile(destination) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        self.assertEqual(self._variables(text)["dem_attribution"], attribution)
+
+    def test_rewrite_without_attribution_clears_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "demo.qgz"
+            rewrite_project_archive(template_path(), destination, "demo")
+            with zipfile.ZipFile(destination) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        self.assertEqual(self._variables(text)["dem_attribution"], "")
+
+    def test_prepare_project_uses_source_attribution(self):
+        from qgis_xtopo.core.config import Config
+        from qgis_xtopo.core.project import prepare_project
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="demo",
+                bbox="7,46,7.1,46.1",
+                array_queries=[],
+                generate_terrain=True,
+                terrain_source="cop30",
+                download_terrain_tiles=True,
+            )
+            path = prepare_project(config)
+            with zipfile.ZipFile(path) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        self.assertIn(
+            "Produced using Copernicus data",
+            self._variables(text)["dem_attribution"],
+        )
+
+
 class ProjectFilePathTest(unittest.TestCase):
     def test_path(self):
         path = project_file_path("/tmp/projects", "demo")
