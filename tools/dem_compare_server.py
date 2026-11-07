@@ -1251,7 +1251,10 @@ def _contour_mask(values, step):
         finite = np.isfinite(corners)
         lowest = np.min(np.where(finite, corners, np.inf), axis=0)
         highest = np.max(np.where(finite, corners, -np.inf), axis=0)
-        crossing = cell_valid & (lowest <= level) & (highest >= level)
+        # Плоская ячейка (все углы равны уровню) пересечения не даёт: иначе
+        # ровное море или плато на уровне 0 рисует горизонтали по всей площади.
+        crossing = (cell_valid & (highest > lowest) &
+                    (lowest <= level) & (highest >= level))
         ys, xs = np.nonzero(crossing)
         for y, x in zip(ys, xs):
             points = []
