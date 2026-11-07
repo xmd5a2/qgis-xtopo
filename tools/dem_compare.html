@@ -67,7 +67,7 @@
   #canvas.grabbing { cursor: grabbing; }
   #canvas.profile { cursor: crosshair; }
   #overlay {
-    position: absolute; left: 10px; bottom: 10px; pointer-events: none;
+    position: absolute; left: 10px; top: 10px; pointer-events: none;
     display: flex; flex-direction: column; gap: 3px;
     background: rgba(20,23,26,.78); border: 1px solid var(--line);
     border-radius: 5px; padding: 6px 9px; font-size: 12px;
@@ -346,10 +346,11 @@ function draw() {
 
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
   const scale = Math.pow(2, state.zoom - tz);
-  const center = centerPoint();
-  const originX = center.x * scale - w / 2;
-  const originY = center.y * scale - h / 2;
   const tileCount = Math.pow(2, tz);
+  const center = centerPoint();
+  // Левый верхний угол видимой области в мировых пикселях тайлов.
+  const left = center.x * scale - w / 2;
+  const top = center.y * scale - h / 2;
 
   const drawLayer = (ds, mode, clipX) => {
     if (!ds) return;
@@ -359,19 +360,21 @@ function draw() {
       ctx.rect(clipX, 0, w - clipX, h);
       ctx.clip();
     }
-    const firstX = Math.floor(originX / (TILE * scale)) - 1;
-    const firstY = Math.floor(originY / (TILE * scale)) - 1;
-    const lastX = Math.floor((originX + w) / (TILE * scale)) + 1;
-    const lastY = Math.floor((originY + h) / (TILE * scale)) + 1;
+    const firstX = Math.floor(left / TILE) - 1;
+    const firstY = Math.floor(top / TILE) - 1;
+    const lastX = Math.floor((left + w) / TILE) + 1;
+    const lastY = Math.floor((top + h) / TILE) + 1;
     for (let tx = firstX; tx <= lastX; tx++) {
       for (let ty = firstY; ty <= lastY; ty++) {
         if (ty < 0 || ty >= tileCount) continue;
+        // Западнее нулевого меридиана мир повторяется: рисуем тот же тайл
+        // с другого края, но на своей позиции.
         const wrapped = ((tx % tileCount) + tileCount) % tileCount;
         const entry = getTile(ds, mode, tz, wrapped, ty);
         if (!entry.loaded) continue;
-        const px = originX + (tx - 0) * TILE * scale - (tx - wrapped) * TILE * scale;
-        const py = originY + ty * TILE * scale;
-        ctx.drawImage(entry.image, px, py, TILE * scale + 1, TILE * scale + 1);
+        const worldX = (tx < 0 ? wrapped : tx) * TILE;
+        ctx.drawImage(entry.image, worldX - left, ty * TILE - top,
+                      TILE * scale + 1, TILE * scale + 1);
       }
     }
     ctx.restore();
@@ -746,12 +749,48 @@ document.getElementById("points").addEventListener("click", event => {
 });
 
 // ---------------------------------------------------------------------------
+// Состояние в адресе: ссылкой можно поделиться, состояние восстанавливается
+// ---------------------------------------------------------------------------
+function readUrl() {
+  const params = new URLSearchParams(location.search);
+  if (params.get("a")) state.a = params.get("a");
+  if (params.get("b")) state.b = params.get("b");
+  if (params.get("mode")) state.mode = params.get("mode");
+  if (params.get("diff") === "1") { state.diff = true; state.compare = false; }
+  if (params.get("lon") && params.get("lat")) {
+    state.center = {lon: parseFloat(params.get("lon")),
+                    lat: parseFloat(params.get("lat"))};
+  }
+  if (params.get("z")) state.zoom = parseFloat(params.get("z"));
+}
+
+function writeUrl() {
+  const params = new URLSearchParams();
+  params.set("a", state.a);
+  params.set("b", state.b);
+  params.set("mode", state.mode);
+  if (state.diff) params.set("diff", "1");
+  params.set("lon", state.center.lon.toFixed(5));
+  params.set("lat", state.center.lat.toFixed(5));
+  params.set("z", state.zoom.toFixed(1));
+  history.replaceState(null, "", "?" + params.toString());
+}
+
+// ---------------------------------------------------------------------------
 // Запуск
 // ---------------------------------------------------------------------------
 loadDatasets().then(() => {
+  readUrl();
+  fillSelect(document.getElementById("ds-a"), state.a);
+  fillSelect(document.getElementById("ds-b"), state.b);
+  document.getElementById("mode").value = state.mode;
+  document.getElementById("diff").classList.toggle("active", state.diff);
+  document.getElementById("compare").classList.toggle("active", state.compare);
+  renderMeta();
   resize();
   requestRender();
   refreshReadout();
+  setInterval(writeUrl, 1500);
 });
 </script>
 </body>

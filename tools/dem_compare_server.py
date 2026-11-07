@@ -39,10 +39,17 @@ gdal.UseExceptions()
 osr.UseExceptions()
 
 TILE_SIZE = 256
+# Версия кэша тайлов: меняется, когда меняется рендер. Старые файлы не
+# удаляются, просто перестают использоваться.
+CACHE_VERSION = 4
 # Подгрузка тайла с запасом, чтобы шов между тайлами не был виден.
 TILE_OVERLAP = 1
 # Ограничение на размер промежуточного растра (пиксели по стороне).
 MAX_GRID = 2048
+
+# Счётчик для уникальных имён временных файлов.
+_counter = 0
+_counter_lock = threading.Lock()
 
 ROOT = Path(__file__).resolve().parent
 HTML_FILE = ROOT / "dem_compare.html"
@@ -428,24 +435,14 @@ def _tiles_for(bbox):
     return tiles
 
 
-def _build_vrt(store, ds, bbox):
-    """Собирает VRT из исходных тайлов, пересекающих область.
+def _sources_for(store, ds, bbox):
+    """Источники DEM для области.
 
-    Источники могут быть локальными файлами и удалёнными COG: GDAL читает
-    их по HTTP Range, целиком ничего не качается.
+    Список, а не общий VRT: запросы идут параллельно, а общий файл VRT
+    затирался бы соседним запросом — и на карте повторялся бы один и тот же
+    участок рельефа.
     """
-    paths = store.sources(ds, bbox)
-    if not paths:
-        return None
-    vrt_path = store.cache_dir / f"_vrt_{ds}.vrt"
-    try:
-        vrt = gdal.BuildVRT(str(vrt_path), paths)
-    except Exception:
-        return paths
-    if vrt is None:
-        return paths
-    vrt = None
-    return str(vrt_path)
+    return store.sources(ds, bbox)
 
 
 def _dem_grid(store, ds, bbox, pixels=None):
@@ -455,16 +452,10 @@ def _dem_grid(store, ds, bbox, pixels=None):
     по нативному разрешению источника, чтобы не терять детали.
     """
     minx, miny, maxx, maxy = bbox
-    vrt = _build_vrt(store, ds, bbox)
-    if vrt is None:
+    sources = _sources_for(store, ds, bbox)
+    if not sources:
         return None, None
-    source = None
-    if isinstance(vrt, list):
-        source = gdal.Open(vrt[0])
-        sources = vrt
-    else:
-        source = gdal.Open(vrt)
-        sources = vrt
+    source = gdal.Open(sources[0])
     if source is None:
         return None, None
     gt = source.GetGeoTransform()
@@ -496,7 +487,7 @@ def _dem_grid(store, ds, bbox, pixels=None):
         dstNodata=float("nan"),
         multithread=True,
     )
-    warped = gdal.Warp("", vrt, options=options)
+    warped = gdal.Warp("", sources, options=options)
     source = None
     if warped is None:
         return None, None
@@ -504,6 +495,19 @@ def _dem_grid(store, ds, bbox, pixels=None):
     out_gt = warped.GetGeoTransform()
     warped = None
     return array, out_gt
+
+
+def _temp_path(prefix):
+    """Уникальное имя временного файла.
+
+    Запросы идут параллельно, а файлы с фиксированными именами затирали
+    друг друга: отмывка считалась по чужому DEM и тайл выходил чёрным.
+    """
+    global _counter
+    with _counter_lock:
+        _counter += 1
+        number = _counter
+    return f"/vsimem/dem_compare_{prefix}_{number}_{threading.get_ident()}.tif"
 
 
 def _prepare_dem(store, ds, bbox):
@@ -520,7 +524,7 @@ def _prepare_dem(store, ds, bbox):
     band.WriteArray(np.where(np.isnan(array), -32768.0,
                               array).astype("float32"))
     band.SetNoDataValue(-32768.0)
-    path = "/vsimem/dem_compare_dem.tif"
+    path = _temp_path("dem")
     gdal.GetDriverByName("GTiff").CreateCopy(path, mem,
                                              options=["COMPRESS=DEFLATE"])
     mem = None
@@ -531,11 +535,12 @@ def _hillshade(dem_path):
     """Отмывка штатным DEMProcessing — так же, как в плагине."""
     options = gdal.DEMProcessingOptions(computeEdges=True, azimuth=315,
                                         altitude=45, zFactor=1)
-    gdal.DEMProcessing("/vsimem/dem_compare_shade.tif", dem_path, "hillshade",
-                       options=options)
-    dataset = gdal.Open("/vsimem/dem_compare_shade.tif")
+    shade_path = _temp_path("shade")
+    gdal.DEMProcessing(shade_path, dem_path, "hillshade", options=options)
+    dataset = gdal.Open(shade_path)
     shade = dataset.GetRasterBand(1).ReadAsArray()
     dataset = None
+    gdal.Unlink(shade_path)
     return shade
 
 
@@ -700,16 +705,20 @@ def _warp_to_png(mem, bounds_3857, size=TILE_SIZE, resample="average"):
     warped = gdal.Warp("", mem, options=options)
     if warped is None:
         return None
-    png = gdal.GetDriverByName("PNG").CreateCopy("/vsimem/out.png", warped)
+    png_path = _temp_path("tile").replace(".tif", ".png")
+    png = gdal.GetDriverByName("PNG").CreateCopy(png_path, warped)
     warped = None
     if png is None:
         return None
     png = None
-    data = gdal.VSIGetMemFileBuffer_unsafe("/vsimem/out.png")
-    gdal.Unlink("/vsimem/out.png")
+    data = gdal.VSIGetMemFileBuffer_unsafe(png_path)
     if data is None:
+        gdal.Unlink(png_path)
         return None
-    return bytes(data)
+    # Буфер — это memoryview на память GDAL: копируем до удаления файла.
+    result = bytes(data)
+    gdal.Unlink(png_path)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -949,8 +958,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "unknown dataset"}, code=404)
             return
         z, x, y = int(z), int(x), int(y.split(".")[0])
-        cache_file = (self.tile_cache / ds / mode / str(z) / str(x) /
-                      f"{y}.png")
+        cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / ds / mode /
+                      str(z) / str(x) / f"{y}.png")
         if cache_file.exists():
             self._send(200, cache_file.read_bytes(), "image/png")
             return
@@ -974,8 +983,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _diff(self, ds_a, ds_b, z, x, y):
         z, x, y = int(z), int(x), int(y.split(".")[0])
-        cache_file = (self.tile_cache / "diff" / f"{ds_a}_{ds_b}" / str(z) /
-                      str(x) / f"{y}.png")
+        cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / "diff" /
+                      f"{ds_a}_{ds_b}" / str(z) / str(x) / f"{y}.png")
         if cache_file.exists():
             self._send(200, cache_file.read_bytes(), "image/png")
             return
