@@ -70,51 +70,55 @@
   #canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
   #canvas.grabbing { cursor: grabbing; }
   #canvas.profile { cursor: crosshair; }
-  #overlay {
-    position: absolute; left: 10px; top: 10px; pointer-events: none;
-    display: flex; flex-direction: column; gap: 1px;
-    background: rgba(20,23,26,.78); border: 1px solid var(--line);
-    border-radius: 4px; padding: 4px 7px; font-size: 11px; line-height: 1.35;
-  }
-  #overlay .coord { color: var(--muted); font-size: 10px; }
   #readout b { font-weight: 600; }
-  #legend {
-    position: absolute; right: 10px; bottom: 10px; pointer-events: none;
-    background: rgba(20,23,26,.78); border: 1px solid var(--line);
-    border-radius: 5px; padding: 6px 9px; font-size: 11px; color: var(--muted);
+  /* Статусная строка поверх карты: высоты, прогресс и масштаб в одну линию. */
+  #statusbar {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 12px;
+    padding: 3px 10px; min-height: 28px;
+    background: rgba(20,23,26,.72); border-top: 1px solid var(--line);
+    font-size: 11px; pointer-events: none;
   }
-  #progress {
-    position: absolute; right: 8px; top: 8px; min-width: 230px;
-    background: rgba(20,23,26,.86); border: 1px solid var(--line);
-    border-radius: 5px; padding: 5px 7px; font-size: 11px;
-    pointer-events: none;
+  #statusbar #readout {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-width: 0; flex: 0 1 auto;
   }
-  #progress h4 {
-    margin: 0 0 3px; font-size: 10px; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: var(--muted);
+  #statusbar .coord { color: var(--muted); }
+  #statusbar .grow { flex: 1; }
+  #statusbar #progress {
+    position: static; min-width: 0; background: none; border: 0; padding: 0;
+    display: flex; align-items: center; gap: 8px; font-size: 11px;
   }
-  #progress .row { display: flex; align-items: center; gap: 6px; margin: 1px 0; }
-  #progress .row .name {
-    flex: 0 0 108px; overflow: hidden; text-overflow: ellipsis;
+  #statusbar #progress h4 { display: none; }
+  #statusbar #progress-rows { display: flex; gap: 10px; }
+  #statusbar #progress .row {
+    display: flex; align-items: center; gap: 5px; margin: 0;
+  }
+  #statusbar #progress .row .name {
+    flex: 0 1 auto; max-width: 130px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; color: var(--text);
   }
-  #progress .row .bar {
-    flex: 1; height: 4px; background: #2a3136; border-radius: 3px;
+  #statusbar #progress .row .bar {
+    flex: 0 0 56px; height: 4px; background: #2a3136; border-radius: 3px;
     overflow: hidden;
   }
-  #progress .row .bar i {
+  #statusbar #progress .row .bar i {
     display: block; height: 100%; width: 0; background: var(--accent);
     transition: width .2s;
   }
-  #progress .row .count { color: var(--muted); font-variant-numeric: tabular-nums; }
-  #progress .hint { color: var(--muted); font-size: 10px; margin-top: 2px; }
-  #progress .hint.net { color: var(--warn); }
-  #progress .hint.net::before {
+  #statusbar #progress .row .count {
+    color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  #statusbar #progress .hint {
+    color: var(--muted); font-size: 10px; margin: 0; white-space: nowrap;
+  }
+  #statusbar #progress .hint.net { color: var(--warn); }
+  #statusbar #progress .hint.net::before {
     content: "⟳"; display: inline-block; margin-right: 3px;
     animation: spin 1s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  #progress .done { color: #8fd18f; }
+  #statusbar #progress .done { color: #8fd18f; }
   #log { font-size: 11px; color: var(--muted); margin-top: 6px; }
   #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #log b { color: var(--text); font-weight: 500; }
@@ -165,8 +169,6 @@
            title="Непрозрачность подложки OSM">
   </div>
   <div class="spacer"></div>
-  <span class="badge" id="res-badge">—</span>
-  <span class="badge" id="coord-badge">—</span>
 </header>
 
 <main>
@@ -232,15 +234,16 @@
   <div id="map">
     <canvas id="canvas"></canvas>
     <div id="hint"></div>
-    <div id="overlay">
+    <div id="statusbar">
       <div id="readout">—</div>
+      <div class="grow"></div>
+      <div id="progress">
+        <div id="progress-rows"></div>
+        <div class="hint" id="progress-hint"></div>
+      </div>
+      <span class="badge" id="res-badge">—</span>
+      <span class="badge" id="coord-badge">—</span>
     </div>
-    <div id="progress">
-      <h4>Загрузка тайлов</h4>
-      <div id="progress-rows"></div>
-      <div class="hint" id="progress-hint"></div>
-    </div>
-    <div id="legend">© OpenStreetMap contributors · ESA / NASA / JAXA / USGS · рельеф отрисован сервером</div>
   </div>
 </main>
 
@@ -756,23 +759,24 @@ function renderProgress() {
   const hint = document.getElementById("progress-hint");
   if (!rows || !hint) return;
   const parts = [];
-  const add = (key, label) => {
+  const add = (key, label, title) => {
     const stats = state.progress && state.progress[key];
     if (!stats) return;
     const percent = stats.wanted
       ? Math.round(stats.loaded / stats.wanted * 100) : 0;
     parts.push(
-      `<div class="row"><span class="name" title="${label}">${label}</span>` +
+      `<div class="row"><span class="name" title="${title || label}">` +
+      `${label}</span>` +
       `<span class="bar"><i style="width:${percent}%"></i></span>` +
       `<span class="count">${stats.loaded}/${stats.wanted}</span></div>`);
   };
   if (state.diff && state.a && state.b) {
-    add("diff", `${datasetLabel(state.a)} − ${datasetLabel(state.b)}`);
+    add("diff", "A−B", `${datasetLabel(state.a)} − ${datasetLabel(state.b)}`);
   } else if (state.compare && state.a && state.b) {
-    add("a", datasetLabel(state.a));
-    add("b", datasetLabel(state.b));
+    add("a", "A", datasetLabel(state.a));
+    add("b", "B", datasetLabel(state.b));
   } else {
-    add("a", datasetLabel(state.a || state.b));
+    add("a", "A", datasetLabel(state.a || state.b));
   }
   rows.innerHTML = parts.join("");
 
@@ -828,7 +832,8 @@ function drawScaleBar() {
   let chosen = nice[0];
   for (const value of nice) { if (value <= meters) chosen = value; }
   const pixels = chosen / groundResolution(lat, state.zoom);
-  const x = 14, y = h - 18;
+  // Поднимаем над статусной строкой, иначе она закрывает масштаб.
+  const x = 14, y = h - 46;
   ctx.save();
   ctx.fillStyle = "rgba(20,23,26,.78)";
   ctx.fillRect(x - 6, y - 26, pixels + 12, 34);
@@ -917,8 +922,8 @@ async function refreshReadout() {
     parts.push(`Δ: ${delta >= 0 ? "+" : ""}${delta.toFixed(1)} м`);
   }
   document.getElementById("readout").innerHTML =
-    `<span class="coord">${lon.toFixed(5)}°, ${lat.toFixed(5)}°</span><br>` +
-    parts.join("<br>");
+    `<span class="coord">${lon.toFixed(5)}°, ${lat.toFixed(5)}°</span> · ` +
+    parts.join(" · ");
 }
 
 // ---------------------------------------------------------------------------
