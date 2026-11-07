@@ -456,8 +456,13 @@ function draw() {
     if (!ds) return;
     const layerScale = Math.pow(2, state.zoom - layerZoom);
     const layerCount = Math.pow(2, layerZoom);
-    const layerLeft = center.x * layerScale - w / 2;
-    const layerTop = center.y * layerScale - h / 2;
+    // Шаг сетки и размер тайла обязаны быть в одном масштабе, иначе при
+    // дробном зуме между тайлами появляются щели. Центр берём в зуме слоя:
+    // для OSM он может быть ниже, чем зум карты.
+    const layerCenter = project(state.center.lon, state.center.lat, layerZoom);
+    const tileSize = TILE * layerScale;
+    const layerLeft = layerCenter.x * layerScale - w / 2;
+    const layerTop = layerCenter.y * layerScale - h / 2;
     const stats = counted
       ? (progress[bucket] || {wanted: 0, loaded: 0}) : null;
     if (stats) progress[bucket] = stats;
@@ -467,11 +472,10 @@ function draw() {
       ctx.rect(clipX, 0, w - clipX, h);
       ctx.clip();
     }
-    const firstX = Math.floor(layerLeft / TILE) - 1;
-    const firstY = Math.floor(layerTop / TILE) - 1;
-    const lastX = Math.floor((layerLeft + w) / TILE) + 1;
-    const lastY = Math.floor((layerTop + h) / TILE) + 1;
-    const size = TILE * layerScale;
+    const firstX = Math.floor(layerLeft / tileSize) - 1;
+    const firstY = Math.floor(layerTop / tileSize) - 1;
+    const lastX = Math.floor((layerLeft + w) / tileSize) + 1;
+    const lastY = Math.floor((layerTop + h) / tileSize) + 1;
     for (let tx = firstX; tx <= lastX; tx++) {
       for (let ty = firstY; ty <= lastY; ty++) {
         if (ty < 0 || ty >= layerCount) continue;
@@ -479,11 +483,10 @@ function draw() {
         // с другого края, но на своей позиции.
         const wrapped = ((tx % layerCount) + layerCount) % layerCount;
         const entry = getTile(ds, mode, layerZoom, wrapped, ty);
-        const worldX = (tx < 0 ? wrapped : tx) * TILE;
-        const screenX = worldX - layerLeft;
-        const screenY = ty * TILE - layerTop;
-        const visible = screenX + size > 0 && screenX < w &&
-                        screenY + size > 0 && screenY < h;
+        const screenX = tx * tileSize - layerLeft;
+        const screenY = ty * tileSize - layerTop;
+        const visible = screenX + tileSize > 0 && screenX < w &&
+                        screenY + tileSize > 0 && screenY < h;
         if (visible && stats) {
           stats.wanted += 1;
           wanted += 1;
@@ -494,7 +497,8 @@ function draw() {
         }
         if (!entry.loaded) continue;
         if (!counted) osmLoaded += 1;
-        ctx.drawImage(entry.image, screenX, screenY, size + 1, size + 1);
+        ctx.drawImage(entry.image, screenX, screenY,
+                      tileSize + 1, tileSize + 1);
       }
     }
     // Догружаем соседей, чтобы панорамирование не ждало сеть.
