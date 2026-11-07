@@ -10,6 +10,7 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 
     python3 tools/dem_compare_server.py [--port 8765] [--cache DIR]
                                         [--temp-dir DIR] [--local-dem DIR]
+                                        [--local-dem2 DIR]
     python3 tools/dem_compare_server.py --precache [--precache-tiles]
                                         [--precache-modes ...]
 
@@ -226,6 +227,10 @@ DEFAULT_B = "srtm3"
 
 # Ключ набора из локального каталога: добавляется по --local-dem или из UI.
 LOCAL_KEY = "local"
+# Второй локальный каталог: можно сравнивать два своих набора.
+LOCAL_KEY_2 = "local2"
+LOCAL_KEYS = (LOCAL_KEY, LOCAL_KEY_2)
+LOCAL_TITLES = {LOCAL_KEY: "Свой рельеф", LOCAL_KEY_2: "Свой рельеф 2"}
 
 # Расширения растров, которые ищутся в локальном каталоге.
 LOCAL_SUFFIXES = (".tif", ".tiff", ".hgt", ".vrt", ".img", ".asc",
@@ -310,6 +315,17 @@ def _sign_pc(href):
     return _http_json(url)["href"]
 
 
+def _has_rasters(folder):
+    """Есть ли в каталоге растры (для пометки в списке выбора)."""
+    try:
+        for child in folder.iterdir():
+            if child.is_file() and child.suffix.lower() in LOCAL_SUFFIXES:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _raster_info(path):
     """Охват (EPSG:4326) и размер пикселя локального растра в метрах."""
     try:
@@ -367,46 +383,48 @@ def _purge_tree(path):
         pass
 
 
-def register_local_source(store, directory):
-    """Добавляет каталог с рельефом как набор ``local``.
+def register_local_source(store, directory, key=LOCAL_KEY):
+    """Добавляет каталог с рельефом как набор ``local`` или ``local2``.
 
     Возвращает описание набора; страница обновляет список и выбирает его.
     """
-    folder, items = store.set_local_dir(directory)
+    if key not in LOCAL_KEYS:
+        raise ValueError(f"неизвестный локальный ключ: {key}")
+    folder, items = store.set_local_dir(key, directory)
     extent = _union_extent([item[1] for item in items])
     resolution = sorted(item[2] for item in items)[len(items) // 2]
-    # Тайлы и DEM в кэше привязаны к ключу local: при смене каталога они
+    # Тайлы и DEM в кэше привязаны к ключу: при смене каталога они
     # показывали бы прежний рельеф.
-    marker = store.cache_dir / "local.json"
+    marker = store.cache_dir / f"{key}.json"
     try:
         previous = json.loads(marker.read_text(encoding="utf-8"))
         previous = previous.get("directory", "")
     except (OSError, ValueError, AttributeError):
         previous = ""
     if previous and Path(previous).expanduser() != folder:
-        _purge_tree(store.cache_dir / "dem3857" / f"v{CACHE_VERSION}" /
-                    LOCAL_KEY)
-        _purge_tree(store.cache_dir / "tiles" / f"v{CACHE_VERSION}" /
-                    LOCAL_KEY)
+        _purge_tree(store.cache_dir / "dem3857" / f"v{CACHE_VERSION}" / key)
+        _purge_tree(store.cache_dir / "tiles" / f"v{CACHE_VERSION}" / key)
     try:
         marker.write_text(json.dumps({"directory": str(folder)}),
                           encoding="utf-8")
     except OSError:
         pass
-    title = f"Свой рельеф ({folder.name})"
-    DATASETS[LOCAL_KEY] = {
+    base = LOCAL_TITLES[key]
+    title = f"{base} ({folder.name})"
+    DATASETS[key] = {
         "title": title,
-        "short": "Свой рельеф",
+        "short": base,
         "provider": "локальный каталог",
         "source": "local",
         "kind": "surface",
         "datum": "как в файлах",
         "note": f"{len(items)} растров, {folder}",
+        "directory": str(folder),
         "attribution": "",
         "src_nodata": None,
         "resolution_m": resolution,
     }
-    return {"key": LOCAL_KEY, "title": title, "files": len(items),
+    return {"key": key, "title": title, "files": len(items),
             "directory": str(folder),
             "extent": list(extent) if extent else None,
             "resolution_m": resolution}
@@ -425,9 +443,8 @@ class SourceStore:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Куда класть промежуточные загрузки; постоянный кэш — в cache_dir.
         self.temp_dir = Path(temp_dir) if temp_dir else None
-        # Локальный каталог с рельефом: индекс «файл → охват».
-        self.local_dir = None
-        self._local_index = []
+        # Локальные каталоги с рельефом: ключ → (папка, индекс «файл → охват»).
+        self._local = {}
         self._local_lock = threading.Lock()
         self._lock = threading.Lock()
         self._download_locks = {}
@@ -568,7 +585,7 @@ class SourceStore:
             math.cos(math.radians((lat1 + lat2) / 2.0)), 0.05) / TILE_SIZE
         return pixel <= resolution * 3.0
 
-    def set_local_dir(self, directory):
+    def set_local_dir(self, key, directory):
         """Индексирует каталог с рельефом: файл → охват и размер пикселя."""
         folder = Path(directory).expanduser()
         if not folder.is_dir():
@@ -586,15 +603,15 @@ class SourceStore:
         if not items:
             raise ValueError(f"в каталоге нет растров: {folder}")
         with self._local_lock:
-            self.local_dir = folder
-            self._local_index = items
+            self._local[key] = (folder, items)
         return folder, items
 
-    def local_sources(self, bbox):
+    def local_sources(self, key, bbox):
         """Файлы локального каталога, пересекающиеся с областью."""
         minx, miny, maxx, maxy = bbox
         with self._local_lock:
-            items = list(self._local_index)
+            entry = self._local.get(key)
+        items = list(entry[1]) if entry else []
         return [str(path) for path, area, _resolution in items
                 if area[0] <= maxx and area[2] >= minx and
                 area[1] <= maxy and area[3] >= miny]
@@ -629,7 +646,7 @@ class SourceStore:
         spec = DATASETS[ds]
         source = spec["source"]
         if source == "local":
-            return self.local_sources(bbox)
+            return self.local_sources(ds, bbox)
         if source == "skadi":
             paths = []
             for lat, lon in _tiles_for(bbox):
@@ -836,7 +853,7 @@ class SourceStore:
         spec = DATASETS[ds]
         source = spec["source"]
         if source == "local":
-            for path in self.local_sources((lon, lat, lon, lat)):
+            for path in self.local_sources(ds, (lon, lat, lon, lat)):
                 dataset, _ = self.open_source(path)
                 if dataset is not None:
                     return dataset
@@ -1904,15 +1921,19 @@ class Handler(BaseHTTPRequestHandler):
         if action == "local":
             # Каталог с рельефом задаётся из UI; сервер только индексирует.
             folder = query.get("dir", [""])[0].strip()
+            key = query.get("key", [LOCAL_KEY])[0]
             if not folder:
                 self._json({"error": "нужен параметр dir"}, code=400)
                 return
             try:
-                info = register_local_source(self.store, folder)
+                info = register_local_source(self.store, folder, key)
             except (OSError, ValueError) as exc:
                 self._json({"error": str(exc)}, code=400)
                 return
             self._json(info)
+            return
+        if action == "browse":
+            self._browse(query)
             return
         if action == "osm-resolve":
             # Короткие ссылки osm.org/go/… редиректят на #map=…; браузер
@@ -1968,6 +1989,28 @@ class Handler(BaseHTTPRequestHandler):
                                                   lon2, lat2, count)})
             return
         self._json({"error": "unknown api"}, code=404)
+
+    def _browse(self, query):
+        """Подкаталоги для выбора локального набора прямо в интерфейсе."""
+        raw = query.get("dir", [""])[0].strip()
+        path = Path(raw).expanduser() if raw else Path.home()
+        try:
+            path = path.resolve()
+        except OSError:
+            path = Path.home()
+        if not path.is_dir():
+            path = path.parent if path.parent.is_dir() else Path.home()
+        try:
+            children = sorted(path.iterdir(),
+                              key=lambda item: item.name.lower())
+        except OSError as exc:
+            self._json({"error": str(exc)}, code=400)
+            return
+        dirs = [{"name": child.name, "raster": _has_rasters(child)}
+                for child in children
+                if child.is_dir() and not child.name.startswith(".")]
+        parent = str(path.parent) if path.parent != path else None
+        self._json({"path": str(path), "parent": parent, "dirs": dirs})
 
     def _tile(self, ds, z, x, y, mode):
         if ds not in DATASETS:
@@ -2108,6 +2151,8 @@ def main():
     parser.add_argument("--local-dem", default=None,
                         help="каталог с собственным рельефом (GeoTIFF, HGT, "
                              "VRT и т. п.); добавляется набором «Свой рельеф»")
+    parser.add_argument("--local-dem2", default=None,
+                        help="второй каталог с рельефом — «Свой рельеф 2»")
     parser.add_argument("--precache", action="store_true",
                         help="скачать исходники и отрисовать тайлы для точек "
                              "страницы, затем выйти")
@@ -2127,12 +2172,15 @@ def main():
     cache = Path(args.cache).expanduser()
     temp_dir = configure_temp_dir(args.temp_dir)
     store = SourceStore(cache, temp_dir=temp_dir)
-    if args.local_dem:
+    for key, folder in ((LOCAL_KEY, args.local_dem),
+                        (LOCAL_KEY_2, args.local_dem2)):
+        if not folder:
+            continue
         try:
-            local = register_local_source(store, args.local_dem)
+            local = register_local_source(store, folder, key)
         except (OSError, ValueError) as exc:
             raise SystemExit(f"Локальный рельеф: {exc}")
-        print(f"Локальный рельеф: {local['files']} файлов, "
+        print(f"{LOCAL_TITLES[key]}: {local['files']} файлов, "
               f"{local['directory']}")
 
     if args.precache:

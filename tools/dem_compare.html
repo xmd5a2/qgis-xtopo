@@ -49,8 +49,46 @@
   .badge.place.set { background: var(--accent); color: #10161a; }
   .point.active { border-color: var(--accent); background: #26333a; }
   .point.active b { color: var(--accent); }
-  .local-form { display: flex; gap: 6px; }
-  .local-form input { flex: 1; min-width: 0; }
+  .local-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .local-tag { color: var(--muted); width: 10px; flex: 0 0 10px; }
+  .local-row button { flex: 0 0 auto; }
+  .local-path {
+    flex: 1; min-width: 0; color: var(--muted); font-size: 10px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #browser {
+    position: fixed; inset: 0; z-index: 20; display: flex;
+    align-items: center; justify-content: center;
+    background: rgba(8,10,12,.62);
+  }
+  #browser[hidden] { display: none; }
+  .browser-box {
+    width: min(640px, 90vw); max-height: 70vh; display: flex;
+    flex-direction: column; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.55); overflow: hidden;
+  }
+  .browser-head { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .browser-head h3 { margin: 0 0 6px; font-size: 13px; }
+  .browser-path {
+    font: 11px ui-monospace, monospace; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .browser-list { flex: 1; overflow-y: auto; padding: 6px; min-height: 180px; }
+  .browser-list button {
+    display: block; width: 100%; text-align: left; border: 0;
+    background: none; padding: 4px 8px; border-radius: 4px;
+  }
+  .browser-list button:hover { background: var(--panel-2); }
+  .browser-list button.raster { color: var(--accent); }
+  .browser-list button.raster::after {
+    content: " · есть растры"; font-size: 10px; color: var(--muted);
+  }
+  .browser-actions {
+    display: flex; gap: 8px; padding: 8px 12px;
+    border-top: 1px solid var(--line);
+  }
+  .browser-actions .grow { flex: 1; }
   main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
@@ -187,14 +225,19 @@
     <div class="note" id="osm-link-note">Вставьте ссылку OpenStreetMap —
       координаты и зум возьмутся из неё.</div>
 
-    <h2>Свой рельеф</h2>
-    <div class="local-form">
-      <input id="local-dir" type="text" placeholder="/путь/к/каталогу"
-             spellcheck="false">
-      <button id="local-add" title="Добавить каталог как набор">добавить</button>
+    <h2>Свои каталоги</h2>
+    <div class="local-row">
+      <span class="local-tag">A</span>
+      <button class="local-pick" data-key="local">выбрать каталог…</button>
+      <span class="local-path" id="path-local">не выбран</span>
+    </div>
+    <div class="local-row">
+      <span class="local-tag">B</span>
+      <button class="local-pick" data-key="local2">выбрать каталог…</button>
+      <span class="local-path" id="path-local2">не выбран</span>
     </div>
     <div class="note" id="local-note">GeoTIFF, HGT, VRT. Локальные данные,
-      прогревать не нужно.</div>
+      прогревать не нужно. Два каталога можно сравнивать между собой.</div>
 
     <h2>Легенда высот</h2>
     <div class="legend-bar"></div>
@@ -251,6 +294,22 @@
     <span class="badge" id="coord-badge">—</span>
   </div>
 </main>
+
+<div id="browser" hidden>
+  <div class="browser-box">
+    <div class="browser-head">
+      <h3>Каталог с рельефом</h3>
+      <div class="browser-path" id="browser-path">—</div>
+    </div>
+    <div class="browser-list" id="browser-list"></div>
+    <div class="browser-actions">
+      <button id="browser-up">вверх</button>
+      <span class="grow"></span>
+      <button id="browser-cancel">отмена</button>
+      <button id="browser-choose">выбрать этот каталог</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -395,6 +454,9 @@ async function loadDatasets() {
   state.b = state.datasets[keepB] ? keepB : data.default_b;
   fillSelect(document.getElementById("ds-a"), state.a);
   fillSelect(document.getElementById("ds-b"), state.b);
+  ["local", "local2"].forEach(key => {
+    setLocalPath(key, state.datasets[key] ? state.datasets[key].directory : "");
+  });
 }
 
 function fillSelect(select, value) {
@@ -1178,29 +1240,87 @@ document.getElementById("osm-alpha").addEventListener("input", event => {
 });
 document.getElementById("osm-alpha").addEventListener("change", writeUrl);
 
-// Подключение собственного каталога с рельефом: сервер индексирует файлы,
-// страница добавляет набор в списки и выбирает его в A.
-async function addLocalSource() {
-  const field = document.getElementById("local-dir");
+// ---------------------------------------------------------------------------
+// Выбор каталога с рельефом: серверный обзор (браузер не отдаёт путь к
+// локальной папке), два независимых набора — A и B.
+// ---------------------------------------------------------------------------
+let browserKey = "local";
+let browserPath = "";
+
+function setLocalPath(key, directory) {
+  const label = document.getElementById(`path-${key}`);
+  if (!label) return;
+  label.textContent = directory || "не выбран";
+  label.title = directory || "";
+}
+
+async function openBrowser(key) {
+  browserKey = key;
+  document.getElementById("browser").hidden = false;
+  const known = state.datasets[key] && state.datasets[key].directory;
+  await browseTo(known || "");
+}
+
+async function browseTo(dir) {
   const note = document.getElementById("local-note");
-  const folder = field.value.trim();
-  if (!folder) {
-    note.textContent = "укажите каталог";
-    return;
+  try {
+    const response = await fetch(
+      `/api/browse?dir=${encodeURIComponent(dir)}`);
+    const data = await response.json();
+    if (!response.ok) {
+      note.textContent = data.error || "не удалось прочитать каталог";
+      return;
+    }
+    browserPath = data.path;
+    document.getElementById("browser-path").textContent = data.path;
+    const up = document.getElementById("browser-up");
+    up.disabled = !data.parent;
+    up.dataset.dir = data.parent || "";
+    const list = document.getElementById("browser-list");
+    list.innerHTML = "";
+    if (!data.dirs.length) {
+      const empty = document.createElement("div");
+      empty.className = "note";
+      empty.textContent = "нет подкаталогов";
+      list.appendChild(empty);
+    }
+    data.dirs.forEach(item => {
+      const button = document.createElement("button");
+      button.textContent = item.name;
+      if (item.raster) button.className = "raster";
+      button.addEventListener("click", () => browseTo(`${data.path}/${item.name}`));
+      list.appendChild(button);
+    });
+  } catch (error) {
+    note.textContent = "сервер не ответил";
   }
+}
+
+function closeBrowser() {
+  document.getElementById("browser").hidden = true;
+}
+
+async function chooseBrowserDir() {
+  const note = document.getElementById("local-note");
   note.textContent = "индексирую…";
   try {
     const response = await fetch(
-      `/api/local?dir=${encodeURIComponent(folder)}`);
+      `/api/local?key=${encodeURIComponent(browserKey)}` +
+      `&dir=${encodeURIComponent(browserPath)}`);
     const info = await response.json();
     if (!response.ok) {
       note.textContent = info.error || "не удалось прочитать каталог";
       return;
     }
+    closeBrowser();
+    setLocalPath(browserKey, info.directory);
+    note.textContent = `${info.title}: ${info.files} растров, ${info.directory}`;
+    // Первый каталог — в A, второй — в B: сразу видно сравнение.
+    if (browserKey === "local2") state.b = info.key;
+    else state.a = info.key;
     await loadDatasets();
-    state.a = info.key;
     fillSelect(document.getElementById("ds-a"), state.a);
-    note.textContent = `${info.files} файлов, ${info.directory}`;
+    fillSelect(document.getElementById("ds-b"), state.b);
     requestRender();
     refreshReadout();
     writeUrl();
@@ -1209,9 +1329,21 @@ async function addLocalSource() {
   }
 }
 
-document.getElementById("local-add").addEventListener("click", addLocalSource);
-document.getElementById("local-dir").addEventListener("keydown", event => {
-  if (event.key === "Enter") addLocalSource();
+document.querySelectorAll(".local-pick").forEach(button => {
+  button.addEventListener("click", () => openBrowser(button.dataset.key));
+});
+document.getElementById("browser-cancel").addEventListener("click", closeBrowser);
+document.getElementById("browser-up").addEventListener("click", event => {
+  browseTo(event.target.dataset.dir || "");
+});
+document.getElementById("browser-choose").addEventListener("click", chooseBrowserDir);
+document.getElementById("browser").addEventListener("click", event => {
+  if (event.target.id === "browser") closeBrowser();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !document.getElementById("browser").hidden) {
+    closeBrowser();
+  }
 });
 
 document.getElementById("points").innerHTML = POINTS.map((point, index) =>
