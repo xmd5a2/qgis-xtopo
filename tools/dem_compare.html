@@ -108,6 +108,12 @@
   }
   #progress .row .count { color: var(--muted); font-variant-numeric: tabular-nums; }
   #progress .hint { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  #progress .hint.net { color: var(--warn); }
+  #progress .hint.net::before {
+    content: "⟳"; display: inline-block; margin-right: 3px;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
   #progress .done { color: #8fd18f; }
   #log { font-size: 11px; color: var(--muted); margin-top: 6px; }
   #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -771,15 +777,29 @@ function renderProgress() {
   const missing = Math.max(0, total.wanted - total.loaded);
   const active = state.server && state.server.active
     ? state.server.active.length : 0;
-  if (total.wanted === 0) {
+  const downloads = (state.server && state.server.downloads) || [];
+  const netLine = () => {
+    const first = downloads[0];
+    const extra = downloads.length > 1
+      ? ` и ещё ${downloads.length - 1}` : "";
+    return `скачивание с сервера: ${first.label}${extra} · ` +
+      `${Math.round(first.seconds)} с`;
+  };
+  if (downloads.length) {
+    // Пока сервер тянет исходники, честно показываем это, даже если
+    // видимые тайлы уже готовы (докачиваются соседние).
+    hint.className = "hint net";
+    hint.textContent = missing > 0
+      ? `${netLine()} · осталось ${missing}`
+      : `готово · ${netLine()}`;
+  } else if (total.wanted === 0) {
     hint.className = "hint";
     hint.textContent = "выберите набор";
   } else if (missing > 0) {
     hint.className = "hint";
     hint.textContent = active
-      ? `сервер рисует ${active} · осталось ${missing} · ` +
-        "первая загрузка области идёт из сети (5–10 с)"
-      : `ожидание ${missing} · первая загрузка области идёт из сети (5–10 с)`;
+      ? `сервер рисует ${active} · осталось ${missing}`
+      : `ожидание ${missing}`;
   } else {
     hint.className = "hint done";
     hint.textContent = "готово";

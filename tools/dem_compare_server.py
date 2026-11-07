@@ -71,20 +71,44 @@ _counter = 0
 _counter_lock = threading.Lock()
 
 # Состояние сервера для индикатора на странице.
-STATUS = {"started": time.time(), "active": {}, "rendered": 0, "cached": 0}
+STATUS = {"started": time.time(), "active": {}, "downloads": {},
+          "rendered": 0, "cached": 0}
 STATUS_LOCK = threading.Lock()
 
 
 def status_snapshot():
     """Что сейчас делает сервер: сколько тайлов рисуется, что в кэше."""
+    now = time.time()
     with STATUS_LOCK:
         active = list(STATUS["active"].values())
+        downloads = [
+            {"label": item["label"], "seconds": round(now - item["since"], 1)}
+            for item in STATUS["downloads"].values()
+        ]
         return {
-            "uptime": round(time.time() - STATUS["started"], 1),
+            "uptime": round(now - STATUS["started"], 1),
             "active": active,
+            "downloads": downloads,
             "rendered": STATUS["rendered"],
             "cached": STATUS["cached"],
         }
+
+
+def _download_enter(key, label):
+    with STATUS_LOCK:
+        STATUS["downloads"][key] = {"label": label, "since": time.time()}
+
+
+def _download_leave(key):
+    with STATUS_LOCK:
+        STATUS["downloads"].pop(key, None)
+
+
+def _tile_label(lat, lon):
+    """Имя градусного тайла: N45E007, S03W062."""
+    ns = "N" if lat >= 0 else "S"
+    ew = "E" if lon >= 0 else "W"
+    return f"{ns}{abs(int(math.floor(lat))):02d}{ew}{abs(int(math.floor(lon))):03d}"
 
 
 def _status_enter(key, dataset, z, x, y):
@@ -743,12 +767,19 @@ class SourceStore:
             creationOptions=["COMPRESS=DEFLATE", "TILED=YES",
                              "BIGTIFF=IF_SAFER"],
         )
+        center_lat = (bbox[1] + bbox[3]) / 2.0
+        center_lon = (bbox[0] + bbox[2]) / 2.0
+        key = f"region:{ds}:{digest}"
+        label = f"{DATASETS[ds]['short']} · {_tile_label(center_lat, center_lon)}"
+        _download_enter(key, label)
         try:
             result = gdal.Warp(str(temporary), sources, options=options)
         except Exception as exc:
             print(f"[dem-compare] {ds}: не удалось сохранить область: {exc}")
             temporary.unlink(missing_ok=True)
             return None
+        finally:
+            _download_leave(key)
         if result is None:
             temporary.unlink(missing_ok=True)
             return None
@@ -854,9 +885,15 @@ class SourceStore:
                 return target
             raw = (self.temp_dir or target.parent) / (
                 f"{target.name}.{os.getpid()}.raw")
-            if not _download(_aws_url("skadi", lat, lon), raw):
-                raw.unlink(missing_ok=True)
-                return None
+            key = f"srtm:{target.name}"
+            label = f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}"
+            _download_enter(key, label)
+            try:
+                if not _download(_aws_url("skadi", lat, lon), raw):
+                    raw.unlink(missing_ok=True)
+                    return None
+            finally:
+                _download_leave(key)
             try:
                 with gzip.open(raw, "rb") as source_handle:
                     data = source_handle.read()
