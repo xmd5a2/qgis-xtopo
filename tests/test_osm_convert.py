@@ -53,6 +53,31 @@ class OsmConvertTest(unittest.TestCase):
         selected = filter_features(features, query)
         self.assertEqual(len(selected), 2)
 
+    def test_island_query_includes_archipelago(self):
+        """Острова, сгруппированные в relation, тоже должны попадать в слой.
+
+        Драйвер GDAL не отдаёт coastline-way, входящие в мультиполигон,
+        отдельными объектами: у группы островов остаётся только relation
+        с тегом place=archipelago.
+        """
+        query = (
+            Path(__file__).resolve().parents[1]
+            / "resources/queries/island.txt"
+        ).read_text(encoding="utf-8")
+        features = [
+            {"properties": {"@type": "relation", "place": "archipelago"},
+             "geometry": {"type": "MultiPolygon"}},
+            {"properties": {"@type": "way", "place": "islet"},
+             "geometry": {"type": "Polygon"}},
+            {"properties": {"@type": "relation", "place": "bay"},
+             "geometry": {"type": "Polygon"}},
+        ]
+        selected = filter_features(features, query)
+        self.assertEqual(
+            [feature["properties"]["place"] for feature in selected],
+            ["archipelago", "islet"],
+        )
+
     def test_negation_matches_missing_tag(self):
         query = 'way["natural"="water"]["intermittent"!="yes"];'
         features = [

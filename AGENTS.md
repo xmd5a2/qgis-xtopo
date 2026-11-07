@@ -202,6 +202,11 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   порядке `INTERLEAVED_LAYER_ORDER` (`points → lines → multilinestrings →
   multipolygons → other_relations`). Чтение слоя до конца теряет
   мультиполигоны.
+- **Замкнутые coastline-way внутри мультиполигона драйвер отдельно не
+  отдаёт**: у группы островов остаётся только relation (например,
+  `place=archipelago`). Поэтому `resources/queries/island.txt` включает
+  архипелаги, иначе острова не попадают в `island.sqlite`, не вычитаются из
+  океана и остаются под водой.
 - **Фильтр на `points` действует на все слои** и теряет вершины больших
   отношений. Поэтому `_apply_spatial_filter` ставит фильтр на все слои, кроме
   `points`; точная отсечка — при разборе. Цена — примерно в 4 раза больше
