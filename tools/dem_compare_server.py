@@ -31,6 +31,7 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 """
 
 import argparse
+import calendar
 import gzip
 import hashlib
 import json
@@ -57,6 +58,14 @@ osr.UseExceptions()
 # Параллельные запросы блоков COG и многопоточная перепроекция.
 gdal.SetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS")
 gdal.SetConfigOption("GDAL_CACHEMAX", "512")
+# /vsicurl: без этих настроек GDAL пытается перебрать каталог контейнера в
+# поисках sidecar-файлов. У ALOS на Azure это десятки секунд на открытие.
+gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff")
+# Одновременных перепроекций тайлов: больше — сеть и кэш GDAL только
+# мешают друг другу, а память растёт.
+RENDER_SLOTS = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("DEM_COMPARE_SLOTS", "6"))))
 
 TILE_SIZE = 256
 # Версия кэша: старые каталоги не удаляются, но и не используются, чтобы
@@ -279,6 +288,14 @@ def _tile_name(lat, lon):
     return f"{north}{east}"
 
 
+def _bbox_intersects(area, bbox):
+    """Пересекаются ли две области (minx, miny, maxx, maxy)."""
+    if not area or len(area) != 4:
+        return False
+    return (area[0] <= bbox[2] and area[2] >= bbox[0] and
+            area[1] <= bbox[3] and area[3] >= bbox[1])
+
+
 def _aws_url(source, lat, lon):
     """Адрес исходного тайла в публичных бакетах AWS."""
     name = _tile_name(lat, lon)
@@ -313,6 +330,36 @@ def _sign_pc(href):
     url = ("https://planetarycomputer.microsoft.com/api/sas/v1/sign?href="
            + urllib.parse.quote(href, safe=""))
     return _http_json(url)["href"]
+
+
+# SAS-токен на весь контейнер коллекции: подписывать каждый файл по
+# отдельности нельзя — сервис отвечает 429, а повтор с паузой занимает
+# десятки секунд на тайл.
+_PC_TOKENS = {}
+_PC_TOKEN_LOCK = threading.Lock()
+
+
+def _pc_token(collection):
+    """Действующий SAS-токен контейнера коллекции Planetary Computer."""
+    with _PC_TOKEN_LOCK:
+        entry = _PC_TOKENS.get(collection)
+        if entry and entry[0] > time.time() + 60:
+            return entry[1]
+        data = _http_json("https://planetarycomputer.microsoft.com/api/"
+                          f"sas/v1/token/{collection}")
+        token = data.get("token", "")
+        if not token:
+            raise RuntimeError("сервис не выдал токен")
+        expiry = time.time() + 600
+        stamp = data.get("msft:expiry")
+        if stamp:
+            try:
+                expiry = calendar.timegm(
+                    time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+            except ValueError:
+                pass
+        _PC_TOKENS[collection] = (expiry, token)
+        return token
 
 
 def _has_rasters(folder):
@@ -844,33 +891,38 @@ class SourceStore:
                 self._prepared_cache.pop(ds, None)
 
     def open_at(self, ds, lon, lat):
-        """Открывает набор так, чтобы в него попала точка."""
+        """Открывает набор так, чтобы в него попала точка.
+
+        Возвращает ``(dataset, lock)``: общий датасет из кэша нельзя читать
+        из двух потоков сразу — libtiff на этом падает. Для свежеоткрытых
+        датасетов блокировка не нужна, поэтому ``lock`` равен ``None``.
+        """
         prepared = self._prepared_for(ds, (lon, lat, lon, lat))
         if prepared:
-            dataset, _ = self.open_source(prepared[0])
+            dataset, lock = self.open_source(prepared[0])
             if dataset is not None:
-                return dataset
+                return dataset, lock
         spec = DATASETS[ds]
         source = spec["source"]
         if source == "local":
             for path in self.local_sources(ds, (lon, lat, lon, lat)):
-                dataset, _ = self.open_source(path)
+                dataset, lock = self.open_source(path)
                 if dataset is not None:
-                    return dataset
-            return None
+                    return dataset, lock
+            return None, None
         if source == "skadi":
             path = self._ensure_srtm(ds, int(math.floor(lat)),
                                      int(math.floor(lon)))
-            return gdal.Open(path) if path else None
+            return (gdal.Open(path), None) if path else (None, None)
         if source == "cop30":
             url = _aws_url(source, int(math.floor(lat)), int(math.floor(lon)))
-            return gdal.Open("/vsicurl/" + url)
+            return gdal.Open("/vsicurl/" + url), None
         sources = self._pc_sources(ds, (math.floor(lon), math.floor(lat),
                                          math.floor(lon) + 1,
                                          math.floor(lat) + 1),
                                    center_only=True)
         for path in sources:
-            dataset, _ = self.open_source(path)
+            dataset, lock = self.open_source(path)
             if dataset is None:
                 continue
             gt = dataset.GetGeoTransform()
@@ -888,9 +940,9 @@ class SourceStore:
             maxy = gt[3]
             miny = gt[3] + gt[5] * dataset.RasterYSize
             if minx <= x <= maxx and miny <= y <= maxy:
-                return dataset
+                return dataset, lock
             dataset = None
-        return None
+        return None, None
 
     def _ensure_srtm(self, ds, lat, lon):
         """Скачивает .hgt.gz и превращает в GeoTIFF (gzip по HTTP не читаем)."""
@@ -939,7 +991,7 @@ class SourceStore:
         return target
 
     def _pc_sources(self, ds, bbox, center_only=False):
-        """Подписанные ссылки на файлы наборов Planetary Computer."""
+        """Ссылки на файлы наборов Planetary Computer с SAS-токеном."""
         collection = {"nasadem": "nasadem", "alos30": "alos-dem",
                       "3dep": "3dep-seamless"}[DATASETS[ds]["source"]]
         suffix = DATASETS[ds].get("id_suffix")
@@ -969,13 +1021,23 @@ class SourceStore:
                          if item.get("id", "").endswith(suffix)]
             if preferred:
                 items = preferred
+        if bbox:
+            # Лишние источники (соседние градусы) только замедляют warp.
+            items = [item for item in items
+                     if not item.get("bbox") or
+                     _bbox_intersects(item["bbox"], bbox)]
         if center_only:
-            # Подписывать лишнее нельзя: сервис подписи отвечает 429.
             center = (query_bbox[0] + 0.5, query_bbox[1] + 0.5)
             items = [item for item in items
                      if not item.get("bbox") or
                      (item["bbox"][0] <= center[0] <= item["bbox"][2] and
                       item["bbox"][1] <= center[1] <= item["bbox"][3])]
+        try:
+            token = _pc_token(collection)
+        except Exception as exc:
+            # Сервис токена недоступен — подписываем по файлам, как раньше.
+            print(f"[dem-compare] {collection}: нет токена ({exc})")
+            token = None
         sources = []
         for item in items:
             href = None
@@ -984,7 +1046,12 @@ class SourceStore:
                 if candidate.lower().endswith((".tif", ".tiff")):
                     href = candidate
                     break
-            if href:
+            if not href:
+                continue
+            if token:
+                separator = "&" if "?" in href else "?"
+                sources.append("/vsicurl/" + href + separator + token)
+            else:
                 sources.append("/vsicurl/" + self._signed(href))
         return sources
 
@@ -1155,13 +1222,15 @@ def _render_dem3857(store, ds, z, x, y, cache_file):
              if not store.is_missing(path)]
     if not paths:
         return None
-    opened = []
+    # Проверяем, что источники открываются (часть тайлов COG не опубликована),
+    # но в warp передаём пути: GDAL откроет их сам, у каждого потока будет
+    # свой дескриптор, и тайлы перестанут ждать друг друга на общей блокировке.
+    usable = []
     for path in paths:
-        dataset, lock = store.open_source(path)
-        if dataset is None:
-            continue
-        opened.append((dataset, lock))
-    if not opened:
+        dataset, _lock = store.open_source(path)
+        if dataset is not None:
+            usable.append(path)
+    if not usable:
         return None
     bounds = _mercator_bounds(lon1, lat1, lon2, lat2)
     src_nodata = DATASETS[ds].get("src_nodata")
@@ -1177,17 +1246,12 @@ def _render_dem3857(store, ds, z, x, y, cache_file):
         outputType=gdal.GDT_Float32,
         srcNodata=src_nodata,
         dstNodata=float("nan"),
-        multithread=True,
+        # Для 256×256 многопоточная перепроекция только вредит: потоки
+        # конкурируют за кэш GDAL и тайл считается в разы дольше.
+        multithread=False,
     )
-    # Один исходник — один поток: GDAL-датасет не потокобезопасен.
-    for _, lock in opened:
-        lock.acquire()
-    try:
-        warped = gdal.Warp("", [dataset for dataset, _ in opened],
-                           options=options)
-    finally:
-        for _, lock in reversed(opened):
-            lock.release()
+    with RENDER_SLOTS:
+        warped = gdal.Warp("", usable, options=options)
     if warped is None:
         return None
     array = warped.GetRasterBand(1).ReadAsArray().astype("float32")
@@ -1530,20 +1594,28 @@ def _dataset_transform(dataset, lon, lat):
 
 def sample_value(store, ds, lon, lat):
     """Высота в точке из исходного тайла набора."""
-    dataset = store.open_at(ds, lon, lat)
+    dataset, lock = store.open_at(ds, lon, lat)
     if dataset is None:
         return {"elevation": None, "native_x_m": None, "native_y_m": None}
-    gt = dataset.GetGeoTransform()
-    band = dataset.GetRasterBand(1)
-    nodata = band.GetNoDataValue()
-    x, y, native_x, native_y = _dataset_transform(dataset, lon, lat)
-    col = int((x - gt[0]) / gt[1])
-    row = int((y - gt[3]) / gt[5])
-    value = None
-    if 0 <= row < dataset.RasterYSize and 0 <= col < dataset.RasterXSize:
-        value = float(band.ReadAsArray(col, row, 1, 1)[0][0])
-        if nodata is not None and abs(value - nodata) < 1e-6:
-            value = None
+    # Общий датасет из кэша читают и другие запросы: libtiff не переносит
+    # одновременный ReadAsArray и роняет процесс.
+    if lock is not None:
+        lock.acquire()
+    try:
+        gt = dataset.GetGeoTransform()
+        band = dataset.GetRasterBand(1)
+        nodata = band.GetNoDataValue()
+        x, y, native_x, native_y = _dataset_transform(dataset, lon, lat)
+        col = int((x - gt[0]) / gt[1])
+        row = int((y - gt[3]) / gt[5])
+        value = None
+        if 0 <= row < dataset.RasterYSize and 0 <= col < dataset.RasterXSize:
+            value = float(band.ReadAsArray(col, row, 1, 1)[0][0])
+            if nodata is not None and abs(value - nodata) < 1e-6:
+                value = None
+    finally:
+        if lock is not None:
+            lock.release()
     dataset = None
     return {"elevation": value, "native_x_m": native_x, "native_y_m": native_y}
 

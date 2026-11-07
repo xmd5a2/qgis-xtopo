@@ -43,8 +43,8 @@
     font-size: 11px; padding: 2px 7px; border-radius: 10px;
     border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
   }
-  .badge.native { color: #0d1417; background: var(--accent); border-color: var(--accent); }
-  .badge.warn { color: #14100a; background: var(--warn); border-color: var(--warn); }
+  .badge.native { color: var(--accent); border-color: var(--line); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
   .badge.place { color: var(--text); border-color: var(--accent); }
   .badge.place.set { background: var(--accent); color: #10161a; }
   .point.active { border-color: var(--accent); background: #26333a; }
@@ -89,8 +89,27 @@
     border-top: 1px solid var(--line);
   }
   .browser-actions .grow { flex: 1; }
-  main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+  main {
+    display: grid; grid-template-columns: 320px 1fr;
+    grid-template-rows: auto 1fr; min-height: 0;
+  }
+  main.sidebar-hidden { grid-template-columns: 0 1fr; }
+  main.sidebar-hidden aside,
+  main.sidebar-hidden #tools { display: none; }
+  /* Карта всегда во второй колонке: при свёрнутой панели первая колонка
+     нулевой ширины, и автоматическое размещение оставило бы карту без
+     места. */
+  #map { grid-column: 2; grid-row: 1 / span 2; }
+  #tools {
+    grid-column: 1; grid-row: 1;
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px; background: var(--panel);
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  #sidebar-toggle { padding: 2px 9px; line-height: 1.2; }
   aside {
+    grid-column: 1; grid-row: 2;
     background: var(--panel); border-right: 1px solid var(--line);
     overflow-y: auto; padding: 10px 12px 40px;
   }
@@ -99,6 +118,15 @@
     color: var(--muted); margin: 16px 0 6px; font-weight: 600;
   }
   aside h2:first-child { margin-top: 0; }
+  aside h2.toggle {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    user-select: none;
+  }
+  aside h2.toggle .chev {
+    font-size: 10px; color: var(--text); transition: transform .15s;
+  }
+  aside h2.toggle.collapsed .chev { transform: rotate(-90deg); }
+  #points[hidden] { display: none; }
   .point {
     display: block; width: 100%; text-align: left; margin-bottom: 4px;
     line-height: 1.3;
@@ -109,23 +137,27 @@
   #canvas.grabbing { cursor: grabbing; }
   #canvas.profile { cursor: crosshair; }
   #readout b { font-weight: 600; }
-  /* Статусная строка во всю ширину, поверх карты и боковой панели. */
+  /* Статусная строка во всю ширину, поверх карты и боковой панели.
+     На узком окне элементы переносятся на вторую строку, а не наезжают
+     друг на друга. */
   #statusbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
-    display: flex; align-items: center; gap: 12px;
-    padding: 3px 10px; min-height: 28px;
-    background: rgba(20,23,26,.84); border-top: 1px solid var(--line);
-    font-size: 11px; pointer-events: none; overflow: hidden;
+    display: flex; flex-wrap: wrap; align-items: center;
+    column-gap: 14px; row-gap: 3px;
+    padding: 4px 10px; min-height: 30px;
+    background: var(--panel); border-top: 1px solid var(--line);
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, .25);
+    font-size: 11px; pointer-events: none;
   }
   #statusbar #readout {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    min-width: 0; flex: 1 1 auto;
+    min-width: 0; flex: 1 1 320px;
   }
   #statusbar .coord { color: var(--muted); }
   #statusbar #progress {
     position: static; min-width: 0; background: none; border: 0; padding: 0;
-    display: flex; align-items: center; gap: 8px; font-size: 11px;
-    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px; font-size: 11px;
+    flex: 0 1 auto; overflow: hidden;
   }
   #statusbar .badge { flex: 0 0 auto; }
   #statusbar #progress h4 { display: none; }
@@ -134,11 +166,11 @@
     display: flex; align-items: center; gap: 5px; margin: 0; flex: 0 0 auto;
   }
   #statusbar #progress .row .name {
-    flex: 0 1 auto; max-width: 130px; overflow: hidden; text-overflow: ellipsis;
+    flex: 0 1 auto; max-width: 110px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; color: var(--text);
   }
   #statusbar #progress .row .bar {
-    flex: 0 0 56px; height: 4px; background: #2a3136; border-radius: 3px;
+    flex: 0 0 48px; height: 4px; background: #2a3136; border-radius: 3px;
     overflow: hidden;
   }
   #statusbar #progress .row .bar i {
@@ -149,8 +181,10 @@
     color: var(--muted); font-variant-numeric: tabular-nums;
   }
   #statusbar #progress .hint {
-    color: var(--muted); font-size: 10px; margin: 0; white-space: nowrap;
-    flex: 0 0 auto;
+    color: var(--muted); font-size: 10px; margin: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 340px; min-width: 0; flex: 0 1 auto;
+    pointer-events: auto;
   }
   #statusbar #progress .hint.net { color: var(--warn); }
   #statusbar #progress .hint.net::before {
@@ -181,6 +215,8 @@
 </head>
 <body>
 <header>
+  <button id="sidebar-toggle" title="Свернуть панель"
+          aria-label="Свернуть панель">⟨</button>
   <h1>Сравнение DEM</h1>
   <span class="badge place" id="place-badge" title="выбранное место">место не выбрано</span>
   <div class="group">
@@ -200,7 +236,11 @@
     <button id="compare" class="active" title="Сравнение шторкой">шторка</button>
     <button id="diff" title="Разность высот B − A">Δ высот</button>
   </div>
-  <div class="group">
+  <div class="spacer"></div>
+</header>
+
+<main>
+  <div id="tools">
     <button id="profile-btn" title="Профиль высот по отрезку">профиль</button>
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
     <button id="osm" class="active"
@@ -208,12 +248,9 @@
     <input id="osm-alpha" type="range" min="0" max="100" value="30"
            title="Доля подложки OSM: 100 % — только OSM, без рельефа">
   </div>
-  <div class="spacer"></div>
-</header>
-
-<main>
   <aside>
-    <h2>Ключевые точки</h2>
+    <h2 class="toggle" id="points-toggle">Ключевые точки
+      <span class="chev">▾</span></h2>
     <div id="points"></div>
 
     <h2>Ссылка OSM</h2>
@@ -257,7 +294,8 @@
       красный — выше. «профиль» — кликните две точки.
       <br><br>
       <b>OSM</b> — полупрозрачная подложка OpenStreetMap: по ней видно, куда
-      вы сдвинули карту. Кнопка <b>OSM</b> в шапке отключает её, ползунок
+      вы сдвинули карту. Кнопка <b>OSM</b> в полосе над панелью отключает
+      её, ползунок
       задаёт долю подложки: на 100 % остаётся только OSM, рельеф скрывается
       и не считается.
       <br><br>
@@ -863,9 +901,8 @@ function renderProgress() {
   const netLine = () => {
     const first = downloads[0];
     const extra = downloads.length > 1
-      ? ` и ещё ${downloads.length - 1}` : "";
-    return `скачивание с сервера: ${first.label}${extra} · ` +
-      `${Math.round(first.seconds)} с`;
+      ? ` +${downloads.length - 1}` : "";
+    return `${first.label}${extra} · ${Math.round(first.seconds)} с`;
   };
   if (state.osm && state.osmAlpha >= 0.995) {
     hint.className = "hint";
@@ -892,6 +929,8 @@ function renderProgress() {
     hint.className = "hint done";
     hint.textContent = "готово";
   }
+  // Полный текст — в подсказке: в строке он обрезается по ширине.
+  hint.title = hint.textContent;
 }
 
 async function pollStatus() {
@@ -913,8 +952,11 @@ function drawScaleBar() {
   let chosen = nice[0];
   for (const value of nice) { if (value <= meters) chosen = value; }
   const pixels = chosen / groundResolution(lat, state.zoom);
-  // Поднимаем над статусной строкой, иначе она закрывает масштаб.
-  const x = 14, y = h - 46;
+  // Поднимаем над статусной строкой: она бывает в две строки, высоту берём
+  // у неё самой, иначе масштаб оказывается под ней.
+  const bar = document.getElementById("statusbar");
+  const barHeight = bar ? bar.offsetHeight : 30;
+  const x = 14, y = h - barHeight - 14;
   ctx.save();
   ctx.fillStyle = "rgba(20,23,26,.78)";
   ctx.fillRect(x - 6, y - 26, pixels + 12, 34);
@@ -1004,9 +1046,11 @@ async function refreshReadout() {
   if (delta !== null && parts.length === 2) {
     parts.push(`Δ: ${delta >= 0 ? "+" : ""}${delta.toFixed(1)} м`);
   }
-  document.getElementById("readout").innerHTML =
+  const readout = document.getElementById("readout");
+  readout.innerHTML =
     `<span class="coord">${lon.toFixed(5)}°, ${lat.toFixed(5)}°</span> · ` +
     parts.join(" · ");
+  readout.title = readout.textContent;
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,10 +1571,54 @@ function writeUrl() {
 }
 
 // ---------------------------------------------------------------------------
+// Сворачивание панели и списка мест. Состояние запоминаем: при следующем
+// открытии страницы панель остаётся такой, какой её оставили.
+// ---------------------------------------------------------------------------
+function storedFlag(name, fallback) {
+  try {
+    const value = localStorage.getItem(name);
+    return value === null ? fallback : value === "1";
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function storeFlag(name, value) {
+  try { localStorage.setItem(name, value ? "1" : "0"); } catch (error) {}
+}
+
+function setSidebarCollapsed(collapsed) {
+  document.querySelector("main").classList.toggle("sidebar-hidden", collapsed);
+  const button = document.getElementById("sidebar-toggle");
+  button.textContent = collapsed ? "⟩" : "⟨";
+  button.title = collapsed ? "Показать панель" : "Свернуть панель";
+  button.setAttribute("aria-label", button.title);
+  storeFlag("dem-compare.sidebar-hidden", collapsed);
+  resize();
+}
+
+function setPointsCollapsed(collapsed) {
+  document.getElementById("points").hidden = collapsed;
+  document.getElementById("points-toggle")
+    .classList.toggle("collapsed", collapsed);
+  storeFlag("dem-compare.points-hidden", collapsed);
+}
+
+document.getElementById("sidebar-toggle").addEventListener("click", () => {
+  const main = document.querySelector("main");
+  setSidebarCollapsed(!main.classList.contains("sidebar-hidden"));
+});
+document.getElementById("points-toggle").addEventListener("click", () => {
+  setPointsCollapsed(!document.getElementById("points").hidden);
+});
+
+// ---------------------------------------------------------------------------
 // Запуск
 // ---------------------------------------------------------------------------
 loadDatasets().then(() => {
   readUrl();
+  setSidebarCollapsed(storedFlag("dem-compare.sidebar-hidden", false));
+  setPointsCollapsed(storedFlag("dem-compare.points-hidden", false));
   fillSelect(document.getElementById("ds-a"), state.a);
   fillSelect(document.getElementById("ds-b"), state.b);
   document.getElementById("mode").value = state.mode;
