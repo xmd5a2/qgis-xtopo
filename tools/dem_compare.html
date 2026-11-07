@@ -82,6 +82,35 @@
     background: rgba(20,23,26,.78); border: 1px solid var(--line);
     border-radius: 5px; padding: 6px 9px; font-size: 11px; color: var(--muted);
   }
+  #progress {
+    position: absolute; right: 10px; top: 10px; min-width: 320px;
+    background: rgba(20,23,26,.86); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font-size: 12px;
+    pointer-events: none;
+  }
+  #progress h4 {
+    margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  #progress .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  #progress .row .name {
+    flex: 0 0 152px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: var(--text);
+  }
+  #progress .row .bar {
+    flex: 1; height: 7px; background: #2a3136; border-radius: 4px;
+    overflow: hidden;
+  }
+  #progress .row .bar i {
+    display: block; height: 100%; width: 0; background: var(--accent);
+    transition: width .2s;
+  }
+  #progress .row .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #progress .hint { color: var(--muted); font-size: 11px; margin-top: 5px; }
+  #progress .done { color: #8fd18f; }
+  #log { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log b { color: var(--text); font-weight: 500; }
   #hint {
     position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
     background: rgba(20,23,26,.9); border: 1px solid var(--line);
@@ -123,7 +152,6 @@
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
   </div>
   <div class="spacer"></div>
-  <span class="badge" id="load-badge" style="display:none"></span>
   <span class="badge" id="res-badge">—</span>
   <span class="badge" id="coord-badge">—</span>
 </header>
@@ -160,6 +188,9 @@
       <b>NASADEM</b> не заходит выше 61° и ниже −56°.
       <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
     </div>
+
+    <h2>Журнал тайлов</h2>
+    <div id="log" class="note">пока ничего не загружено</div>
   </aside>
 
   <div id="map">
@@ -168,6 +199,11 @@
     <div id="overlay">
       <div id="readout">—</div>
       <div class="note" id="src-note"></div>
+    </div>
+    <div id="progress">
+      <h4>Загрузка тайлов</h4>
+      <div id="progress-rows"></div>
+      <div class="hint" id="progress-hint"></div>
     </div>
     <div id="legend">© ESA / NASA / JAXA / USGS · рельеф отрисован сервером</div>
   </div>
@@ -315,19 +351,62 @@ function tileKey(ds, mode, z, x, y) {
 function getTile(ds, mode, z, x, y) {
   const key = tileKey(ds, mode, z, x, y);
   let entry = state.tiles.get(key);
-  if (!entry) {
-    const image = new Image();
-    entry = {image, loaded: false, failed: false};
-    state.tiles.set(key, entry);
-    if (ds === "__diff__") {
-      image.src = `/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`;
-    } else {
-      image.src = `/tile/${ds}/${z}/${x}/${y}.png?mode=${mode}`;
-    }
-    image.onload = () => { entry.loaded = true; requestRender(); };
-    image.onerror = () => { entry.failed = true; requestRender(); };
-  }
+  if (entry) return entry;
+  entry = {image: null, loaded: false, failed: false, status: "", seconds: 0};
+  state.tiles.set(key, entry);
+  const url = ds === "__diff__"
+    ? `/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`
+    : `/tile/${ds}/${z}/${x}/${y}.png?mode=${mode}`;
+  // fetch вместо <img>: нужны заголовки — откуда тайл (кэш или рендер)
+  // и сколько секунд он считался.
+  fetch(url)
+    .then(async response => {
+      entry.status = response.headers.get("X-Tile-Status") || "";
+      entry.seconds = parseFloat(response.headers.get("X-Tile-Seconds") || "0");
+      if (!response.ok) {
+        entry.failed = true;
+        addLog(ds, `${z}/${x}/${y}`, "нет данных", 0);
+        requestRender();
+        return;
+      }
+      const blob = await response.blob();
+      const image = new Image();
+      image.onload = () => {
+        entry.image = image;
+        entry.loaded = true;
+        addLog(ds, `${z}/${x}/${y}`, entry.status, entry.seconds);
+        requestRender();
+      };
+      image.onerror = () => { entry.failed = true; requestRender(); };
+      image.src = URL.createObjectURL(blob);
+    })
+    .catch(() => {
+      entry.failed = true;
+      requestRender();
+    });
   return entry;
+}
+
+function addLog(ds, tile, status, seconds) {
+  const name = ds === "__diff__"
+    ? `${datasetLabel(state.a)} − ${datasetLabel(state.b)}`
+    : datasetLabel(ds);
+  let text;
+  if (status === "cached") text = "из кэша";
+  else if (status === "rendered") text = `отрисован ${seconds.toFixed(1)} с`;
+  else if (status === "empty") text = "нет данных";
+  else text = status || "готов";
+  state.log.unshift({name, tile, text});
+  if (state.log.length > 8) state.log.pop();
+  renderLog();
+}
+
+function renderLog() {
+  const box = document.getElementById("log");
+  if (!box) return;
+  box.innerHTML = state.log
+    .map(item => `<div><b>${item.name}</b> ${item.tile} — ${item.text}</div>`)
+    .join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -361,9 +440,12 @@ function draw() {
 
   let wanted = 0;
   let loaded = 0;
+  const progress = {};
 
-  const drawLayer = (ds, mode, clipX) => {
+  const drawLayer = (ds, mode, clipX, bucket) => {
     if (!ds) return;
+    const stats = progress[bucket] || {wanted: 0, loaded: 0};
+    progress[bucket] = stats;
     ctx.save();
     if (clipX !== null) {
       ctx.beginPath();
@@ -381,11 +463,21 @@ function draw() {
         // с другого края, но на своей позиции.
         const wrapped = ((tx % tileCount) + tileCount) % tileCount;
         const entry = getTile(ds, mode, tz, wrapped, ty);
-        wanted += 1;
-        if (!entry.loaded) continue;
-        loaded += 1;
         const worldX = (tx < 0 ? wrapped : tx) * TILE;
-        ctx.drawImage(entry.image, worldX - left, ty * TILE - top,
+        const screenX = worldX - left;
+        const screenY = ty * TILE - top;
+        const visible = screenX + TILE * scale > 0 && screenX < w &&
+                        screenY + TILE * scale > 0 && screenY < h;
+        if (visible) {
+          stats.wanted += 1;
+          wanted += 1;
+          if (entry.loaded) {
+            stats.loaded += 1;
+            loaded += 1;
+          }
+        }
+        if (!entry.loaded) continue;
+        ctx.drawImage(entry.image, screenX, screenY,
                       TILE * scale + 1, TILE * scale + 1);
       }
     }
@@ -417,11 +509,11 @@ function draw() {
   }
 
   if (state.diff && state.a && state.b) {
-    drawLayer("__diff__", "diff", null);
+    drawLayer("__diff__", "diff", null, "diff");
   } else if (state.compare && state.a && state.b) {
     const split = Math.round(w * state.divider);
-    drawLayer(state.a, state.mode, null);
-    drawLayer(state.b, state.mode, split);
+    drawLayer(state.a, state.mode, null, "a");
+    drawLayer(state.b, state.mode, split, "b");
     ctx.save();
     ctx.strokeStyle = "#6fb3d2";
     ctx.lineWidth = 2;
@@ -439,7 +531,7 @@ function draw() {
     ctx.fillText("⇔", split, h / 2 + 4);
     ctx.restore();
   } else {
-    drawLayer(state.a || state.b, state.mode, null);
+    drawLayer(state.a || state.b, state.mode, null, "a");
   }
 
   // Кадр целиком собран — запоминаем его как подложку.
@@ -454,20 +546,81 @@ function draw() {
     frameState = {left, top, scale};
   }
 
+  state.progress = progress;
+  state.progressTotals = {wanted, loaded};
   drawScaleBar();
   updateResolutionBadge();
-  updateProgress(wanted, loaded);
+  renderProgress();
 }
 
-function updateProgress(wanted, loaded) {
-  const badge = document.getElementById("load-badge");
-  if (!badge) return;
-  if (wanted > 0 && loaded < wanted) {
-    badge.textContent = `тайлы ${loaded}/${wanted}`;
-    badge.style.display = "";
+// Короткие подписи, если сервер не прислал поле short.
+const SHORT_NAMES = {
+  srtm3: "SRTM v3",
+  cop30: "Copernicus GLO-30",
+  nasadem: "NASADEM",
+  alos30: "ALOS AW3D30",
+  "3dep": "3DEP 10 м"
+};
+
+function datasetLabel(key) {
+  if (!key) return "";
+  const item = state.datasets[key];
+  if (!item) return key;
+  return item.short || SHORT_NAMES[key] || item.title.split(" (")[0];
+}
+
+function renderProgress() {
+  const rows = document.getElementById("progress-rows");
+  const hint = document.getElementById("progress-hint");
+  if (!rows || !hint) return;
+  const parts = [];
+  const add = (key, label) => {
+    const stats = state.progress && state.progress[key];
+    if (!stats) return;
+    const percent = stats.wanted
+      ? Math.round(stats.loaded / stats.wanted * 100) : 0;
+    parts.push(
+      `<div class="row"><span class="name" title="${label}">${label}</span>` +
+      `<span class="bar"><i style="width:${percent}%"></i></span>` +
+      `<span class="count">${stats.loaded}/${stats.wanted}</span></div>`);
+  };
+  if (state.diff && state.a && state.b) {
+    add("diff", `${datasetLabel(state.a)} − ${datasetLabel(state.b)}`);
+  } else if (state.compare && state.a && state.b) {
+    add("a", datasetLabel(state.a));
+    add("b", datasetLabel(state.b));
   } else {
-    badge.style.display = "none";
+    add("a", datasetLabel(state.a || state.b));
   }
+  rows.innerHTML = parts.join("");
+
+  const total = state.progressTotals || {wanted: 0, loaded: 0};
+  const missing = Math.max(0, total.wanted - total.loaded);
+  const active = state.server && state.server.active
+    ? state.server.active.length : 0;
+  if (total.wanted === 0) {
+    hint.className = "hint";
+    hint.textContent = "выберите набор";
+  } else if (missing > 0) {
+    hint.className = "hint";
+    hint.textContent = active
+      ? `сервер рисует ${active} · осталось ${missing} · ` +
+        "первая загрузка области идёт из сети (5–10 с)"
+      : `ожидание ${missing} · первая загрузка области идёт из сети (5–10 с)`;
+  } else {
+    hint.className = "hint done";
+    hint.textContent = "готово";
+  }
+}
+
+async function pollStatus() {
+  try {
+    const response = await fetch("/api/status");
+    state.server = await response.json();
+  } catch (error) {
+    state.server = null;
+  }
+  renderProgress();
 }
 
 function drawScaleBar() {
@@ -897,6 +1050,8 @@ loadDatasets().then(() => {
   resize();
   requestRender();
   refreshReadout();
+  pollStatus();
+  setInterval(pollStatus, 2000);
   setInterval(writeUrl, 1500);
 });
 </script>

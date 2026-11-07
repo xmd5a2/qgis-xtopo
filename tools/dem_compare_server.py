@@ -55,6 +55,39 @@ MAX_GRID = 2048
 _counter = 0
 _counter_lock = threading.Lock()
 
+# Состояние сервера для индикатора на странице.
+STATUS = {"started": time.time(), "active": {}, "rendered": 0, "cached": 0}
+STATUS_LOCK = threading.Lock()
+
+
+def status_snapshot():
+    """Что сейчас делает сервер: сколько тайлов рисуется, что в кэше."""
+    with STATUS_LOCK:
+        active = list(STATUS["active"].values())
+        return {
+            "uptime": round(time.time() - STATUS["started"], 1),
+            "active": active,
+            "rendered": STATUS["rendered"],
+            "cached": STATUS["cached"],
+        }
+
+
+def _status_enter(key, dataset, z, x, y):
+    with STATUS_LOCK:
+        STATUS["active"][key] = {
+            "key": key, "dataset": dataset, "z": z, "x": x, "y": y,
+            "since": round(time.time() - STATUS["started"], 1),
+        }
+
+
+def _status_leave(key, rendered):
+    with STATUS_LOCK:
+        STATUS["active"].pop(key, None)
+        if rendered:
+            STATUS["rendered"] += 1
+        else:
+            STATUS["cached"] += 1
+
 ROOT = Path(__file__).resolve().parent
 HTML_FILE = ROOT / "dem_compare.html"
 
@@ -71,6 +104,7 @@ USER_AGENT = "qgis-xtopo-dem-compare/1.0"
 DATASETS = {
     "srtm3": {
         "title": "SRTM v3 (1″)",
+        "short": "SRTM v3",
         "provider": "NASA/USGS, зеркало AWS elevation-tiles-prod (skadi)",
         "source": "skadi",
         "kind": "surface",
@@ -81,6 +115,7 @@ DATASETS = {
     },
     "cop30": {
         "title": "Copernicus DEM GLO-30 (1″)",
+        "short": "Copernicus GLO-30",
         "provider": "ESA/Copernicus, бакет AWS copernicus-dem-30m",
         "source": "cop30",
         "kind": "surface",
@@ -93,6 +128,7 @@ DATASETS = {
     },
     "nasadem": {
         "title": "NASADEM HGT (1″)",
+        "short": "NASADEM",
         "provider": "NASA/JPL/USGS, зеркало Planetary Computer",
         "source": "nasadem",
         "kind": "surface",
@@ -103,6 +139,7 @@ DATASETS = {
     },
     "alos30": {
         "title": "ALOS World 3D-30m (1″)",
+        "short": "ALOS AW3D30",
         "provider": "JAXA, зеркало Planetary Computer",
         "source": "alos30",
         "kind": "surface",
@@ -113,6 +150,7 @@ DATASETS = {
     },
     "3dep": {
         "title": "USGS 3DEP Seamless (1/3″, 10 м)",
+        "short": "3DEP 10 м",
         "provider": "USGS, зеркало Planetary Computer",
         "source": "3dep",
         "kind": "bare-earth",
@@ -229,6 +267,7 @@ class SourceStore:
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
+        path = str(path)
         with self._lock:
             entry = self._datasets.get(path)
             if entry is not None:
@@ -1014,6 +1053,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api(self, parts, query):
         action = parts[0]
+        if action == "status":
+            snapshot = status_snapshot()
+            snapshot["datasets"] = list(DATASETS)
+            self._json(snapshot)
+            return
         if action == "datasets":
             self._json({
                 "datasets": [dict(key=key, **value)
@@ -1066,40 +1110,73 @@ class Handler(BaseHTTPRequestHandler):
         cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / ds / mode /
                       str(z) / str(x) / f"{y}.png")
         if cache_file.exists():
-            self._send(200, cache_file.read_bytes(), "image/png")
+            _status_leave(f"{ds}/{mode}/{z}/{x}/{y}", rendered=False)
+            self._send(200, cache_file.read_bytes(), "image/png",
+                       {"X-Tile-Status": "cached", "X-Tile-Seconds": "0"})
             return
+        key = f"{ds}/{mode}/{z}/{x}/{y}"
+        _status_enter(key, ds, z, x, y)
         started = time.monotonic()
-        result = render_tile(self.store, ds, z, x, y, mode)
+        try:
+            result = render_tile(self.store, ds, z, x, y, mode)
+        finally:
+            _status_leave(key, rendered=True)
+        seconds = time.monotonic() - started
         if result is None or result[0] is None:
-            self._send(404, b"", "text/plain")
+            self._send(404, b"", "text/plain",
+                       {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
             return
         data, native = result
         if len(data) < 256:
             # Пустой результат — источник не отдался: не кэшируем.
-            self._send(404, b"", "text/plain")
+            self._send(404, b"", "text/plain",
+                       {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
             return
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_bytes(data)
-        print(f"[dem-compare] tile {ds}/{mode} {z}/{x}/{y} "
-              f"{time.monotonic() - started:.2f}s")
+        print(f"[dem-compare] tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s")
         self._send(200, data, "image/png",
                    {"X-Native-X": f"{native[0]:.2f}",
-                    "X-Native-Y": f"{native[1]:.2f}"})
+                    "X-Native-Y": f"{native[1]:.2f}",
+                    "X-Tile-Status": "rendered",
+                    "X-Tile-Seconds": f"{seconds:.2f}"})
 
     def _diff(self, ds_a, ds_b, z, x, y):
         z, x, y = int(z), int(x), int(y.split(".")[0])
         cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / "diff" /
                       f"{ds_a}_{ds_b}" / str(z) / str(x) / f"{y}.png")
         if cache_file.exists():
-            self._send(200, cache_file.read_bytes(), "image/png")
+            self._send(200, cache_file.read_bytes(), "image/png",
+                       {"X-Tile-Status": "cached", "X-Tile-Seconds": "0"})
             return
-        data = render_diff(self.store, ds_a, ds_b, z, x, y)
+        key = f"diff/{ds_a}_{ds_b}/{z}/{x}/{y}"
+        _status_enter(key, f"{ds_a}−{ds_b}", z, x, y)
+        started = time.monotonic()
+        try:
+            data = render_diff(self.store, ds_a, ds_b, z, x, y)
+        finally:
+            _status_leave(key, rendered=True)
+        seconds = time.monotonic() - started
         if data is None or len(data) < 256:
-            self._send(404, b"", "text/plain")
+            self._send(404, b"", "text/plain",
+                       {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
             return
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_bytes(data)
-        self._send(200, data, "image/png")
+        self._send(200, data, "image/png",
+                   {"X-Tile-Status": "rendered",
+                    "X-Tile-Seconds": f"{seconds:.2f}"})
+
+
+def page_url(host, port):
+    """Адрес страницы для печати в консоли.
+
+    Слушая 0.0.0.0, в ссылке показываем 127.0.0.1: по такому адресу
+    браузер на этой же машине откроет страницу.
+    """
+    if host in ("", "0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+    return f"http://{host}:{port}/"
 
 
 def main():
@@ -1115,12 +1192,22 @@ def main():
     Handler.tile_cache = cache / "tiles"
     Handler.tile_cache.mkdir(parents=True, exist_ok=True)
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"dem-compare: http://{args.host}:{args.port}/  (кэш: {cache})")
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        print(f"Не удалось занять {args.host}:{args.port}: {exc}")
+        print("Похоже, порт уже занят. Попробуйте другой: --port 8766")
+        raise SystemExit(1)
+    port = server.server_address[1]
+
+    print("Сервер сравнения DEM запущен.")
+    print(f"Страница: {page_url(args.host, port)}")
+    print(f"Кэш:      {cache}")
+    print("Остановить: Ctrl+C")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        print("\nСервер остановлен.")
 
 
 if __name__ == "__main__":
