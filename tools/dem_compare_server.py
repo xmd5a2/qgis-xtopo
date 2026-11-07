@@ -9,6 +9,10 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 Запуск::
 
     python3 tools/dem_compare_server.py [--port 8765] [--cache DIR]
+    python3 tools/dem_compare_server.py --precache [--precache-modes ...]
+
+Прогрев кэша (``--precache``) скачивает исходные данные для всех точек
+страницы и рисует тайлы, после чего сервер работает без обращений в сеть.
 
 Эндпоинты:
 
@@ -22,8 +26,10 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
+import re
 import threading
 import time
 import urllib.error
@@ -112,6 +118,7 @@ DATASETS = {
         "note": "SRTMGL1.003, пустоты заполнены. Текущий источник плагина.",
         "attribution": "SRTM data courtesy of the U.S. Geological Survey",
         "src_nodata": -32768,
+        "resolution_m": 30.0,
     },
     "cop30": {
         "title": "Copernicus DEM GLO-30 (1″)",
@@ -125,6 +132,7 @@ DATASETS = {
         "attribution": "Produced using Copernicus data and information "
                        "funded by the European Union and ESA",
         "src_nodata": None,
+        "resolution_m": 30.0,
     },
     "nasadem": {
         "title": "NASADEM HGT (1″)",
@@ -136,6 +144,7 @@ DATASETS = {
         "note": "SRTM v3 с доработкой NASA. Покрытие только −56°…+61° широты.",
         "attribution": "NASADEM — courtesy of NASA/JPL/USGS",
         "src_nodata": -32768,
+        "resolution_m": 30.0,
     },
     "alos30": {
         "title": "ALOS World 3D-30m (1″)",
@@ -147,6 +156,7 @@ DATASETS = {
         "note": "DSM: включает растительность и постройки. Нужна ссылка на JAXA.",
         "attribution": "ALOS World 3D-30m — © JAXA",
         "src_nodata": None,
+        "resolution_m": 30.0,
     },
     "3dep": {
         "title": "USGS 3DEP Seamless (1/3″, 10 м)",
@@ -161,6 +171,7 @@ DATASETS = {
                        "Survey (public domain)",
         "src_nodata": None,
         "id_suffix": "-13",
+        "resolution_m": 10.0,
     },
 }
 
@@ -264,6 +275,9 @@ class SourceStore:
         # Открытые источники: GDAL держит блоки COG в своём кэше, поэтому
         # соседние тайлы читаются без повторной сети.
         self._datasets = {}
+        # Локальные копии исходников (см. prepare_region): индекс и его mtime.
+        self._prepared_lock = threading.Lock()
+        self._prepared_cache = {}
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
@@ -316,6 +330,13 @@ class SourceStore:
 
     def sources(self, ds, bbox):
         """Список источников для области: локальные файлы и /vsicurl."""
+        prepared = self._prepared_for(ds, bbox)
+        if prepared:
+            return prepared
+        return self._remote_sources(ds, bbox)
+
+    def _remote_sources(self, ds, bbox):
+        """Источники в хранилище: без локальной копии, только сеть."""
         spec = DATASETS[ds]
         source = spec["source"]
         if source == "skadi":
@@ -333,8 +354,148 @@ class SourceStore:
             return paths
         return self._pc_sources(ds, bbox)
 
+    # ------------------------------------------------------------------
+    # Локальные копии исходников
+    # ------------------------------------------------------------------
+
+    def prepared_dir(self, ds):
+        return self.cache_dir / "prepared" / f"v{CACHE_VERSION}" / ds
+
+    def _prepared_index(self, ds):
+        """Список локальных копий набора: [{"file": ..., "bbox": [...]}]."""
+        path = self.prepared_dir(ds) / "index.json"
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            return []
+        with self._lock:
+            cached = self._prepared_cache.get(ds)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        try:
+            items = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            items = []
+        if not isinstance(items, list):
+            items = []
+        with self._lock:
+            self._prepared_cache[ds] = (stamp, items)
+        return items
+
+    def _prepared_for(self, ds, bbox):
+        """Наименьшая локальная копия, покрывающая область (если есть)."""
+        minx, miny, maxx, maxy = bbox
+        # Допуск ~0.1 м: координаты в индексе округлены.
+        tolerance = 1e-6
+        best = None
+        best_area = None
+        for item in self._prepared_index(ds):
+            area = item.get("bbox")
+            if not area or len(area) != 4:
+                continue
+            if not (area[0] <= minx + tolerance and
+                    area[1] <= miny + tolerance and
+                    area[2] >= maxx - tolerance and
+                    area[3] >= maxy - tolerance):
+                continue
+            path = self.prepared_dir(ds) / item.get("file", "")
+            if not path.exists():
+                continue
+            size = (area[2] - area[0]) * (area[3] - area[1])
+            if best is None or size < best_area:
+                best = path
+                best_area = size
+        return [str(best)] if best else None
+
+    def _prepared_exact(self, ds, bbox):
+        """Локальная копия ровно этой области (для прогрева)."""
+        minx, miny, maxx, maxy = bbox
+        tolerance = 1e-6
+        for item in self._prepared_index(ds):
+            area = item.get("bbox")
+            if not area or len(area) != 4:
+                continue
+            if (abs(area[0] - minx) <= tolerance and
+                    abs(area[1] - miny) <= tolerance and
+                    abs(area[2] - maxx) <= tolerance and
+                    abs(area[3] - maxy) <= tolerance):
+                path = self.prepared_dir(ds) / item.get("file", "")
+                if path.exists():
+                    return path
+        return None
+
+    def prepare_region(self, ds, bbox, name):
+        """Сохраняет исходные данные области в локальный GeoTIFF.
+
+        COG-наборы читаются по HTTP Range, и без локальной копии каждый
+        запуск сервера снова тянет блоки из сети. Копия режется по области
+        и хранится в родном разрешении источника, поэтому она небольшая.
+        """
+        found = self._prepared_exact(ds, bbox)
+        if found:
+            return found
+        sources = self._remote_sources(ds, bbox)
+        if not sources:
+            return None
+        folder = self.prepared_dir(ds)
+        folder.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.md5(
+            ",".join(f"{v:.8f}" for v in bbox).encode("ascii")).hexdigest()[:8]
+        target = folder / f"{name}_{digest}.tif"
+        temporary = folder / f"{name}_{digest}.tmp.tif"
+        options = gdal.WarpOptions(
+            format="GTiff",
+            dstSRS="EPSG:4326",
+            outputBounds=tuple(bbox),
+            resampleAlg="bilinear",
+            srcNodata=DATASETS[ds].get("src_nodata"),
+            dstNodata=DATASETS[ds].get("src_nodata"),
+            multithread=True,
+            creationOptions=["COMPRESS=DEFLATE", "TILED=YES",
+                             "BIGTIFF=IF_SAFER"],
+        )
+        try:
+            result = gdal.Warp(str(temporary), sources, options=options)
+        except Exception as exc:
+            print(f"[dem-compare] {ds}: не удалось сохранить область: {exc}")
+            temporary.unlink(missing_ok=True)
+            return None
+        if result is None:
+            temporary.unlink(missing_ok=True)
+            return None
+        result.FlushCache()
+        result = None
+        temporary.replace(target)
+        self._register_prepared(ds, target.name, bbox)
+        return target
+    def _register_prepared(self, ds, filename, bbox):
+        folder = self.prepared_dir(ds)
+        folder.mkdir(parents=True, exist_ok=True)
+        index_path = folder / "index.json"
+        with self._prepared_lock:
+            try:
+                items = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                items = []
+            if not isinstance(items, list):
+                items = []
+            items = [item for item in items if item.get("file") != filename]
+            items.append({"file": filename,
+                          "bbox": [round(float(v), 8) for v in bbox]})
+            temporary = index_path.with_name("index.tmp")
+            temporary.write_text(json.dumps(items, ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+            temporary.replace(index_path)
+            with self._lock:
+                self._prepared_cache.pop(ds, None)
+
     def open_at(self, ds, lon, lat):
         """Открывает набор так, чтобы в него попала точка."""
+        prepared = self._prepared_for(ds, (lon, lat, lon, lat))
+        if prepared:
+            dataset, _ = self.open_source(prepared[0])
+            if dataset is not None:
+                return dataset
         spec = DATASETS[ds]
         source = spec["source"]
         if source == "skadi":
@@ -875,6 +1036,12 @@ def _png_bytes(rgb, alpha=None):
 # Рендер тайлов
 # ---------------------------------------------------------------------------
 
+def tile_cache_path(tile_cache, ds, mode, z, x, y):
+    """Путь готового тайла в кэше (общий для сервера и прогрева)."""
+    return (Path(tile_cache) / f"v{CACHE_VERSION}" / ds / mode /
+            str(z) / str(x) / f"{y}.png")
+
+
 def render_tile(store, ds, z, x, y, mode="hillshade"):
     values = _dem3857(store, ds, z, x, y)
     if values is None:
@@ -989,6 +1156,177 @@ def sample_profile(store, ds, lon1, lat1, lon2, lat2, count=200):
         else:
             samples.append([round(lon, 6), round(lat, 6), value])
     return samples
+
+
+# ---------------------------------------------------------------------------
+# Предварительный прогрев кэша
+# ---------------------------------------------------------------------------
+
+# Точки берутся из страницы, чтобы список не дублировался в двух файлах.
+_POINT_RE = re.compile(
+    r'\{name:\s*"(?P<name>[^"]+)".*?'
+    r'lon:\s*(?P<lon>-?\d+(?:\.\d+)?)\s*,\s*'
+    r'lat:\s*(?P<lat>-?\d+(?:\.\d+)?)\s*,\s*'
+    r'zoom:\s*(?P<zoom>\d+)',
+    re.S,
+)
+
+
+def load_points(page=None):
+    """Точки сравнения из dem_compare.html."""
+    path = Path(page) if page else Path(__file__).with_name("dem_compare.html")
+    text = path.read_text(encoding="utf-8")
+    points = []
+    for match in _POINT_RE.finditer(text):
+        points.append({
+            "name": match.group("name"),
+            "lon": float(match.group("lon")),
+            "lat": float(match.group("lat")),
+            "zoom": int(match.group("zoom")),
+        })
+    if not points:
+        raise SystemExit(f"Не нашёл список точек в {path}")
+    return points
+
+
+def parse_view(text):
+    match = re.fullmatch(r"\s*(\d+)\s*[x×]\s*(\d+)\s*", text)
+    if not match:
+        raise SystemExit("Размер окна задаётся как ШИРИНАxВЫСОТА, "
+                         "например 1400x900")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _world_pixel(lon, lat, zoom):
+    scale = TILE_SIZE * (2 ** zoom)
+    x = (lon + 180.0) / 360.0 * scale
+    s = math.sin(math.radians(lat))
+    y = (0.5 - math.log((1 + s) / (1 - s)) / (4 * math.pi)) * scale
+    return x, y
+
+
+def view_bbox(lon, lat, zoom, width, height, margin=1, pad=0.02):
+    """Область всех тайлов, которые страница запросит для окна.
+
+    Границы берутся по сетке тайлов, а не по самому окну: страница рисует
+    на один тайл шире окна, и без этого края оставались бы без локальной
+    копии и снова шли в сеть.
+    """
+    px, py = _world_pixel(lon, lat, zoom)
+    left = px - width / 2.0
+    top = py - height / 2.0
+    count = 2 ** zoom
+    first_x = math.floor(left / TILE_SIZE) - margin
+    last_x = math.floor((left + width) / TILE_SIZE) + margin
+    first_y = max(0, math.floor(top / TILE_SIZE) - margin)
+    last_y = min(count - 1, math.floor((top + height) / TILE_SIZE) + margin)
+    lon1 = first_x / count * 360.0 - 180.0
+    lon2 = (last_x + 1) / count * 360.0 - 180.0
+    lat1 = _merc_y_to_lat((last_y + 1) / count)
+    lat2 = _merc_y_to_lat(first_y / count)
+    dx = (lon2 - lon1) * pad
+    dy = (lat2 - lat1) * pad
+    return (lon1 - dx, lat1 - dy, lon2 + dx, lat2 + dy)
+
+
+def visible_tiles(lon, lat, zoom, width, height, margin=1):
+    """Тайлы, которые страница запросит для окна вокруг точки."""
+    px, py = _world_pixel(lon, lat, zoom)
+    left = px - width / 2.0
+    top = py - height / 2.0
+    count = 2 ** zoom
+    first_x = math.floor(left / TILE_SIZE) - margin
+    last_x = math.floor((left + width) / TILE_SIZE) + margin
+    first_y = math.floor(top / TILE_SIZE) - margin
+    last_y = math.floor((top + height) / TILE_SIZE) + margin
+    for tx in range(first_x, last_x + 1):
+        wrapped = tx % count
+        for ty in range(max(0, first_y), min(count - 1, last_y) + 1):
+            yield wrapped, ty
+
+
+def native_zoom(lat, resolution_m):
+    return math.log2(156543.03392 * math.cos(math.radians(lat)) /
+                     resolution_m)
+
+
+def zoom_range(point_zoom, lat, resolution_m):
+    """Зумы от вида по умолчанию до полного разрешения источника.
+
+    Кнопка «1:1» ставит дробный зум, а страница рисует тайлы округлённого
+    зума, поэтому границей считается round, а не floor/ceil.
+    """
+    native = round(native_zoom(lat, resolution_m))
+    return min(point_zoom, native), max(point_zoom, native)
+
+
+def precache(store, tile_cache, points, modes=("hillshade",),
+             view=(1400, 900)):
+    """Скачивает исходники и рисует тайлы для всех точек страницы.
+
+    Сначала для каждого зума сохраняется локальная копия области в родном
+    разрешении источника (для SRTM — просто скачиваются .hgt.gz), потом
+    рисуются тайлы. После этого страница открывается без обращений в сеть.
+    """
+    width, height = view
+    started = time.monotonic()
+    total_rendered = 0
+    total_cached = 0
+    total_empty = 0
+    print(f"Прогрев кэша: точек {len(points)}, наборов {len(DATASETS)}, "
+          f"режимы {', '.join(modes)}, окно {width}×{height}")
+    for index, point in enumerate(points, 1):
+        lon, lat, zoom = point["lon"], point["lat"], point["zoom"]
+        print(f"\n[{index}/{len(points)}] {point['name']}")
+        for key, spec in DATASETS.items():
+            low, high = zoom_range(zoom, lat, spec["resolution_m"])
+            print(f"  {spec['short']:<18} z{low}–{high}")
+            source_seconds = 0.0
+            ready = True
+            for z in range(low, high + 1):
+                bbox = view_bbox(lon, lat, z, width, height)
+                moment = time.monotonic()
+                if spec["source"] == "skadi":
+                    ok = bool(store.sources(key, bbox))
+                else:
+                    ok = store.prepare_region(
+                        key, bbox, f"p{index:02d}_z{z}") is not None
+                source_seconds += time.monotonic() - moment
+                if not ok:
+                    ready = False
+                    break
+            if not ready:
+                print(f"    исходники: нет данных ({source_seconds:.1f} с)")
+                continue
+            print(f"    исходники: готовы ({source_seconds:.1f} с)")
+            for z in range(low, high + 1):
+                tiles = list(visible_tiles(lon, lat, z, width, height))
+                for done, (x, y) in enumerate(tiles, 1):
+                    for mode in modes:
+                        path = tile_cache_path(tile_cache, key, mode, z, x, y)
+                        if path.exists():
+                            total_cached += 1
+                            continue
+                        try:
+                            data, _native = render_tile(store, key, z, x, y,
+                                                        mode)
+                        except Exception as exc:
+                            print(f"\n      ошибка {z}/{x}/{y}: {exc}")
+                            continue
+                        if data is None or len(data) < 256:
+                            total_empty += 1
+                            continue
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data)
+                        total_rendered += 1
+                    if done % 8 == 0 or done == len(tiles):
+                        print(f"\r    тайлы z{z}: {done}/{len(tiles)}",
+                              end="", flush=True)
+                print()
+    elapsed = time.monotonic() - started
+    print(f"\nГотово за {elapsed:.0f} с: отрисовано {total_rendered}, "
+          f"из кэша {total_cached}, без данных {total_empty}")
+    print(f"Кэш: {store.cache_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -1107,8 +1445,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "unknown dataset"}, code=404)
             return
         z, x, y = int(z), int(x), int(y.split(".")[0])
-        cache_file = (self.tile_cache / f"v{CACHE_VERSION}" / ds / mode /
-                      str(z) / str(x) / f"{y}.png")
+        cache_file = tile_cache_path(self.tile_cache, ds, mode, z, x, y)
         if cache_file.exists():
             _status_leave(f"{ds}/{mode}/{z}/{x}/{y}", rendered=False)
             self._send(200, cache_file.read_bytes(), "image/png",
@@ -1184,10 +1521,30 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--cache", default=str(DEFAULT_CACHE))
+    parser.add_argument("--precache", action="store_true",
+                        help="скачать исходники и отрисовать тайлы для точек "
+                             "страницы, затем выйти")
+    parser.add_argument("--precache-modes", default="hillshade",
+                        help="режимы через запятую: hillshade,elevation,contours")
+    parser.add_argument("--precache-view", default="1400x900",
+                        help="размер окна страницы для прогрева (ШxВ)")
     args = parser.parse_args()
 
     cache = Path(args.cache).expanduser()
     store = SourceStore(cache)
+
+    if args.precache:
+        modes = [mode.strip() for mode in args.precache_modes.split(",")
+                 if mode.strip()]
+        unknown = [mode for mode in modes
+                   if mode not in ("hillshade", "elevation", "contours")]
+        if unknown:
+            raise SystemExit(f"Неизвестный режим: {', '.join(unknown)}")
+        precache(store, cache / "tiles", load_points(),
+                 modes=modes or ("hillshade",),
+                 view=parse_view(args.precache_view))
+        return
+
     Handler.store = store
     Handler.tile_cache = cache / "tiles"
     Handler.tile_cache.mkdir(parents=True, exist_ok=True)
