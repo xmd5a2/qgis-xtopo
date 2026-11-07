@@ -46,6 +46,8 @@
   .badge.place.set { background: var(--accent); color: #10161a; }
   .point.active { border-color: var(--accent); background: #26333a; }
   .point.active b { color: var(--accent); }
+  .local-form { display: flex; gap: 6px; }
+  .local-form input { flex: 1; min-width: 0; }
   main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
@@ -163,6 +165,15 @@
     <h2>Ключевые точки</h2>
     <div id="points"></div>
 
+    <h2>Свой рельеф</h2>
+    <div class="local-form">
+      <input id="local-dir" type="text" placeholder="/путь/к/каталогу"
+             spellcheck="false">
+      <button id="local-add" title="Добавить каталог как набор">добавить</button>
+    </div>
+    <div class="note" id="local-note">GeoTIFF, HGT, VRT. Локальные данные,
+      прогревать не нужно.</div>
+
     <h2>Набор A</h2>
     <div class="meta" id="meta-a"></div>
 
@@ -188,6 +199,10 @@
       <br><br>
       <b>OSM</b> — полупрозрачная подложка OpenStreetMap: по ней видно, куда
       вы сдвинули карту. Кнопка <b>OSM</b> в шапке отключает её.
+      <br><br>
+      <b>Свой рельеф</b> — укажите каталог с GeoTIFF, HGT или VRT: сервер
+      проиндексирует файлы, и набор появится в списках A и B. Данные
+      локальные, сеть и прогрев не нужны.
       <br><br>
       <b>3DEP</b> покрывает только США — в остальных точках он пуст.
       <b>NASADEM</b> не заходит выше 61° и ниже −56°.
@@ -327,9 +342,13 @@ function groundResolution(lat, zoom) {
 async function loadDatasets() {
   const response = await fetch("/api/datasets");
   const data = await response.json();
+  const keepA = state.a, keepB = state.b;
+  state.datasets = {};
   data.datasets.forEach(item => { state.datasets[item.key] = item; });
-  state.a = data.default_a;
-  state.b = data.default_b;
+  // Выбор сохраняем: список перезагружается и после добавления своего
+  // каталога, и при обычном старте.
+  state.a = state.datasets[keepA] ? keepA : data.default_a;
+  state.b = state.datasets[keepB] ? keepB : data.default_b;
   fillSelect(document.getElementById("ds-a"), state.a);
   fillSelect(document.getElementById("ds-b"), state.b);
   renderMeta();
@@ -347,7 +366,7 @@ function fillSelect(select, value) {
     option.textContent = state.datasets[key].title;
     select.appendChild(option);
   });
-  select.value = value;
+  select.value = state.datasets[value] ? value : "";
 }
 
 function tileKey(ds, mode, z, x, y) {
@@ -998,6 +1017,43 @@ document.getElementById("osm").addEventListener("click", event => {
   }
   requestRender();
   writeUrl();
+});
+
+// Подключение собственного каталога с рельефом: сервер индексирует файлы,
+// страница добавляет набор в списки и выбирает его в A.
+async function addLocalSource() {
+  const field = document.getElementById("local-dir");
+  const note = document.getElementById("local-note");
+  const folder = field.value.trim();
+  if (!folder) {
+    note.textContent = "укажите каталог";
+    return;
+  }
+  note.textContent = "индексирую…";
+  try {
+    const response = await fetch(
+      `/api/local?dir=${encodeURIComponent(folder)}`);
+    const info = await response.json();
+    if (!response.ok) {
+      note.textContent = info.error || "не удалось прочитать каталог";
+      return;
+    }
+    await loadDatasets();
+    state.a = info.key;
+    fillSelect(document.getElementById("ds-a"), state.a);
+    note.textContent = `${info.files} файлов, ${info.directory}`;
+    renderMeta();
+    requestRender();
+    refreshReadout();
+    writeUrl();
+  } catch (error) {
+    note.textContent = "сервер не ответил";
+  }
+}
+
+document.getElementById("local-add").addEventListener("click", addLocalSource);
+document.getElementById("local-dir").addEventListener("keydown", event => {
+  if (event.key === "Enter") addLocalSource();
 });
 
 document.getElementById("points").innerHTML = POINTS.map((point, index) =>

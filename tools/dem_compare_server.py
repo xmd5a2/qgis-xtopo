@@ -9,6 +9,7 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 Запуск::
 
     python3 tools/dem_compare_server.py [--port 8765] [--cache DIR]
+                                        [--temp-dir DIR] [--local-dem DIR]
     python3 tools/dem_compare_server.py --precache [--precache-modes ...]
 
 Прогрев кэша (``--precache``) скачивает исходные данные для всех точек
@@ -32,6 +33,8 @@ import json
 import math
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 import urllib.error
@@ -194,6 +197,13 @@ DATASETS = {
 DEFAULT_A = "cop30"
 DEFAULT_B = "srtm3"
 
+# Ключ набора из локального каталога: добавляется по --local-dem или из UI.
+LOCAL_KEY = "local"
+
+# Расширения растров, которые ищутся в локальном каталоге.
+LOCAL_SUFFIXES = (".tif", ".tiff", ".hgt", ".vrt", ".img", ".asc",
+                  ".dem", ".dt2", ".bil", ".grd", ".nc")
+
 
 # ---------------------------------------------------------------------------
 # Загрузка исходных тайлов
@@ -273,6 +283,108 @@ def _sign_pc(href):
     return _http_json(url)["href"]
 
 
+def _raster_info(path):
+    """Охват (EPSG:4326) и размер пикселя локального растра в метрах."""
+    try:
+        dataset = gdal.Open(str(path))
+    except RuntimeError:
+        return None
+    if dataset is None:
+        return None
+    gt = dataset.GetGeoTransform()
+    if gt is None:
+        return None
+    width, height = dataset.RasterXSize, dataset.RasterYSize
+    srs = dataset.GetSpatialRef()
+    corners = [(gt[0], gt[3]),
+               (gt[0] + gt[1] * width, gt[3] + gt[5] * height)]
+    minx, maxx = sorted(x for x, _ in corners)
+    miny, maxy = sorted(y for _, y in corners)
+    if srs is not None and not srs.IsGeographic():
+        target = osr.SpatialReference()
+        target.ImportFromEPSG(4326)
+        target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        source = srs.Clone()
+        source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        transform = osr.CoordinateTransformation(source, target)
+        points = []
+        for px, py in ((minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy)):
+            lon, lat, *_ = transform.TransformPoint(px, py)
+            points.append((lon, lat))
+        minx = min(point[0] for point in points)
+        maxx = max(point[0] for point in points)
+        miny = min(point[1] for point in points)
+        maxy = max(point[1] for point in points)
+        resolution = abs(gt[5])
+    else:
+        resolution = abs(gt[5]) * 110574.0
+    dataset = None
+    if resolution <= 0:
+        resolution = 30.0
+    return (minx, miny, maxx, maxy), resolution
+
+
+def _union_extent(extents):
+    if not extents:
+        return None
+    return (min(item[0] for item in extents),
+            min(item[1] for item in extents),
+            max(item[2] for item in extents),
+            max(item[3] for item in extents))
+
+
+def _purge_tree(path):
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
+
+
+def register_local_source(store, directory):
+    """Добавляет каталог с рельефом как набор ``local``.
+
+    Возвращает описание набора; страница обновляет список и выбирает его.
+    """
+    folder, items = store.set_local_dir(directory)
+    extent = _union_extent([item[1] for item in items])
+    resolution = sorted(item[2] for item in items)[len(items) // 2]
+    # Тайлы и DEM в кэше привязаны к ключу local: при смене каталога они
+    # показывали бы прежний рельеф.
+    marker = store.cache_dir / "local.json"
+    try:
+        previous = json.loads(marker.read_text(encoding="utf-8"))
+        previous = previous.get("directory", "")
+    except (OSError, ValueError, AttributeError):
+        previous = ""
+    if previous and Path(previous).expanduser() != folder:
+        _purge_tree(store.cache_dir / "dem3857" / f"v{CACHE_VERSION}" /
+                    LOCAL_KEY)
+        _purge_tree(store.cache_dir / "tiles" / f"v{CACHE_VERSION}" /
+                    LOCAL_KEY)
+    try:
+        marker.write_text(json.dumps({"directory": str(folder)}),
+                          encoding="utf-8")
+    except OSError:
+        pass
+    title = f"Свой рельеф ({folder.name})"
+    DATASETS[LOCAL_KEY] = {
+        "title": title,
+        "short": "Свой рельеф",
+        "provider": "локальный каталог",
+        "source": "local",
+        "kind": "surface",
+        "datum": "как в файлах",
+        "note": f"{len(items)} растров, {folder}",
+        "attribution": "",
+        "src_nodata": None,
+        "resolution_m": resolution,
+    }
+    return {"key": LOCAL_KEY, "title": title, "files": len(items),
+            "directory": str(folder),
+            "extent": list(extent) if extent else None,
+            "resolution_m": resolution}
+
+
 class SourceStore:
     """Источники DEM: локальный кэш для gzip-SRTM, HTTP-чтение — для COG.
 
@@ -281,9 +393,15 @@ class SourceStore:
     блоки. Это важно: тайл 3DEP в 10 м — это десятки мегабайт.
     """
 
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir: Path, temp_dir: Path = None):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Куда класть промежуточные загрузки; постоянный кэш — в cache_dir.
+        self.temp_dir = Path(temp_dir) if temp_dir else None
+        # Локальный каталог с рельефом: индекс «файл → охват».
+        self.local_dir = None
+        self._local_index = []
+        self._local_lock = threading.Lock()
         self._lock = threading.Lock()
         self._download_locks = {}
         self._signs = {}
@@ -423,10 +541,42 @@ class SourceStore:
             math.cos(math.radians((lat1 + lat2) / 2.0)), 0.05) / TILE_SIZE
         return pixel <= resolution * 3.0
 
+    def set_local_dir(self, directory):
+        """Индексирует каталог с рельефом: файл → охват и размер пикселя."""
+        folder = Path(directory).expanduser()
+        if not folder.is_dir():
+            raise ValueError(f"нет каталога: {folder}")
+        items = []
+        for path in sorted(folder.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in LOCAL_SUFFIXES:
+                continue
+            info = _raster_info(path)
+            if info is None:
+                continue
+            items.append((path, info[0], info[1]))
+        if not items:
+            raise ValueError(f"в каталоге нет растров: {folder}")
+        with self._local_lock:
+            self.local_dir = folder
+            self._local_index = items
+        return folder, items
+
+    def local_sources(self, bbox):
+        """Файлы локального каталога, пересекающиеся с областью."""
+        minx, miny, maxx, maxy = bbox
+        with self._local_lock:
+            items = list(self._local_index)
+        return [str(path) for path, area, _resolution in items
+                if area[0] <= maxx and area[2] >= minx and
+                area[1] <= maxy and area[3] >= miny]
+
     def _auto_block(self, ds, bbox):
         spec = DATASETS[ds]
-        if spec["source"] == "skadi":
-            # SRTM качается целыми градусными тайлами и уже кэшируется.
+        if spec["source"] in ("skadi", "local"):
+            # SRTM качается целыми градусными тайлами, локальный каталог уже
+            # лежит на диске — промежуточное окно им не нужно.
             return None
         resolution = spec.get("resolution_m") or 30.0
         block = self.AUTO_BLOCK_PIXELS * resolution / 111320.0
@@ -451,6 +601,8 @@ class SourceStore:
         """Источники в хранилище: без локальной копии, только сеть."""
         spec = DATASETS[ds]
         source = spec["source"]
+        if source == "local":
+            return self.local_sources(bbox)
         if source == "skadi":
             paths = []
             for lat, lon in _tiles_for(bbox):
@@ -649,6 +801,12 @@ class SourceStore:
                 return dataset
         spec = DATASETS[ds]
         source = spec["source"]
+        if source == "local":
+            for path in self.local_sources((lon, lat, lon, lat)):
+                dataset, _ = self.open_source(path)
+                if dataset is not None:
+                    return dataset
+            return None
         if source == "skadi":
             path = self._ensure_srtm(ds, int(math.floor(lat)),
                                      int(math.floor(lon)))
@@ -691,7 +849,8 @@ class SourceStore:
         with self._tile_lock(f"{ds}:{target.name}"):
             if target.exists() and target.stat().st_size > 0:
                 return target
-            raw = target.with_name(target.name + ".raw")
+            raw = (self.temp_dir or target.parent) / (
+                f"{target.name}.{os.getpid()}.raw")
             if not _download(_aws_url("skadi", lat, lon), raw):
                 raw.unlink(missing_ok=True)
                 return None
@@ -1480,6 +1639,9 @@ def precache(store, tile_cache, points, modes=("hillshade", "elevation",
     source_tasks = []
     for index, point in enumerate(points, 1):
         for key, spec in DATASETS.items():
+            if spec["source"] == "local":
+                # Локальный каталог уже на диске — прогревать нечего.
+                continue
             low, high = zoom_range(point["zoom"], point["lat"],
                                    spec["resolution_m"])
             for z in range(low, high + 1):
@@ -1676,6 +1838,19 @@ class Handler(BaseHTTPRequestHandler):
                 "default_b": DEFAULT_B,
             })
             return
+        if action == "local":
+            # Каталог с рельефом задаётся из UI; сервер только индексирует.
+            folder = query.get("dir", [""])[0].strip()
+            if not folder:
+                self._json({"error": "нужен параметр dir"}, code=400)
+                return
+            try:
+                info = register_local_source(self.store, folder)
+            except (OSError, ValueError) as exc:
+                self._json({"error": str(exc)}, code=400)
+                return
+            self._json(info)
+            return
         ds = query.get("ds", [""])[0]
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
@@ -1827,11 +2002,30 @@ def page_url(host, port):
     return f"http://{host}:{port}/"
 
 
+def configure_temp_dir(path):
+    """Направляет временные файлы GDAL и Python в указанный каталог."""
+    folder = Path(path).expanduser() if path else Path(tempfile.gettempdir())
+    folder.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(folder)
+    os.environ["TEMP"] = str(folder)
+    os.environ["TMP"] = str(folder)
+    tempfile.tempdir = str(folder)
+    # GDAL кладёт сюда промежуточные VRT и spill больших warp.
+    gdal.SetConfigOption("CPL_TMPDIR", str(folder))
+    return folder
+
+
 def main():
     parser = argparse.ArgumentParser(description="Сервер сравнения DEM")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--cache", default=str(DEFAULT_CACHE))
+    parser.add_argument("--temp-dir", default=None,
+                        help="каталог временных файлов GDAL и промежуточных "
+                             "загрузок (по умолчанию системный)")
+    parser.add_argument("--local-dem", default=None,
+                        help="каталог с собственным рельефом (GeoTIFF, HGT, "
+                             "VRT и т. п.); добавляется набором «Свой рельеф»")
     parser.add_argument("--precache", action="store_true",
                         help="скачать исходники и отрисовать тайлы для точек "
                              "страницы, затем выйти")
@@ -1846,7 +2040,15 @@ def main():
     args = parser.parse_args()
 
     cache = Path(args.cache).expanduser()
-    store = SourceStore(cache)
+    temp_dir = configure_temp_dir(args.temp_dir)
+    store = SourceStore(cache, temp_dir=temp_dir)
+    if args.local_dem:
+        try:
+            local = register_local_source(store, args.local_dem)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Локальный рельеф: {exc}")
+        print(f"Локальный рельеф: {local['files']} файлов, "
+              f"{local['directory']}")
 
     if args.precache:
         modes = [mode.strip() for mode in args.precache_modes.split(",")
@@ -1878,6 +2080,7 @@ def main():
     print("Сервер сравнения DEM запущен.")
     print(f"Страница: {page_url(args.host, port)}")
     print(f"Кэш:      {cache}")
+    print(f"Временные файлы: {temp_dir}")
     print("Остановить: Ctrl+C")
     try:
         server.serve_forever()
