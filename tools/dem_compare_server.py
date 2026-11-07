@@ -10,10 +10,13 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 
     python3 tools/dem_compare_server.py [--port 8765] [--cache DIR]
                                         [--temp-dir DIR] [--local-dem DIR]
-    python3 tools/dem_compare_server.py --precache [--precache-modes ...]
+    python3 tools/dem_compare_server.py --precache [--precache-tiles]
+                                        [--precache-modes ...]
 
 Прогрев кэша (``--precache``) скачивает исходные данные для всех точек
-страницы и рисует тайлы, после чего сервер работает без обращений в сеть.
+страницы; тайлы по умолчанию не рисуются — из локальных данных они
+считаются на лету за десятые доли секунды. ``--precache-tiles`` рисует их
+заранее, если нужен показ вообще без обращений к сети.
 
 Эндпоинты:
 
@@ -1623,13 +1626,14 @@ def zoom_range(point_zoom, lat, resolution_m):
 
 def precache(store, tile_cache, points, modes=("hillshade", "elevation",
                                                "contours"),
-             view=(1400, 900), jobs=8, margin=2):
-    """Скачивает исходники и рисует тайлы для всех точек страницы.
+             view=(1400, 900), jobs=8, margin=2, render_tiles=False):
+    """Скачивает исходники для всех точек страницы.
 
-    Сначала параллельно сохраняются локальные копии областей в родном
-    разрешении источника (для SRTM — просто скачиваются .hgt.gz), потом
-    параллельно рисуются тайлы. После этого страница открывается без
-    обращений в сеть.
+    Тайлы по умолчанию не рисуются: когда исходные данные уже локально,
+    один тайл считается за десятые доли секунды, а скачивание области —
+    это секунды и десятки мегабайт. Поэтому прогреваем только сеть, а PNG
+    страница получает по требованию. ``render_tiles=True`` дополнительно
+    рисует тайлы (для проверки, что всё считается без сети).
     """
     width, height = view
     jobs = max(1, int(jobs))
@@ -1654,7 +1658,11 @@ def precache(store, tile_cache, points, modes=("hillshade", "elevation",
                 source_tasks.append((index, point, key, spec, z, bbox))
 
     print(f"Прогрев кэша: точек {len(points)}, наборов {len(DATASETS)}, "
-          f"режимы {', '.join(modes)}, окно {width}×{height}, потоков {jobs}")
+          f"окно {width}×{height}, потоков {jobs}")
+    if render_tiles:
+        print(f"Режимы тайлов: {', '.join(modes)}")
+    else:
+        print("Тайлы не рисуются: они считаются на лету из локальных данных")
     print(f"\nИсходные данные: {len(source_tasks)} областей")
 
     def prepare(task):
@@ -1692,63 +1700,69 @@ def precache(store, tile_cache, points, modes=("hillshade", "elevation",
                 print(f"  [{done:>3}/{total_sources}] {point['name']} · "
                       f"{spec['short']} z{z} — {status}", flush=True)
 
-    # Тайлы рисуем только там, где исходники действительно есть.
-    tile_tasks = []
-    for index, key, z in sorted(ready):
-        point = points[index - 1]
-        for x, y in visible_tiles(point["lon"], point["lat"], z, width, height,
-                                  margin=margin):
-            for mode in modes:
-                tile_tasks.append((index, point, key, z, x, y, mode))
+    if render_tiles:
+        # Тайлы рисуем только там, где исходники действительно есть.
+        tile_tasks = []
+        for index, key, z in sorted(ready):
+            point = points[index - 1]
+            for x, y in visible_tiles(point["lon"], point["lat"], z, width,
+                                      height, margin=margin):
+                for mode in modes:
+                    tile_tasks.append((index, point, key, z, x, y, mode))
 
-    total_tiles = len(tile_tasks)
-    print(f"\nТайлы: {total_tiles}")
-    rendered = cached = empty = failed = 0
-    done_tiles = 0
-    tile_started = time.monotonic()
+        total_tiles = len(tile_tasks)
+        print(f"\nТайлы: {total_tiles}")
+        rendered = cached = empty = failed = 0
+        done_tiles = 0
+        tile_started = time.monotonic()
 
-    def render(task):
-        index, point, key, z, x, y, mode = task
-        path = tile_cache_path(tile_cache, key, mode, z, x, y)
-        if path.exists():
-            return task, "cached", ""
-        try:
-            data, _native = render_tile(store, key, z, x, y, mode)
-        except Exception as exc:
-            return task, "error", str(exc)
-        if data is None or len(data) < 256:
-            return task, "empty", ""
-        write_bytes_atomic(path, data)
-        return task, "rendered", ""
+        def render(task):
+            index, point, key, z, x, y, mode = task
+            path = tile_cache_path(tile_cache, key, mode, z, x, y)
+            if path.exists():
+                return task, "cached", ""
+            try:
+                data, _native = render_tile(store, key, z, x, y, mode)
+            except Exception as exc:
+                return task, "error", str(exc)
+            if data is None or len(data) < 256:
+                return task, "empty", ""
+            write_bytes_atomic(path, data)
+            return task, "rendered", ""
 
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = [pool.submit(render, task) for task in tile_tasks]
-        for future in as_completed(futures):
-            task, status, error = future.result()
-            done_tiles += 1
-            if status == "cached":
-                cached += 1
-            elif status == "empty":
-                empty += 1
-            elif status == "error":
-                failed += 1
-                with print_lock:
-                    print(f"\n  ошибка {task[3]}/{task[4]}/{task[5]}: {error}")
-            else:
-                rendered += 1
-            if done_tiles % 50 == 0 or done_tiles == total_tiles:
-                elapsed = time.monotonic() - tile_started
-                rate = done_tiles / elapsed if elapsed else 0.0
-                with print_lock:
-                    print(f"\r  {done_tiles}/{total_tiles} "
-                          f"({rate:.1f} тайла/с, отрисовано {rendered}, "
-                          f"из кэша {cached})", end="", flush=True)
-    if total_tiles:
-        print()
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(render, task) for task in tile_tasks]
+            for future in as_completed(futures):
+                task, status, error = future.result()
+                done_tiles += 1
+                if status == "cached":
+                    cached += 1
+                elif status == "empty":
+                    empty += 1
+                elif status == "error":
+                    failed += 1
+                    with print_lock:
+                        print(f"\n  ошибка {task[3]}/{task[4]}/{task[5]}: "
+                              f"{error}")
+                else:
+                    rendered += 1
+                if done_tiles % 50 == 0 or done_tiles == total_tiles:
+                    elapsed = time.monotonic() - tile_started
+                    rate = done_tiles / elapsed if elapsed else 0.0
+                    with print_lock:
+                        print(f"\r  {done_tiles}/{total_tiles} "
+                              f"({rate:.1f} тайла/с, отрисовано {rendered}, "
+                              f"из кэша {cached})", end="", flush=True)
+        if total_tiles:
+            print()
 
-    elapsed = time.monotonic() - started
-    print(f"\nГотово за {elapsed:.0f} с: отрисовано {rendered}, "
-          f"из кэша {cached}, без данных {empty}, ошибок {failed}")
+        elapsed = time.monotonic() - started
+        print(f"\nГотово за {elapsed:.0f} с: отрисовано {rendered}, "
+              f"из кэша {cached}, без данных {empty}, ошибок {failed}")
+    else:
+        elapsed = time.monotonic() - started
+        print(f"\nГотово за {elapsed:.0f} с: исходники скачаны, "
+              f"тайлы не рисовались")
     print(f"Кэш: {store.cache_dir}")
 
 
@@ -2033,8 +2047,11 @@ def main():
     parser.add_argument("--precache", action="store_true",
                         help="скачать исходники и отрисовать тайлы для точек "
                              "страницы, затем выйти")
+    parser.add_argument("--precache-tiles", action="store_true",
+                        help="дополнительно отрисовать тайлы (по умолчанию "
+                             "прогрев только скачивает исходники)")
     parser.add_argument("--precache-modes", default="hillshade,elevation,contours",
-                        help="режимы через запятую: hillshade,elevation,contours")
+                        help="режимы тайлов при --precache-tiles, через запятую")
     parser.add_argument("--precache-view", default="1400x900",
                         help="размер окна страницы для прогрева (ШxВ)")
     parser.add_argument("--precache-margin", type=int, default=2,
@@ -2064,7 +2081,8 @@ def main():
         precache(store, cache / "tiles", load_points(),
                  modes=modes or ("hillshade",),
                  view=parse_view(args.precache_view),
-                 jobs=args.jobs, margin=max(0, args.precache_margin))
+                 jobs=args.jobs, margin=max(0, args.precache_margin),
+                 render_tiles=args.precache_tiles)
         return
 
     Handler.store = store
