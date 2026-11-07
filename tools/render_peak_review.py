@@ -53,6 +53,7 @@ def load_rows(csv_path):
         "lon", "lat", "dem", "max3", "min3", "max5", "summit_distance",
         "summit_drop", "cross300", "cross600", "ridge_distance",
         "divide_distance", "sharp_distance", "ring_higher", "ele",
+        "ele_diff", "cross900", "ring_700_higher",
     )
     rows = []
     with Path(csv_path).open(encoding="utf-8") as handle:
@@ -251,17 +252,39 @@ def render_peak(row, peaks_index, waterlines, dem, radius, out_path):
             f"водораздел: {row['divide_distance']:.0f} м, "
             f"острый гребень: {row['sharp_distance']:.0f} м",
             f"кольцо 200 м выше точки на {row['ring_higher']:.0%}",
-            f"поперёк склона (600 м): {row['cross600']:+.0f} м",
+            f"поперёк склона (600 м): {row['cross600']:+.0f} м, "
+            f"(900 м): {row['cross900']:+.0f} м",
             ("ближайшая вершина рельефа: "
              f"{row['summit_distance']:.0f} м, +{row['summit_drop']:.0f} м")
             if row['summit_distance'] > 0
             else "точка сама локальный максимум DEM",
             f"локальный макс. в 90 м: {row['max3']:.0f} м",
+            (f"OSM ele и DEM расходятся на {row['ele_diff']:.0f} %"
+             if row['ele_diff'] == row['ele_diff'] else ""),
             f"правка: {row['timestamp'][:10]}  {row['user'] or '(без пользователя)'}",
         ]),
         transform=axes.transAxes, fontsize=8, va="top", ha="left",
         bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.6"),
     )
+
+    # Причины вердикта — из столбца flags.  Без них картинка не
+    # показывает, почему пик помечен ошибочным.
+    reasons = [part for part in row.get("flags", "").split("; ")
+               if part and not part.startswith((
+                   "ниже вершины", "локальный минимум DEM",
+                   "не локальный максимум DEM", "ближайшая вершина рельефа",
+                   "не на хребте", "на хребте", "ближайший локальный максимум",
+                   "до ближайшего гребня", "до ближайшего водораздела",
+                   "до острого гребня", "выше точки",
+                   "ниже соседних пиков OSM"))]
+    if reasons:
+        axes.text(
+            0.015, 0.015,
+            "почему: " + "; ".join(reasons[:3]),
+            transform=axes.transAxes, fontsize=8, va="bottom", ha="left",
+            color="darkred",
+            bbox=dict(facecolor="white", alpha=0.85, edgecolor="0.6"),
+        )
 
     # Масштабная линейка на 1 км.
     bar = 1000.0 / METRES_PER_DEGREE
