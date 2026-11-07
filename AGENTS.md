@@ -133,6 +133,10 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   регистрируются `core/expressions.py: load_expressions()`. Если функции нет,
   QGIS не рисует подписи. Доступные функции — `registered_functions()` через
   `QgsExpression.Functions()`; `registeredFunctionNames()` в QGIS нет.
+- **Название острова не должно вытесняться пиком**: у подписей островов
+  (`island polygon`, `island point names`) `priority=7`, у пиков — `6`.
+  Иначе пик занимает место, и имя острова не размещается. Проверка —
+  `tests/test_template_styles.py`.
 
 ## Источники рельефа
 

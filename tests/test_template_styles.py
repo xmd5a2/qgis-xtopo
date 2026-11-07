@@ -120,6 +120,35 @@ class IsolinesHachureTest(unittest.TestCase):
                     self.assertNotEqual(option.get("name"), DD_PROPERTY)
 
 
+class LabelPriorityTest(unittest.TestCase):
+    """Название острова не должно вытесняться подписью пика."""
+
+    ISLAND_LAYERS = ("island polygon", "island point names")
+    PEAK_LAYER = "peak"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _priorities(self, name):
+        layer = self.layers.get(name)
+        self.assertIsNotNone(layer, f"в шаблоне нет слоя {name}")
+        values = {
+            int(item.get("priority", 0))
+            for item in layer.iter("placement")
+        }
+        self.assertTrue(values, f"у слоя {name} нет размещения подписей")
+        return values
+
+    def test_island_names_are_placed_before_peaks(self):
+        peak = max(self._priorities(self.PEAK_LAYER))
+        for name in self.ISLAND_LAYERS:
+            self.assertGreater(min(self._priorities(name)), peak)
+
+
 class IntermittentWaterStyleTest(unittest.TestCase):
     """Пересыхающая вода нарисована горизонтальной штриховкой без обводки."""
 
