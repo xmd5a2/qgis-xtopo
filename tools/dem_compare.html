@@ -35,6 +35,8 @@
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
   button.active { background: var(--accent); color: #10161a; border-color: var(--accent); }
+  input[type="range"] { padding: 0; height: 18px; accent-color: var(--accent); }
+  #osm-alpha { width: 72px; }
   .spacer { flex: 1; }
   .badge {
     font-size: 11px; padding: 2px 7px; border-radius: 10px;
@@ -63,21 +65,17 @@
     line-height: 1.3;
   }
   .point b { display: block; font-weight: 600; }
-  .point span { color: var(--muted); font-size: 11px; }
-  .meta { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
-  .meta h3 { font-size: 13px; margin: 0 0 2px; }
-  .meta .row { color: var(--muted); font-size: 11px; }
-  .meta .row b { color: var(--text); font-weight: 500; }
   #map { position: relative; overflow: hidden; background: #0d1114; }
-  #canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  #canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
   #canvas.grabbing { cursor: grabbing; }
   #canvas.profile { cursor: crosshair; }
   #overlay {
     position: absolute; left: 10px; top: 10px; pointer-events: none;
-    display: flex; flex-direction: column; gap: 3px;
+    display: flex; flex-direction: column; gap: 1px;
     background: rgba(20,23,26,.78); border: 1px solid var(--line);
-    border-radius: 5px; padding: 6px 9px; font-size: 12px;
+    border-radius: 4px; padding: 4px 7px; font-size: 11px; line-height: 1.35;
   }
+  #overlay .coord { color: var(--muted); font-size: 10px; }
   #readout b { font-weight: 600; }
   #legend {
     position: absolute; right: 10px; bottom: 10px; pointer-events: none;
@@ -85,22 +83,22 @@
     border-radius: 5px; padding: 6px 9px; font-size: 11px; color: var(--muted);
   }
   #progress {
-    position: absolute; right: 10px; top: 10px; min-width: 320px;
+    position: absolute; right: 8px; top: 8px; min-width: 230px;
     background: rgba(20,23,26,.86); border: 1px solid var(--line);
-    border-radius: 6px; padding: 8px 10px; font-size: 12px;
+    border-radius: 5px; padding: 5px 7px; font-size: 11px;
     pointer-events: none;
   }
   #progress h4 {
-    margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    margin: 0 0 3px; font-size: 10px; font-weight: 600; letter-spacing: .06em;
     text-transform: uppercase; color: var(--muted);
   }
-  #progress .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+  #progress .row { display: flex; align-items: center; gap: 6px; margin: 1px 0; }
   #progress .row .name {
-    flex: 0 0 152px; overflow: hidden; text-overflow: ellipsis;
+    flex: 0 0 108px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; color: var(--text);
   }
   #progress .row .bar {
-    flex: 1; height: 7px; background: #2a3136; border-radius: 4px;
+    flex: 1; height: 4px; background: #2a3136; border-radius: 3px;
     overflow: hidden;
   }
   #progress .row .bar i {
@@ -108,7 +106,7 @@
     transition: width .2s;
   }
   #progress .row .count { color: var(--muted); font-variant-numeric: tabular-nums; }
-  #progress .hint { color: var(--muted); font-size: 11px; margin-top: 5px; }
+  #progress .hint { color: var(--muted); font-size: 10px; margin-top: 2px; }
   #progress .done { color: #8fd18f; }
   #log { font-size: 11px; color: var(--muted); margin-top: 6px; }
   #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -119,6 +117,8 @@
     padding: 5px 12px; border-radius: 14px; font-size: 12px; display: none;
   }
   #profile-box { display: none; margin-top: 10px; }
+  #profile-box.active h2 { color: var(--accent); }
+  #profile-box.active svg { border-color: var(--accent); }
   #profile-box svg { width: 100%; height: 170px; background: var(--panel-2);
     border: 1px solid var(--line); border-radius: 4px; }
   .legend-bar { height: 10px; border-radius: 2px; margin: 4px 0 2px;
@@ -154,6 +154,8 @@
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
     <button id="osm" class="active"
             title="Полупрозрачная подложка OpenStreetMap">OSM</button>
+    <input id="osm-alpha" type="range" min="0" max="100" value="100"
+           title="Непрозрачность подложки OSM">
   </div>
   <div class="spacer"></div>
   <span class="badge" id="res-badge">—</span>
@@ -174,12 +176,6 @@
     <div class="note" id="local-note">GeoTIFF, HGT, VRT. Локальные данные,
       прогревать не нужно.</div>
 
-    <h2>Набор A</h2>
-    <div class="meta" id="meta-a"></div>
-
-    <h2>Набор B</h2>
-    <div class="meta" id="meta-b"></div>
-
     <h2>Легенда высот</h2>
     <div class="legend-bar"></div>
     <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
@@ -198,7 +194,8 @@
       красный — выше. «профиль» — кликните две точки.
       <br><br>
       <b>OSM</b> — полупрозрачная подложка OpenStreetMap: по ней видно, куда
-      вы сдвинули карту. Кнопка <b>OSM</b> в шапке отключает её.
+      вы сдвинули карту. Кнопка <b>OSM</b> в шапке отключает её, ползунок
+      рядом задаёт непрозрачность.
       <br><br>
       <b>Свой рельеф</b> — укажите каталог с GeoTIFF, HGT или VRT: сервер
       проиндексирует файлы, и набор появится в списках A и B. Данные
@@ -218,7 +215,6 @@
     <div id="hint"></div>
     <div id="overlay">
       <div id="readout">—</div>
-      <div class="note" id="src-note"></div>
     </div>
     <div id="progress">
       <h4>Загрузка тайлов</h4>
@@ -293,6 +289,7 @@ const state = {
   compare: true,
   diff: false,
   osm: true,
+  osmAlpha: 1,
   center: {lon: 7.6586, lat: 45.9763},
   zoom: 12,
   minZoom: 2,
@@ -366,7 +363,6 @@ async function loadDatasets() {
   state.b = state.datasets[keepB] ? keepB : data.default_b;
   fillSelect(document.getElementById("ds-a"), state.a);
   fillSelect(document.getElementById("ds-b"), state.b);
-  renderMeta();
 }
 
 function fillSelect(select, value) {
@@ -485,7 +481,7 @@ function draw() {
   let osmLoaded = 0;
   const progress = {};
 
-  const drawLayer = (ds, mode, clipX, bucket, layerZoom = tz,
+  const drawLayer = (ds, mode, clip, bucket, layerZoom = tz,
                      counted = true) => {
     if (!ds) return;
     const layerScale = Math.pow(2, state.zoom - layerZoom);
@@ -501,9 +497,9 @@ function draw() {
       ? (progress[bucket] || {wanted: 0, loaded: 0}) : null;
     if (stats) progress[bucket] = stats;
     ctx.save();
-    if (clipX !== null) {
+    if (clip !== null) {
       ctx.beginPath();
-      ctx.rect(clipX, 0, w - clipX, h);
+      ctx.rect(clip[0], 0, clip[1] - clip[0], h);
       ctx.clip();
     }
     const firstX = Math.floor(layerLeft / tileSize) - 1;
@@ -560,8 +556,9 @@ function draw() {
   // Подложка OSM лежит под рельефом, поэтому рельеф рисуем полупрозрачным.
   // Выше 19-го зума OSM тайлов нет — растягиваем последний доступный.
   const osmZoom = Math.min(tz, 19);
-  if (state.osm) {
+  if (state.osm && state.osmAlpha > 0) {
     ctx.save();
+    ctx.globalAlpha = state.osmAlpha;
     drawLayer("__osm__", "osm", null, "osm", osmZoom, false);
     ctx.restore();
   }
@@ -572,7 +569,7 @@ function draw() {
                   frameState.top * scale - top, w * k, h * k);
   }
 
-  const demAlpha = (state.osm && osmLoaded > 0) ? 0.7 : 1;
+  const demAlpha = (state.osm && state.osmAlpha > 0 && osmLoaded > 0) ? 0.7 : 1;
   if (state.diff && state.a && state.b) {
     ctx.save();
     ctx.globalAlpha = demAlpha;
@@ -582,8 +579,10 @@ function draw() {
     const split = Math.round(w * state.divider);
     ctx.save();
     ctx.globalAlpha = demAlpha;
-    drawLayer(state.a, state.mode, null, "a");
-    drawLayer(state.b, state.mode, split, "b");
+    // Каждая половина рисуется ровно один раз: иначе B ложится поверх A,
+    // и справа подложка видна слабее, чем слева.
+    drawLayer(state.a, state.mode, [0, split], "a");
+    drawLayer(state.b, state.mode, [split, w], "b");
     ctx.restore();
     ctx.save();
     ctx.strokeStyle = "#6fb3d2";
@@ -726,25 +725,6 @@ function drawScaleBar() {
 // ---------------------------------------------------------------------------
 // Панели и подписи
 // ---------------------------------------------------------------------------
-function renderMeta() {
-  ["a", "b"].forEach(side => {
-    const key = state[side];
-    const box = document.getElementById("meta-" + side);
-    if (!key || !state.datasets[key]) {
-      box.innerHTML = '<div class="note">не выбран</div>';
-      return;
-    }
-    const item = state.datasets[key];
-    box.innerHTML = `
-      <h3>${item.title}</h3>
-      <div class="row">поставщик: <b>${item.provider}</b></div>
-      <div class="row">вертикаль: <b>${item.datum}</b></div>
-      <div class="row">тип: <b>${item.kind === "surface" ? "поверхность (DSM)" : "земля (DTM)"}</b></div>
-      <div class="row">${item.note}</div>
-      <div class="row" style="margin-top:4px">${item.attribution}</div>`;
-  });
-}
-
 function showHint(text) {
   const hint = document.getElementById("hint");
   hint.textContent = text || "";
@@ -796,7 +776,8 @@ async function refreshReadout() {
     const info = results[index];
     const value = info && info.elevation !== null && info.elevation !== undefined
       ? info.elevation.toFixed(1) + " м" : "—";
-    parts.push(`<b>${state.datasets[ds].title.split(" (")[0]}</b>: ${value}`);
+    parts.push(`<b>${state.datasets[ds].short ||
+      state.datasets[ds].title.split(" (")[0]}</b>: ${value}`);
     if (index === 0) { delta = info && info.elevation; }
     else if (delta !== null && info && info.elevation !== null) {
       delta = info.elevation - delta;
@@ -806,7 +787,8 @@ async function refreshReadout() {
     parts.push(`Δ: ${delta >= 0 ? "+" : ""}${delta.toFixed(1)} м`);
   }
   document.getElementById("readout").innerHTML =
-    `${lon.toFixed(5)}°, ${lat.toFixed(5)}°<br>` + parts.join("<br>");
+    `<span class="coord">${lon.toFixed(5)}°, ${lat.toFixed(5)}°</span><br>` +
+    parts.join("<br>");
   document.getElementById("coord-badge").textContent =
     `z=${state.zoom.toFixed(1)} · ${groundResolution(state.center.lat, state.zoom).toFixed(1)} м/пикс`;
 }
@@ -818,6 +800,7 @@ async function buildProfile(a, b) {
   const box = document.getElementById("profile-box");
   const svg = document.getElementById("profile-svg");
   box.style.display = "block";
+  box.classList.add("active");
   const [lon1, lat1] = a;
   const [lon2, lat2] = b;
   const fetchProfile = ds => fetch(
@@ -973,10 +956,10 @@ window.addEventListener("resize", resize);
 // Элементы управления
 // ---------------------------------------------------------------------------
 document.getElementById("ds-a").addEventListener("change", event => {
-  state.a = event.target.value; renderMeta(); requestRender(); refreshReadout();
+  state.a = event.target.value; requestRender(); refreshReadout();
 });
 document.getElementById("ds-b").addEventListener("change", event => {
-  state.b = event.target.value; renderMeta(); requestRender(); refreshReadout();
+  state.b = event.target.value; requestRender(); refreshReadout();
 });
 document.getElementById("mode").addEventListener("change", event => {
   state.mode = event.target.value; requestRender();
@@ -985,7 +968,7 @@ document.getElementById("swap").addEventListener("click", () => {
   const a = state.a; state.a = state.b; state.b = a;
   document.getElementById("ds-a").value = state.a;
   document.getElementById("ds-b").value = state.b;
-  renderMeta(); requestRender(); refreshReadout();
+  requestRender(); refreshReadout();
 });
 document.getElementById("compare").addEventListener("click", event => {
   state.compare = !state.compare;
@@ -1034,6 +1017,16 @@ document.getElementById("osm").addEventListener("click", event => {
   writeUrl();
 });
 
+document.getElementById("osm-alpha").addEventListener("input", event => {
+  state.osmAlpha = Number(event.target.value) / 100;
+  if (state.osmAlpha > 0 && !state.osm) {
+    state.osm = true;
+    document.getElementById("osm").classList.add("active");
+  }
+  requestRender();
+});
+document.getElementById("osm-alpha").addEventListener("change", writeUrl);
+
 // Подключение собственного каталога с рельефом: сервер индексирует файлы,
 // страница добавляет набор в списки и выбирает его в A.
 async function addLocalSource() {
@@ -1057,7 +1050,6 @@ async function addLocalSource() {
     state.a = info.key;
     fillSelect(document.getElementById("ds-a"), state.a);
     note.textContent = `${info.files} файлов, ${info.directory}`;
-    renderMeta();
     requestRender();
     refreshReadout();
     writeUrl();
@@ -1072,8 +1064,8 @@ document.getElementById("local-dir").addEventListener("keydown", event => {
 });
 
 document.getElementById("points").innerHTML = POINTS.map((point, index) =>
-  `<button class="point" data-index="${index}"><b>${point.name}</b>` +
-  `<span>${point.kind}</span></button>`).join("");
+  `<button class="point" data-index="${index}" ` +
+  `title="${point.kind}. ${point.note}"><b>${point.name}</b></button>`).join("");
 
 document.getElementById("points").addEventListener("click", event => {
   const button = event.target.closest(".point");
@@ -1091,14 +1083,11 @@ function selectPlace(point, index) {
   state.place = point;
   const badge = document.getElementById("place-badge");
   badge.textContent = point ? point.name : "место не выбрано";
+  badge.title = point ? `${point.kind}. ${point.note}` : "выбранное место";
   badge.classList.toggle("set", Boolean(point));
   document.querySelectorAll("#points .point").forEach(item => {
     item.classList.toggle("active", Number(item.dataset.index) === index);
   });
-  if (point) {
-    document.getElementById("src-note").textContent =
-      `${point.kind}. ${point.note}`;
-  }
 }
 
 // Если точка совпадает с одной из заготовок — показываем её название.
@@ -1142,6 +1131,12 @@ function readUrl() {
   }
   if (params.get("z")) state.zoom = parseFloat(params.get("z"));
   if (params.get("osm") === "0") state.osm = false;
+  if (params.get("osma") !== null) {
+    const alpha = parseFloat(params.get("osma")) / 100;
+    if (Number.isFinite(alpha)) {
+      state.osmAlpha = Math.max(0, Math.min(1, alpha));
+    }
+  }
 }
 
 function writeUrl() {
@@ -1151,6 +1146,7 @@ function writeUrl() {
   params.set("mode", state.mode);
   if (state.diff) params.set("diff", "1");
   params.set("osm", state.osm ? "1" : "0");
+  params.set("osma", String(Math.round(state.osmAlpha * 100)));
   params.set("lon", state.center.lon.toFixed(5));
   params.set("lat", state.center.lat.toFixed(5));
   params.set("z", state.zoom.toFixed(1));
@@ -1168,11 +1164,12 @@ loadDatasets().then(() => {
   document.getElementById("diff").classList.toggle("active", state.diff);
   document.getElementById("compare").classList.toggle("active", state.compare);
   document.getElementById("osm").classList.toggle("active", state.osm);
+  document.getElementById("osm-alpha").value =
+    String(Math.round(state.osmAlpha * 100));
   const found = matchPlace(state.center.lon, state.center.lat);
   if (found) {
     selectPlace(found.point, found.index);
   }
-  renderMeta();
   resize();
   requestRender();
   refreshReadout();
