@@ -224,6 +224,9 @@
       Пунктир — границы градусных тайлов 1×1°, подписаны как <b>N45E007</b>:
       так же называются исходники SRTM и Copernicus.
       <br><br>
+      Ниже <b>z9</b> рельеф не рисуется — остаётся подложка OSM: на таких
+      масштабах обобщённые тайлы только мешают ориентироваться.
+      <br><br>
       <b>3DEP</b> покрывает только США — в остальных точках он пуст.
       <b>NASADEM</b> не заходит выше 61° и ниже −56°.
       <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
@@ -344,6 +347,8 @@ let frameState = null;
 // Геометрия
 // ---------------------------------------------------------------------------
 const TILE = 256;
+// Ниже этого зума рельеф не рисуется: остаётся подложка OSM.
+const RELIEF_MIN_ZOOM = 9;
 
 function project(lon, lat, zoom) {
   const scale = TILE * Math.pow(2, zoom);
@@ -696,7 +701,10 @@ function draw() {
 
   const demAlpha = (state.osm && state.osmAlpha > 0 && osmLoaded > 0) ? 0.7 : 1;
   let splitAt = null;
-  if (state.diff && state.a && state.b) {
+  if (state.zoom < RELIEF_MIN_ZOOM) {
+    // Ниже z9 рельеф не рисуем: обобщённые тайлы дают кашу, остаётся
+    // подложка OSM для ориентирования.
+  } else if (state.diff && state.a && state.b) {
     ctx.save();
     ctx.globalAlpha = demAlpha;
     drawLayer("__diff__", "diff", null, "diff");
@@ -794,7 +802,10 @@ function renderProgress() {
     return `скачивание с сервера: ${first.label}${extra} · ` +
       `${Math.round(first.seconds)} с`;
   };
-  if (downloads.length) {
+  if (state.zoom < RELIEF_MIN_ZOOM) {
+    hint.className = "hint";
+    hint.textContent = "рельеф рисуется с z9";
+  } else if (downloads.length) {
     // Пока сервер тянет исходники, честно показываем это, даже если
     // видимые тайлы уже готовы (докачиваются соседние).
     hint.className = "hint net";
