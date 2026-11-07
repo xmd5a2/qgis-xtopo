@@ -322,7 +322,8 @@ const state = {
   tiles: new Map(),
   cursor: null,
   lastReadout: 0,
-  native: {}
+  native: {},
+  log: []
 };
 
 const canvas = document.getElementById("canvas");
@@ -434,8 +435,10 @@ function getTile(ds, mode, z, x, y) {
       image.onload = () => {
         entry.image = image;
         entry.loaded = true;
-        if (log) addLog(ds, `${z}/${x}/${y}`, entry.status, entry.seconds);
+        // Перерисовка важнее журнала: если запись в журнал сломается,
+        // тайл всё равно должен появиться без действий пользователя.
         requestRender();
+        if (log) addLog(ds, `${z}/${x}/${y}`, entry.status, entry.seconds);
       };
       image.onerror = () => { entry.failed = true; requestRender(); };
       image.src = URL.createObjectURL(blob);
