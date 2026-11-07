@@ -167,6 +167,10 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `[%if(@dem_attribution ...)%]`. `rewrite_project_archive` получает
   `dem_attribution` из выбранного источника. Ширина подписи в шаблоне
   увеличена до 210 мм под длинную строку Copernicus.
+- Строки доступности в панели короткие (`Availability.message`), полные
+  формулировки — в `Availability.detail` и подсказке. Подпись в панели —
+  `WrappedLabel`: высота считается по фактической ширине, иначе в узкой
+  панели обрезается последняя строка с числом тайлов.
 - Верхняя граница охвата не включает тайл, начинающийся ровно на ней:
   `tiles_for_bbox` использует `ceil(max) - 1`.
 

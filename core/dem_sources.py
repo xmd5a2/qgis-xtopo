@@ -57,6 +57,8 @@ class DemSource:
     datum: str
     coverage: str
     note: str
+    # Короткое покрытие для панели: полное с оговорками не помещается.
+    coverage_short: str = ""
     attribution: str = ""
     collection: str = ""
     lat_min: float = None
@@ -94,6 +96,7 @@ SOURCES = (
         datum="EGM2008",
         coverage="суша; 25 тайлов не опубликованы (Армения, Азербайджан, "
                  "СЗ Иран, Туркменистан)",
+        coverage_short="суша",
         note="TanDEM-X. В крутых склонах точнее SRTM; на море данных нет. "
              "На высоких широтах шаг по долготе грубее.",
         attribution="Produced using Copernicus data and information funded "
@@ -147,8 +150,9 @@ SOURCES = (
         short="Свой каталог",
         provider="пользовательские данные",
         resolution="любое",
-        datum="зависит от данных",
+        datum="по данным",
         coverage="по вашему каталогу",
+        coverage_short="по каталогу",
         note="Тайлы .tif/.hgt/.zip с именами как у SRTM (N42E044).",
         manual=True,
     ),
@@ -324,7 +328,9 @@ class Availability:
     available: bool = True
     checked: bool = False
     partial: bool = False
+    # Короткая строка для панели и подробное объяснение для подсказки.
     message: str = ""
+    detail: str = ""
     missing: int = 0
     total: int = 0
 
@@ -359,24 +365,29 @@ def _range_availability(item, bbox):
     if clipped is None:
         return Availability(
             available=False, checked=True, partial=False,
-            message=i18n.trf("Охват вне покрытия набора: {}", i18n.tr(item.coverage)),
+            message=i18n.tr("вне покрытия"),
+            detail=i18n.trf(
+                "Охват вне покрытия набора: {}", i18n.tr(item.coverage)
+            ),
             total=0,
         )
     clipped_bbox = BBox(*clipped)
     total = len(tiles_for_bbox(clipped_bbox))
     partial = clipped != _bbox_tuple(bbox)
     if partial:
-        message = i18n.trf(
+        message = i18n.trf("не весь охват, тайлов: {}", total)
+        detail = i18n.trf(
             "Данные есть не для всего охвата: часть за пределами {}",
             i18n.tr(item.coverage),
         )
     else:
-        message = i18n.trf(
+        message = i18n.trf("весь охват, тайлов: {}", total)
+        detail = i18n.trf(
             "Данные есть для всего охвата: тайлов — {}", total
         )
     return Availability(
         available=True, checked=True, partial=partial,
-        message=message, missing=0, total=total,
+        message=message, detail=detail, missing=0, total=total,
     )
 
 
@@ -385,7 +396,10 @@ def _stac_availability(item, bbox, timeout=30):
     if clipped is None:
         return Availability(
             available=False, checked=True,
-            message=i18n.trf("Охват вне покрытия набора: {}", i18n.tr(item.coverage)),
+            message=i18n.tr("вне покрытия"),
+            detail=i18n.trf(
+                "Охват вне покрытия набора: {}", i18n.tr(item.coverage)
+            ),
         )
     clipped_bbox = BBox(*clipped)
     items = stac_items(
@@ -397,7 +411,8 @@ def _stac_availability(item, bbox, timeout=30):
     if not covered:
         return Availability(
             available=False, checked=True, partial=False,
-            message=i18n.trf(
+            message=i18n.tr("нет данных"),
+            detail=i18n.trf(
                 "Нет данных для выбранного охвата (покрытие: {})",
                 i18n.tr(item.coverage),
             ),
@@ -407,19 +422,24 @@ def _stac_availability(item, bbox, timeout=30):
     partial = bool(missing) or outside
     if partial:
         message = i18n.trf(
+            "{} из {} тайлов", len(covered), len(required)
+        )
+        detail = i18n.trf(
             "Данные есть не для всех тайлов охвата: {} из {} "
             "(часть может быть морем или не опубликована)",
             len(covered), len(required),
         )
         if outside:
-            message += i18n.tr("; часть охвата вне покрытия набора")
+            detail += i18n.tr("; часть охвата вне покрытия набора")
     else:
-        message = i18n.trf(
+        message = i18n.trf("весь охват, тайлов: {}", len(required))
+        detail = i18n.trf(
             "Данные есть для всего охвата: тайлов — {}", len(required)
         )
     return Availability(
         available=True, checked=True, partial=partial,
-        message=message, missing=len(missing), total=len(required),
+        message=message, detail=detail,
+        missing=len(missing), total=len(required),
     )
 
 
@@ -427,7 +447,7 @@ def _check_one(item, bbox, timeout):
     if item.manual:
         return Availability(
             available=True, checked=True,
-            message=i18n.tr("Свой каталог: каталог выбирается вручную"),
+            message=i18n.tr("каталог выбирается вручную"),
         )
     if not item.collection:
         return _range_availability(item, bbox)
@@ -436,7 +456,8 @@ def _check_one(item, bbox, timeout):
     except Exception as exc:  # noqa: BLE001 - проверка не должна ломать UI
         return Availability(
             available=True, checked=False,
-            message=i18n.tr(
+            message=i18n.tr("ошибка проверки"),
+            detail=i18n.tr(
                 "Не удалось проверить доступность: {}"
             ).replace("{}", str(exc)),
         )
@@ -465,17 +486,20 @@ def check_availability(bbox, cancel=None, timeout=30):
 def describe(key, availability=None):
     """Краткое описание источника для интерфейса.
 
-    Возвращает пару ``(текст, подсказка)``.  Текст — несколько строк:
-    название, провайдер, система высот, покрытие и доступность.
+    Возвращает пару ``(текст, подсказка)``.  Текст — короткие строки:
+    провайдер, система высот и короткое покрытие, затем доступность.
+    Подробности — в подсказке: в узкой панели длинный текст обрезается.
     """
     item = source(key)
-    title = i18n.tr(item.title)
     provider = i18n.tr(item.provider)
     datum = i18n.tr(item.datum)
     note = i18n.tr(item.note)
     coverage = i18n.tr(item.coverage)
-    first = " · ".join(value for value in (title, provider, datum) if value)
-    lines = [first, i18n.trf("{} Покрытие: {}", note, coverage)]
+    coverage_short = i18n.tr(item.coverage_short or item.coverage)
+    first = " · ".join(
+        value for value in (provider, datum, coverage_short) if value
+    )
+    lines = [first]
     if availability is not None:
         lines.append(
             i18n.tr("Доступность: {}").replace(
@@ -489,6 +513,11 @@ def describe(key, availability=None):
         i18n.trf("Покрытие: {}", coverage),
         note,
     ]
+    if availability is not None:
+        detail = availability.detail or availability.message
+        tooltip.append(
+            i18n.tr("Доступность: {}").replace("{}", i18n.tr(detail))
+        )
     if item.attribution:
         tooltip.append(i18n.trf(
             "Атрибуция: {}", i18n.tr(item.attribution)

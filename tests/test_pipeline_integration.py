@@ -637,12 +637,26 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertIn("не найден", dock.dem_info.text())
             with tempfile.TemporaryDirectory() as dem:
                 dock.dem_dir.setText(dem)
-                self.assertIn("Каталог:", dock.dem_info.text())
+                self.assertIn("каталог выбран", dock.dem_info.text())
             dock.dem_source.setCurrentIndex(
                 dock.dem_source.findData("srtm")
             )
             self.assertTrue(dock.dem_dir_row.isHidden())
-            self.assertIn("SRTM", dock.dem_info.text())
+            self.assertIn("NASA/USGS", dock.dem_info.text())
+
+            # Число тайлов должно быть в короткой строке доступности,
+            # а не теряться при переносе длинного текста.
+            from qgis_xtopo.core import dem_sources
+
+            dock._dem_availability = {
+                "srtm": dem_sources.Availability(
+                    available=True, checked=True,
+                    message="весь охват, тайлов: 2",
+                ),
+            }
+            dock._dem_check_message = ""
+            dock._update_dem_info()
+            self.assertIn("тайлов: 2", dock.dem_info.text())
             with tempfile.TemporaryDirectory() as directory:
                 dock.projects_dir.setText(directory)
                 dock.project_name.setText("demo")

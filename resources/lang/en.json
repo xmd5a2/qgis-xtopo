@@ -434,5 +434,20 @@
   "Найдено тайлов {}: {}": "Tiles found for {}: {}",
   "Большой охват: разрешение снижено до ~{} м": "Large extent: resolution reduced to ~{} m",
   "Загрузка рельефа {}: {}": "Downloading terrain {}: {}",
-  "Данные есть не для всего охвата: часть за пределами {}": "Data available for only part of the extent: part is outside {}"
+  "Данные есть не для всего охвата: часть за пределами {}": "Data available for only part of the extent: part is outside {}",
+  "нет данных": "no data",
+  "вне покрытия": "outside coverage",
+  "каталог выбран": "directory selected",
+  "каталог не выбран": "no directory selected",
+  "каталог не найден": "directory not found",
+  "путь не каталог": "path is not a directory",
+  "каталог выбирается вручную": "directory is selected manually",
+  "ошибка проверки": "check failed",
+  "не проверено": "not checked",
+  "суша": "land",
+  "по данным": "from the data",
+  "по каталогу": "from the directory",
+  "весь охват, тайлов: {}": "whole extent, tiles: {}",
+  "{} из {} тайлов": "{} of {} tiles",
+  "не весь охват, тайлов: {}": "partial extent, tiles: {}"
 }

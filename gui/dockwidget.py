@@ -400,6 +400,40 @@ class GeofabrikPlanWorker(QThread):
         self.cancel_event.set()
 
 
+class WrappedLabel(QLabel):
+    """Подпись, высота которой следует за переносами строк.
+
+    QLabel с wordWrap в QFormLayout может получить меньше высоты, чем
+    нужно тексту, и тогда последняя строка обрезается.  Минимальная
+    высота считается по фактической ширине.
+    """
+
+    def _wrapped_height(self, hint):
+        width = self.width()
+        if width > 0 and self.wordWrap():
+            hint.setHeight(max(hint.height(), self.heightForWidth(width)))
+        return hint
+
+    def sizeHint(self):
+        return self._wrapped_height(super().sizeHint())
+
+    def minimumSizeHint(self):
+        return self._wrapped_height(super().minimumSizeHint())
+
+    def setText(self, text):
+        super().setText(text)
+        self._sync_height()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_height()
+
+    def _sync_height(self):
+        width = self.width()
+        if width > 0 and self.wordWrap():
+            self.setMinimumHeight(self.heightForWidth(width))
+
+
 class XtopoDockWidget(QDockWidget):
     def __init__(self, iface, parent=None):
         super().__init__("QGIS-xtopo", parent)
@@ -411,6 +445,7 @@ class XtopoDockWidget(QDockWidget):
         self.dem_availability_worker = None
         self._dem_availability = {}
         self._dem_check_message = ""
+        self._dem_check_detail = ""
         self._dem_availability_generation = 0
         self._dem_check_timer = QTimer(self)
         self._dem_check_timer.setSingleShot(True)
@@ -702,7 +737,7 @@ class XtopoDockWidget(QDockWidget):
             self.dem_source.addItem(i18n.tr(item.title), item.key)
         self.dem_source.currentIndexChanged.connect(self._dem_source_changed)
         terrain_form.addRow("Источник:", self.dem_source)
-        self.dem_info = QLabel()
+        self.dem_info = WrappedLabel()
         self.dem_info.setWordWrap(True)
         try:
             self.dem_info.setTextFormat(Qt.TextFormat.PlainText)
@@ -1783,17 +1818,21 @@ class XtopoDockWidget(QDockWidget):
     def _dem_manual_availability(self):
         value = self.dem_dir.text().strip()
         if not value:
-            message = "Свой каталог: каталог не выбран"
+            message = "каталог не выбран"
+            detail = "Свой каталог: каталог не выбран"
         else:
             path = Path(value).expanduser()
             if not path.exists():
-                message = f"Каталог DEM не найден: {path}"
+                message = "каталог не найден"
+                detail = f"Каталог DEM не найден: {path}"
             elif not path.is_dir():
-                message = f"Указанный путь не является каталогом: {path}"
+                message = "путь не каталог"
+                detail = f"Указанный путь не является каталогом: {path}"
             else:
-                message = f"Каталог: {path}"
+                message = "каталог выбран"
+                detail = f"Каталог: {path}"
         return dem_sources.Availability(
-            available=True, checked=True, message=message,
+            available=True, checked=True, message=message, detail=detail,
         )
 
     def _update_dem_info(self):
@@ -1809,8 +1848,8 @@ class XtopoDockWidget(QDockWidget):
             if availability is None:
                 availability = dem_sources.Availability(
                     available=True, checked=False,
-                    message=self._dem_check_message
-                    or "Охват не выбран — доступность не проверена",
+                    message=self._dem_check_message or "не проверено",
+                    detail=self._dem_check_detail,
                 )
         text, tooltip = dem_sources.describe(key, availability)
         self.dem_info.setText(text)
@@ -1821,24 +1860,30 @@ class XtopoDockWidget(QDockWidget):
         self._dem_availability = {}
         if not self.bbox.text().strip():
             self._dem_check_timer.stop()
-            self._dem_check_message = "Охват не выбран — доступность не проверена"
+            self._dem_check_message = "не проверено"
+            self._dem_check_detail = (
+                "Охват не выбран — доступность не проверена"
+            )
             self._update_dem_info()
             return
-        self._dem_check_message = "Проверка доступности…"
+        self._dem_check_message = "проверка…"
+        self._dem_check_detail = "Проверка доступности…"
         self._update_dem_info()
         self._dem_check_timer.start(600)
 
     def _start_dem_availability(self):
         self._dem_check_timer.stop()
         if self.iface is None:
-            self._dem_check_message = ""
+            self._dem_check_message = "не проверено"
+            self._dem_check_detail = ""
             self._update_dem_info()
             return
         try:
             bbox = parse_bbox(self.bbox.text().strip())
         except Exception as exc:  # noqa: BLE001 - в поле может быть что угодно
             self._dem_availability = {}
-            self._dem_check_message = f"Охват не задан: {exc}"
+            self._dem_check_message = "не проверено"
+            self._dem_check_detail = f"Охват не задан: {exc}"
             self._update_dem_info()
             return
         if self.dem_availability_worker is not None:
@@ -1867,6 +1912,7 @@ class XtopoDockWidget(QDockWidget):
             return
         self._dem_availability = availability
         self._dem_check_message = ""
+        self._dem_check_detail = ""
         self._apply_dem_availability(availability)
         self._update_dem_info()
 
@@ -1874,7 +1920,10 @@ class XtopoDockWidget(QDockWidget):
         if generation != self._dem_availability_generation:
             return
         self._dem_availability = {}
-        self._dem_check_message = f"Не удалось проверить доступность: {message}"
+        self._dem_check_message = "ошибка проверки"
+        self._dem_check_detail = (
+            f"Не удалось проверить доступность: {message}"
+        )
         self._update_dem_info()
 
     def _apply_dem_availability(self, availability):
@@ -1887,7 +1936,7 @@ class XtopoDockWidget(QDockWidget):
                 tooltip = ""
             else:
                 enabled = state.available or not state.checked
-                tooltip = state.message
+                tooltip = state.detail or state.message
             model = self.dem_source.model()
             item = model.item(index) if hasattr(model, "item") else None
             if item is not None:
@@ -1999,6 +2048,9 @@ class XtopoDockWidget(QDockWidget):
                 if self.dem_dir.text().strip()
                 else dem_sources.DEFAULT_SOURCE
             )
+        if (saved_source == dem_sources.MANUAL_SOURCE
+                and not self.dem_dir.text().strip()):
+            saved_source = dem_sources.DEFAULT_SOURCE
         source_index = self.dem_source.findData(saved_source)
         self.dem_source.setCurrentIndex(max(0, source_index))
         saved_steps = str(self.settings.value("isolines_steps", "") or "")
