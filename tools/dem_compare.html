@@ -54,7 +54,7 @@
   main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
-    overflow-y: auto; padding: 10px 12px 30px;
+    overflow-y: auto; padding: 10px 12px 40px;
   }
   aside h2 {
     font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
@@ -71,12 +71,12 @@
   #canvas.grabbing { cursor: grabbing; }
   #canvas.profile { cursor: crosshair; }
   #readout b { font-weight: 600; }
-  /* Статусная строка поверх карты: высоты, прогресс и масштаб в одну линию. */
+  /* Статусная строка во всю ширину, поверх карты и боковой панели. */
   #statusbar {
-    position: absolute; left: 0; right: 0; bottom: 0;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
     display: flex; align-items: center; gap: 12px;
     padding: 3px 10px; min-height: 28px;
-    background: rgba(20,23,26,.72); border-top: 1px solid var(--line);
+    background: rgba(20,23,26,.84); border-top: 1px solid var(--line);
     font-size: 11px; pointer-events: none;
   }
   #statusbar #readout {
@@ -234,16 +234,17 @@
   <div id="map">
     <canvas id="canvas"></canvas>
     <div id="hint"></div>
-    <div id="statusbar">
-      <div id="readout">—</div>
-      <div class="grow"></div>
-      <div id="progress">
-        <div id="progress-rows"></div>
-        <div class="hint" id="progress-hint"></div>
-      </div>
-      <span class="badge" id="res-badge">—</span>
-      <span class="badge" id="coord-badge">—</span>
+  </div>
+
+  <div id="statusbar">
+    <div id="readout">—</div>
+    <div class="grow"></div>
+    <div id="progress">
+      <div id="progress-rows"></div>
+      <div class="hint" id="progress-hint"></div>
     </div>
+    <span class="badge" id="res-badge">—</span>
+    <span class="badge" id="coord-badge">—</span>
   </div>
 </main>
 
