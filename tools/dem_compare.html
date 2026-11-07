@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Сравнение DEM-наборов — qgis-xtopo</title>
+<style>
+  :root {
+    --bg: #14171a;
+    --panel: #1c2024;
+    --panel-2: #23282d;
+    --line: #333a40;
+    --text: #e6e9ec;
+    --muted: #9aa4ad;
+    --accent: #6fb3d2;
+    --warn: #e0a458;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    display: grid; grid-template-rows: auto 1fr;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 600; }
+  .group { display: flex; align-items: center; gap: 6px; }
+  .group > label { color: var(--muted); }
+  select, button, input {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 4px 7px; font: inherit;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.active { background: var(--accent); color: #10161a; border-color: var(--accent); }
+  .spacer { flex: 1; }
+  .badge {
+    font-size: 11px; padding: 2px 7px; border-radius: 10px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .badge.native { color: #0d1417; background: var(--accent); border-color: var(--accent); }
+  .badge.warn { color: #14100a; background: var(--warn); border-color: var(--warn); }
+  main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+  aside {
+    background: var(--panel); border-right: 1px solid var(--line);
+    overflow-y: auto; padding: 10px 12px 30px;
+  }
+  aside h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 16px 0 6px; font-weight: 600;
+  }
+  aside h2:first-child { margin-top: 0; }
+  .point {
+    display: block; width: 100%; text-align: left; margin-bottom: 4px;
+    line-height: 1.3;
+  }
+  .point b { display: block; font-weight: 600; }
+  .point span { color: var(--muted); font-size: 11px; }
+  .meta { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
+  .meta h3 { font-size: 13px; margin: 0 0 2px; }
+  .meta .row { color: var(--muted); font-size: 11px; }
+  .meta .row b { color: var(--text); font-weight: 500; }
+  #map { position: relative; overflow: hidden; background: #0d1114; }
+  #canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  #canvas.grabbing { cursor: grabbing; }
+  #canvas.profile { cursor: crosshair; }
+  #overlay {
+    position: absolute; left: 10px; bottom: 10px; pointer-events: none;
+    display: flex; flex-direction: column; gap: 3px;
+    background: rgba(20,23,26,.78); border: 1px solid var(--line);
+    border-radius: 5px; padding: 6px 9px; font-size: 12px;
+  }
+  #readout b { font-weight: 600; }
+  #legend {
+    position: absolute; right: 10px; bottom: 10px; pointer-events: none;
+    background: rgba(20,23,26,.78); border: 1px solid var(--line);
+    border-radius: 5px; padding: 6px 9px; font-size: 11px; color: var(--muted);
+  }
+  #hint {
+    position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+    background: rgba(20,23,26,.9); border: 1px solid var(--line);
+    padding: 5px 12px; border-radius: 14px; font-size: 12px; display: none;
+  }
+  #profile-box { display: none; margin-top: 10px; }
+  #profile-box svg { width: 100%; height: 170px; background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 4px; }
+  .legend-bar { height: 10px; border-radius: 2px; margin: 4px 0 2px;
+    background: linear-gradient(90deg,#3a6a3e,#6e9b5c,#b0c484,#dedba8,#c4ac7a,#92745a,#604a3e); }
+  .legend-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
+  code { background: var(--panel-2); padding: 1px 4px; border-radius: 3px; }
+  .note { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Сравнение DEM</h1>
+  <div class="group">
+    <label for="ds-a">A</label>
+    <select id="ds-a"></select>
+    <label for="mode">режим</label>
+    <select id="mode">
+      <option value="hillshade">отмывка</option>
+      <option value="elevation">высоты</option>
+      <option value="contours">горизонтали</option>
+    </select>
+  </div>
+  <div class="group">
+    <label for="ds-b">B</label>
+    <select id="ds-b"></select>
+    <button id="swap" title="Поменять A и B">⇄</button>
+    <button id="compare" class="active" title="Сравнение шторкой">шторка</button>
+    <button id="diff" title="Разность высот B − A">Δ высот</button>
+  </div>
+  <div class="group">
+    <button id="profile-btn" title="Профиль высот по отрезку">профиль</button>
+    <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
+  </div>
+  <div class="spacer"></div>
+  <span class="badge" id="res-badge">—</span>
+  <span class="badge" id="coord-badge">—</span>
+</header>
+
+<main>
+  <aside>
+    <h2>Ключевые точки</h2>
+    <div id="points"></div>
+
+    <h2>Набор A</h2>
+    <div class="meta" id="meta-a"></div>
+
+    <h2>Набор B</h2>
+    <div class="meta" id="meta-b"></div>
+
+    <h2>Легенда высот</h2>
+    <div class="legend-bar"></div>
+    <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
+
+    <div id="profile-box">
+      <h2>Профиль высот</h2>
+      <svg id="profile-svg" viewBox="0 0 300 170" preserveAspectRatio="none"></svg>
+      <div class="note" id="profile-note"></div>
+    </div>
+
+    <h2>Как читать</h2>
+    <div class="note">
+      Колесо — масштаб, перетаскивание — сдвиг. <b>1:1</b> приближает до
+      пикселя источника. В режиме «шторка» слева набор A, справа B — границу
+      тянут мышью. «Δ высот» показывает разность B − A: синий — ниже,
+      красный — выше. «профиль» — кликните две точки.
+      <br><br>
+      <b>3DEP</b> покрывает только США — в остальных точках он пуст.
+      <b>NASADEM</b> не заходит выше 61° и ниже −56°.
+      <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
+    </div>
+  </aside>
+
+  <div id="map">
+    <canvas id="canvas"></canvas>
+    <div id="hint"></div>
+    <div id="overlay">
+      <div id="readout">—</div>
+      <div class="note" id="src-note"></div>
+    </div>
+    <div id="legend">© ESA / NASA / JAXA / USGS · рельеф отрисован сервером</div>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Точки для сравнения: разные типы местности и разные ожидаемые расхождения.
+// ---------------------------------------------------------------------------
+const POINTS = [
+  {name: "Маттерхорн, Альпы", kind: "крутые ледниковые склоны",
+   lon: 7.6586, lat: 45.9763, zoom: 13,
+   note: "SRTM занижает вершины на 100+ м, Copernicus ближе к истине."},
+  {name: "Эверест, Гималаи", kind: "высокогорье, ошибка DEM",
+   lon: 86.9250, lat: 27.9881, zoom: 12,
+   note: "В Гималаях DEM завышен на сотни метров относительно OSM ele."},
+  {name: "Гран-Каньон, США", kind: "каньон на плато",
+   lon: -112.1129, lat: 36.1069, zoom: 12,
+   note: "Проверка вертикали на плато и проработки дна каньона."},
+  {name: "Этна, Сицилия", kind: "вулкан, конус",
+   lon: 14.9934, lat: 37.7510, zoom: 12,
+   note: "DSM против DTM: разница в постройках и лесе на склонах."},
+  {name: "Шпицберген", kind: "полярный рельеф, выше 61°",
+   lon: 15.6469, lat: 78.2232, zoom: 11,
+   note: "NASADEM сюда не доходит: только −56°…+61°."},
+  {name: "Ливия, Сахара", kind: "пустыня, плато",
+   lon: 25.0, lat: 25.0, zoom: 11,
+   note: "Ровные поверхности: видно интерполяционные артефакты."},
+  {name: "Амазония, Бразилия", kind: "тропический лес, DSM против DTM",
+   lon: -62.2159, lat: -3.4653, zoom: 12,
+   note: "ALOS и Copernicus — поверхность с лесом, SRTM — ближе к земле."},
+  {name: "Зейдские земли, Нидерланды", kind: "ниже уровня моря",
+   lon: 4.1420, lat: 51.9475, zoom: 12,
+   note: "Отрицательные высоты: проверка datum и обработки воды."},
+  {name: "Ключевская, Камчатка", kind: "вулкан и хребет",
+   lon: 160.6430, lat: 56.0625, zoom: 11,
+   note: "Снежный вулкан: верх границы растительности."},
+  {name: "Лофотен, Норвегия", kind: "фьорды и острые пики",
+   lon: 13.5022, lat: 68.2094, zoom: 12,
+   note: "Острые грани: NASADEM против SRTM v3."},
+  {name: "Йосемити, США", kind: "гранитный хребет, только 3DEP",
+   lon: -119.5332, lat: 37.7459, zoom: 12,
+   note: "Единственная точка с настоящим DTM: 3DEP (10 м) против остальных."}
+];
+
+const state = {
+  datasets: {},
+  a: "", b: "",
+  mode: "hillshade",
+  compare: true,
+  diff: false,
+  center: {lon: 7.6586, lat: 45.9763},
+  zoom: 12,
+  minZoom: 2,
+  maxZoom: 21,
+  divider: 0.5,
+  dragging: false,
+  dragDivider: false,
+  dragStart: null,
+  profileMode: false,
+  profilePts: [],
+  tiles: new Map(),
+  cursor: null,
+  lastReadout: 0
+};
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const mapEl = document.getElementById("map");
+
+// ---------------------------------------------------------------------------
+// Геометрия
+// ---------------------------------------------------------------------------
+const TILE = 256;
+
+function project(lon, lat, zoom) {
+  const scale = TILE * Math.pow(2, zoom);
+  const x = (lon + 180) / 360 * scale;
+  const s = Math.sin(lat * Math.PI / 180);
+  const y = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * scale;
+  return {x, y};
+}
+
+function unproject(x, y, zoom) {
+  const scale = TILE * Math.pow(2, zoom);
+  const lon = x / scale * 360 - 180;
+  const n = Math.PI - 2 * Math.PI * y / scale;
+  const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  return {lon, lat};
+}
+
+function centerPoint() {
+  return project(state.center.lon, state.center.lat, state.zoom);
+}
+
+function viewSize() {
+  const rect = mapEl.getBoundingClientRect();
+  return {w: rect.width, h: rect.height};
+}
+
+function groundResolution(lat, zoom) {
+  return 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+}
+
+// ---------------------------------------------------------------------------
+// Загрузка данных и тайлов
+// ---------------------------------------------------------------------------
+async function loadDatasets() {
+  const response = await fetch("/api/datasets");
+  const data = await response.json();
+  data.datasets.forEach(item => { state.datasets[item.key] = item; });
+  state.a = data.default_a;
+  state.b = data.default_b;
+  fillSelect(document.getElementById("ds-a"), state.a);
+  fillSelect(document.getElementById("ds-b"), state.b);
+  renderMeta();
+}
+
+function fillSelect(select, value) {
+  select.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— нет —";
+  select.appendChild(none);
+  Object.keys(state.datasets).forEach(key => {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = state.datasets[key].title;
+    select.appendChild(option);
+  });
+  select.value = value;
+}
+
+function tileKey(ds, mode, z, x, y) {
+  return [ds, mode, z, x, y].join("/");
+}
+
+function getTile(ds, mode, z, x, y) {
+  const key = tileKey(ds, mode, z, x, y);
+  let entry = state.tiles.get(key);
+  if (!entry) {
+    const image = new Image();
+    entry = {image, loaded: false, failed: false};
+    state.tiles.set(key, entry);
+    if (ds === "__diff__") {
+      image.src = `/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`;
+    } else {
+      image.src = `/tile/${ds}/${z}/${x}/${y}.png?mode=${mode}`;
+    }
+    image.onload = () => { entry.loaded = true; requestRender(); };
+    image.onerror = () => { entry.failed = true; requestRender(); };
+  }
+  return entry;
+}
+
+// ---------------------------------------------------------------------------
+// Отрисовка
+// ---------------------------------------------------------------------------
+let renderQueued = false;
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; draw(); });
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const {w, h} = viewSize();
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  requestRender();
+}
+
+function draw() {
+  const {w, h} = viewSize();
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#0d1114";
+  ctx.fillRect(0, 0, w, h);
+
+  const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
+  const scale = Math.pow(2, state.zoom - tz);
+  const center = centerPoint();
+  const originX = center.x * scale - w / 2;
+  const originY = center.y * scale - h / 2;
+  const tileCount = Math.pow(2, tz);
+
+  const drawLayer = (ds, mode, clipX) => {
+    if (!ds) return;
+    ctx.save();
+    if (clipX !== null) {
+      ctx.beginPath();
+      ctx.rect(clipX, 0, w - clipX, h);
+      ctx.clip();
+    }
+    const firstX = Math.floor(originX / (TILE * scale)) - 1;
+    const firstY = Math.floor(originY / (TILE * scale)) - 1;
+    const lastX = Math.floor((originX + w) / (TILE * scale)) + 1;
+    const lastY = Math.floor((originY + h) / (TILE * scale)) + 1;
+    for (let tx = firstX; tx <= lastX; tx++) {
+      for (let ty = firstY; ty <= lastY; ty++) {
+        if (ty < 0 || ty >= tileCount) continue;
+        const wrapped = ((tx % tileCount) + tileCount) % tileCount;
+        const entry = getTile(ds, mode, tz, wrapped, ty);
+        if (!entry.loaded) continue;
+        const px = originX + (tx - 0) * TILE * scale - (tx - wrapped) * TILE * scale;
+        const py = originY + ty * TILE * scale;
+        ctx.drawImage(entry.image, px, py, TILE * scale + 1, TILE * scale + 1);
+      }
+    }
+    ctx.restore();
+  };
+
+  if (state.diff && state.a && state.b) {
+    drawLayer("__diff__", "diff", null);
+  } else if (state.compare && state.a && state.b) {
+    const split = Math.round(w * state.divider);
+    drawLayer(state.a, state.mode, null);
+    drawLayer(state.b, state.mode, split);
+    ctx.save();
+    ctx.strokeStyle = "#6fb3d2";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(split, 0);
+    ctx.lineTo(split, h);
+    ctx.stroke();
+    ctx.fillStyle = "#6fb3d2";
+    ctx.beginPath();
+    ctx.arc(split, h / 2, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#10161a";
+    ctx.font = "11px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("⇔", split, h / 2 + 4);
+    ctx.restore();
+  } else {
+    drawLayer(state.a || state.b, state.mode, null);
+  }
+
+  drawScaleBar();
+  updateResolutionBadge();
+}
+
+function drawScaleBar() {
+  const {w, h} = viewSize();
+  const lat = state.center.lat;
+  const meters = groundResolution(lat, state.zoom) * 100;
+  const nice = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10000, 25000,
+                50000, 100000, 250000, 500000, 1000000, 2000000];
+  let chosen = nice[0];
+  for (const value of nice) { if (value <= meters) chosen = value; }
+  const pixels = chosen / groundResolution(lat, state.zoom);
+  const x = 14, y = h - 18;
+  ctx.save();
+  ctx.fillStyle = "rgba(20,23,26,.78)";
+  ctx.fillRect(x - 6, y - 26, pixels + 12, 34);
+  ctx.strokeStyle = "#e6e9ec";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y - 8); ctx.lineTo(x, y); ctx.lineTo(x + pixels, y);
+  ctx.lineTo(x + pixels, y - 8);
+  ctx.stroke();
+  ctx.fillStyle = "#e6e9ec";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(chosen >= 1000 ? (chosen / 1000) + " км" : chosen + " м", x, y - 12);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// Панели и подписи
+// ---------------------------------------------------------------------------
+function renderMeta() {
+  ["a", "b"].forEach(side => {
+    const key = state[side];
+    const box = document.getElementById("meta-" + side);
+    if (!key || !state.datasets[key]) {
+      box.innerHTML = '<div class="note">не выбран</div>';
+      return;
+    }
+    const item = state.datasets[key];
+    box.innerHTML = `
+      <h3>${item.title}</h3>
+      <div class="row">поставщик: <b>${item.provider}</b></div>
+      <div class="row">вертикаль: <b>${item.datum}</b></div>
+      <div class="row">тип: <b>${item.kind === "surface" ? "поверхность (DSM)" : "земля (DTM)"}</b></div>
+      <div class="row">${item.note}</div>
+      <div class="row" style="margin-top:4px">${item.attribution}</div>`;
+  });
+}
+
+function showHint(text) {
+  const hint = document.getElementById("hint");
+  hint.textContent = text || "";
+  hint.style.display = text ? "block" : "none";
+}
+
+function updateResolutionBadge() {
+  const badge = document.getElementById("res-badge");
+  const ds = state.a || state.b;
+  if (!ds) { badge.textContent = "—"; badge.className = "badge"; return; }
+  const screen = groundResolution(state.center.lat, state.zoom);
+  fetch(`/api/info?ds=${ds}&lon=${state.center.lon}&lat=${state.center.lat}`)
+    .then(r => r.json())
+    .then(info => {
+      if (!info || !info.native_y_m) {
+        badge.textContent = "нет данных";
+        badge.className = "badge warn";
+        return;
+      }
+      const native = Math.max(info.native_y_m, info.native_x_m);
+      const ratio = screen / native;
+      if (ratio <= 1.05) {
+        badge.textContent = `полное разрешение · ${native.toFixed(0)} м/пикс`;
+        badge.className = "badge native";
+      } else {
+        badge.textContent = `×${ratio.toFixed(1)} к нативным ${native.toFixed(0)} м/пикс`;
+        badge.className = "badge";
+      }
+    })
+    .catch(() => { badge.textContent = "—"; });
+}
+
+// ---------------------------------------------------------------------------
+// Запрос высот
+// ---------------------------------------------------------------------------
+async function refreshReadout() {
+  const now = Date.now();
+  if (now - state.lastReadout < 250) return;
+  state.lastReadout = now;
+  const {lon, lat} = state.cursor || state.center;
+  const keys = [state.a, state.b].filter(Boolean);
+  const results = await Promise.all(keys.map(ds =>
+    fetch(`/api/value?ds=${ds}&lon=${lon}&lat=${lat}`).then(r => r.json())
+      .catch(() => null)));
+  const parts = [];
+  let delta = null;
+  let i = 0;
+  keys.forEach((ds, index) => {
+    const info = results[index];
+    const value = info && info.elevation !== null && info.elevation !== undefined
+      ? info.elevation.toFixed(1) + " м" : "—";
+    parts.push(`<b>${state.datasets[ds].title.split(" (")[0]}</b>: ${value}`);
+    if (index === 0) { delta = info && info.elevation; }
+    else if (delta !== null && info && info.elevation !== null) {
+      delta = info.elevation - delta;
+    }
+  });
+  if (delta !== null && parts.length === 2) {
+    parts.push(`Δ: ${delta >= 0 ? "+" : ""}${delta.toFixed(1)} м`);
+  }
+  document.getElementById("readout").innerHTML =
+    `${lon.toFixed(5)}°, ${lat.toFixed(5)}°<br>` + parts.join("<br>");
+  document.getElementById("coord-badge").textContent =
+    `z=${state.zoom.toFixed(1)} · ${groundResolution(state.center.lat, state.zoom).toFixed(1)} м/пикс`;
+}
+
+// ---------------------------------------------------------------------------
+// Профиль высот
+// ---------------------------------------------------------------------------
+async function buildProfile(a, b) {
+  const box = document.getElementById("profile-box");
+  const svg = document.getElementById("profile-svg");
+  box.style.display = "block";
+  const [lon1, lat1] = a;
+  const [lon2, lat2] = b;
+  const fetchProfile = ds => fetch(
+    `/api/profile?ds=${ds}&lon1=${lon1}&lat1=${lat1}&lon2=${lon2}&lat2=${lat2}&n=120`
+  ).then(r => r.json()).catch(() => null);
+  const [pa, pb] = await Promise.all([
+    state.a ? fetchProfile(state.a) : Promise.resolve(null),
+    state.b ? fetchProfile(state.b) : Promise.resolve(null)
+  ]);
+  const series = [];
+  if (pa && pa.samples) series.push({name: state.datasets[state.a].title, samples: pa.samples, color: "#6fb3d2"});
+  if (pb && pb.samples) series.push({name: state.datasets[state.b].title, samples: pb.samples, color: "#e0a458"});
+  drawProfile(svg, series);
+  document.getElementById("profile-note").textContent =
+    series.map(s => s.name).join(" · ");
+}
+
+function drawProfile(svg, series) {
+  const width = 300, height = 170, pad = 24;
+  const values = [];
+  series.forEach(s => s.samples.forEach(p => { if (p[2] !== null) values.push(p[2]); }));
+  if (!values.length) { svg.innerHTML = ""; return; }
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = (max - min) || 1;
+  let parts = "";
+  series.forEach(s => {
+    const n = s.samples.length;
+    const points = s.samples.map((p, i) => {
+      const x = pad + (i / (n - 1)) * (width - 2 * pad);
+      const y = height - pad - ((p[2] === null ? min : p[2]) - min) / span * (height - 2 * pad);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    parts += `<polyline points="${points}" fill="none" stroke="${s.color}" stroke-width="1.6"/>`;
+  });
+  parts += `<text x="4" y="12" fill="#9aa4ad" font-size="9">${max.toFixed(0)} м</text>`;
+  parts += `<text x="4" y="${height - 4}" fill="#9aa4ad" font-size="9">${min.toFixed(0)} м</text>`;
+  svg.innerHTML = parts;
+}
+
+// ---------------------------------------------------------------------------
+// Взаимодействие
+// ---------------------------------------------------------------------------
+function canvasPoint(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {x: event.clientX - rect.left, y: event.clientY - rect.top};
+}
+
+function lonLatAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const {w, h} = viewSize();
+  const center = centerPoint();
+  const point = unproject(center.x + (px - w / 2), center.y + (py - h / 2), state.zoom);
+  return point;
+}
+
+canvas.addEventListener("pointerdown", event => {
+  canvas.setPointerCapture(event.pointerId);
+  if (state.profileMode) {
+    const point = lonLatAt(event.clientX, event.clientY);
+    state.profilePts.push([point.lon, point.lat]);
+    if (state.profilePts.length === 2) {
+      state.profileMode = false;
+      canvas.classList.remove("profile");
+      showHint("");
+      buildProfile(state.profilePts[0], state.profilePts[1]);
+      state.profilePts = [];
+    } else {
+      showHint("Вторая точка профиля…");
+    }
+    return;
+  }
+  // Захват границы шторки.
+  const rect = canvas.getBoundingClientRect();
+  const split = viewSize().w * state.divider;
+  if (state.compare && state.a && state.b &&
+      Math.abs(event.clientX - rect.left - split) < 14) {
+    state.dragDivider = true;
+    return;
+  }
+  state.dragging = true;
+  state.dragStart = {
+    x: event.clientX, y: event.clientY,
+    center: {...state.center}, zoom: state.zoom
+  };
+  canvas.classList.add("grabbing");
+});
+
+canvas.addEventListener("pointermove", event => {
+  const point = lonLatAt(event.clientX, event.clientY);
+  state.cursor = point;
+  if (state.dragDivider) {
+    const rect = canvas.getBoundingClientRect();
+    const ratio = (event.clientX - rect.left) / viewSize().w;
+    state.divider = Math.min(0.98, Math.max(0.02, ratio));
+    requestRender();
+    return;
+  }
+  if (state.dragging) {
+    const dx = event.clientX - state.dragStart.x;
+    const dy = event.clientY - state.dragStart.y;
+    const start = project(state.dragStart.center.lon, state.dragStart.center.lat, state.dragStart.zoom);
+    const target = unproject(start.x - dx, start.y - dy, state.dragStart.zoom);
+    state.center = target;
+    requestRender();
+  } else {
+    // Курсор у разделителя шторки — двигаем границу.
+    const {w} = viewSize();
+    const split = w * state.divider;
+    if (state.compare && state.a && state.b &&
+        Math.abs(event.clientX - canvas.getBoundingClientRect().left - split) < 14) {
+      canvas.style.cursor = "col-resize";
+    } else {
+      canvas.style.cursor = "";
+    }
+  }
+  refreshReadout();
+});
+
+canvas.addEventListener("pointerup", event => {
+  if (state.dragging) {
+    state.dragging = false;
+    canvas.classList.remove("grabbing");
+  }
+  state.dragDivider = false;
+  canvas.releasePointerCapture(event.pointerId);
+});
+
+canvas.addEventListener("wheel", event => {
+  event.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
+  const before = lonLatAt(event.clientX, event.clientY);
+  const factor = event.deltaY < 0 ? 1.25 : 0.8;
+  const next = Math.min(state.maxZoom, Math.max(state.minZoom, state.zoom + Math.log2(factor)));
+  state.zoom = next;
+  const after = lonLatAt(event.clientX, event.clientY);
+  state.center = {
+    lon: state.center.lon + (before.lon - after.lon),
+    lat: state.center.lat + (before.lat - after.lat)
+  };
+  requestRender();
+  refreshReadout();
+}, {passive: false});
+
+window.addEventListener("resize", resize);
+
+// ---------------------------------------------------------------------------
+// Элементы управления
+// ---------------------------------------------------------------------------
+document.getElementById("ds-a").addEventListener("change", event => {
+  state.a = event.target.value; renderMeta(); requestRender(); refreshReadout();
+});
+document.getElementById("ds-b").addEventListener("change", event => {
+  state.b = event.target.value; renderMeta(); requestRender(); refreshReadout();
+});
+document.getElementById("mode").addEventListener("change", event => {
+  state.mode = event.target.value; requestRender();
+});
+document.getElementById("swap").addEventListener("click", () => {
+  const a = state.a; state.a = state.b; state.b = a;
+  document.getElementById("ds-a").value = state.a;
+  document.getElementById("ds-b").value = state.b;
+  renderMeta(); requestRender(); refreshReadout();
+});
+document.getElementById("compare").addEventListener("click", event => {
+  state.compare = !state.compare;
+  state.diff = false;
+  event.target.classList.toggle("active", state.compare);
+  document.getElementById("diff").classList.remove("active");
+  requestRender();
+});
+document.getElementById("diff").addEventListener("click", event => {
+  state.diff = !state.diff;
+  if (state.diff) { state.compare = false; }
+  event.target.classList.toggle("active", state.diff);
+  document.getElementById("compare").classList.toggle("active", state.compare);
+  requestRender();
+});
+document.getElementById("profile-btn").addEventListener("click", () => {
+  state.profileMode = !state.profileMode;
+  state.profilePts = [];
+  canvas.classList.toggle("profile", state.profileMode);
+  showHint(state.profileMode ? "Кликните первую точку профиля" : "");
+});
+document.getElementById("zoom-native").addEventListener("click", async () => {
+  const ds = state.a || state.b;
+  if (!ds) return;
+  const info = await fetch(
+    `/api/info?ds=${ds}&lon=${state.center.lon}&lat=${state.center.lat}`
+  ).then(r => r.json());
+  if (!info || !info.native_y_m) { showHint("нет данных"); return; }
+  const native = Math.max(info.native_y_m, info.native_x_m);
+  const zoom = Math.log2(156543.03392 *
+    Math.cos(state.center.lat * Math.PI / 180) / native);
+  state.zoom = Math.min(state.maxZoom, Math.max(state.minZoom, zoom));
+  requestRender();
+  refreshReadout();
+});
+
+document.getElementById("points").innerHTML = POINTS.map((point, index) =>
+  `<button class="point" data-index="${index}"><b>${point.name}</b>` +
+  `<span>${point.kind}</span></button>`).join("");
+
+document.getElementById("points").addEventListener("click", event => {
+  const button = event.target.closest(".point");
+  if (!button) return;
+  const point = POINTS[Number(button.dataset.index)];
+  state.center = {lon: point.lon, lat: point.lat};
+  state.zoom = point.zoom;
+  document.getElementById("src-note").textContent = point.note;
+  requestRender();
+  refreshReadout();
+});
+
+// ---------------------------------------------------------------------------
+// Запуск
+// ---------------------------------------------------------------------------
+loadDatasets().then(() => {
+  resize();
+  requestRender();
+  refreshReadout();
+});
+</script>
+</body>
+</html>
