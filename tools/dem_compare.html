@@ -1372,13 +1372,34 @@ function renderProgress() {
   const active = state.server && state.server.active
     ? state.server.active.length : 0;
   const downloads = (state.server && state.server.downloads) || [];
-  const netLine = () => {
-    const first = downloads[0];
-    const extra = downloads.length > 1
-      ? ` +${downloads.length - 1}` : "";
-    return `${first.label}${extra} · ${Math.round(first.seconds)} с`;
-  };
-  if (state.limitsError && scaledMode() && !state.limits) {
+  // Что именно качается: набор и гранула. Группируем по набору — при
+  // сравнении двух наборов видны оба, а не только один. Внутри набора
+  // берём самую долгую загрузку (сервер сортирует по времени).
+  const netGroups = new Map();
+  downloads.forEach(item => {
+    if (!item.label) return;
+    const name = item.label.split(" · ")[0];
+    const group = netGroups.get(name);
+    if (!group) {
+      netGroups.set(name, {label: item.label, seconds: item.seconds || 0});
+    } else {
+      group.seconds = Math.max(group.seconds, item.seconds || 0);
+    }
+  });
+  const netItems = [...netGroups.values()];
+  // В строке помещается два набора; остальные — счётчиком.
+  const netShown = netItems.slice(0, 2);
+  const netText = netShown.map(item => item.label).join(", ");
+  const netExtra = netItems.length > 2 ? ` +${netItems.length - 2}` : "";
+  const netSeconds = netItems.length
+    ? Math.round(Math.max(...netItems.map(item => item.seconds))) : 0;
+  const netLine = () => `${netText}${netExtra} · ${netSeconds} с`;
+  if (downloads.length) {
+    // Пока идёт загрузка исходников, это главное: без неё непонятно, что
+    // происходит. Пометка о шкале добавляется следом.
+    hint.className = "hint net";
+    hint.textContent = netLine();
+  } else if (state.limitsError && scaledMode() && !state.limits) {
     // Шкалы ещё нет: без неё тайлы в этом режиме не запрашиваются, и
     // карта пустая — надо сказать, что происходит.
     hint.className = "hint net";
@@ -1389,13 +1410,6 @@ function renderProgress() {
   } else if (state.osm && state.reliefAlpha <= 0.002) {
     hint.className = "hint";
     hint.textContent = "рельеф скрыт — только OSM";
-  } else if (downloads.length) {
-    // Пока сервер тянет исходники, честно показываем это, даже если
-    // видимые тайлы уже готовы (докачиваются соседние).
-    hint.className = "hint net";
-    hint.textContent = missing > 0
-      ? `${netLine()} · осталось ${missing}`
-      : `готово · ${netLine()}`;
   } else if (total.wanted === 0) {
     hint.className = "hint";
     hint.textContent = "выберите набор";
@@ -1410,6 +1424,13 @@ function renderProgress() {
   }
   // Полный текст — в подсказке: в строке он обрезается по ширине.
   hint.title = hint.textContent;
+  // Что качается — подробным списком: в строке помещается не всё.
+  if (netItems.length) {
+    const detail = netItems.map(item =>
+      `${item.label} (${Math.round(item.seconds)} с)`).join("\n");
+    hint.title = `${detail}` +
+      (missing > 0 ? `\nосталось ${missing}` : "");
+  }
 }
 
 async function pollStatus() {
@@ -2537,7 +2558,9 @@ loadDatasets().then(() => {
   requestRender();
   refreshReadout();
   pollStatus();
-  setInterval(pollStatus, 2000);
+  // Раз в секунду: загрузка исходников идёт минутами, и без частого
+  // опроса строка статуса молчит всё это время.
+  setInterval(pollStatus, 1000);
   setInterval(writeUrl, 1500);
 });
 </script>

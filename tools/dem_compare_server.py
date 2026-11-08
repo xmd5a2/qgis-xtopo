@@ -32,6 +32,7 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 
 import argparse
 import calendar
+import contextlib
 import gzip
 import hashlib
 import json
@@ -97,10 +98,25 @@ def status_snapshot():
     now = time.time()
     with STATUS_LOCK:
         active = list(STATUS["active"].values())
+        # Одинаковые метки сводим: странице важно, какие наборы и области
+        # качаются, а не сколько параллельных операций их тянут.
+        grouped = {}
+        for item in STATUS["downloads"].values():
+            entry = grouped.get(item["label"])
+            if entry is None:
+                grouped[item["label"]] = {"label": item["label"],
+                                          "since": item["since"],
+                                          "count": 1}
+            else:
+                entry["since"] = min(entry["since"], item["since"])
+                entry["count"] += 1
         downloads = [
-            {"label": item["label"], "seconds": round(now - item["since"], 1)}
-            for item in STATUS["downloads"].values()
+            {"label": item["label"], "seconds": round(now - item["since"], 1),
+             "count": item["count"]}
+            for item in grouped.values()
         ]
+        # Дольше всего идущее — первым: именно оно объясняет паузу.
+        downloads.sort(key=lambda item: -item["seconds"])
         return {
             "uptime": round(now - STATUS["started"], 1),
             "active": active,
@@ -120,6 +136,17 @@ def _download_leave(key):
         STATUS["downloads"].pop(key, None)
 
 
+@contextlib.contextmanager
+def _net_read(label):
+    """Отмечает сетевое чтение: в статусе видно, что именно качается."""
+    key = f"net:{os.getpid()}:{threading.get_ident()}:{time.monotonic_ns()}"
+    _download_enter(key, label)
+    try:
+        yield
+    finally:
+        _download_leave(key)
+
+
 def _queue_size():
     """Сколько тайлов сейчас в работе (рендер или ожидание ответа)."""
     with STATUS_LOCK:
@@ -131,6 +158,25 @@ def _tile_label(lat, lon):
     ns = "N" if lat >= 0 else "S"
     ew = "E" if lon >= 0 else "W"
     return f"{ns}{abs(int(math.floor(lat))):02d}{ew}{abs(int(math.floor(lon))):03d}"
+
+
+def _cell_label(bbox):
+    """Градусный тайл области по её юго-западному углу: N43E043.
+
+    Углы округляются: в bbox гранулы Planetary Computer попадает шум
+    вида 42.99999999999997, и без округления тайл назывался бы на
+    градус южнее настоящего.
+    """
+    minx, miny, maxx, maxy = bbox
+    return _tile_label(round(miny), round(minx))
+
+
+def _source_key(path):
+    """Ключ источника без токена и параметров: один и тот же файл — один ключ."""
+    text = str(path)
+    if text.startswith("/vsicurl/"):
+        text = text[len("/vsicurl/"):]
+    return text.split("?")[0]
 
 
 def _status_enter(key, dataset, z, x, y):
@@ -523,6 +569,19 @@ class SourceStore:
         # его на каждом тайле области. Помним, что источника нет.
         self._missing = {}
         self._missing_ttl = 3600.0
+        # Код гранулы для каждого удалённого источника: путь → «N43E043».
+        # По нему статус страницы пишет, что именно качается из сети.
+        self._source_labels = {}
+
+    def remember_source(self, path, label):
+        """Запоминает подпись удалённого источника: «ALOS AW3D30 · N43E043»."""
+        with self._lock:
+            self._source_labels[_source_key(path)] = label
+
+    def source_label(self, path):
+        """Подпись удалённого источника; пусто, если источник локальный."""
+        with self._lock:
+            return self._source_labels.get(_source_key(path), "")
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
@@ -717,7 +776,11 @@ class SourceStore:
             paths = []
             for lat, lon in _tiles_for(bbox):
                 url = _aws_url(source, lat, lon)
-                paths.append("/vsicurl/" + url)
+                path = "/vsicurl/" + url
+                paths.append(path)
+                # У GLO-30 гранула названа по юго-западному углу, как у SRTM.
+                self.remember_source(
+                    path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}")
             return paths
         return self._pc_sources(ds, bbox)
 
@@ -851,7 +914,17 @@ class SourceStore:
         center_lat = (bbox[1] + bbox[3]) / 2.0
         center_lon = (bbox[0] + bbox[2]) / 2.0
         key = f"region:{ds}:{digest}"
-        label = f"{DATASETS[ds]['short']} · {_tile_label(center_lat, center_lon)}"
+        # Подпись — по настоящим гранулам источников: центр области мог
+        # попасть в соседний тайл и сбить с толку.
+        labels = []
+        for path in sources:
+            label = self.source_label(path)
+            if label and label not in labels:
+                labels.append(label)
+        if not labels:
+            labels = [f"{DATASETS[ds]['short']} · "
+                      f"{_tile_label(center_lat, center_lon)}"]
+        label = labels[0] if len(labels) == 1 else f"{labels[0]} +{len(labels) - 1}"
         _download_enter(key, label)
         try:
             result = gdal.Warp(str(temporary), sources, options=options)
@@ -1049,7 +1122,10 @@ class SourceStore:
                 url = ("https://planetarycomputer.microsoft.com/api/stac/v1/"
                        f"search?collections={collection}"
                        f"&bbox={','.join(str(v) for v in query_bbox)}&limit=100")
-                items = _http_json(url).get("features", [])
+                # Поиск файлов — тоже сеть, и он небыстрый: без отметки
+                # пауза выглядит зависанием сервера.
+                with _net_read(f"{DATASETS[ds]['short']} · список файлов"):
+                    items = _http_json(url).get("features", [])
                 temporary = key.with_name(key.name + ".tmp")
                 temporary.write_text(json.dumps(items), encoding="utf-8")
                 temporary.replace(key)
@@ -1070,7 +1146,8 @@ class SourceStore:
                      (item["bbox"][0] <= center[0] <= item["bbox"][2] and
                       item["bbox"][1] <= center[1] <= item["bbox"][3])]
         try:
-            token = _pc_token(collection)
+            with _net_read(f"{DATASETS[ds]['short']} · токен доступа"):
+                token = _pc_token(collection)
         except Exception as exc:
             # Сервис токена недоступен — подписываем по файлам, как раньше.
             _log(f"{collection}: нет токена ({exc})")
@@ -1087,9 +1164,15 @@ class SourceStore:
                 continue
             if token:
                 separator = "&" if "?" in href else "?"
-                sources.append("/vsicurl/" + href + separator + token)
+                source = "/vsicurl/" + href + separator + token
             else:
-                sources.append("/vsicurl/" + self._signed(href))
+                source = "/vsicurl/" + self._signed(href)
+            sources.append(source)
+            # Подпись гранулы: по ней видно, какой кусок набора качается.
+            cell = item.get("bbox")
+            if cell:
+                self.remember_source(
+                    source, f"{DATASETS[ds]['short']} · {_cell_label(cell)}")
         return sources
 
 
@@ -1259,6 +1342,23 @@ def _render_dem3857(store, ds, z, x, y, cache_file):
              if not store.is_missing(path)]
     if not paths:
         return None
+    # Сетевые источники читаются по HTTP: без отметки в статусе видно
+    # только «ожидание», а что именно качается — нет.
+    remote = [path for path in paths if str(path).startswith("/vsicurl/")]
+    labels = []
+    for path in remote:
+        label = store.source_label(path)
+        if label and label not in labels:
+            labels.append(label)
+    if labels:
+        label = labels[0] if len(labels) == 1 else f"{labels[0]} +{len(labels) - 1}"
+        with _net_read(label):
+            return _warp_dem3857(store, ds, paths, lon1, lat1, lon2, lat2,
+                                 cache_file)
+    return _warp_dem3857(store, ds, paths, lon1, lat1, lon2, lat2, cache_file)
+
+
+def _warp_dem3857(store, ds, paths, lon1, lat1, lon2, lat2, cache_file):
     # Проверяем, что источники открываются (часть тайлов COG не опубликована),
     # но в warp передаём пути: GDAL откроет их сам, у каждого потока будет
     # свой дескриптор, и тайлы перестанут ждать друг друга на общей блокировке.
