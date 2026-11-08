@@ -2416,6 +2416,110 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertTrue(callable(painter_check))
         dialog.done(0)
 
+    def test_extent_dialog_basemaps(self):
+        """Подложки переключаются, подпись под ними меняется."""
+        from qgis_xtopo.gui.extentdialog import BASEMAPS, ExtentDialog
+
+        dialog = ExtentDialog("")
+        try:
+            self.assertEqual(dialog.basemap_combo.count(), len(BASEMAPS))
+            names = [
+                dialog.basemap_combo.itemText(index)
+                for index in range(dialog.basemap_combo.count())
+            ]
+            for expected in (
+                "OpenStreetMap", "OpenTopoMap", "ArcGIS Topo",
+                "Google Satellite", "Google Hybrid",
+            ):
+                self.assertIn(expected, names)
+            self.assertTrue(dialog.layer.isValid())
+            self.assertIn("openstreetmap.org", dialog.attribution.text())
+            index = dialog.basemap_combo.findData("opentopo")
+            dialog.basemap_combo.setCurrentIndex(index)
+            self.assertIn("opentopomap.org", dialog.attribution.text())
+            self.assertIn("opentopomap.org", dialog.layer.source())
+            self.assertTrue(dialog.layer.isValid())
+            index = dialog.basemap_combo.findData("google_satellite")
+            dialog.basemap_combo.setCurrentIndex(index)
+            self.assertIn("mt1.google.com", dialog.layer.source())
+            self.assertTrue(dialog.layer.isValid())
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_search_moves_map(self):
+        """Найденное место: карта переходит к нему, рамка сбрасывается."""
+        import time
+        from unittest import mock
+
+        from qgis_xtopo.core import nominatim
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        place = nominatim.Place(
+            name="Кисловодск, Россия",
+            lat=43.9055311,
+            lon=42.7157283,
+            south=43.8472332,
+            north=43.9599627,
+            west=42.6598370,
+            east=42.7922094,
+        )
+        dialog = ExtentDialog("")
+        try:
+            with mock.patch.object(
+                nominatim, "search", return_value=[place]
+            ) as search:
+                dialog.search_input.setText("Кисловодск")
+                dialog._start_search()
+                deadline = time.time() + 20
+                while (
+                    dialog._search_worker is not None
+                    and time.time() < deadline
+                ):
+                    self.app.processEvents()
+                    time.sleep(0.02)
+                self.app.processEvents()
+            search.assert_called()
+            self.assertEqual(dialog.search_results.count(), 1)
+            self.assertIn("1", dialog.search_status.text())
+            dialog.search_results.setCurrentRow(0)
+            self.app.processEvents()
+            bbox = dialog._extent_as_bbox()
+            middle_lon = (bbox.lon_min + bbox.lon_max) / 2
+            middle_lat = (bbox.lat_min + bbox.lat_max) / 2
+            self.assertAlmostEqual(middle_lon, 42.7157283, delta=0.2)
+            self.assertAlmostEqual(middle_lat, 43.9055311, delta=0.2)
+            # Нарисованная рамка больше не задаёт охват.
+            self.assertIsNone(dialog._drawn_extent)
+            self.assertFalse(dialog.reset_button.isEnabled())
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_enter_in_search_does_not_close(self):
+        """Enter в строке поиска запускает поиск, а не закрывает окно."""
+        from unittest import mock
+
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtTest import QTest
+        from qgis_xtopo.core import nominatim
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        dialog = ExtentDialog("")
+        accepted = []
+        dialog.accepted.connect(lambda: accepted.append(True))
+        try:
+            with mock.patch.object(nominatim, "search", return_value=[]):
+                dialog.show()
+                self.app.processEvents()
+                dialog.search_input.setFocus()
+                self.app.processEvents()
+                dialog.search_input.setText("Кисловодск")
+                QTest.keyClick(dialog.search_input, Qt.Key_Return)
+                self.app.processEvents()
+            self.assertEqual(accepted, [])
+        finally:
+            dialog.done(0)
+            self.app.processEvents()
+
     def test_geofabrik_refresh_button(self):
         """Кнопка обновления индекса помечает кэш индекса устаревшим."""
         from unittest import mock

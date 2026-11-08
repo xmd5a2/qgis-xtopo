@@ -66,6 +66,18 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   они берутся у `MeasuredCanvas.set_frame_provider` при каждой отрисовке.
   Шкала масштаба считается от ширины видимой области, а не от знаменателя
   масштаба (`gui/extentdialog.py: scale_bar`).
+- **Окно выбора охвата**: поиск места по Nominatim (`core/nominatim.py`) и
+  выбор подложки предпросмотра (`BASEMAPS` в `gui/extentdialog.py`).
+  Подложка меняет только карту в окне, в готовую карту не попадает.
+  Nominatim: не больше одного запроса в секунду, обязателен User-Agent,
+  ответы кэшируются по строке запроса (`core/nominatim.py`).
+- **Enter в окне охвата**: в строке поиска он запускает поиск, а не закрывает
+  окно. `QLineEdit` отдаёт Enter родителю, поэтому `keyPressEvent` окна
+  проверяет фокус и не применяет охват (`gui/extentdialog.py`).
+  Shortcut Enter живёт на холсте (`Qt.WidgetShortcut`), иначе он перехватывал
+  бы ввод в строке поиска.
+- **Поток поиска — не ребёнок окна**: окно закрывается во время запроса,
+  поток должен доработать и удалиться сам (родитель — `QgsApplication`).
 - `automap.qgz` лежит только в корне; путь в коде — `core/resources.py:
   template_path()`. При сборке копируется в пакет как
   `resources/automap.qgz`. Рядом не оставлять `*.bak*`.

@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 
 from qgis.core import (
     QgsApplication,
@@ -13,21 +14,93 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
-from qgis.PyQt.QtCore import QRectF, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPen
 from qgis.PyQt.QtWidgets import (
-    QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QShortcut, QVBoxLayout,
+    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QShortcut,
+    QVBoxLayout,
 )
 
-from ..core import i18n
+from ..core import i18n, nominatim
 from ..core.bbox import BBox, parse_bbox
 
-OSM_TILE_URI = (
-    "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0"
+
+@dataclass(frozen=True)
+class Basemap:
+    """Подложка карты в окне выбора охвата."""
+
+    key: str
+    name: str
+    template: str
+    zmax: int
+    attribution: str
+
+    @property
+    def uri(self):
+        """URI слоя тайлов.
+
+        Внутренние ``&`` адреса кодируются: иначе разбор URI разорвал бы
+        шаблон Google на отдельные параметры.
+        """
+        url = self.template.replace("&", "%26")
+        return f"type=xyz&url={url}&zmax={self.zmax}&zmin=0"
+
+
+# Подложки предпросмотра.  В готовую карту они не попадают: там только
+# данные OSM и рельеф.
+BASEMAPS = (
+    Basemap(
+        "osm",
+        "OpenStreetMap",
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        19,
+        '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        " contributors",
+    ),
+    Basemap(
+        "opentopo",
+        "OpenTopoMap",
+        "https://a.tile.opentopomap.org/{z}/{x}/{y}.png",
+        17,
+        '© <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA), '
+        '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        " contributors",
+    ),
+    Basemap(
+        "arcgis",
+        "ArcGIS Topo",
+        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+        "World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        19,
+        '© <a href="https://www.esri.com">Esri</a>, HERE, Garmin, USGS, '
+        "Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), "
+        "Esri (Thailand), TomTom",
+    ),
+    Basemap(
+        "google_satellite",
+        "Google Satellite",
+        "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+        20,
+        '© <a href="https://www.google.com">Google</a>',
+    ),
+    Basemap(
+        "google_hybrid",
+        "Google Hybrid",
+        "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+        20,
+        '© <a href="https://www.google.com">Google</a>',
+    ),
 )
+
+BASEMAP_BY_KEY = {basemap.key: basemap for basemap in BASEMAPS}
+
+OSM_TILE_URI = BASEMAPS[0].uri
 MERCATOR_EXTENT = 20037508.342789244
 MAX_LATITUDE = 85.0511287798
+
+# Размер окна вокруг точки, если у найденного места нет границ.
+PLACE_SPAN = 0.02
 
 DRAW_TOOL_STYLE = (
     "QPushButton {"
@@ -329,6 +402,25 @@ class RectangleMapTool(QgsMapTool):
         self.band.hide()
 
 
+class NominatimWorker(QThread):
+    """Поиск мест по Nominatim в отдельном потоке."""
+
+    result = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, query, parent=None):
+        super().__init__(parent)
+        self.query = query
+
+    def run(self):
+        try:
+            places = nominatim.search(self.query)
+        except Exception as exc:  # noqa: BLE001 - сеть не должна ломать окно
+            self.failed.emit(str(exc))
+        else:
+            self.result.emit(places)
+
+
 class ExtentDialog(QDialog):
     def __init__(self, bbox_text="", parent=None):
         super().__init__(parent)
@@ -338,12 +430,48 @@ class ExtentDialog(QDialog):
         self._bbox = None
         self._drawn_extent = None
         self._frame_labels = ("", "")
+        self._search_worker = None
         self._wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         self._mercator = QgsCoordinateReferenceSystem("EPSG:3857")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(4)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText(
+            "Поиск места: например, «Кисловодск»"
+        )
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.returnPressed.connect(self._start_search)
+        self.search_button = QPushButton("Найти")
+        self.search_button.clicked.connect(self._start_search)
+        self.search_status = QLabel("")
+        self.search_status.setMinimumWidth(120)
+        search_row.addWidget(self.search_input, 1)
+        search_row.addWidget(self.search_button)
+        search_row.addWidget(self.search_status)
+        self.basemap_combo = QComboBox()
+        for basemap in BASEMAPS:
+            self.basemap_combo.addItem(basemap.name, basemap.key)
+        self.basemap_combo.setToolTip("Подложка карты")
+        self.basemap_combo.currentIndexChanged.connect(self._basemap_changed)
+        search_row.addWidget(self.basemap_combo)
+        layout.addLayout(search_row)
+
+        # Подпись под подложкой меняется вместе с ней.
+        self.attribution = QLabel("")
+        self.attribution.setOpenExternalLinks(True)
+
+        self.search_results = QListWidget()
+        self.search_results.setMaximumHeight(110)
+        self.search_results.itemSelectionChanged.connect(
+            self._search_result_selected
+        )
+        self.search_results.hide()
+        layout.addWidget(self.search_results)
 
         tools = QHBoxLayout()
         self.draw_button = QPushButton()
@@ -377,9 +505,8 @@ class ExtentDialog(QDialog):
         self.canvas.setCanvasColor(QColor("white"))
         self.canvas.enableAntiAliasing(True)
         self.canvas.setDestinationCrs(self._mercator)
-        self.layer = QgsRasterLayer(OSM_TILE_URI, "OpenStreetMap", "wms")
-        if self.layer.isValid():
-            self.canvas.setLayers([self.layer])
+        self.layer = None
+        self._basemap_changed(0)
         self._pan_tool = QgsMapToolPan(self.canvas)
         self._draw_tool = RectangleMapTool(self.canvas)
         self._draw_tool.rectangleDrawn.connect(self._rectangle_drawn)
@@ -400,19 +527,16 @@ class ExtentDialog(QDialog):
         layout.addWidget(self.canvas, 1)
 
         hint = QLabel(
-            "Перетаскивайте карту мышью, колесом меняйте масштаб. Нажмите "
-            "кнопку с иконкой прямоугольника и протяните рамку, чтобы задать "
-            "область точнее. Затем нажмите «Использовать охват»."
+            "Перетаскивайте карту мышью, колесом меняйте масштаб. Найдите "
+            "место в строке поиска или нажмите кнопку с иконкой прямоугольника "
+            "и протяните рамку, чтобы задать область точнее. Затем нажмите "
+            "«Использовать охват»."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         bottom = QHBoxLayout()
-        attribution = QLabel(
-            '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        )
-        attribution.setOpenExternalLinks(True)
-        bottom.addWidget(attribution)
+        bottom.addWidget(self.attribution)
         bottom.addStretch(1)
         use_button = QPushButton("Использовать охват")
         use_button.setDefault(True)
@@ -424,10 +548,11 @@ class ExtentDialog(QDialog):
         layout.addLayout(bottom)
 
         # Enter применяет охват и закрывает окно: канвас забирает фокус,
-        # поэтому нужен явный shortcut.
+        # поэтому нужен явный shortcut.  Он живёт на канвасе, чтобы в
+        # строке поиска Enter запускал поиск, а не закрывал окно.
         for key in (Qt.Key_Return, Qt.Key_Enter):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.setContext(Qt.WindowShortcut)
+            shortcut = QShortcut(QKeySequence(key), self.canvas)
+            shortcut.setContext(Qt.WidgetShortcut)
             shortcut.activated.connect(self.accept)
 
         # Esc отменяет выбор и закрывает окно: карта перехватывает его
@@ -440,6 +565,10 @@ class ExtentDialog(QDialog):
         self._update_measurement()
 
     def keyPressEvent(self, event):
+        # Enter в строке поиска запускает поиск, а не применяет охват:
+        # строка отдаёт клавишу диалогу, иначе окно закрылось бы.
+        if QApplication.focusWidget() is self.search_input:
+            return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             self.accept()
             return
@@ -465,6 +594,9 @@ class ExtentDialog(QDialog):
         if not self._fitted_to_screen:
             self._fitted_to_screen = True
             self._fit_to_screen()
+        # Фокус у карты: Enter применяет охват, а в строке поиска
+        # запускает поиск.
+        self.canvas.setFocus()
         super().showEvent(event)
 
     def _toggle_draw(self, active):
@@ -472,6 +604,116 @@ class ExtentDialog(QDialog):
             self.canvas.setMapTool(self._draw_tool)
         else:
             self.canvas.setMapTool(self._pan_tool)
+
+    def _basemap_changed(self, _index):
+        """Сменить подложку карты."""
+        basemap = BASEMAP_BY_KEY.get(self.basemap_combo.currentData())
+        if basemap is None:
+            return
+        layer = QgsRasterLayer(basemap.uri, basemap.name, "wms")
+        self.layer = layer
+        self.canvas.setLayers([layer] if layer.isValid() else [])
+        self.attribution.setText(basemap.attribution)
+
+    def _start_search(self):
+        """Запустить поиск места по Nominatim."""
+        query = self.search_input.text().strip()
+        if not query:
+            return
+        worker = self._search_worker
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    return
+            except RuntimeError:
+                # Поток уже удалён: можно искать снова.
+                self._search_worker = None
+        self.search_button.setEnabled(False)
+        self.search_status.setText(i18n.tr("Поиск…"))
+        # Поток — не ребёнок окна: окно может закрыться во время запроса,
+        # и тогда поток должен спокойно доработать и удалиться сам.
+        worker = NominatimWorker(query, QgsApplication.instance())
+        worker.result.connect(self._search_done)
+        worker.failed.connect(self._search_failed)
+        worker.finished.connect(self._search_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._search_worker = worker
+        worker.start()
+
+    def _search_done(self, places):
+        """Результаты поиска показаны списком."""
+        self.search_results.clear()
+        for place in places:
+            item = QListWidgetItem(place.name)
+            item.setData(Qt.UserRole, place)
+            self.search_results.addItem(item)
+        self.search_results.setVisible(bool(places))
+        if places:
+            self.search_status.setText(
+                i18n.trf("Найдено: {}", len(places))
+            )
+        else:
+            self.search_status.setText(i18n.tr("Ничего не найдено"))
+
+    def _search_failed(self, message):
+        self.search_results.clear()
+        self.search_results.hide()
+        self.search_status.setText(
+            i18n.trf("Ошибка поиска: {}", message)
+        )
+
+    def _search_finished(self):
+        """Поиск закончен — кнопки снова доступны."""
+        self.search_button.setEnabled(True)
+        self._search_worker = None
+
+    def _search_result_selected(self):
+        """Выбран результат поиска — переходим к найденному месту."""
+        items = self.search_results.selectedItems()
+        if not items:
+            return
+        place = items[0].data(Qt.UserRole)
+        if place is None:
+            return
+        self._show_place(place)
+
+    def _show_place(self, place):
+        """Перейти к найденному месту: центрировать и приблизить."""
+        extent = self._place_extent(place)
+        if extent is None:
+            return
+        # Рамка, нарисованная раньше, больше не задаёт охват: иначе
+        # переход к месту ничего бы не менял.
+        self._reset_drawn()
+        self.canvas.setExtent(extent)
+        self.canvas.refresh()
+        self._update_coords()
+        self._update_measurement()
+
+    def _place_extent(self, place):
+        """Прямоугольник найденного места в координатах холста."""
+        bounds = place.bounds()
+        if bounds is None:
+            west = east = place.lon
+            south = north = place.lat
+        else:
+            west, south, east, north = bounds
+        transform = QgsCoordinateTransform(
+            self._wgs84, self._mercator, QgsProject.instance()
+        )
+        extent = transform.transformBoundingBox(
+            QgsRectangle(west, south, east, north)
+        )
+        extent.normalize()
+        if extent.width() <= 0 or extent.height() <= 0:
+            # Точка без границ: небольшое окно вокруг неё.
+            center = transform.transform(QgsPointXY(place.lon, place.lat))
+            half = PLACE_SPAN * MERCATOR_EXTENT / 180.0
+            extent = QgsRectangle(
+                center.x() - half, center.y() - half,
+                center.x() + half, center.y() + half,
+            )
+        return self._padded_extent(extent)
 
     def _rectangle_drawn(self, rectangle):
         if rectangle is None or rectangle.width() <= 0 or rectangle.height() <= 0:
