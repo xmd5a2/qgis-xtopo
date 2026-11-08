@@ -581,6 +581,10 @@ const state = {
   dragStart: null,
   profileMode: false,
   profilePts: [],
+  // Применённая линия профиля [[lon, lat], [lon, lat]] или null: рисуется
+  // поверх карты, пока не сброшена кликом.
+  profileLine: null,
+  press: null,
   tiles: new Map(),
   cursor: null,
   lastReadout: 0,
@@ -975,6 +979,46 @@ function drawDivider(split, h) {
   ctx.restore();
 }
 
+// Линия профиля на карте: пунктирная от первой точки к курсору, пока выбирают
+// вторую; после применения — постоянная. Сбрасывается кликом по карте.
+function drawProfileOverlay(left, top) {
+  const preview = state.profileMode && state.profilePts.length === 1;
+  if (!preview && !state.profileLine) return;
+  const start = preview ? state.profilePts[0] : state.profileLine[0];
+  const end = preview ? [state.cursor.lon, state.cursor.lat] : state.profileLine[1];
+  const at = lonlat => {
+    const p = project(lonlat[0], lonlat[1], state.zoom);
+    return [p.x - left, p.y - top];
+  };
+  const [ax, ay] = at(start);
+  const [bx, by] = at(end);
+  ctx.save();
+  ctx.strokeStyle = "#6fb3d2";
+  ctx.lineWidth = 2;
+  if (preview) ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(bx, by);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#6fb3d2";
+  for (const [x, y] of [[ax, ay], [bx, by]]) {
+    ctx.beginPath();
+    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Сброс построенного профиля: линия с карты и график из панели.
+function clearProfile() {
+  state.profileLine = null;
+  const box = document.getElementById("profile-box");
+  box.classList.remove("active");
+  box.style.display = "none";
+  requestRender();
+}
+
 function draw() {
   const {w, h} = viewSize();
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
@@ -1139,6 +1183,7 @@ function draw() {
 
   drawTileGrid(left, top, w, h);
   if (splitAt !== null) drawDivider(splitAt, h);
+  drawProfileOverlay(left, top);
 
   state.progress = progress;
   state.progressTotals = {wanted, loaded};
@@ -1422,17 +1467,21 @@ canvas.addEventListener("pointerdown", event => {
   if (state.profileMode) {
     const point = lonLatAt(event.clientX, event.clientY);
     state.profilePts.push([point.lon, point.lat]);
+    state.cursor = point;
     if (state.profilePts.length === 2) {
       state.profileMode = false;
       canvas.classList.remove("profile");
       showHint("");
+      state.profileLine = [state.profilePts[0], state.profilePts[1]];
       buildProfile(state.profilePts[0], state.profilePts[1]);
       state.profilePts = [];
     } else {
       showHint("Вторая точка профиля…");
     }
+    requestRender();
     return;
   }
+  state.press = {x: event.clientX, y: event.clientY};
   // Захват границы шторки.
   const rect = canvas.getBoundingClientRect();
   const split = viewSize().w * state.divider;
@@ -1452,6 +1501,10 @@ canvas.addEventListener("pointerdown", event => {
 canvas.addEventListener("pointermove", event => {
   const point = lonLatAt(event.clientX, event.clientY);
   state.cursor = point;
+  if (state.profileMode && state.profilePts.length === 1) {
+    // Резиновая линия от первой точки к курсору.
+    requestRender();
+  }
   if (state.dragDivider) {
     const rect = canvas.getBoundingClientRect();
     const ratio = (event.clientX - rect.left) / viewSize().w;
@@ -1490,6 +1543,14 @@ canvas.addEventListener("pointerup", event => {
     scheduleLimits();
   }
   state.dragDivider = false;
+  // Клик без перетаскивания сбрасывает построенный профиль. Панорамирование
+  // и драг разделителя сдвигают курсор дальше порога — они не сбрасывают.
+  if (state.press && state.profileLine &&
+      Math.hypot(event.clientX - state.press.x,
+                 event.clientY - state.press.y) < 5) {
+    clearProfile();
+  }
+  state.press = null;
   canvas.releasePointerCapture(event.pointerId);
 });
 
@@ -1560,8 +1621,11 @@ document.getElementById("diff").addEventListener("click", event => {
 document.getElementById("profile-btn").addEventListener("click", () => {
   state.profileMode = !state.profileMode;
   state.profilePts = [];
+  // Новый замер начинается с чистого листа: старая линия и график не нужны.
+  if (state.profileLine) clearProfile();
   canvas.classList.toggle("profile", state.profileMode);
   showHint(state.profileMode ? "Кликните первую точку профиля" : "");
+  requestRender();
 });
 document.getElementById("zoom-native").addEventListener("click", async () => {
   const ds = state.a || state.b;
