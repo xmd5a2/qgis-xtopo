@@ -102,10 +102,13 @@
   /* Карта всегда во второй колонке: при свёрнутой панели первая колонка
      узкая, и автоматическое размещение оставило бы карту без места. */
   #map { grid-column: 2; grid-row: 1 / span 2; }
+  /* В свёрнутом виде карта занимает всю ширину, а на рейле видна только
+     кнопка разворачивания — вертикальной полосы быть не должно. */
+  main.sidebar-hidden #map { grid-column: 1 / span 2; }
   #sidebar-rail {
     display: none; grid-column: 1; grid-row: 1 / span 2;
-    background: var(--panel); border-right: 1px solid var(--line);
     padding: 8px 0; justify-content: center; align-items: flex-start;
+    position: relative; z-index: 1;
   }
   main.sidebar-hidden #sidebar-rail { display: flex; }
   #sidebar-rail button,
