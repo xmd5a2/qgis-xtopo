@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверка положения пиков OSM (natural=peak) по рельефу SRTM.
+"""Проверка положения пиков OSM (natural=peak) по рельефу выбранного источника.
 
 Ошибочный пик — узел natural=peak, поставленный не на вершине, а в
 долине, на склоне или в седловине.  В QGIS он виден как точка с
@@ -24,6 +24,12 @@
     python3 tools/check_peak_placement.py \\
         --pbf ~/qgis_projects/qgisxtopo-cache/geofabrik/georgia.osm.pbf \\
         --out /tmp/peaks
+
+Источник рельефа выбирается ``--dem-source``: поддерживаются все наборы
+плагина (``srtm``, ``cop30``, ``nasadem``, ``alos``, ``3dep``, ``manual``).
+Растровые наборы скачиваются через ``core.terrain.download_cog_dem`` и
+приводятся к сетке 1″ в EPSG:4326, поэтому метрики сравнимы с SRTM.
+Для ``manual`` или своего файла укажите ``--dem-file``.
 """
 
 import argparse
@@ -37,6 +43,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -44,6 +51,12 @@ from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import tests  # noqa: E402,F401  (регистрирует пакет qgis_xtopo)
+
+from qgis_xtopo.core.bbox import BBox  # noqa: E402
+from qgis_xtopo.core import dem_sources  # noqa: E402
 
 # Размер тайла SRTM (SRTM1): 3601x3601 ячеек по 1/3600 градуса.
 TILE_PIXELS = 3601
@@ -436,6 +449,126 @@ class DemTiles:
                     col_offset:col_offset + piece.shape[1],
                 ] = piece[::-1]
         return out
+
+
+class DemRaster:
+    """Доступ к окну DEM из локального GeoTIFF (EPSG:4326, шаг 1″).
+
+    Растровые наборы плагина (Copernicus, NASADEM, ALOS, 3DEP) и ручной
+    каталог приводятся к той же сетке, что и тайлы SRTM, поэтому метрики
+    считаются одинаково для любого источника.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._dataset = None
+
+    def _open(self):
+        if self._dataset is None:
+            from osgeo import gdal
+
+            gdal.UseExceptions()
+            dataset = gdal.Open(str(self.path))
+            if dataset is None:
+                raise RuntimeError(f"Не удалось открыть рельеф: {self.path}")
+            self._dataset = dataset
+        return self._dataset
+
+    def window(self, lon, lat, half_px_x, half_px_y):
+        """Прямоугольник DEM вокруг точки (строка 0 — южный край)."""
+        dataset = self._open()
+        transform = dataset.GetGeoTransform()
+        step_x = abs(transform[1])
+        step_y = abs(transform[5])
+        width = 2 * half_px_x + 1
+        height = 2 * half_px_y + 1
+        lon_min = lon - half_px_x * PIXEL_DEGREES
+        lat_min = lat - half_px_y * PIXEL_DEGREES
+        lat_max = lat_min + (height - 1) * PIXEL_DEGREES
+        out = np.full((height, width), np.nan, dtype="float32")
+
+        x0 = int(round((lon_min - transform[0]) / step_x))
+        y0 = int(round((transform[3] - lat_max) / step_y))
+        x1 = x0 + width
+        y1 = y0 + height
+        sx0, sy0 = max(0, x0), max(0, y0)
+        sx1 = min(dataset.RasterXSize, x1)
+        sy1 = min(dataset.RasterYSize, y1)
+        if sx1 <= sx0 or sy1 <= sy0:
+            return out
+
+        band = dataset.GetRasterBand(1)
+        piece = band.ReadAsArray(sx0, sy0, sx1 - sx0, sy1 - sy0).astype("float32")
+        nodata = band.GetNoDataValue()
+        if nodata is not None:
+            piece[piece == nodata] = np.nan
+        # Строки растра идут с севера на юг, а в окне — с юга на север.
+        piece = piece[::-1]
+        out_x = sx0 - x0
+        out_y = (height - 1) - (sy1 - 1 - y0)
+        out[out_y:out_y + piece.shape[0], out_x:out_x + piece.shape[1]] = piece
+        return out
+
+
+def peaks_bbox(peaks, padding=0.05):
+    """Охват всех пиков с запасом под окна рельефа."""
+    lons = [peak.lon for peak in peaks]
+    lats = [peak.lat for peak in peaks]
+    return BBox(
+        max(-180.0, min(lons) - padding),
+        max(-90.0, min(lats) - padding),
+        min(180.0, max(lons) + padding),
+        min(90.0, max(lats) + padding),
+    )
+
+
+def prepare_dem_raster(source, bbox, cache_dir, workdir, dem_file=None):
+    """Готовит растр DEM в EPSG:4326 с шагом 1″ и возвращает путь.
+
+    Для растровых наборов окно скачивает ``core.terrain.download_cog_dem``
+    (с кэшем плагина), ручной каталог передаётся через ``dem_file``.
+    """
+    from osgeo import gdal
+
+    from qgis_xtopo.core import terrain
+
+    gdal.UseExceptions()
+    if dem_file is not None:
+        source_path = Path(dem_file).expanduser()
+        if not source_path.exists():
+            raise RuntimeError(f"Нет файла рельефа: {source_path}")
+    else:
+        source_path = terrain.download_cog_dem(
+            source, bbox, workdir, cache_dir=cache_dir,
+            progress=lambda message: print(message, flush=True),
+        )
+
+    target = Path(workdir) / "dem_1s.tif"
+    width = max(1, int(round((bbox.lon_max - bbox.lon_min) / PIXEL_DEGREES)))
+    height = max(1, int(round((bbox.lat_max - bbox.lat_min) / PIXEL_DEGREES)))
+    options = gdal.WarpOptions(
+        format="GTiff",
+        dstSRS="EPSG:4326",
+        outputBounds=(bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max),
+        width=width,
+        height=height,
+        resampleAlg="bilinear",
+        outputType=gdal.GDT_Int16,
+        dstNodata=-32768,
+        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+    )
+    result = gdal.Warp(str(target), str(source_path), options=options)
+    if result is None:
+        raise RuntimeError(f"Не удалось подготовить рельеф {source}")
+    result = None
+    return target
+
+
+def make_dem(spec):
+    """Объект доступа к рельефу по описанию источника."""
+    if spec.get("path"):
+        return DemRaster(spec["path"])
+    return DemTiles(spec["cache_dir"], download=spec["download"])
 
 
 def half_pixels(metres, lat):
@@ -1160,7 +1293,7 @@ def cluster_points(items, cell_degrees=0.02):
     return clusters
 
 
-def write_reports(peaks, results, output_dir, radii, thresholds):
+def write_reports(peaks, results, output_dir, radii, thresholds, source_label="SRTM"):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1333,13 +1466,13 @@ def write_reports(peaks, results, output_dir, radii, thresholds):
 
     report_path = output_dir / "report.txt"
     report_path.write_text(
-        build_report(peaks, results, radii, thresholds),
+        build_report(peaks, results, radii, thresholds, source_label),
         encoding="utf-8",
     )
     return csv_path, geojson_path, report_path
 
 
-def build_report(peaks, results, radii, thresholds):
+def build_report(peaks, results, radii, thresholds, source_label="SRTM"):
     verdicts = Counter(item[2] for item in results)
     total = len(results)
     anonymous = [item for item in results if item[0].category == "anonymous"]
@@ -1352,7 +1485,7 @@ def build_report(peaks, results, radii, thresholds):
         return [item for item in group if item[2] == "error"]
 
     lines = []
-    lines.append("Проверка положения пиков OSM по рельефу SRTM")
+    lines.append(f"Проверка положения пиков OSM по рельефу {source_label}")
     lines.append("=" * 62)
     lines.append(f"Всего пиков: {total}")
     if without_dem:
@@ -1418,7 +1551,7 @@ def build_report(peaks, results, radii, thresholds):
         "  * высота OSM и рельеф расходятся более чем на "
         f"{thresholds['ele_diff']:.0f} процентов — пик поставлен не на ту "
         "вершину.\n"
-        "Признаки — по рельефу SRTM и высоте из тега OSM ele."
+        f"Признаки — по рельефу {source_label} и высоте из тега OSM ele."
     )
     lines.append("")
 
@@ -1477,8 +1610,8 @@ def build_report(peaks, results, radii, thresholds):
 _WORKER = {}
 
 
-def _measure_init(cache_dir, radii, thresholds, download):
-    _WORKER["dem"] = DemTiles(cache_dir, download=download)
+def _measure_init(dem_spec, radii, thresholds):
+    _WORKER["dem"] = make_dem(dem_spec)
     _WORKER["radii"] = radii
     _WORKER["thresholds"] = thresholds
 
@@ -1503,11 +1636,20 @@ def main(argv=None):
     )
     parser.add_argument(
         "--dem-cache", default=str(DEFAULT_DEM_CACHE),
-        help="каталог кэша тайлов SRTM",
+        help="каталог кэша рельефа: тайлы SRTM и окна растровых наборов",
+    )
+    parser.add_argument(
+        "--dem-source", default="srtm",
+        choices=[item.key for item in dem_sources.SOURCES],
+        help="источник рельефа, как в плагине (по умолчанию srtm)",
+    )
+    parser.add_argument(
+        "--dem-file", default=None,
+        help="готовый растр рельефа (для manual или вместо загрузки)",
     )
     parser.add_argument(
         "--no-download", action="store_true",
-        help="не скачивать недостающие тайлы рельефа",
+        help="не скачивать недостающие тайлы SRTM",
     )
     parser.add_argument(
         "--osmium", default=None, help="путь к бинарю osmium",
@@ -1712,22 +1854,36 @@ def main(argv=None):
     peaks = read_peaks(arguments.pbf, natural_values, osmium_bin)
     print(f"Найдено пиков: {len(peaks)}")
 
+    if arguments.dem_source == "manual" and not arguments.dem_file:
+        parser.error("для --dem-source manual укажите --dem-file")
+    dem_spec = {
+        "cache_dir": arguments.dem_cache,
+        "download": not arguments.no_download,
+        "path": None,
+    }
+    workdir = None
+    if arguments.dem_file or arguments.dem_source != "srtm":
+        workdir = tempfile.mkdtemp(prefix="peak_dem_")
+        dem_path = prepare_dem_raster(
+            arguments.dem_source, peaks_bbox(peaks),
+            arguments.dem_cache, workdir, arguments.dem_file,
+        )
+        dem_spec["path"] = str(dem_path)
+        print(f"Рельеф: {arguments.dem_source} ({dem_path})", flush=True)
+
     jobs = arguments.jobs or (os.cpu_count() or 1)
     jobs = max(1, min(jobs, len(peaks)))
     print(f"Расчёт рельефа в {jobs} процессе(ах)", flush=True)
     results = []
     if jobs == 1:
-        dem = DemTiles(arguments.dem_cache, download=not arguments.no_download)
+        dem = make_dem(dem_spec)
         for peak in peaks:
             results.append((peak, measure(peak, dem, radii, thresholds), "ok", [], None))
     else:
         with ProcessPoolExecutor(
             max_workers=jobs,
             initializer=_measure_init,
-            initargs=(
-                arguments.dem_cache, radii, thresholds,
-                not arguments.no_download,
-            ),
+            initargs=(dem_spec, radii, thresholds),
         ) as pool:
             measured = list(pool.map(_measure_one, peaks, chunksize=64))
         results = [
@@ -1746,11 +1902,16 @@ def main(argv=None):
         for peak, metrics, _verdict, _flags, _mismatch in results
     ]
 
+    source_label = dem_sources.source(arguments.dem_source).short
+    if arguments.dem_file:
+        source_label = Path(arguments.dem_file).name
     csv_path, geojson_path, report_path = write_reports(
-        peaks, results, arguments.out, radii, thresholds
+        peaks, results, arguments.out, radii, thresholds, source_label
     )
+    if workdir is not None:
+        shutil.rmtree(workdir, ignore_errors=True)
     print(f"Отчёты: {csv_path}, {geojson_path}, {report_path}")
-    print(build_report(peaks, results, radii, thresholds))
+    print(build_report(peaks, results, radii, thresholds, source_label))
     return 0
 
 
