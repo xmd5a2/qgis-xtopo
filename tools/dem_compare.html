@@ -145,6 +145,14 @@
   }
   aside h2.toggle.collapsed .chev { transform: rotate(-90deg); }
   #points[hidden] { display: none; }
+  /* Список по умолчанию усечён до POINTS_VISIBLE пунктов; остальные
+     показывает кнопка «ещё» внизу списка. */
+  #points.trimmed .point:nth-child(n+6) { display: none; }
+  #points-more {
+    width: 100%; margin-top: 2px; padding: 3px 7px;
+    color: var(--muted); font-size: 12px;
+  }
+  #points-more:hover { color: var(--accent); }
   .point {
     display: block; width: 100%; text-align: left; margin-bottom: 4px;
     line-height: 1.3;
@@ -439,6 +447,21 @@ const POINTS = [
   {name: "Денали, Аляска", kind: "высокогорье, 63° с. ш.",
    lon: -151.0070, lat: 63.0692, zoom: 12,
    note: "6190 м: SRTM и NASADEM обрываются на 60–61°, остаются GLO-30, ALOS и 3DEP."},
+  {name: "Банф, Роки, Канада", kind: "ледниковые склоны Скалистых гор",
+   lon: -115.5708, lat: 51.1784, zoom: 12,
+   note: "3DEP теперь покрывает Канаду: DTM против DSM остальных наборов."},
+  {name: "Ванкувер, Канада", kind: "город у залива, крутые берега",
+   lon: -123.1207, lat: 49.2827, zoom: 11,
+   note: "Крыши центра и береговая линия: DSM видит застройку, 3DEP — землю."},
+  {name: "Попокатепетль, Мексика", kind: "действующий вулкан",
+   lon: -98.6273, lat: 19.0225, zoom: 12,
+   note: "Конус 5393 м: кратер и ледник на склонах в 3DEP и GLO-30."},
+  {name: "Пико-де-Оризаба, Мексика", kind: "высочайшая вершина Мексики",
+   lon: -97.2694, lat: 19.0305, zoom: 12,
+   note: "5636 м: высокогорье в пределах нового покрытия 3DEP."},
+  {name: "Медный каньон, Мексика", kind: "каньонное плато",
+   lon: -107.9500, lat: 27.6500, zoom: 12,
+   note: "Сьерра-Тараумара: сеть каньонов глубже Гран-Каньона."},
   {name: "Мауна-Кеа, Гавайи", kind: "вулкан в океане",
    lon: -155.4681, lat: 19.8207, zoom: 12,
    note: "Резкий берег и край острова: проверка nodata на границе тайлов."},
@@ -449,6 +472,10 @@ const POINTS = [
    lon: -73.9857, lat: 40.7484, zoom: 14,
    note: "ALOS и GLO-30 видят крыши, 3DEP — землю под домами."}
 ];
+
+// Сколько пунктов списка показывать без раскрытия: панель остаётся компактной,
+// остальные открываются кнопкой «ещё».
+const POINTS_VISIBLE = 5;
 
 const state = {
   datasets: {},
@@ -1593,7 +1620,21 @@ document.addEventListener("keydown", event => {
 
 document.getElementById("points").innerHTML = POINTS.map((point, index) =>
   `<button class="point" data-index="${index}" ` +
-  `title="${point.kind}. ${point.note}"><b>${point.name}</b></button>`).join("");
+  `title="${point.kind}. ${point.note}"><b>${point.name}</b></button>`).join("") +
+  `<button id="points-more" title="Показать все ключевые точки"></button>`;
+
+// Сворачивание списка до POINTS_VISIBLE пунктов и обратно.
+function setPointsTrimmed(trimmed) {
+  document.getElementById("points").classList.toggle("trimmed", trimmed);
+  document.getElementById("points-more").textContent =
+    trimmed ? `ещё ${POINTS.length - POINTS_VISIBLE} ▾` : "свернуть ▴";
+  storeFlag("dem-compare.points-trimmed", trimmed);
+}
+
+document.getElementById("points-more").addEventListener("click", event => {
+  event.stopPropagation();
+  setPointsTrimmed(!document.getElementById("points").classList.contains("trimmed"));
+});
 
 document.getElementById("points").addEventListener("click", event => {
   const button = event.target.closest(".point");
@@ -1613,6 +1654,11 @@ function selectPlace(point, index) {
   badge.textContent = point ? point.name : "место не выбрано";
   badge.title = point ? `${point.kind}. ${point.note}` : "выбранное место";
   badge.classList.toggle("set", Boolean(point));
+  if (point && index >= POINTS_VISIBLE) {
+    // Выбранный пункт скрыт усечением — раскрываем список, иначе подсветка
+    // не видна.
+    setPointsTrimmed(false);
+  }
   document.querySelectorAll("#points .point").forEach(item => {
     item.classList.toggle("active", Number(item.dataset.index) === index);
   });
@@ -1822,6 +1868,7 @@ loadDatasets().then(() => {
   readUrl();
   setSidebarCollapsed(storedFlag("dem-compare.sidebar-hidden", false));
   setPointsCollapsed(storedFlag("dem-compare.points-hidden", false));
+  setPointsTrimmed(storedFlag("dem-compare.points-trimmed", true));
   fillSelect(document.getElementById("ds-a"), state.a);
   fillSelect(document.getElementById("ds-b"), state.b);
   document.getElementById("mode").value = state.mode;
