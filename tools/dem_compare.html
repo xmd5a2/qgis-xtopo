@@ -596,6 +596,10 @@ const state = {
   profileGeom: null,
   profileLen: 0,
   profileHover: null,
+  // Разность высот B − A по линии профиля, предел её нормировки и среднее.
+  profileDiff: null,
+  profileDiffLimit: 5,
+  profileDiffMean: null,
   press: null,
   tiles: new Map(),
   cursor: null,
@@ -1099,6 +1103,8 @@ function clearProfile() {
   state.profileHover = null;
   state.profileSeries = null;
   state.profileGeom = null;
+  state.profileDiff = null;
+  state.profileDiffMean = null;
   document.getElementById("profile-legend").innerHTML = "";
   const box = document.getElementById("profile-box");
   box.classList.remove("active");
@@ -1316,7 +1322,8 @@ function renderProgress() {
       `<span class="count">${stats.loaded}/${stats.wanted}</span></div>`);
   };
   if (state.diff && state.a && state.b) {
-    add("diff", "A−B", `${datasetLabel(state.a)} − ${datasetLabel(state.b)}`);
+    // Карта дельты рисует B − A: красным там, где B выше A.
+    add("diff", "B−A", `${datasetLabel(state.b)} − ${datasetLabel(state.a)}`);
   } else if (state.compare && state.a && state.b) {
     add("a", "A", datasetLabel(state.a));
     add("b", "B", datasetLabel(state.b));
@@ -1530,6 +1537,30 @@ async function buildProfile(a, b, scroll = true) {
   state.profileSeries = series;
   state.profileLen = sphereDistanceKm(lon1, lat1, lon2, lat2);
   state.profileHover = null;
+  // Разность высот по линии — та же величина, что показывает дельта на
+  // карте (B − A), и тот же предел нормировки: 98-й процентлиль, чтобы
+  // единичные отвесы не съедали контраст.
+  const deltas = [];
+  const curveA = series.find(s => s.label === "A");
+  const curveB = series.find(s => s.label === "B");
+  if (curveA && curveB) {
+    const n = Math.min(curveA.samples.length, curveB.samples.length);
+    for (let i = 0; i < n; i++) {
+      const va = curveA.samples[i][2], vb = curveB.samples[i][2];
+      deltas.push(va === null || vb === null ? null : vb - va);
+    }
+  }
+  const magnitudes = deltas.filter(v => v !== null).map(v => Math.abs(v))
+    .sort((x, y) => x - y);
+  const limit = magnitudes.length
+    ? Math.max(5, magnitudes[Math.min(magnitudes.length - 1,
+                                       Math.floor(magnitudes.length * 0.98))])
+    : 5;
+  const known = deltas.filter(v => v !== null);
+  state.profileDiff = deltas.length ? deltas : null;
+  state.profileDiffLimit = limit;
+  state.profileDiffMean = known.length
+    ? known.reduce((sum, v) => sum + v, 0) / known.length : null;
   drawProfile(svg, series);
   drawProfileLegend(series);
   updateProfileNote();
@@ -1664,22 +1695,53 @@ function drawProfile(svg, series) {
   svg.innerHTML = parts;
 }
 
-// Подпись под графиком: с курсором — позиция маркера и высоты кривых.
-// Без курсора подпись пустая: имена наборов уже показаны в легенде.
+// Цвет разности высот — как в режиме «дельта высот»: красным вверх (B
+// выше A), синим вниз, насыщенность по величине расхождения. Нулевая
+// разность — нейтральный серый.
+function diffColor(delta, limit) {
+  if (delta === null || delta === undefined || !isFinite(delta)) {
+    return "var(--muted)";
+  }
+  const norm = Math.max(-1, Math.min(1, delta / (limit || 1)));
+  if (Math.abs(norm) < 1e-6) return "#9aa4ad";
+  // У сервера насыщенность идёт от нуля к полному цвету; на тёмном фоне
+  // совсем тёмный текст не читается, поэтому поднимаем нижнюю границу.
+  const level = Math.round(90 + Math.abs(norm) * 165);
+  return norm > 0 ? `rgb(${level},0,0)` : `rgb(0,0,${level})`;
+}
+
+// Подпись под графиком: разница высот B − A, окрашенная как дельта на
+// карте. С курсором — разница в текущей точке, без курсора — средняя по
+// линии.
 function updateProfileNote() {
+  const note = document.getElementById("profile-note");
   const t = state.profileHover;
-  if (t === null || !state.profileSeries || !state.profileGeom) {
-    document.getElementById("profile-note").textContent = "";
+  const series = state.profileSeries, geom = state.profileGeom;
+  const diff = state.profileDiff;
+  if (!series || !geom || !diff) {
+    note.textContent = "";
     return;
   }
-  const geom = state.profileGeom;
+  const limit = state.profileDiffLimit;
+  if (t === null) {
+    const mean = state.profileDiffMean;
+    note.innerHTML = mean === null ? "" :
+      `средняя <b style="color:${diffColor(mean, limit)}">` +
+      `Δ ${mean >= 0 ? "+" : "−"}${Math.abs(mean).toFixed(1)} м</b>`;
+    return;
+  }
   const i = Math.round(t * (geom.n - 1));
-  const heights = state.profileSeries.map(s => {
+  const heights = series.map(s => {
     const v = s.samples[i] && s.samples[i][2];
     return `${s.label} ${v === null || v === undefined ? "—" : v.toFixed(0) + " м"}`;
   });
-  document.getElementById("profile-note").textContent =
-    `${formatDistance(t * state.profileLen)} от A · ` + heights.join(" · ");
+  let html = `${formatDistance(t * state.profileLen)} от A · ` + heights.join(" · ");
+  const delta = diff[i];
+  if (delta !== null && delta !== undefined) {
+    html += ` · <b style="color:${diffColor(delta, limit)}">` +
+            `Δ ${delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(1)} м</b>`;
+  }
+  note.innerHTML = html;
 }
 
 // Маркер на графике: вертикальная линия в позиции t и точки на кривых.
