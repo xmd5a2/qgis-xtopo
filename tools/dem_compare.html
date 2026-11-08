@@ -169,15 +169,25 @@
   }
   #statusbar .coord { color: var(--muted); }
   #statusbar #progress {
-    position: static; min-width: 0; background: none; border: 0; padding: 0;
+    position: static; min-width: 250px; background: none; border: 0; padding: 0;
     display: flex; align-items: center; gap: 10px; font-size: 11px;
-    flex: 0 1 auto; overflow: hidden;
+    /* Firefox сжимает вложенный flex ниже содержимого, если размер задан
+       только через flex: 0 0 auto: полоски наезжают на подписи. Явный
+       min-width держит блок целиком и переносит его на новую строку. */
+    flex: 0 0 auto; overflow: hidden;
   }
   #statusbar .badge { flex: 0 0 auto; }
+  #statusbar #status-badges {
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    min-width: 196px;
+  }
   #statusbar #progress h4 { display: none; }
-  #statusbar #progress-rows { display: flex; gap: 10px; flex: 0 0 auto; }
+  #statusbar #progress-rows {
+    display: flex; gap: 10px; flex: 0 0 auto; min-width: 214px;
+  }
   #statusbar #progress .row {
-    display: flex; align-items: center; gap: 5px; margin: 0; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 5px; margin: 0;
+    flex: 0 0 auto; min-width: 102px;
   }
   #statusbar #progress .row .name {
     flex: 0 1 auto; max-width: 110px; overflow: hidden; text-overflow: ellipsis;
@@ -197,7 +207,10 @@
   #statusbar #progress .hint {
     color: var(--muted); font-size: 10px; margin: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    max-width: 340px; min-width: 0; flex: 0 1 auto;
+    /* На узком окне длинная подпись загрузки обрезается, а не вылезает
+       за край: оставляем место полоскам прогресса. */
+    max-width: clamp(80px, calc(100vw - 250px), 340px);
+    min-width: 0; flex: 0 1 auto;
     pointer-events: auto;
   }
   #statusbar #progress .hint.net { color: var(--warn); }
@@ -350,8 +363,10 @@
       <div id="progress-rows"></div>
       <div class="hint" id="progress-hint"></div>
     </div>
-    <span class="badge" id="res-badge">—</span>
-    <span class="badge" id="coord-badge">—</span>
+    <div id="status-badges">
+      <span class="badge" id="res-badge">—</span>
+      <span class="badge" id="coord-badge">—</span>
+    </div>
   </div>
 </main>
 
