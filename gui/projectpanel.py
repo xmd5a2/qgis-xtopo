@@ -39,7 +39,8 @@ from qgis.PyQt.QtCore import (
     QEvent, QEventLoop, QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal,
 )
 from qgis.PyQt.QtGui import (
-    QColor, QFontMetrics, QIcon, QPainter, QPalette, QPen, QPixmap,
+    QColor, QFontMetrics, QIcon, QImageWriter, QPainter, QPalette, QPen,
+    QPixmap,
 )
 from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
@@ -1764,14 +1765,9 @@ class ProjectPanel(QWidget):
                 settings = QgsLayoutExporter.ImageExportSettings()
                 settings.dpi = dpi
                 exporter = QgsLayoutExporter(layout)
-                if atlas.enabled():
-                    base = str(Path(path).with_suffix(""))
-                    result, error = exporter.exportToImage(
-                        atlas, base, "png", settings
-                    )
-                else:
-                    result = exporter.exportToImage(path, settings)
-                    error = ""
+                result, error = self._export_png(
+                    exporter, layout, atlas, path, settings
+                )
             else:
                 settings = QgsLayoutExporter.PdfExportSettings()
                 settings.dpi = dpi
@@ -1801,8 +1797,120 @@ class ProjectPanel(QWidget):
             self._restore_map_layers()
         self._export_result(result, error, path, extension, elapsed=time.monotonic() - started)
 
+    def _export_png(self, exporter, layout, atlas, path, settings):
+        """Экспорт PNG без геопривязки QGIS.
+
+        ``QgsLayoutExporter.exportToImage`` после сохранения пытается
+        записать в PNG геопривязку через GDAL, но драйвер PNG не умеет
+        обновлять готовый файл и пишет в консоль ERROR 6.  Страницы
+        рендерим сами и сохраняем через ``QImageWriter``.
+        """
+        context = layout.renderContext()
+        previous = (
+            context.dpi(), context.flags(), context.predefinedScales()
+        )
+        context.setDpi(settings.dpi)
+        context.setFlags(settings.flags)
+        context.setPredefinedScales(settings.predefinedMapScales)
+        try:
+            if atlas.enabled():
+                return self._export_png_atlas(
+                    exporter, layout, atlas, path, settings
+                )
+            return self._export_png_pages(exporter, layout, path, settings)
+        finally:
+            context.setDpi(previous[0])
+            context.setFlags(previous[1])
+            context.setPredefinedScales(previous[2])
+
+    def _export_png_atlas(self, exporter, layout, atlas, path, settings):
+        success = _enum(QgsLayoutExporter, "ExportResult", "Success")
+        base = str(Path(path).with_suffix(""))
+        if not atlas.beginRender():
+            return (
+                _enum(QgsLayoutExporter, "ExportResult", "IteratorError"),
+                i18n.tr("В атласе нет листов для экспорта"),
+            )
+        try:
+            while atlas.next():
+                result, error = self._export_png_pages(
+                    exporter, layout,
+                    atlas.filePath(base, "png"), settings,
+                )
+                if result != success:
+                    return result, error
+        finally:
+            atlas.endRender()
+        return success, ""
+
+    def _export_png_pages(self, exporter, layout, path, settings):
+        success = _enum(QgsLayoutExporter, "ExportResult", "Success")
+        pages = list(settings.pages)
+        if not pages:
+            pages = list(range(layout.pageCollection().pageCount()))
+        for page in pages:
+            if not layout.pageCollection().shouldExportPage(page):
+                continue
+            image = exporter.renderPageToImage(
+                page, settings.imageSize, settings.dpi
+            )
+            if image.isNull():
+                return (
+                    _enum(QgsLayoutExporter, "ExportResult", "MemoryError"),
+                    i18n.tr("Недостаточно памяти для экспорта страницы"),
+                )
+            error = self._write_png(
+                image, self._png_page_path(path, page), layout, settings
+            )
+            if error:
+                return (
+                    _enum(QgsLayoutExporter, "ExportResult", "FileError"),
+                    error,
+                )
+        return success, ""
+
+    @staticmethod
+    def _png_page_path(path, page):
+        if page == 0:
+            return str(path)
+        source = Path(path)
+        return str(
+            source.with_name(f"{source.stem}_{page + 1}{source.suffix}")
+        )
+
+    @staticmethod
+    def _write_png(image, path, layout, settings):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        writer = QImageWriter(str(path), b"png")
+        writer.setQuality(getattr(settings, "quality", -1))
+        if settings.exportMetadata:
+            metadata = layout.project().metadata()
+            creator = f"QGIS {Qgis.version()}"
+            writer.setText("Author", metadata.author())
+            writer.setText("Creator", creator)
+            writer.setText("Producer", creator)
+            writer.setText("Subject", metadata.abstract())
+            writer.setText(
+                "Created",
+                metadata.creationDateTime().toString(
+                    _enum(Qt, "DateFormat", "ISODate")
+                ),
+            )
+            writer.setText("Title", metadata.title())
+            keywords = metadata.keywords()
+            writer.setText(
+                "Keywords",
+                ";".join(
+                    f"{key}: {', '.join(values)}"
+                    for key, values in keywords.items()
+                ),
+            )
+        if writer.write(image):
+            return ""
+        return writer.errorString()
+
     def _atlas_export_feature(self, feature):
-        if self._export_progress is None:
+        if self._export_progress is None or not feature.isValid():
             return
         kind, total = self._export_progress
         try:

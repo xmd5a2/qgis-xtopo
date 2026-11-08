@@ -1146,6 +1146,10 @@ class PipelineIntegrationTest(unittest.TestCase):
                     any("лист 2 из 2" in message for message in messages),
                     messages,
                 )
+                self.assertFalse(
+                    any("лист -" in message for message in messages),
+                    messages,
+                )
                 pdf = Path(directory) / "map.pdf"
                 panel._export_to(str(pdf), "pdf")
                 self.assertTrue(pdf.exists())
@@ -1156,6 +1160,65 @@ class PipelineIntegrationTest(unittest.TestCase):
             panel.deleteLater()
             canvas.deleteLater()
             self.app.processEvents()
+
+    def test_export_png_without_atlas(self):
+        from osgeo import gdal
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsLayoutItemMap, QgsLayoutPoint,
+            QgsLayoutSize, QgsPrintLayout, QgsProject, QgsUnitTypes,
+        )
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtGui import QImage
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        project = QgsProject.instance()
+        project.clear()
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        layout.setName("Detailed")
+        map_item = QgsLayoutItemMap(layout)
+        map_item.attemptMove(
+            QgsLayoutPoint(0, 0, QgsUnitTypes.LayoutMillimeters)
+        )
+        map_item.attemptResize(
+            QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters)
+        )
+        layout.addLayoutItem(map_item)
+        project.layoutManager().addLayout(layout)
+
+        class Iface:
+            def __init__(self, canvas):
+                self._canvas = canvas
+
+            def mapCanvas(self):
+                return self._canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        panel = ProjectPanel(Iface(canvas))
+        errors = []
+        gdal.PushErrorHandler(
+            lambda _class, _number, message: errors.append(message)
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "map.png"
+                panel._export_to(str(target), "png")
+                self.assertTrue(target.exists())
+                self.assertGreater(target.stat().st_size, 0)
+                self.assertFalse(QImage(str(target)).isNull())
+        finally:
+            gdal.PopErrorHandler()
+            panel.deleteLater()
+            project.clear()
+            canvas.deleteLater()
+            self.app.processEvents()
+        self.assertFalse(
+            any("does not support update access" in error for error in errors),
+            errors,
+        )
 
     def test_dock_reprobes_pbf_on_bbox_change(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
