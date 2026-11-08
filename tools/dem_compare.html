@@ -1413,7 +1413,16 @@ document.getElementById("ds-b").addEventListener("change", event => {
   state.b = event.target.value; scheduleLimits(); requestRender(); refreshReadout();
 });
 document.getElementById("mode").addEventListener("change", event => {
-  state.mode = event.target.value; scheduleLimits(); requestRender();
+  state.mode = event.target.value;
+  // Режим дельты рисует разность B − A и игнорирует выбранный режим: смена
+  // режима означает, что дельту смотреть больше не хотят — возвращаем шторку.
+  if (state.diff) {
+    state.diff = false;
+    state.compare = true;
+    document.getElementById("diff").classList.remove("active");
+    document.getElementById("compare").classList.add("active");
+  }
+  scheduleLimits(); requestRender();
 });
 document.getElementById("swap").addEventListener("click", () => {
   const a = state.a; state.a = state.b; state.b = a;
