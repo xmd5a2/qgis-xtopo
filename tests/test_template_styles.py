@@ -297,5 +297,38 @@ class HillshadeVariantsTest(unittest.TestCase):
         )
 
 
+class AttributionLabelTest(unittest.TestCase):
+    """Прямоугольник подписи атрибуции подгоняется по тексту в панели."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _template_root()
+        cls.item = next(
+            item for item in cls.root.iter("LayoutItem")
+            if "OpenStreetMap" in (item.get("labelText") or "")
+        )
+
+    def test_item_background_is_on(self):
+        self.assertEqual(self.item.get("background"), "true")
+
+    def test_text_background_is_off(self):
+        # Фон текстового формата не используется: нужен прямоугольник
+        # самой подписи, который панель сжимает по тексту.
+        background = self.item.find("text-style/background")
+        self.assertIsNotNone(background)
+        self.assertEqual(background.get("shapeDraw"), "0")
+
+    def test_item_is_wide_enough_for_long_attribution(self):
+        # Ширина рамки — предел переноса длинной строки; видимую заливку
+        # задаёт подгонка по тексту, а не эта ширина.
+        self.assertTrue(self.item.get("size").startswith("210,"))
+
+    def test_background_is_white(self):
+        color = self.item.find("BackgroundColor")
+        self.assertIsNotNone(color)
+        for channel in ("red", "green", "blue"):
+            self.assertEqual(color.get(channel), "255")
+
+
 if __name__ == "__main__":
     unittest.main()

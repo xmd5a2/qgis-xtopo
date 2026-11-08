@@ -1341,6 +1341,7 @@ class ProjectPanel(QWidget):
         self._remove_atlas_layer()
         self._dispose_sheet_tool()
         self._dispose_edit_sheet_tool()
+        self._activate_pan()
         self.statusMessage.emit("Листы атласа очищены")
 
     def _remove_atlas_layer(self):
@@ -1450,6 +1451,32 @@ class ProjectPanel(QWidget):
         self._atlas_layer = layer
         return layer
 
+    def _fit_copyright_label(self, layout=None):
+        """Подгоняет прямоугольник подписи атрибуции под её текст.
+
+        В шаблоне рамка подписи широкая (210 мм), чтобы длинная строка
+        атрибуции не переносилась. Видимая заливка должна быть лишь чуть
+        шире текста, поэтому перед показом и экспортом элемент сжимается
+        по текущему тексту.
+        """
+        if layout is None:
+            layout = QgsProject.instance().layoutManager().layoutByName(
+                "Detailed"
+            )
+        if layout is None:
+            return None
+        item = next(
+            (
+                item for item in layout.items()
+                if isinstance(item, QgsLayoutItemLabel)
+                and "OpenStreetMap" in item.text()
+            ),
+            None,
+        )
+        if item is not None:
+            item.adjustSizeToText()
+        return item
+
     def _configure_layout(self, filename_prefix=None):
         layout = QgsProject.instance().layoutManager().layoutByName("Detailed")
         if layout is None:
@@ -1491,14 +1518,7 @@ class ProjectPanel(QWidget):
                 _enum(QgsLayoutItem, "ReferencePoint", "UpperLeft")
             )
             number_item.attemptMove(QgsLayoutPoint(0.0, 0.0, units))
-        copyright_item = next(
-            (
-                item for item in layout.items()
-                if isinstance(item, QgsLayoutItemLabel)
-                and "OpenStreetMap" in item.text()
-            ),
-            None,
-        )
+        copyright_item = self._fit_copyright_label(layout)
         if copyright_item is not None:
             # В макете копирайт прижат к правому нижнему углу страницы:
             # опорная точка элемента — его правый нижний угол.
@@ -2056,6 +2076,9 @@ class ProjectPanel(QWidget):
         self._rebuild_rules()
         self._sync_from_project()
         self._sync_isoline_color()
+        # Прямоугольник подписи атрибуции сжимается по тексту: в шаблоне
+        # он широкий, чтобы длинная строка не переносилась.
+        self._fit_copyright_label()
         # Уровень детализации для проекта берётся из списка панели: проект,
         # собранный старым шаблоном, может не иметь переменной вовсе.
         before = self.detail_combo.currentData()
@@ -2146,6 +2169,26 @@ class ProjectPanel(QWidget):
             canvas.setMapTool(self._pan_tool)
         elif self._pan_tool is not None:
             canvas.unsetMapTool(self._pan_tool)
+
+    def _activate_pan(self):
+        """Принудительно включает «Прокрутку карты».
+
+        После очистки листов атласа на холсте остаётся пустой инструмент:
+        кастомный инструмент снят, а новый не назначен, поэтому карту
+        нельзя перетащить. Возвращаем штатную прокрутку.
+        """
+        canvas = self._canvas()
+        if canvas is None:
+            return
+        if self._pan_tool is None:
+            self._pan_tool = QgsMapToolPan(canvas)
+        # Галочку ставим без обработчика: инструмент назначаем сами.
+        self._tool_syncing = True
+        try:
+            self.pan_action.setChecked(True)
+        finally:
+            self._tool_syncing = False
+        canvas.setMapTool(self._pan_tool)
 
     def _map_tool_changed(self, new_tool, _old_tool):
         if (

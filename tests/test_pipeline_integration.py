@@ -790,6 +790,38 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_clear_atlas_activates_pan_tool(self):
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        panel = ProjectPanel(Iface(canvas))
+        try:
+            panel._sheet_drawn(QgsRectangle(0, 0, 100, 70))
+            panel.edit_sheet_button.setChecked(True)
+            self.assertIs(canvas.mapTool(), panel._edit_sheet_tool)
+            panel.clear_sheets_button.click()
+            self.assertEqual(len(panel._sheets), 0)
+            self.assertFalse(panel.add_sheet_button.isChecked())
+            self.assertFalse(panel.edit_sheet_button.isChecked())
+            # После очистки карта снова таскается штатной прокруткой.
+            self.assertTrue(panel.pan_action.isChecked())
+            self.assertIsNotNone(panel._pan_tool)
+            self.assertIs(canvas.mapTool(), panel._pan_tool)
+        finally:
+            panel.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
     def test_configure_map_layers_keeps_project_visibility(self):
         from qgis.core import (
             QgsFeature, QgsGeometry, QgsLayoutItemMap, QgsPointXY,
@@ -939,6 +971,11 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertAlmostEqual(
                 copyright_item.pos().y() + size.height(), 210.0, places=3
             )
+            # прямоугольник сжат по тексту, а не растянут на всю ширину
+            expected = copyright_item.sizeForText()
+            self.assertAlmostEqual(size.width(), expected.width(), places=3)
+            self.assertAlmostEqual(size.height(), expected.height(), places=3)
+            self.assertLess(size.width(), 210.0)
             # номер листа — в левом верхнем углу, как в макете
             self.assertAlmostEqual(number_item.pos().x(), 0.0, places=3)
             self.assertAlmostEqual(number_item.pos().y(), 0.0, places=3)
