@@ -21,6 +21,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from functools import lru_cache
+from pathlib import Path
 
 from . import i18n
 from .bbox import BBox
@@ -37,6 +39,9 @@ MANUAL_SOURCE = "manual"
 # обход.
 STAC_LIMIT = 1000
 STAC_MAX_ITEMS = 5000
+
+# Слой Natural Earth в ресурсах QGIS: по нему определяется суша.
+WORLD_MAP_LAYER = "countries"
 
 # Подпись SAS кэшируется: сервис отвечает 429, если подписывать подряд.
 _SIGN_LOCK = threading.Lock()
@@ -495,21 +500,104 @@ def check_availability(bbox, cancel=None, timeout=30):
     return results
 
 
-def _land_tiles(bbox, availability):
-    """Тайлы охвата, где есть суша, по глобальным наборам.
+def _world_map_path():
+    """Путь к Natural Earth в ресурсах QGIS (None — данных нет)."""
+    try:
+        from qgis.core import QgsApplication
+    except Exception:
+        return None
+    base = QgsApplication.pkgDataPath()
+    if not base:
+        return None
+    path = Path(base) / "resources" / "data" / "world_map.gpkg"
+    return path if path.exists() else None
 
-    ALOS и Copernicus содержат только сушу: наличие их тайла означает,
-    что в квадрате 1°×1° есть земля.  Океанские тайлы в маску не попадают,
-    поэтому они не мешают выбрать 3DEP для прибрежного охвата.
+
+def _tile_rect(bbox, lat, lon):
+    """Пересечение тайла 1°×1° с охватом (None — не пересекаются)."""
+    minx = max(bbox.lon_min, float(lon))
+    miny = max(bbox.lat_min, float(lat))
+    maxx = min(bbox.lon_max, float(lon + 1))
+    maxy = min(bbox.lat_max, float(lat + 1))
+    if minx >= maxx or miny >= maxy:
+        return None
+    return minx, miny, maxx, maxy
+
+
+def _tile_geometry(rect):
+    """Прямоугольник тайла как геометрия OGR."""
+    from osgeo import ogr
+
+    minx, miny, maxx, maxy = rect
+    ring = ogr.Geometry(ogr.wkbLinearRing)
+    for x, y in ((minx, miny), (maxx, miny), (maxx, maxy),
+                 (minx, maxy), (minx, miny)):
+        ring.AddPoint_2D(x, y)
+    polygon = ogr.Geometry(ogr.wkbPolygon)
+    polygon.AddGeometry(ring)
+    return polygon
+
+
+@lru_cache(maxsize=32)
+def _world_map_land_tiles(bbox):
+    """Тайлы охвата с сушей по Natural Earth из ресурсов QGIS.
+
+    Слой ``countries`` содержит полигоны суши (Natural Earth 1:10m),
+    поэтому океанские квадраты в него не попадают.  Возвращается
+    ``None``, если файл ресурсов недоступен: тогда используется
+    запасная проверка по ALOS/Copernicus.
     """
+    path = _world_map_path()
+    if path is None:
+        return None
+    try:
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(path))
+        if dataset is None:
+            return None
+        layer = dataset.GetLayerByName(WORLD_MAP_LAYER)
+        if layer is None:
+            dataset = None
+            return None
+        land = set()
+        for lat, lon in tiles_for_bbox(bbox):
+            rect = _tile_rect(bbox, lat, lon)
+            if rect is None:
+                continue
+            layer.SetSpatialFilterRect(*rect)
+            tile = _tile_geometry(rect)
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                if geometry is not None and geometry.Intersects(tile):
+                    land.add((lat, lon))
+                    break
+        layer.SetSpatialFilter(None)
+        dataset = None
+        return frozenset(land)
+    except Exception:
+        return None
+
+
+def _land_tiles(bbox, availability):
+    """Тайлы охвата, где есть суша.
+
+    Основная маска — Natural Earth из ресурсов QGIS: океанские тайлы в
+    неё не попадают.  Запасной вариант — покрытие ALOS/Copernicus: их
+    тайлы могут включать океан с нулевыми высотами, поэтому маска менее
+    точна и используется только при отсутствии Natural Earth.
+    """
+    land = _world_map_land_tiles(bbox)
+    if land is not None:
+        return set(land)
     required = set(tiles_for_bbox(bbox))
-    land = set()
+    fallback = set()
     for key in ("alos", "cop30"):
         state = availability.get(key)
         if state is None or not state.checked or not state.available:
             continue
-        land |= set(state.covered_tiles) & required
-    return land
+        fallback |= set(state.covered_tiles) & required
+    return fallback
 
 
 def preferred_source(bbox, availability):
@@ -517,9 +605,8 @@ def preferred_source(bbox, availability):
 
     ``"3dep"`` возвращается, если 3DEP покрывает всю сушу охвата.
     Океанские тайлы игнорируются: данных 3DEP там всё равно нет.
-    Если маску суши построить не удалось (ALOS и Copernicus не
-    проверились), требуется покрытие всех тайлов — консервативный
-    запасной вариант.
+    Если маску суши построить не удалось, требуется покрытие всех
+    тайлов — консервативный запасной вариант.
     """
     state = availability.get("3dep")
     if state is None or not state.checked or not state.available:

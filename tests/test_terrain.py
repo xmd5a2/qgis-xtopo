@@ -727,6 +727,52 @@ class DemSourceTest(unittest.TestCase):
         self.assertFalse(shown.partial)
         self.assertIn("океан", shown.message)
 
+    def test_preferred_source_ignores_ocean_tile_with_land_mask(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(-80.2101, 26.07, -79.1259, 26.6067)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        land = frozenset({(26, -81)})
+        availability = {
+            "3dep": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required,
+                covered_tiles=land,
+                missing_tiles=required - land,
+            ),
+            "alos": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        with mock.patch.object(
+            dem_sources, "_world_map_land_tiles", return_value=land
+        ):
+            self.assertEqual(
+                dem_sources.preferred_source(bbox, availability), "3dep"
+            )
+            shown = dem_sources.display_availability(
+                "3dep", bbox, availability
+            )
+        self.assertIn("океан", shown.message)
+
+    def test_world_map_land_mask_skips_ocean(self):
+        from qgis_xtopo.core import dem_sources
+
+        if dem_sources._world_map_path() is None:
+            self.skipTest("QGIS world map is not available")
+        bbox = BBox(-80.2101, 26.07, -79.1259, 26.6067)
+        self.assertEqual(
+            dem_sources._world_map_land_tiles(bbox),
+            frozenset({(26, -81)}),
+        )
+
     def test_preferred_source_requires_land_coverage(self):
         from qgis_xtopo.core import dem_sources
 
