@@ -1553,10 +1553,6 @@ async function buildProfile(a, b, scroll = true) {
   const svg = document.getElementById("profile-svg");
   box.style.display = "block";
   box.classList.add("active");
-  // Панель слева прокручиваем к графику: иначе результат остаётся
-  // ниже видимой части и кажется, что профиль не построился. При пересчёте
-  // прокручивать нечего — график уже на месте.
-  if (scroll) box.scrollIntoView({behavior: "smooth", block: "nearest"});
   const [lon1, lat1] = a;
   const [lon2, lat2] = b;
   const fetchProfile = ds => fetch(
@@ -1611,6 +1607,21 @@ async function buildProfile(a, b, scroll = true) {
   drawProfile(svg, series);
   drawProfileLegend(series);
   updateProfileNote();
+  // Прокрутка панели — после того как появилась подпись под графиком: она
+  // и есть цель, график виден вместе с ней. Раньше панель прокручивалась к
+  // началу графика, а подпись дописывалась уже после прокрутки и уезжала
+  // за нижний край. При пересчёте прокручивать нечего — график на месте.
+  if (scroll) scrollToProfileNote();
+}
+
+// Прокрутка к подписи под графиком. Подпись — последний элемент блока
+// профиля, поэтому минимальная прокрутка «nearest» оставляет её над
+// нижним краем панели, а график — над ней.
+function scrollToProfileNote() {
+  const note = document.getElementById("profile-note");
+  const target = note.textContent.trim() ? note
+    : document.getElementById("profile-box");
+  target.scrollIntoView({behavior: "smooth", block: "nearest"});
 }
 
 // Пересчёт профиля при смене набора: кривые строятся по текущим A и B.
