@@ -126,6 +126,15 @@ STEEP_VARIANTS = (
     ("[TERRAIN] slope (steep) var2", "Предгорья"),
     ("[TERRAIN] slope (steep) var3", "Равнины"),
 )
+
+# Варианты отмывки рельефа: два слоя с общей подложкой
+# hillshade_composite.tif, но разными цветовыми шкалами. var1 — светлый
+# фон для равнин, var2 — текущая отмывка для гор. Показывается только
+# один вариант, по умолчанию var1.
+HILLSHADE_VARIANTS = (
+    ("[TERRAIN] hillshade var1", "Вариант 1 (равнины)"),
+    ("[TERRAIN] hillshade var2", "Вариант 2 (горы)"),
+)
 MOUNTAIN_LAYER = "mountain area"
 NATURE_RESERVE_LAYER = "nature_reserve"
 
@@ -517,7 +526,7 @@ class ProjectPanel(QWidget):
         self._layout_visible_states = None
         self._export_progress = None
         self._opacity_baseline = {}
-        self._hillshade_baseline = []
+        self._hillshade_baseline = {}
         self._isoline_color = None
         self._isoline_baseline = {}
         self._baseline_project = None
@@ -778,13 +787,33 @@ class ProjectPanel(QWidget):
         layout.addWidget(self.slight_opacity)
 
         self.hillshade_check = self._checkbox(
-            "Затенение рельефа", "hillshade1"
+            "Затенение", "hillshade1"
         )
-        self.hillshade_check.toggled.connect(
-            lambda checked: self._layer_box_toggled(HILLSHADE_LAYER, checked)
+        self.hillshade_check.setToolTip("Затенение рельефа")
+        self.hillshade_check.toggled.connect(self._hillshade_toggled)
+        # Выбор варианта — такая же кнопка с меню, как у крутых склонов.
+        self.hillshade_variant_button = QToolButton(self)
+        self.hillshade_variant_button.setToolTip(
+            "Вариант отмывки рельефа: равнины или горы. "
+            "Одновременно показывается только один вариант."
         )
+        self.hillshade_variant_button.setPopupMode(_instant_popup())
+        self.hillshade_variant_button.setToolButtonStyle(
+            Qt.ToolButtonTextBesideIcon
+        )
+        self.hillshade_variant_button.setAutoRaise(True)
+        self.hillshade_variant_button.setStyleSheet(
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
+        self.hillshade_variant_button.setFixedHeight(
+            self.hillshade_check.sizeHint().height()
+        )
+        self.hillshade_variant_menu = QMenu(self)
+        self.hillshade_variant_button.setMenu(self.hillshade_variant_menu)
+        self._hillshade_variant_name = None
         self.hillshade_opacity = self._layer_row(
-            self.hillshade_check, HILLSHADE_LAYER
+            self.hillshade_check, HILLSHADE_LAYER,
+            extra=self.hillshade_variant_button,
         )
         layout.addWidget(self.hillshade_opacity)
 
@@ -1851,6 +1880,7 @@ class ProjectPanel(QWidget):
         self._fill_detail_combo()
         # Название варианта в кнопке и в меню зависит от языка.
         self._update_steep_variants()
+        self._update_hillshade_variants()
 
     def _fill_map_language_combo(self):
         """Заполняет список языков подписей, сохраняя выбор."""
@@ -2018,7 +2048,7 @@ class ProjectPanel(QWidget):
         if file_name != self._baseline_project:
             self._baseline_project = file_name
             self._opacity_baseline = {}
-            self._hillshade_baseline = []
+            self._hillshade_baseline = {}
             self._isoline_color = None
             self._isoline_baseline = {}
             self._capture_hillshade_baseline()
@@ -2226,6 +2256,7 @@ class ProjectPanel(QWidget):
         self._syncing = True
         try:
             self._update_steep_variants()
+            self._update_hillshade_variants()
             available = {name: self._layer(name) is not None for name in LAYER_NAMES}
             visible = {name: self._layer_visible(name) for name in LAYER_NAMES}
             # Раскраска уклонов — семейство слоёв: в проекте может быть
@@ -2236,6 +2267,15 @@ class ProjectPanel(QWidget):
             active = self._active_steep_layer()
             visible[STEEP_LAYER] = (
                 self._layer_visible(active) if active else False
+            )
+            # Отмывка рельефа — тоже семейство слоёв с общей подложкой.
+            hillshade_names = self._hillshade_variant_names()
+            available[HILLSHADE_LAYER] = bool(hillshade_names)
+            self._sync_hillshade_state()
+            active_hillshade = self._active_hillshade_layer()
+            visible[HILLSHADE_LAYER] = (
+                self._layer_visible(active_hillshade)
+                if active_hillshade else False
             )
             for box, name in self._layer_boxes:
                 box.setEnabled(available[name])
@@ -2259,6 +2299,7 @@ class ProjectPanel(QWidget):
             )
             self._sync_opacity_sliders()
             self._update_steep_variant_state()
+            self._update_hillshade_variant_state()
             self._update_rule_checks(available[ISOLINES_LAYER])
             self._sync_glacier_rules()
             self._update_isoline_controls()
@@ -2833,6 +2874,158 @@ class ProjectPanel(QWidget):
         self._apply_steep_opacity()
         self._sync_from_project()
 
+    def _hillshade_variant_names(self):
+        """Слои-варианты отмывки рельефа, присутствующие в проекте."""
+        known = dict(HILLSHADE_VARIANTS)
+        known[HILLSHADE_LAYER] = ""
+        names = []
+        try:
+            layers = list(QgsProject.instance().mapLayers().values())
+        except Exception:
+            layers = []
+        for layer in layers:
+            name = layer.name()
+            if name in known:
+                names.append(name)
+        order = {
+            name: index for index, (name, _) in enumerate(HILLSHADE_VARIANTS)
+        }
+        names.sort(key=lambda name: (order.get(name, len(order)), name))
+        return names
+
+    def _hillshade_variant_label(self, name):
+        """Подпись варианта отмывки."""
+        for layer_name, label in HILLSHADE_VARIANTS:
+            if layer_name == name:
+                return label
+        if name == HILLSHADE_LAYER:
+            # Старый шаблон: единственный слой с текущей отмывкой.
+            return "Вариант 2 (горы)"
+        return name
+
+    def _active_hillshade_layer(self):
+        """Выбранный вариант отмывки (имя слоя)."""
+        names = self._hillshade_variant_names()
+        if not names:
+            return None
+        if self._hillshade_variant_name in names:
+            return self._hillshade_variant_name
+        return names[0]
+
+    def _update_hillshade_variants(self):
+        """Приводит список вариантов отмывки в соответствие с проектом."""
+        names = self._hillshade_variant_names()
+        current = self._hillshade_variant_name
+        if current not in names:
+            current = names[0] if names else None
+        self._hillshade_variant_name = current
+        self.hillshade_variant_menu.clear()
+        for name in names:
+            label = self._hillshade_variant_label(name)
+            action = self.hillshade_variant_menu.addAction(i18n.tr(label))
+            action.setData(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(
+                lambda checked=False, layer_name=name:
+                self._hillshade_variant_changed(layer_name)
+            )
+        self._update_hillshade_variant_button()
+        self._update_hillshade_variant_state()
+
+    def _update_hillshade_variant_button(self):
+        """Текст кнопки: номер выбранного варианта."""
+        name = self._hillshade_variant_name
+        if not name:
+            self.hillshade_variant_button.setText("")
+            return
+        label = i18n.tr(self._hillshade_variant_label(name))
+        digit = next((char for char in label if char.isdigit()), "")
+        self.hillshade_variant_button.setText(
+            f"({digit}) ▼" if digit else "▼"
+        )
+        tooltip = i18n.tr(
+            "Вариант отмывки рельефа: равнины или горы. "
+            "Одновременно показывается только один вариант."
+        )
+        tooltip += " " + i18n.trf("Выбрано: {}.", label)
+        self.hillshade_variant_button.setToolTip(tooltip)
+
+    def _update_hillshade_variant_state(self):
+        """Вариант отмывки доступен только при включённой опции."""
+        enabled = (
+            self.hillshade_check.isChecked()
+            and len(self._hillshade_variant_names()) > 1
+        )
+        self.hillshade_variant_button.setEnabled(enabled)
+        self.hillshade_variant_button.setVisible(
+            bool(self._hillshade_variant_names())
+        )
+
+    def _apply_hillshade_visibility(self, checked):
+        """Показывает выбранный вариант отмывки, остальные скрывает."""
+        active = self._active_hillshade_layer()
+        for name in self._hillshade_variant_names():
+            self._set_layer_visible(name, bool(checked) and name == active)
+
+    def _set_hillshade_variant(self, name):
+        """Выбирает вариант отмывки без обработчика (по состоянию проекта)."""
+        if name not in self._hillshade_variant_names():
+            return
+        self._hillshade_variant_name = name
+        for action in self.hillshade_variant_menu.actions():
+            action.setChecked(action.data() == name)
+        self._update_hillshade_variant_button()
+
+    def _sync_hillshade_state(self):
+        """Держит включённым только один вариант отмывки."""
+        names = self._hillshade_variant_names()
+        if not names:
+            return
+        active = self._active_hillshade_layer()
+        visible = [name for name in names if self._layer_visible(name)]
+        if active is not None and active not in visible and len(visible) == 1:
+            # Другой вариант включили в дереве слоёв QGIS — он и выбран.
+            active = visible[0]
+            self._set_hillshade_variant(active)
+        if len(visible) > 1:
+            for name in visible:
+                if name != active:
+                    self._set_layer_visible(name, False)
+        if active is not None and active not in self._hillshade_baseline:
+            self._capture_hillshade_baseline()
+
+    def _hillshade_toggled(self, checked):
+        """Галочка «Затенение рельефа» управляет выбранным вариантом."""
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            self._apply_hillshade_visibility(checked)
+        finally:
+            self._syncing = False
+        self._update_hillshade_variant_state()
+        self._sync_from_project()
+
+    def _hillshade_variant_changed(self, name):
+        """Выбор варианта отмывки из меню."""
+        if self._syncing:
+            return
+        self._hillshade_variant_name = name
+        self._update_hillshade_variant_button()
+        self._syncing = True
+        try:
+            self._apply_hillshade_visibility(self.hillshade_check.isChecked())
+        finally:
+            self._syncing = False
+        if name not in self._hillshade_baseline:
+            self._capture_hillshade_baseline()
+        widget = self._opacity_widgets.get(HILLSHADE_LAYER)
+        slider = widget.property("slider") if widget is not None else None
+        if slider is not None:
+            self._apply_hillshade_transparency(slider.value())
+        self._sync_from_project()
+
     def _layer_box_toggled(self, name, checked):
         if self._syncing:
             return
@@ -2889,6 +3082,8 @@ class ProjectPanel(QWidget):
         """
         if layer_name == STEEP_LAYER:
             return self._active_steep_layer()
+        if layer_name == HILLSHADE_LAYER:
+            return self._active_hillshade_layer()
         return layer_name
 
     def _reset_opacity(self, layer_name):
@@ -3029,9 +3224,10 @@ class ProjectPanel(QWidget):
                 apply_isoline_color(self._layer(name), self._isoline_color)
         self._update_isoline_controls()
 
-    def _hillshade_ramp(self):
+    def _hillshade_ramp(self, layer=None):
         """Отрисовщик, шейдер и цветовая шкала слоя затенения рельефа."""
-        layer = self._layer(HILLSHADE_LAYER)
+        if layer is None:
+            layer = self._layer(self._active_hillshade_layer() or "")
         if layer is None:
             return None, None, None
         try:
@@ -3045,16 +3241,17 @@ class ProjectPanel(QWidget):
         return renderer, shader, function
 
     def _capture_hillshade_baseline(self):
-        """Запоминает прозрачность теней из шаблона проекта."""
-        _, _, function = self._hillshade_ramp()
-        if function is None:
+        """Запоминает прозрачность теней варианта из шаблона проекта."""
+        layer = self._layer(self._active_hillshade_layer() or "")
+        _, _, function = self._hillshade_ramp(layer)
+        if layer is None or function is None:
             return
         try:
             alphas = [item.color.alpha() for item in function.colorRampItemList()]
         except Exception:
             return
         if alphas:
-            self._hillshade_baseline = alphas
+            self._hillshade_baseline[layer.name()] = alphas
 
     def _apply_hillshade_transparency(self, number):
         """Затемняет или осветляет тени рельефа.
@@ -3063,35 +3260,35 @@ class ProjectPanel(QWidget):
         задаётся прозрачностью цветовой шкалы: 50% — исходный вид,
         меньше — темнее, больше — светлее.
         """
-        renderer, shader, function = self._hillshade_ramp()
-        if renderer is None:
+        layer = self._layer(self._active_hillshade_layer() or "")
+        renderer, shader, function = self._hillshade_ramp(layer)
+        if layer is None or renderer is None:
             return False
         try:
             items = function.colorRampItemList()
         except Exception:
             return False
-        baseline = self._hillshade_baseline
+        baseline = self._hillshade_baseline.get(layer.name())
         if not baseline or len(baseline) != len(items):
             return False
         updated = _ramp_items(items, baseline, number)
         # Меняем цветовую шкалу на месте: шейдер и функция принадлежат
         # отрисовщику, повторная установка привела бы к двойному удалению.
         function.setColorRampItemList(updated)
-        layer = self._layer(HILLSHADE_LAYER)
-        if layer is not None:
-            layer.triggerRepaint()
-            try:
-                layer.emitStyleChanged()
-            except Exception:
-                pass
+        layer.triggerRepaint()
+        try:
+            layer.emitStyleChanged()
+        except Exception:
+            pass
         return True
 
     def _hillshade_transparency(self):
         """Текущая прозрачность теней по цветовой шкале слоя."""
-        _, _, function = self._hillshade_ramp()
-        if function is None:
+        layer = self._layer(self._active_hillshade_layer() or "")
+        _, _, function = self._hillshade_ramp(layer)
+        if layer is None or function is None:
             return None
-        baseline = self._hillshade_baseline
+        baseline = self._hillshade_baseline.get(layer.name())
         try:
             items = function.colorRampItemList()
         except Exception:
@@ -3121,7 +3318,8 @@ class ProjectPanel(QWidget):
             layer = self._layer(self._opacity_target(layer_name) or "")
             value = 100
             if layer_name == HILLSHADE_LAYER:
-                if not self._hillshade_baseline:
+                active = self._active_hillshade_layer()
+                if active and active not in self._hillshade_baseline:
                     self._capture_hillshade_baseline()
                 value = self._hillshade_transparency()
                 if value is None:

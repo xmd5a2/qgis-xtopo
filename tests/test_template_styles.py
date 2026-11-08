@@ -229,5 +229,73 @@ class IntermittentWaterStyleTest(unittest.TestCase):
             self.assertEqual(_option_value(fill, "color"), WATER_COLOR)
 
 
+class HillshadeVariantsTest(unittest.TestCase):
+    """Два варианта отмывки: светлый для равнин и текущий для гор."""
+
+    VAR1 = "[TERRAIN] hillshade var1"
+    VAR2 = "[TERRAIN] hillshade var2"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _template_root()
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in cls.root.iter("maplayer")
+            if (layer.findtext("layername") or "").startswith(
+                "[TERRAIN] hillshade"
+            )
+        }
+        cls.ids = {
+            name: layer.findtext("id")
+            for name, layer in cls.layers.items()
+        }
+
+    def _alphas(self, name):
+        ramp = self.layers[name].find(".//colorrampshader")
+        return {
+            int(item.get("value")): int(item.get("alpha"))
+            for item in ramp.findall("item")
+        }
+
+    def test_two_variants_share_raster(self):
+        self.assertEqual(set(self.layers), {self.VAR1, self.VAR2})
+        for layer in self.layers.values():
+            self.assertEqual(
+                layer.findtext("datasource"),
+                "./raster/hillshade_composite.tif",
+            )
+
+    def test_var1_is_visible_by_default(self):
+        checked = {
+            item.get("name"): item.get("checked")
+            for item in self.root.iter("layer-tree-layer")
+            if item.get("name") in self.layers
+        }
+        self.assertEqual(checked.get(self.VAR1), "Qt::Checked")
+        self.assertEqual(checked.get(self.VAR2), "Qt::Unchecked")
+
+    def test_var1_keeps_lit_slopes(self):
+        """Плоскость (190) прозрачна, освещённые склоны — светлый полутон."""
+        alphas = self._alphas(self.VAR1)
+        self.assertEqual(alphas.get(190), 0)
+        self.assertGreater(alphas.get(255, 0), 0)
+
+    def test_var2_keeps_current_style(self):
+        alphas = self._alphas(self.VAR2)
+        self.assertEqual(alphas.get(245), 5)
+        self.assertEqual(alphas.get(255), 0)
+
+    def test_layer_order_contains_both(self):
+        order = [
+            item.get("id") for item in self.root.find(".//layerorder")
+        ]
+        for layer_id in self.ids.values():
+            self.assertIn(layer_id, order)
+        self.assertLess(
+            order.index(self.ids[self.VAR1]),
+            order.index(self.ids[self.VAR2]),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

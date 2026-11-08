@@ -1305,13 +1305,70 @@ class PipelineIntegrationTest(unittest.TestCase):
         project.addMapLayer(layer)
         panel = ProjectPanel(None)
         try:
-            # Отдельного выбора вариантов больше нет
+            # Старый шаблон: единственный слой без вариантов
             self.assertFalse(hasattr(panel, "hillshade_1_check"))
             self.assertFalse(hasattr(panel, "hillshade_2_check"))
             self.assertFalse(hasattr(panel, "hillshade_container"))
+            panel._sync_from_project()
+            self.assertEqual(len(panel.hillshade_variant_menu.actions()), 1)
+            self.assertEqual(
+                panel._active_hillshade_layer(), "[TERRAIN] hillshade"
+            )
             self.assertTrue(panel.hillshade_check.isEnabled())
             panel.hillshade_check.setChecked(True)
             self.assertTrue(panel._layer_visible("[TERRAIN] hillshade"))
+        finally:
+            panel.deleteLater()
+            project.clear()
+
+    def test_project_panel_hillshade_variants(self):
+        from qgis.core import QgsProject, QgsRasterLayer
+        from qgis_xtopo.gui.projectpanel import (
+            HILLSHADE_VARIANTS, ProjectPanel,
+        )
+
+        project = QgsProject.instance()
+        project.clear()
+        layers = {}
+        for name, _label in HILLSHADE_VARIANTS:
+            layer = QgsRasterLayer(
+                "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                "&zmax=19&zmin=0",
+                name,
+                "wms",
+            )
+            project.addMapLayer(layer)
+            layers[name] = layer
+        panel = ProjectPanel(None)
+        try:
+            panel._sync_from_project()
+            labels = [
+                action.text()
+                for action in panel.hillshade_variant_menu.actions()
+            ]
+            self.assertEqual(
+                labels, ["Вариант 1 (равнины)", "Вариант 2 (горы)"]
+            )
+            # По умолчанию выбран светлый вариант для равнин
+            self.assertEqual(
+                panel._active_hillshade_layer(), HILLSHADE_VARIANTS[0][0]
+            )
+            self.assertEqual(panel.hillshade_variant_button.text(), "(1) ▼")
+            self.assertTrue(panel.hillshade_check.isChecked())
+            self.assertTrue(panel._layer_visible(HILLSHADE_VARIANTS[0][0]))
+            self.assertFalse(panel._layer_visible(HILLSHADE_VARIANTS[1][0]))
+            # Смена варианта переносит видимость
+            panel.hillshade_variant_menu.actions()[1].trigger()
+            self.assertTrue(panel._layer_visible(HILLSHADE_VARIANTS[1][0]))
+            self.assertFalse(panel._layer_visible(HILLSHADE_VARIANTS[0][0]))
+            self.assertEqual(panel.hillshade_variant_button.text(), "(2) ▼")
+            # Снятие галочки прячет все варианты, включение возвращает выбранный
+            panel.hillshade_check.setChecked(False)
+            for name, _label in HILLSHADE_VARIANTS:
+                self.assertFalse(panel._layer_visible(name))
+            panel.hillshade_check.setChecked(True)
+            self.assertTrue(panel._layer_visible(HILLSHADE_VARIANTS[1][0]))
+            self.assertFalse(panel._layer_visible(HILLSHADE_VARIANTS[0][0]))
         finally:
             panel.deleteLater()
             project.clear()
