@@ -120,6 +120,12 @@ def _download_leave(key):
         STATUS["downloads"].pop(key, None)
 
 
+def _queue_size():
+    """Сколько тайлов сейчас в работе (рендер или ожидание ответа)."""
+    with STATUS_LOCK:
+        return len(STATUS["active"])
+
+
 def _tile_label(lat, lon):
     """Имя градусного тайла: N45E007, S03W062."""
     ns = "N" if lat >= 0 else "S"
@@ -2260,7 +2266,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         write_bytes_atomic(cache_file, data)
-        _log(f"tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s")
+        _log(f"tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s очередь {_queue_size()}")
         self._send(200, data, "image/png",
                    {"X-Native-X": f"{native[0]:.2f}",
                     "X-Native-Y": f"{native[1]:.2f}",
