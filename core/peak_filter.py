@@ -133,10 +133,18 @@ class ProjectDem:
         """Чтение с приведением к сетке 1″ (3DEP, ручной рельеф)."""
         width = 2 * half_x + 1
         height = 2 * half_y + 1
-        lon_min = lon - half_x * peak_placement.PIXEL_DEGREES
-        lat_min = lat - half_y * peak_placement.PIXEL_DEGREES
-        longitudes = lon_min + np.arange(width) * peak_placement.PIXEL_DEGREES
-        latitudes = lat_min + np.arange(height) * peak_placement.PIXEL_DEGREES
+        pixel = peak_placement.PIXEL_DEGREES
+        # Привязываем сетку 1″ к сетке растра проекта: инструмент так же
+        # округляет окно к узлам сетки, а не к точке пика.
+        lon_min = self.transform[0] + round(
+            (lon - half_x * pixel - self.transform[0]) / pixel
+        ) * pixel
+        lat_max = self.transform[3] - round(
+            (self.transform[3] - (lat + half_y * pixel)) / pixel
+        ) * pixel
+        lat_min = lat_max - (height - 1) * pixel
+        longitudes = lon_min + np.arange(width) * pixel
+        latitudes = lat_min + np.arange(height) * pixel
         columns = (longitudes - self.transform[0]) / self.transform[1] - 0.5
         rows = (latitudes - self.transform[3]) / self.transform[5] - 0.5
 
