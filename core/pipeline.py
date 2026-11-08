@@ -6,7 +6,10 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
-from . import coastline, gdal_log, i18n, osm_convert, project, sources, terrain
+from . import (
+    coastline, gdal_log, i18n, osm_convert, peak_filter, project, sources,
+    terrain,
+)
 from .bbox import parse_bbox
 from .query_recipes import recipe_for
 
@@ -93,6 +96,8 @@ def progress_stages(config):
         stages.append(("Обработка береговой линии", 4))
     if config.generate_terrain:
         stages.append(("Обработка рельефа", 14))
+    if "peak" in config.array_queries:
+        stages.append(("Проверка пиков", 3))
     stages.append(("Удаление пустых слоёв", 2))
     return stages
 
@@ -1352,6 +1357,22 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("рельеф", time.monotonic() - started)
+        if "peak" in config.array_queries:
+            report("Проверка пиков")
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                peak_filter.filter_peak_layer(
+                    config, bbox, progress=report, cancel=cancel,
+                    fraction=tracker.fraction,
+                )
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                report(f"WARNING: Пики: {exc}; проверка пропущена")
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage("проверка пиков", time.monotonic() - started)
         report("Удаление пустых слоёв")
         started = time.monotonic()
         project.clean_project_layers(project_path)

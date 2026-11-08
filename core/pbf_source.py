@@ -3,6 +3,7 @@ import gzip
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,88 @@ def _gdal():
     gdal.UseExceptions()
     ogr.UseExceptions()
     return gdal, ogr
+
+
+# Запасной конфиг OSM-драйвера, если системный osmconf.ini не найден.
+# Главное отличие от стандартного — ele не исключается из other_tags:
+# без этого у пиков нет высоты, и подписи с отметками не работают.
+_FALLBACK_OSM_CONFIG = """[points]
+osm_id=yes
+attributes=name,barrier,highway,ref,address,is_in,place,man_made
+unsignificant=created_by,converted_by,source,time,ele,attribution
+ignore=created_by,converted_by,source,time,note,todo,openGeoDB:,fixme,FIXME
+"""
+
+
+def _system_osm_config():
+    """Путь к системному osmconf.ini, если он доступен."""
+    from osgeo import gdal
+
+    candidates = []
+    for name in ("OSM_CONFIG_FILE", "GDAL_DATA"):
+        value = gdal.GetConfigOption(name) or os.environ.get(name)
+        if value:
+            path = Path(value)
+            candidates.append(
+                path if path.name == "osmconf.ini" else path / "osmconf.ini"
+            )
+    candidates.extend([
+        Path(sys.prefix) / "share" / "gdal" / "osmconf.ini",
+        Path("/usr/share/gdal/osmconf.ini"),
+        Path("/usr/local/share/gdal/osmconf.ini"),
+    ])
+    try:
+        import qgis
+
+        prefix = Path(qgis.__file__).resolve().parent.parent
+        candidates.append(prefix / "share" / "gdal" / "osmconf.ini")
+    except Exception:
+        pass
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def ensure_osm_config(config):
+    """Готовит osmconf.ini, сохраняющий тег ele у точек.
+
+    Стандартный конфиг GDAL перечисляет ele в ``ignore``, поэтому
+    ``other_tags`` его не содержит.  Копия системного конфига без этого
+    тега возвращает высоту в слой пиков.
+    """
+    source = _system_osm_config()
+    if source is not None:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    else:
+        text = _FALLBACK_OSM_CONFIG
+    lines = []
+    in_points = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_points = stripped == "[points]"
+        if in_points and line.startswith("ignore="):
+            keys = [
+                key for key in line[len("ignore="):].split(",")
+                if key.strip() != "ele"
+            ]
+            line = "ignore=" + ",".join(keys)
+        lines.append(line)
+    content = "\n".join(lines) + "\n"
+    target = Path(config.config_dir) / "osmconf.ini"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists() or target.read_text(encoding="utf-8") != content:
+        target.write_text(content, encoding="utf-8")
+    return target
+
+
+def _set_osm_config(path):
+    from osgeo import gdal
+
+    gdal.SetConfigOption(
+        "OSM_CONFIG_FILE", str(path) if path is not None else None
+    )
 
 
 def _unescape(value):
@@ -548,33 +631,45 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
     Если доступен osmium, область сначала вырезается из выгрузок:
     чтение большой карты целиком занимает минуты, а вырезка — секунды.
     """
-    paths = [Path(item).expanduser() for item in (sources or [config.pbf_path])]
-    temporary = []
-    unfiltered = set()
-    if use_osmium and paths:
-        paths, temporary, covering = osmium_prefilter.prefilter_sources(
-            paths, bbox, config, progress=progress, cancel=cancel
-        )
-        unfiltered = {str(Path(item).expanduser()) for item in covering}
+    from osgeo import gdal
+
+    previous = gdal.GetConfigOption("OSM_CONFIG_FILE")
+    osm_config = ensure_osm_config(config)
+    if osm_config is not None:
+        _set_osm_config(osm_config)
     try:
-        dataset = _prepare_dataset(
-            config, bbox, query_names, query_texts=query_texts, cancel=cancel,
-            progress=progress, sources=paths, _custom_indexing=True,
-            unfiltered=unfiltered,
-        )
-    except RuntimeError:
-        if progress:
-            progress(
-                "PBF: индекс GDAL не справился с повторяющимися id, "
-                "файл читается заново без индекса"
+        paths = [
+            Path(item).expanduser()
+            for item in (sources or [config.pbf_path])
+        ]
+        temporary = []
+        unfiltered = set()
+        if use_osmium and paths:
+            paths, temporary, covering = osmium_prefilter.prefilter_sources(
+                paths, bbox, config, progress=progress, cancel=cancel
             )
-        dataset = _prepare_dataset(
-            config, bbox, query_names, query_texts=query_texts, cancel=cancel,
-            progress=progress, sources=paths, _custom_indexing=False,
-            unfiltered=unfiltered,
-        )
-    dataset.temp_files.extend(temporary)
-    return dataset
+            unfiltered = {str(Path(item).expanduser()) for item in covering}
+        try:
+            dataset = _prepare_dataset(
+                config, bbox, query_names, query_texts=query_texts,
+                cancel=cancel, progress=progress, sources=paths,
+                _custom_indexing=True, unfiltered=unfiltered,
+            )
+        except RuntimeError:
+            if progress:
+                progress(
+                    "PBF: индекс GDAL не справился с повторяющимися id, "
+                    "файл читается заново без индекса"
+                )
+            dataset = _prepare_dataset(
+                config, bbox, query_names, query_texts=query_texts,
+                cancel=cancel, progress=progress, sources=paths,
+                _custom_indexing=False, unfiltered=unfiltered,
+            )
+        dataset.temp_files.extend(temporary)
+        return dataset
+    finally:
+        _set_osm_config(previous)
 
 
 def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,

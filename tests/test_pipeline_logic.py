@@ -612,3 +612,198 @@ class CleanLayersTest(unittest.TestCase):
             qgis_projects_dir=self.directory.name, project_name="empty"
         )
         self.assertEqual(_clean_layers(empty), 0)
+
+
+class _PeakConfig:
+    def __init__(self, root, source="srtm"):
+        self.vector_dir = Path(root) / "vector"
+        self.raster_dir = Path(root) / "raster"
+        self.terrain_cache_dir = Path(root) / "srtm-cache"
+        self._source = source
+
+    def resolved_terrain_source(self):
+        return self._source
+
+
+class PeakFilterTest(unittest.TestCase):
+    BBOX = BBox(30.0, 35.99, 30.01, 36.0)
+
+    @staticmethod
+    def _write_dem(path, value=1000.0, size=60, step=1.0 / 3600.0):
+        import numpy as np
+        from osgeo import gdal, osr
+
+        gdal.UseExceptions()
+        driver = gdal.GetDriverByName("GTiff")
+        dataset = driver.Create(str(path), size, size, 1, gdal.GDT_Float32)
+        dataset.SetGeoTransform((30.0, step, 0.0, 36.0, 0.0, -step))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        dataset.SetProjection(srs.ExportToWkt())
+        dataset.GetRasterBand(1).WriteArray(
+            np.full((size, size), value, dtype="float32")
+        )
+        dataset = None
+
+    @staticmethod
+    def _write_layer(path, peaks):
+        from osgeo import ogr, osr
+
+        ogr.UseExceptions()
+        path = Path(path)
+        path.unlink(missing_ok=True)
+        driver = ogr.GetDriverByName("SQLite")
+        dataset = driver.CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer("peak", srs, ogr.wkbPoint)
+        for name in ("name", "@id", "ele"):
+            layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
+        for peak in peaks:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("@id", peak["id"])
+            if peak.get("name"):
+                feature.SetField("name", peak["name"])
+            if peak.get("ele") is not None:
+                feature.SetField("ele", str(peak["ele"]))
+            geometry = ogr.Geometry(ogr.wkbPoint)
+            geometry.AddPoint_2D(peak["lon"], peak["lat"])
+            feature.SetGeometry(geometry)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    def _root(self, directory):
+        root = Path(directory)
+        (root / "vector").mkdir()
+        (root / "raster").mkdir()
+        return root
+
+    def test_removes_false_peaks_and_updates_ele(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import peak_filter, peak_placement
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            self._write_dem(root / "raster" / "merged_dem.tif")
+            self._write_layer(root / "vector" / "peak.sqlite", [
+                {"id": "node/1", "ele": 900, "lon": 30.005, "lat": 35.995},
+                {"id": "node/2", "ele": 1000, "lon": 30.006, "lat": 35.996},
+                {"id": "node/3", "name": "Named", "ele": 500,
+                 "lon": 30.007, "lat": 35.997},
+                {"id": "node/4", "ele": None, "lon": 30.008, "lat": 35.998},
+            ])
+            messages = []
+
+            def fake_measure(_peak, _dem, _radii, _thresholds):
+                return type("Metrics", (), {"dem": 1000.0})()
+
+            def fake_classify(peak, _metrics, _thresholds, neighbour=None):
+                if peak.osm_id in ("node/2", "node/4"):
+                    return "error", [], None
+                return "ok", [], None
+
+            with mock.patch.object(peak_placement, "measure", fake_measure), \
+                    mock.patch.object(peak_placement, "classify", fake_classify):
+                stats = peak_filter.filter_peak_layer(
+                    _PeakConfig(root), self.BBOX, progress=messages.append
+                )
+
+            self.assertEqual(stats, {
+                "checked": 3, "removed": 2, "ele_fixed": 1, "no_data": 0,
+            })
+            self.assertIn(
+                "Пики: проверено 3, удалено 2, исправлено ele 1", messages
+            )
+            import sqlite3
+
+            database = sqlite3.connect(root / "vector" / "peak.sqlite")
+            identifiers = {
+                row[0] for row in database.execute('select "@id" from peak')
+            }
+            self.assertEqual(identifiers, {"node/1", "node/3"})
+            ele = database.execute(
+                'select ele from peak where "@id" = ?', ("node/1",)
+            ).fetchone()[0]
+            self.assertEqual(ele, "1000")
+            database.close()
+
+    def test_ele_mismatch_is_corrected_not_removed(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import peak_filter, peak_placement
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            self._write_dem(root / "raster" / "merged_dem.tif")
+            self._write_layer(root / "vector" / "peak.sqlite", [
+                {"id": "node/1", "ele": 500, "lon": 30.005, "lat": 35.995},
+            ])
+            metrics = peak_placement.Metrics()
+            metrics.dem = 1000.0
+            metrics.ele_diff = 50.0
+            metrics.ele_below = -50.0
+
+            with mock.patch.object(peak_placement, "measure",
+                                   lambda *_args: metrics):
+                stats = peak_filter.filter_peak_layer(
+                    _PeakConfig(root), self.BBOX
+                )
+
+            self.assertEqual(stats["removed"], 0)
+            self.assertEqual(stats["ele_fixed"], 1)
+            import sqlite3
+
+            database = sqlite3.connect(root / "vector" / "peak.sqlite")
+            ele = database.execute("select ele from peak").fetchone()[0]
+            self.assertEqual(ele, "1000")
+            database.close()
+
+    def test_no_terrain_skips(self):
+        from qgis_xtopo.core import peak_filter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            self._write_layer(root / "vector" / "peak.sqlite", [
+                {"id": "node/1", "lon": 30.005, "lat": 35.995},
+            ])
+            messages = []
+            stats = peak_filter.filter_peak_layer(
+                _PeakConfig(root), self.BBOX, progress=messages.append
+            )
+            self.assertIsNone(stats)
+            self.assertTrue(
+                any("рельеф не подготовлен" in message for message in messages)
+            )
+
+    def test_project_dem_window(self):
+        from qgis_xtopo.core import peak_filter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            path = root / "raster" / "merged_dem.tif"
+            self._write_dem(path, value=1234.0, size=30)
+            dem = peak_filter.ProjectDem(path)
+            try:
+                self.assertTrue(dem.covers(self.BBOX))
+                window = dem.window(30.005, 35.995, 2, 2)
+                self.assertEqual(window.shape, (5, 5))
+                self.assertTrue((window == 1234.0).all())
+            finally:
+                dem.close()
+
+    def test_resampled_window(self):
+        from qgis_xtopo.core import peak_filter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            path = root / "raster" / "merged_dem.tif"
+            self._write_dem(path, value=500.0, size=30, step=1.0 / 1200.0)
+            dem = peak_filter.ProjectDem(path)
+            try:
+                self.assertFalse(dem.direct)
+                window = dem.window(30.005, 35.995, 2, 2)
+                self.assertEqual(window.shape, (5, 5))
+                self.assertTrue((window == 500.0).all())
+            finally:
+                dem.close()

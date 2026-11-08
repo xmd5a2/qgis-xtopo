@@ -30,6 +30,25 @@ class PbfSourceTest(unittest.TestCase):
         self.assertEqual(tags["name"], 'D"Or')
         self.assertEqual(tags["int_name"], "Principat d'Andorra")
 
+    def test_osm_config_keeps_ele(self):
+        from qgis_xtopo.core.pbf_source import ensure_osm_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="osm",
+                bbox="1,2,3,4",
+            )
+            config.ensure_directories()
+            path = ensure_osm_config(config)
+            self.assertTrue(path.exists())
+            ignore = next(
+                line for line in path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("ignore=")
+            )
+            keys = [item.strip() for item in ignore[len("ignore="):].split(",")]
+            self.assertNotIn("ele", keys)
+
     def test_query_index(self):
         index = QueryIndex({
             "water": 'way["natural"="water"]["intermittent"!="yes"];',

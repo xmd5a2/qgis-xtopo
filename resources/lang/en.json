@@ -454,5 +454,13 @@
   "~{} мин": "~{} min",
   "~{} ч {} мин": "~{} h {} min",
   "Загрузка карт: {}% ({}/{} МБ) · {}/{} · {} МБ/с · {}": "Downloading maps: {}% ({}/{} MB) · {}/{} · {} MB/s · {}",
-  "Загрузка карт: {} МБ · {}/{} · {} МБ/с · {}": "Downloading maps: {} MB · {}/{} · {} MB/s · {}"
+  "Загрузка карт: {} МБ · {}/{} · {} МБ/с · {}": "Downloading maps: {} MB · {}/{} · {} MB/s · {}",
+  "Проверка пиков": "Checking peaks",
+  "Пики: проверено {}, удалено {}, исправлено ele {}": "Peaks: checked {}, removed {}, ele fixed {}",
+  "Пики: без рельефа {}": "Peaks: no terrain data {}",
+  "Пики: рельеф не подготовлен, проверка пропущена": "Peaks: terrain is not prepared, check skipped",
+  "Пики: рельеф не покрывает охват, проверка пропущена": "Peaks: terrain does not cover the extent, check skipped",
+  "Пики: не удалось открыть слой, проверка пропущена": "Peaks: failed to open the layer, check skipped",
+  "Пики: слой не найден": "Peaks: layer not found",
+  "Пики: нет объектов": "Peaks: no objects"
 }
