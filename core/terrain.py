@@ -556,12 +556,15 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     downscaled.unlink(missing_ok=True)
 
     hillshade = config.raster_dir / "hillshade.tif"
+    # Как gdaldem hillshade по умолчанию: солнце 315°/45°, без вертикального
+    # преувеличения. Многопроходная отмывка с altitude=70 и zFactor=2 давала
+    # почти белое полотно, на котором рельеф не читался.
     options = gdal.DEMProcessingOptions(
         computeEdges=True,
-        multiDirectional=True,
-        zFactor=2,
+        azimuth=315,
+        altitude=45,
+        zFactor=1,
         scale=111120,
-        altitude=70,
         creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
     )
     result = gdal.DEMProcessing(str(hillshade), str(upscaled), "hillshade", options=options)
@@ -570,9 +573,8 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     result = None
 
     hillshade_template, hillshade_array = _read_band(hillshade)
-    slope_template, slope_up_array = _read_band(slope_up)
-    slope_shade = 255.0 * (1.0 - numpy.clip(slope_up_array / 90.0, 0.0, 1.0))
-    composite = numpy.clip(hillshade_array + slope_shade * 0.5, 0, 255)
+    # 10 % подсветки: самые глубокие тени не проваливаются в чёрный.
+    composite = numpy.clip(255.0 * (0.10 + 0.90 * (hillshade_array / 255.0)), 0, 255)
     composite_path = config.raster_dir / "hillshade_composite.tif"
     _write_raster(composite_path, composite, hillshade_template)
     hillshade.unlink(missing_ok=True)

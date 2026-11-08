@@ -25,6 +25,11 @@ DEM_FILES = (
     "slope_upscaled.tif",
     "hillshade_composite.tif",
 )
+
+# Версия параметров отмывки (core/terrain.py: generate_hillshade_slope).
+# Меняя направление света, преувеличение или подсветку теней, поднимайте
+# число: иначе кэш вернёт растры, посчитанные по старым параметрам.
+HILLSHADE_STYLE_VERSION = 2
 # Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
 DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
@@ -144,6 +149,7 @@ def dem_signature(config, bbox, source_digest=None):
         config.resolved_terrain_source(),
         config.terrain_resample_method,
         config.generate_terrain_hillshade_slope,
+        HILLSHADE_STYLE_VERSION,
         source_digest,
     ]
     return _digest(parts)

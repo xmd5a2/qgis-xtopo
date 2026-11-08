@@ -47,6 +47,48 @@ class SlopeResolutionTest(unittest.TestCase):
             self.assertFalse((root / "merged_dem_x2.tif").exists())
 
 
+class HillshadeStyleTest(unittest.TestCase):
+    """Отмывка как у gdaldem hillshade: одно направление света, тени не чёрные."""
+
+    def test_deep_shadows_are_lifted(self):
+        from osgeo import gdal, osr
+        import numpy as np
+        from qgis_xtopo.core.terrain import generate_hillshade_slope
+
+        gdal.UseExceptions()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = type("Config", (), {})()
+            config.raster_dir = root
+            config.temp_dir = root / "tmp"
+            config.temp_dir.mkdir()
+            config.terrain_resample_method = "cubicspline"
+
+            dem_path = root / "merged_dem.tif"
+            driver = gdal.GetDriverByName("GTiff")
+            ds = driver.Create(str(dem_path), 40, 40, 1, gdal.GDT_Float32)
+            ds.SetGeoTransform((0, 0.0003, 0, 0, 0, -0.0003))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            ds.SetProjection(srs.ExportToWkt())
+            # Конус с уклоном около 55°: юго-восточный склон полностью в тени,
+            # северо-западный — на свету.
+            yy, xx = np.mgrid[0:40, 0:40]
+            values = 1000.0 - 45.0 * np.hypot(xx - 20.0, yy - 20.0)
+            ds.GetRasterBand(1).WriteArray(values.astype("float32"))
+            ds = None
+
+            generate_hillshade_slope(config, None)
+            composite = gdal.Open(str(root / "hillshade_composite.tif"))
+            array = composite.GetRasterBand(1).ReadAsArray()
+            composite = None
+
+            # 10 % подсветки дают нижнюю границу около 25,5; прежний вариант
+            # с примешиванием уклона и многонаправленной отмывкой был светлее.
+            self.assertLess(float(array.min()), 35.0)
+            self.assertGreater(float(array.max()), 235.0)
+
+
 class BarrierRecipeTest(unittest.TestCase):
     def test_barrier_polygons_become_lines(self):
         self.assertIn("barrier", RECIPES)
