@@ -136,6 +136,18 @@
     color: var(--muted); margin: 16px 0 6px; font-weight: 600;
   }
   aside h2:first-child { margin-top: 0; }
+  /* «Как читать» свёрнут: длинный текст не должен занимать панель, но
+     остаётся на главном экране и раскрывается по клику. */
+  aside details#help summary {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 16px 0 6px; font-weight: 600;
+    cursor: pointer; user-select: none; list-style: none;
+  }
+  aside details#help summary::-webkit-details-marker { display: none; }
+  aside details#help summary::after { content: " ▾"; font-size: 10px; color: var(--text); }
+  aside details#help[open] summary::after { content: " ▴"; }
+  aside details#help[open] summary { margin-bottom: 6px; }
+  aside details#help .note { padding: 2px 0 4px; }
   aside h2.toggle {
     display: flex; align-items: center; gap: 6px; cursor: pointer;
     user-select: none;
@@ -305,6 +317,13 @@
     </h2>
     <div id="points"></div>
 
+    <div id="profile-box">
+      <h2>Профиль высот</h2>
+      <div id="profile-legend"></div>
+      <svg id="profile-svg" viewBox="0 0 300 170" preserveAspectRatio="none"></svg>
+      <div class="note" id="profile-note"></div>
+    </div>
+
     <h2>Ссылка OSM</h2>
     <div class="local-form">
       <input id="osm-link" type="text" spellcheck="false"
@@ -332,42 +351,37 @@
     <div class="legend-bar"></div>
     <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
 
-    <div id="profile-box">
-      <h2>Профиль высот</h2>
-      <div id="profile-legend"></div>
-      <svg id="profile-svg" viewBox="0 0 300 170" preserveAspectRatio="none"></svg>
-      <div class="note" id="profile-note"></div>
-    </div>
-
-    <h2>Как читать</h2>
-    <div class="note">
-      Колесо — масштаб, перетаскивание — сдвиг. <b>1:1</b> приближает до
-      пикселя источника. В режиме «шторка» слева набор A, справа B — границу
-      тянут мышью. «Δ высот» показывает разность B − A: синий — ниже,
-      красный — выше. «профиль» — кликните две точки.
-      <br><br>
-      <b>OSM</b> — непрозрачная подложка OpenStreetMap: по ней видно, куда
-      вы сдвинули карту. Кнопка <b>OSM</b> в полосе над панелью включает и
-      выключает её, ползунок <b>рельеф</b> задаёт долю рельефа поверх
-      подложки: 0 % — только OSM (рельеф не считается), 100 % — рельеф
-      полностью перекрывает подложку. Если подложка выключена, рельеф
-      непрозрачный.
-      <br><br>
-      <b>Свой рельеф</b> — укажите каталог с GeoTIFF, HGT или VRT: сервер
-      проиндексирует файлы, и набор появится в списках A и B. Данные
-      локальные, сеть и прогрев не нужны.
-      <br><br>
-      Пунктир — границы градусных тайлов 1×1°, подписаны как <b>N45E007</b>:
-      так же называются исходники SRTM и Copernicus. Подпись стоит над своим
-      тайлом: угол в имени файла — юго-западный.
-      <br><br>
-      Ниже <b>z9</b> показывается только подложка OSM: рельеф на таких
-      масштабах слишком обобщён. Кнопка OSM и ползунок там заблокированы.
-      <br><br>
-      <b>3DEP</b> покрывает только США — в остальных точках он пуст.
-      <b>NASADEM</b> не заходит выше 61° и ниже −56°.
-      <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
-    </div>
+    <details id="help">
+      <summary>Как читать</summary>
+      <div class="note">
+        Колесо — масштаб, перетаскивание — сдвиг. <b>1:1</b> приближает до
+        пикселя источника. В режиме «шторка» слева набор A, справа B — границу
+        тянут мышью. «Δ высот» показывает разность B − A: синий — ниже,
+        красный — выше. «профиль» — кликните две точки.
+        <br><br>
+        <b>OSM</b> — непрозрачная подложка OpenStreetMap: по ней видно, куда
+        вы сдвинули карту. Кнопка <b>OSM</b> в полосе над панелью включает и
+        выключает её, ползунок <b>рельеф</b> задаёт долю рельефа поверх
+        подложки: 0 % — только OSM (рельеф не считается), 100 % — рельеф
+        полностью перекрывает подложку. Если подложка выключена, рельеф
+        непрозрачный.
+        <br><br>
+        <b>Свой рельеф</b> — укажите каталог с GeoTIFF, HGT или VRT: сервер
+        проиндексирует файлы, и набор появится в списках A и B. Данные
+        локальные, сеть и прогрев не нужны.
+        <br><br>
+        Пунктир — границы градусных тайлов 1×1°, подписаны как <b>N45E007</b>:
+        так же называются исходники SRTM и Copernicus. Подпись стоит над своим
+        тайлом: угол в имени файла — юго-западный.
+        <br><br>
+        Ниже <b>z9</b> показывается только подложка OSM: рельеф на таких
+        масштабах слишком обобщён. Кнопка OSM и ползунок там заблокированы.
+        <br><br>
+        <b>3DEP</b> покрывает только США — в остальных точках он пуст.
+        <b>NASADEM</b> не заходит выше 61° и ниже −56°.
+        <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
+      </div>
+    </details>
 
     <h2>Журнал тайлов</h2>
     <div id="log" class="note">пока ничего не загружено</div>
@@ -2465,6 +2479,12 @@ loadDatasets().then(() => {
   setSidebarCollapsed(storedFlag("dem-compare.sidebar-hidden", false));
   setPointsCollapsed(storedFlag("dem-compare.points-hidden", false));
   setPointsTrimmed(storedFlag("dem-compare.points-trimmed", true));
+  // «Как читать» по умолчанию свёрнут, но если его открывали — оставляем.
+  const help = document.getElementById("help");
+  help.open = storedFlag("dem-compare.help-open", false);
+  help.addEventListener("toggle", event => {
+    storeFlag("dem-compare.help-open", event.target.open);
+  });
   fillSelect(document.getElementById("ds-a"), state.a);
   fillSelect(document.getElementById("ds-b"), state.b);
   document.getElementById("mode").value = state.mode;
