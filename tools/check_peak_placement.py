@@ -30,6 +30,10 @@
 Растровые наборы скачиваются через ``core.terrain.download_cog_dem`` и
 приводятся к сетке 1″ в EPSG:4326, поэтому метрики сравнимы с SRTM.
 Для ``manual`` или своего файла укажите ``--dem-file``.
+
+Для ALOS и Copernicus автоматически включается профиль порогов: их
+поверхность (DSM) сдвигает часть метрик относительно SRTM, и базовые
+пороги ловят верные пики.  Профиль можно отключить ``--no-source-profile``.
 """
 
 import argparse
@@ -65,6 +69,40 @@ PIXEL_DEGREES = 1.0 / 3600.0
 SRTM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{dir}/{tile}.hgt.gz"
 
 DEFAULT_DEM_CACHE = Path.home() / "qgis_projects" / "qgisxtopo-cache" / "srtm"
+
+# Пороги для растровых DSM (ALOS, Copernicus).  Поверхность у них другая:
+# растительность, шум и пропуски сдвигают часть метрик на границу порога.
+# Профиль поднимает самые неустойчивые пороги, чтобы не ловить верные пики.
+# SRTM и SRTM-подобные источники остаются на базовом правиле.
+SOURCE_THRESHOLD_PROFILES = {
+    "alos": {
+        "no_crest_450": 80.0,
+        "far_drop": 260.0,
+        "near_max_d": 400.0,
+        "stream_distance": 50.0,
+        "ele_below": 4.6,
+        "summit_far_neighbour": 900.0,
+    },
+    "cop30": {
+        "no_crest_450": 80.0,
+        "far_drop": 260.0,
+        "near_max_d": 400.0,
+        "stream_distance": 50.0,
+        "ele_below": 4.6,
+        "summit_far_neighbour": 900.0,
+    },
+}
+
+# Базовые значения аргументов, которые меняет профиль.  Явно заданный
+# пользователем порог (отличный от базового) профиль не перекрывает.
+PROFILE_ARGUMENT_DEFAULTS = {
+    "no_crest_450": 40.0,
+    "far_drop": 240.0,
+    "near_max_d": 300.0,
+    "stream_distance": 200.0,
+    "ele_below": 4.0,
+    "summit_far_neighbour": 600.0,
+}
 
 # Теги, по которым объект считается названным.
 NAME_TAGS = ("name", "alt_name", "official_name", "short_name", "old_name",
@@ -1237,7 +1275,7 @@ def classify(peak, metrics, thresholds, neighbour=None):
         )
     # 9. Настоящей вершины рядом нет, но есть более высокий пик OSM
     #     далеко — пик стоит на пологом участке под ним.
-    if (far(metrics.summit_distance, thresholds["summit_far"])
+    if (far(metrics.summit_distance, thresholds["summit_far_neighbour"])
             and far(neighbour_nearest, thresholds["neighbour_nearest"])):
         reasons.append(
             "вершины рядом нет, а более высокий пик OSM в "
@@ -1542,7 +1580,8 @@ def build_report(peaks, results, radii, thresholds, source_label="SRTM"):
         f"{thresholds['ele_below']:.0f} процентов и провал в 450 м больше "
         f"{thresholds['shift_drop']:.0f} м;\n"
         "  * ближайшая вершина рельефа дальше "
-        f"{thresholds['summit_far']:.0f} м, а более высокий пик OSM — дальше "
+        f"{thresholds['summit_far_neighbour']:.0f} м, а более высокий "
+        "пик OSM — дальше "
         f"{thresholds['neighbour_nearest']:.0f} м;\n"
         "  * выше точки больше "
         f"{thresholds['valley_ring_soft']:.0%} кольца в "
@@ -1620,6 +1659,18 @@ def _measure_one(peak):
     return measure(peak, _WORKER["dem"], _WORKER["radii"], _WORKER["thresholds"])
 
 
+def apply_source_profile(arguments):
+    """Подставляет профиль порогов для растровых DSM (ALOS, Copernicus)."""
+    if arguments.no_source_profile:
+        return
+    profile = SOURCE_THRESHOLD_PROFILES.get(arguments.dem_source)
+    if not profile:
+        return
+    for name, value in profile.items():
+        if getattr(arguments, name) == PROFILE_ARGUMENT_DEFAULTS[name]:
+            setattr(arguments, name, value)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1641,11 +1692,16 @@ def main(argv=None):
     parser.add_argument(
         "--dem-source", default="srtm",
         choices=[item.key for item in dem_sources.SOURCES],
-        help="источник рельефа, как в плагине (по умолчанию srtm)",
+        help="источник рельефа, как в плагине (по умолчанию srtm); "
+             "для alos/cop30 включается устойчивый профиль порогов",
     )
     parser.add_argument(
         "--dem-file", default=None,
         help="готовый растр рельефа (для manual или вместо загрузки)",
+    )
+    parser.add_argument(
+        "--no-source-profile", action="store_true",
+        help="не подставлять профиль порогов для ALOS/Copernicus",
     )
     parser.add_argument(
         "--no-download", action="store_true",
@@ -1795,6 +1851,12 @@ def main(argv=None):
              "рядом нет, м",
     )
     parser.add_argument(
+        "--neighbour-summit", dest="summit_far_neighbour", type=float,
+        default=600.0,
+        help="то же для пары «вершины рядом нет, а более высокий пик OSM "
+             "далеко», м",
+    )
+    parser.add_argument(
         "--ridge-drop", type=float, default=170.0,
         help="перепад до самой низкой точки в 200 м для признака «не на "
              "гребне и рельеф рядом ниже», м",
@@ -1809,6 +1871,7 @@ def main(argv=None):
              "поставленным не на ту вершину, в процентах",
     )
     arguments = parser.parse_args(argv)
+    apply_source_profile(arguments)
 
     natural_values = [item.strip() for item in arguments.natural.split(",") if item.strip()]
     thresholds = {
@@ -1842,6 +1905,7 @@ def main(argv=None):
         "ele_diff": arguments.ele_diff,
         "smooth_150": arguments.smooth_150,
         "summit_far": arguments.summit_far,
+        "summit_far_neighbour": arguments.summit_far_neighbour,
         "ridge_drop": arguments.ridge_drop,
         "neighbour_nearest": arguments.neighbour_nearest,
         "valley_ring_wide": arguments.valley_ring_wide,
