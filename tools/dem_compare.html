@@ -1501,14 +1501,15 @@ function formatDistance(km) {
   return km >= 1 ? (km).toFixed(2) + " км" : (km * 1000).toFixed(0) + " м";
 }
 
-async function buildProfile(a, b) {
+async function buildProfile(a, b, scroll = true) {
   const box = document.getElementById("profile-box");
   const svg = document.getElementById("profile-svg");
   box.style.display = "block";
   box.classList.add("active");
   // Панель слева прокручиваем к графику: иначе результат остаётся
-  // ниже видимой части и кажется, что профиль не построился.
-  box.scrollIntoView({behavior: "smooth", block: "nearest"});
+  // ниже видимой части и кажется, что профиль не построился. При пересчёте
+  // прокручивать нечего — график уже на месте.
+  if (scroll) box.scrollIntoView({behavior: "smooth", block: "nearest"});
   const [lon1, lat1] = a;
   const [lon2, lat2] = b;
   const fetchProfile = ds => fetch(
@@ -1534,6 +1535,17 @@ async function buildProfile(a, b) {
   updateProfileNote();
 }
 
+// Пересчёт профиля при смене набора: кривые строятся по текущим A и B.
+// Позиция курсора на графике сохраняется — пересчёт не должен её сбрасывать.
+function refreshProfile() {
+  if (!state.profileLine) return;
+  const t = state.profileHover;
+  const [a, b] = state.profileLine;
+  buildProfile(a, b, false).then(() => {
+    if (t !== null && t !== undefined) setProfileHover(t);
+  });
+}
+
 // Легенда кривых: цветной штрих и краткое имя набора для A и B.
 function drawProfileLegend(series) {
   document.getElementById("profile-legend").innerHTML = series.map(s =>
@@ -1541,8 +1553,24 @@ function drawProfileLegend(series) {
     `${s.label} ${s.short}</span>`).join("");
 }
 
+// Шаг сетки — «красивое» число: 1, 2, 2.5, 5 или 10, умноженное на
+// степень десяти. Так линии ложатся на круглые значения, их число не
+// зависит от диапазона, а подписи читаются без длинных дробей.
+function niceStep(range, count) {
+  if (!(range > 0)) return 0;
+  const rough = range / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5
+            : norm <= 5 ? 5 : 10;
+  return step * mag;
+}
+
 function drawProfile(svg, series) {
-  const width = 300, height = 170, pad = 24;
+  const width = 300, height = 170;
+  const padLeft = 36, padRight = 8, padTop = 10, padBottom = 18;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
   const values = [];
   series.forEach(s => s.samples.forEach(p => { if (p[2] !== null) values.push(p[2]); }));
   if (!values.length) {
@@ -1551,31 +1579,97 @@ function drawProfile(svg, series) {
     return;
   }
   const min = Math.min(...values), max = Math.max(...values);
-  const span = (max - min) || 1;
-  state.profileGeom = {width, height, pad, n: series[0].samples.length,
-                       min, max, span};
+  // Ровная поверхность: высоты совпадают, шкала вырождается — рисуем одну
+  // линию посередине, иначе границы диапазона схлопнутся в одну точку.
+  const flat = max - min < 1e-6;
+  const span = flat ? 1 : (max - min);
+  state.profileGeom = {width, height, padLeft, padRight, padTop, padBottom,
+                       plotW, plotH, n: series[0].samples.length,
+                       min, max, span, flat};
+  const xOf = t => padLeft + t * plotW;
+  const yOf = v => flat ? padTop + plotH / 2
+                        : padTop + plotH - (v - min) / span * plotH;
   let parts = "";
+
+  // Сетка по высоте: горизонтальные линии на круглых уровнях, подпись
+  // значения слева. Шаг подбирается под диапазон, поэтому линий всегда
+  // четыре-пять, независимо от высот.
+  const stepY = flat ? 0 : niceStep(span, 6);
+  const levels = [];
+  if (stepY > 0) {
+    const first = Math.ceil(min / stepY) * stepY;
+    for (let v = first; v <= max + 1e-6; v += stepY) levels.push(v);
+  }
+  levels.forEach(v => {
+    const y = yOf(v).toFixed(1);
+    parts += `<line x1="${padLeft}" y1="${y}" x2="${width - padRight}" ` +
+             `y2="${y}" stroke="#2b333a" stroke-width="1"/>`;
+    parts += `<text x="${padLeft - 4}" y="${(Number(y) + 3).toFixed(1)}" ` +
+             `fill="#9aa4ad" font-size="9" text-anchor="end">` +
+             `${Math.round(v)}</text>`;
+  });
+  // Границы диапазона — тоже линии шкалы: без них не видно, где кончаются
+  // высоты. Если граница совпала с уровнем, второй раз её не рисуем.
+  const near = (a, b) => Math.abs(a - b) < stepY * 0.01;
+  const bounds = flat ? [[min, yOf(min)]] : [[max, yOf(max)], [min, yOf(min)]];
+  bounds.forEach(([v, y]) => {
+    if (stepY > 0 && levels.some(l => near(l, v))) return;
+    parts += `<line x1="${padLeft}" y1="${y.toFixed(1)}" ` +
+             `x2="${width - padRight}" y2="${y.toFixed(1)}" ` +
+             `stroke="#3a444d" stroke-width="1"/>`;
+    parts += `<text x="${padLeft - 4}" y="${(y + (v === max ? -3 : 8)).toFixed(1)}" ` +
+             `fill="#c8cfd4" font-size="9" text-anchor="end">` +
+             `${Math.round(v)}</text>`;
+  });
+
+  // Сетка по расстоянию: вертикальные линии на круглых километрах от A.
+  const km = state.profileLen;
+  const stepKm = niceStep(km, 6);
+  // Шаг может быть дробным (2.5 км) — тогда подпись без округления.
+  const label = d => stepKm >= 1 ? `${Number(d.toFixed(2))} км`
+                                : `${Math.round(d * 1000)} м`;
+  if (stepKm > 0) {
+    for (let d = stepKm; d < km - 1e-9; d += stepKm) {
+      const x = xOf(d / km).toFixed(1);
+      parts += `<line x1="${x}" y1="${padTop}" x2="${x}" ` +
+               `y2="${padTop + plotH}" stroke="#2b333a" stroke-width="1"/>`;
+      parts += `<text x="${x}" y="${height - 6}" fill="#9aa4ad" ` +
+               `font-size="9" text-anchor="middle">${label(d)}</text>`;
+    }
+  }
+  // Концы шкалы расстояния: 0 у A и полная длина у B.
+  parts += `<text x="${padLeft}" y="${height - 6}" fill="#9aa4ad" ` +
+           `font-size="9" text-anchor="start">0</text>`;
+  parts += `<text x="${width - padRight}" y="${height - 6}" fill="#9aa4ad" ` +
+           `font-size="9" text-anchor="end">` +
+           `${km >= 1 ? km.toFixed(0) + " км" : (km * 1000).toFixed(0) + " м"}` +
+           `</text>`;
+
+  // Оси: Y слева, X снизу.
+  parts += `<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" ` +
+           `y2="${padTop + plotH}" stroke="#48525b" stroke-width="1"/>`;
+  parts += `<line x1="${padLeft}" y1="${padTop + plotH}" ` +
+           `x2="${width - padRight}" y2="${padTop + plotH}" ` +
+           `stroke="#48525b" stroke-width="1"/>`;
+
   series.forEach(s => {
     const n = s.samples.length;
     const points = s.samples.map((p, i) => {
-      const x = pad + (i / (n - 1)) * (width - 2 * pad);
-      const y = height - pad - ((p[2] === null ? min : p[2]) - min) / span * (height - 2 * pad);
+      const x = xOf(i / (n - 1));
+      const y = yOf(p[2] === null ? min : p[2]);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     }).join(" ");
     parts += `<polyline points="${points}" fill="none" stroke="${s.color}" stroke-width="1.6"/>`;
   });
-  parts += `<text x="4" y="12" fill="#9aa4ad" font-size="9">${max.toFixed(0)} м</text>`;
-  parts += `<text x="4" y="${height - 4}" fill="#9aa4ad" font-size="9">${min.toFixed(0)} м</text>`;
   svg.innerHTML = parts;
 }
 
-// Подпись под графиком: без курсора — имена наборов, с курсором — позиция
-// маркера и высоты кривых в ней.
+// Подпись под графиком: с курсором — позиция маркера и высоты кривых.
+// Без курсора подпись пустая: имена наборов уже показаны в легенде.
 function updateProfileNote() {
   const t = state.profileHover;
   if (t === null || !state.profileSeries || !state.profileGeom) {
-    document.getElementById("profile-note").textContent =
-      state.profileSeries.map(s => s.name || s.short).join(" · ");
+    document.getElementById("profile-note").textContent = "";
     return;
   }
   const geom = state.profileGeom;
@@ -1597,21 +1691,21 @@ function updateProfileMarker() {
   const geom = state.profileGeom, series = state.profileSeries;
   if (t === null || !geom || !series) return;
   const i = Math.round(t * (geom.n - 1));
-  const x = geom.pad + t * (geom.width - 2 * geom.pad);
+  const x = geom.padLeft + t * geom.plotW;
   let parts = "";
-  parts += `<line x1="${x.toFixed(1)}" y1="${geom.pad - 6}" ` +
-           `x2="${x.toFixed(1)}" y2="${geom.height - geom.pad}" ` +
+  parts += `<line x1="${x.toFixed(1)}" y1="${geom.padTop}" ` +
+           `x2="${x.toFixed(1)}" y2="${geom.padTop + geom.plotH}" ` +
            `stroke="#8b949c" stroke-width="1" stroke-dasharray="3,2"/>`;
   series.forEach(s => {
     const v = s.samples[i] && s.samples[i][2];
     if (v === null || v === undefined) return;
-    const y = geom.height - geom.pad -
-      (v - geom.min) / geom.span * (geom.height - 2 * geom.pad);
+    const y = geom.flat ? geom.padTop + geom.plotH / 2
+      : geom.padTop + geom.plotH - (v - geom.min) / geom.span * geom.plotH;
     parts += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" ` +
              `fill="${s.color}" stroke="#10161a" stroke-width="1"/>`;
   });
   parts += `<text x="${Math.min(x + 3, geom.width - 34).toFixed(1)}" ` +
-           `y="${geom.pad - 8}" fill="#c8cfd4" font-size="9">` +
+           `y="${geom.padTop + 8}" fill="#c8cfd4" font-size="9">` +
            `${formatDistance(t * state.profileLen)}</text>`;
   svg.insertAdjacentHTML("beforeend",
     `<g id="profile-marker">${parts}</g>`);
@@ -1650,13 +1744,14 @@ function profileHitTest(clientX, clientY) {
 
 // Наведение на график: позиция по X курсора → точка на карте.
 // viewBox растянут на ширину панели (preserveAspectRatio="none"), поэтому
-// считаем t от реальной ширины, а не от координат viewBox.
+// координату курсора переводим в viewBox и уже оттуда берём долю шкалы.
 const profileSvg = document.getElementById("profile-svg");
 profileSvg.addEventListener("mousemove", event => {
-  if (!state.profileGeom || !state.profileLine) return;
+  const geom = state.profileGeom;
+  if (!geom || !state.profileLine) return;
   const rect = profileSvg.getBoundingClientRect();
-  const padPx = state.profileGeom.pad * (rect.width / state.profileGeom.width);
-  const t = (event.clientX - rect.left - padPx) / (rect.width - 2 * padPx);
+  const vbX = (event.clientX - rect.left) * (geom.width / rect.width);
+  const t = (vbX - geom.padLeft) / geom.plotW;
   setProfileHover(Math.max(0, Math.min(1, t)));
 });
 profileSvg.addEventListener("mouseleave", () => setProfileHover(null));
@@ -1804,10 +1899,12 @@ window.addEventListener("resize", resize);
 // Элементы управления
 // ---------------------------------------------------------------------------
 document.getElementById("ds-a").addEventListener("change", event => {
-  state.a = event.target.value; scheduleLimits(); requestRender(); refreshReadout();
+  state.a = event.target.value;
+  scheduleLimits(); requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("ds-b").addEventListener("change", event => {
-  state.b = event.target.value; scheduleLimits(); requestRender(); refreshReadout();
+  state.b = event.target.value;
+  scheduleLimits(); requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("mode").addEventListener("change", event => {
   state.mode = event.target.value;
@@ -1826,6 +1923,8 @@ document.getElementById("swap").addEventListener("click", () => {
   document.getElementById("ds-a").value = state.a;
   document.getElementById("ds-b").value = state.b;
   requestRender(); refreshReadout();
+  // Меняются только буквы A и B, но график и легенда к ним привязаны.
+  refreshProfile();
 });
 document.getElementById("compare").addEventListener("click", event => {
   state.compare = !state.compare;
@@ -1968,6 +2067,8 @@ async function chooseBrowserDir() {
     fillSelect(document.getElementById("ds-b"), state.b);
     requestRender();
     refreshReadout();
+    // Набор сменился — профиль по нему строим заново.
+    refreshProfile();
     writeUrl();
   } catch (error) {
     note.textContent = "сервер не ответил";
