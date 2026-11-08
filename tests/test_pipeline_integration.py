@@ -1077,6 +1077,53 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock._pbf_probe_timer.stop()
         dock.deleteLater()
 
+    def test_dock_auto_selects_3dep_and_warns(self):
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.dem_sources import Availability
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        bbox = BBox(-76.2538, 35.8625, -63.1295, 36.6597)
+        required = frozenset({(35, -77), (35, -76), (35, -75),
+                              (36, -77), (36, -76), (36, -75)})
+        land = frozenset({(35, -77), (35, -76), (36, -77), (36, -76)})
+        availability = {
+            "3dep": Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+                missing_tiles=required - land,
+            ),
+            "alos": Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+            ),
+            "cop30": Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+            ),
+            "srtm": Availability(available=True, checked=True),
+        }
+        dock = XtopoDockWidget(None)
+        try:
+            dock._dem_check_timer.stop()
+            dock._dem_bbox = bbox
+            dock._dem_availability_generation = 3
+            dock._dem_availability_ready(3, availability)
+            self.assertEqual(dock.dem_source.currentData(), "3dep")
+
+            # Ручной выбор другого источника даёт предупреждение.
+            dock.dem_source.setCurrentIndex(
+                dock.dem_source.findData("srtm")
+            )
+            self.assertFalse(dock.dem_warning.isHidden())
+            self.assertIn("3DEP", dock.dem_warning.text())
+
+            # Смена охвата сбрасывает предупреждение до новой проверки.
+            dock.bbox.setText("-65.0292,32.1998,-64.567,32.5081")
+            dock._dem_check_timer.stop()
+            self.assertTrue(dock.dem_warning.isHidden())
+        finally:
+            dock.deleteLater()
+
     def test_dock_project_name(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 

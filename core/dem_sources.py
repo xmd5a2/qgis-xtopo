@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import i18n
 from .bbox import BBox
@@ -136,7 +136,7 @@ SOURCES = (
         provider="USGS",
         resolution="10 м (1/3″)",
         datum="NAVD88",
-        coverage="только США",
+        coverage="США, Канада, Мексика",
         note="DTM без растительности и построек — единственный такой набор. "
              "В Аляске разрешение грубее.",
         attribution="3D Elevation Program — courtesy of the U.S. Geological "
@@ -333,6 +333,11 @@ class Availability:
     detail: str = ""
     missing: int = 0
     total: int = 0
+    # Тайлы 1°×1°, по которым проверялось покрытие. Нужны, чтобы
+    # отличать океан от суши при выборе лучшего источника.
+    required_tiles: frozenset = frozenset()
+    covered_tiles: frozenset = frozenset()
+    missing_tiles: frozenset = frozenset()
 
 
 def _bbox_tuple(bbox):
@@ -372,7 +377,8 @@ def _range_availability(item, bbox):
             total=0,
         )
     clipped_bbox = BBox(*clipped)
-    total = len(tiles_for_bbox(clipped_bbox))
+    tiles = frozenset(tiles_for_bbox(clipped_bbox))
+    total = len(tiles)
     partial = clipped != _bbox_tuple(bbox)
     if partial:
         message = i18n.trf("не весь охват, тайлов: {}", total)
@@ -388,6 +394,7 @@ def _range_availability(item, bbox):
     return Availability(
         available=True, checked=True, partial=partial,
         message=message, detail=detail, missing=0, total=total,
+        required_tiles=tiles, covered_tiles=tiles,
     )
 
 
@@ -417,6 +424,8 @@ def _stac_availability(item, bbox, timeout=30):
                 i18n.tr(item.coverage),
             ),
             missing=len(required), total=len(required),
+            required_tiles=frozenset(required),
+            missing_tiles=frozenset(required),
         )
     missing = required - covered
     partial = bool(missing) or outside
@@ -440,6 +449,9 @@ def _stac_availability(item, bbox, timeout=30):
         available=True, checked=True, partial=partial,
         message=message, detail=detail,
         missing=len(missing), total=len(required),
+        required_tiles=frozenset(required),
+        covered_tiles=frozenset(covered),
+        missing_tiles=frozenset(missing),
     )
 
 
@@ -481,6 +493,77 @@ def check_availability(bbox, cancel=None, timeout=30):
                 raise InterruptedError("DEM availability check cancelled")
             results[item.key] = future.result()
     return results
+
+
+def _land_tiles(bbox, availability):
+    """Тайлы охвата, где есть суша, по глобальным наборам.
+
+    ALOS и Copernicus содержат только сушу: наличие их тайла означает,
+    что в квадрате 1°×1° есть земля.  Океанские тайлы в маску не попадают,
+    поэтому они не мешают выбрать 3DEP для прибрежного охвата.
+    """
+    required = set(tiles_for_bbox(bbox))
+    land = set()
+    for key in ("alos", "cop30"):
+        state = availability.get(key)
+        if state is None or not state.checked or not state.available:
+            continue
+        land |= set(state.covered_tiles) & required
+    return land
+
+
+def preferred_source(bbox, availability):
+    """Ключ лучшего источника для охвата (пока только 3DEP).
+
+    ``"3dep"`` возвращается, если 3DEP покрывает всю сушу охвата.
+    Океанские тайлы игнорируются: данных 3DEP там всё равно нет.
+    Если маску суши построить не удалось (ALOS и Copernicus не
+    проверились), требуется покрытие всех тайлов — консервативный
+    запасной вариант.
+    """
+    state = availability.get("3dep")
+    if state is None or not state.checked or not state.available:
+        return None
+    required = set(state.required_tiles) or set(tiles_for_bbox(bbox))
+    land = _land_tiles(bbox, availability)
+    if not land:
+        land = required
+    if not land or land - set(state.covered_tiles):
+        return None
+    return "3dep"
+
+
+def display_availability(key, bbox, availability):
+    """Доступность для панели: океанские тайлы не считаются пропуском."""
+    state = availability.get(key)
+    if state is None or key != "3dep" or bbox is None:
+        return state
+    if not state.missing_tiles:
+        return state
+    if preferred_source(bbox, availability) != "3dep":
+        return state
+    return replace(
+        state,
+        partial=False,
+        message=i18n.tr("суша покрыта, океан без данных"),
+        detail=i18n.trf(
+            "Данные есть для всей суши охвата: тайлов — {}; "
+            "океанские тайлы без данных",
+            len(state.covered_tiles),
+        ),
+    )
+
+
+def source_warning(key, bbox, availability):
+    """Предупреждение, что для охвата есть источник точнее."""
+    if key in ("3dep", MANUAL_SOURCE):
+        return ""
+    if preferred_source(bbox, availability) != "3dep":
+        return ""
+    return i18n.tr(
+        "Для этого охвата доступен USGS 3DEP (10 м, DTM) — "
+        "он точнее выбранного источника."
+    )
 
 
 def describe(key, availability=None):

@@ -678,6 +678,134 @@ class DemSourceTest(unittest.TestCase):
         self.assertTrue(state.available)
         self.assertFalse(state.partial)
         self.assertEqual(state.missing, 0)
+        self.assertEqual(
+            state.covered_tiles, frozenset({(45, 7), (46, 7)})
+        )
+        self.assertFalse(state.missing_tiles)
+
+    def test_stac_source_keeps_missing_tiles(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        item = {"bbox": [7.0, 46.0, 8.0, 47.0], "assets": {}}
+        with mock.patch.object(dem_sources, "stac_items", return_value=[item]):
+            state = dem_sources._stac_availability(
+                dem_sources.source("cop30"),
+                BBox(7.0, 45.9, 8.0, 46.9), timeout=1,
+            )
+        self.assertEqual(state.covered_tiles, frozenset({(46, 7)}))
+        self.assertEqual(state.missing_tiles, frozenset({(45, 7)}))
+
+    def test_preferred_source_ignores_ocean_tiles(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(-76.2538, 35.8625, -63.1295, 36.6597)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        land = frozenset({(35, -77), (35, -76), (36, -77), (36, -76)})
+        availability = {
+            "3dep": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+                missing_tiles=required - land,
+            ),
+            "alos": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+            ),
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+            ),
+        }
+        self.assertEqual(
+            dem_sources.preferred_source(bbox, availability), "3dep"
+        )
+        shown = dem_sources.display_availability(
+            "3dep", bbox, availability
+        )
+        self.assertFalse(shown.partial)
+        self.assertIn("океан", shown.message)
+
+    def test_preferred_source_requires_land_coverage(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(-76.2538, 35.8625, -63.1295, 36.6597)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        land = frozenset({(35, -77), (35, -76), (36, -77), (36, -76)})
+        covered = land - {(36, -77)}
+        availability = {
+            "3dep": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=covered,
+                missing_tiles=required - covered,
+            ),
+            "alos": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+            ),
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=land,
+            ),
+        }
+        self.assertIsNone(dem_sources.preferred_source(bbox, availability))
+
+    def test_preferred_source_without_land_mask_is_strict(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 45.9, 8.0, 46.9)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        partial = dem_sources.Availability(
+            available=True, checked=True,
+            required_tiles=required,
+            covered_tiles=frozenset({(45, 7)}),
+            missing_tiles=frozenset({(46, 7)}),
+        )
+        self.assertIsNone(
+            dem_sources.preferred_source(bbox, {"3dep": partial})
+        )
+        full = dem_sources.Availability(
+            available=True, checked=True,
+            required_tiles=required, covered_tiles=required,
+            message="весь охват",
+        )
+        self.assertEqual(
+            dem_sources.preferred_source(bbox, {"3dep": full}), "3dep"
+        )
+        shown = dem_sources.display_availability(
+            "3dep", bbox, {"3dep": full}
+        )
+        self.assertEqual(shown.message, "весь охват")
+
+    def test_source_warning_only_for_other_sources(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 45.9, 8.0, 46.9)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "3dep": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+            "alos": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        self.assertIn(
+            "3DEP", dem_sources.source_warning("srtm", bbox, availability)
+        )
+        self.assertEqual(
+            dem_sources.source_warning("3dep", bbox, availability), ""
+        )
+        self.assertEqual(
+            dem_sources.source_warning(
+                dem_sources.MANUAL_SOURCE, bbox, availability
+            ),
+            "",
+        )
+        self.assertEqual(dem_sources.source_warning("srtm", bbox, {}), "")
 
 
 class CogDownloadTest(unittest.TestCase):
