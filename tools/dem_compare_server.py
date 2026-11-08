@@ -46,6 +46,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -844,7 +845,7 @@ class SourceStore:
         try:
             result = gdal.Warp(str(temporary), sources, options=options)
         except Exception as exc:
-            print(f"[dem-compare] {ds}: не удалось сохранить область: {exc}")
+            _log(f"{ds}: не удалось сохранить область: {exc}")
             temporary.unlink(missing_ok=True)
             return None
         finally:
@@ -1041,7 +1042,7 @@ class SourceStore:
             token = _pc_token(collection)
         except Exception as exc:
             # Сервис токена недоступен — подписываем по файлам, как раньше.
-            print(f"[dem-compare] {collection}: нет токена ({exc})")
+            _log(f"{collection}: нет токена ({exc})")
             token = None
         sources = []
         for item in items:
@@ -1568,6 +1569,16 @@ def _limits_from_query(query):
     return low, high
 
 
+def _log(message):
+    """Сообщение в консоль сервера с датой и временем.
+
+    С flush: при перенаправлении в файл stdout буферизуется, и строки
+    появлялись бы пачками раз в несколько килобайт.
+    """
+    print(f"[dem-compare {datetime.now():%Y-%m-%d %H:%M:%S}] {message}",
+          flush=True)
+
+
 def _math_ceil(value):
     return int(math.ceil(value))
 
@@ -2013,7 +2024,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         message = fmt % args
         if " 404 " in message or " 500 " in message:
-            print("[dem-compare]", message)
+            _log(message)
 
     def _send(self, code, body, content_type, extra=None):
         extra = extra or {}
@@ -2249,7 +2260,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         write_bytes_atomic(cache_file, data)
-        print(f"[dem-compare] tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s")
+        _log(f"tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s")
         self._send(200, data, "image/png",
                    {"X-Native-X": f"{native[0]:.2f}",
                     "X-Native-Y": f"{native[1]:.2f}",

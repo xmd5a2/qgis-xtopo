@@ -110,14 +110,12 @@
   main.sidebar-hidden #sidebar-rail { display: flex; }
   #sidebar-rail button,
   #sidebar-collapse { padding: 2px 7px; line-height: 1.2; }
-  #sidebar-head {
-    display: flex; justify-content: flex-end; margin-bottom: 4px;
-  }
-  #sidebar-head button {
+  #sidebar-collapse {
+    margin-left: auto;
     background: none; border-color: transparent; color: var(--muted);
-    font-size: 11px; padding: 2px 6px;
+    font-size: 13px;
   }
-  #sidebar-head button:hover { color: var(--accent); border-color: var(--line); }
+  #sidebar-collapse:hover { color: var(--accent); border-color: var(--line); }
   #tools {
     grid-column: 1; grid-row: 1;
     display: flex; align-items: center; gap: 6px;
@@ -279,12 +277,11 @@
            title="Доля рельефа поверх OSM: 0 % — только OSM, 100 % — непрозрачный рельеф">
   </div>
   <aside>
-    <div id="sidebar-head">
-      <button id="sidebar-collapse" title="Свернуть панель"
-              aria-label="Свернуть панель">« свернуть</button>
-    </div>
     <h2 class="toggle" id="points-toggle">Ключевые точки
-      <span class="chev">▾</span></h2>
+      <span class="chev">▾</span>
+      <button id="sidebar-collapse" title="Свернуть панель"
+              aria-label="Свернуть панель">«</button>
+    </h2>
     <div id="points"></div>
 
     <h2>Ссылка OSM</h2>
@@ -1793,7 +1790,10 @@ function setPointsCollapsed(collapsed) {
   storeFlag("dem-compare.points-hidden", collapsed);
 }
 
-document.getElementById("sidebar-collapse").addEventListener("click", () => {
+document.getElementById("sidebar-collapse").addEventListener("click", event => {
+  // Кнопка живёт внутри заголовка «Ключевые точки» — клик не должен
+  // сворачивать и список точек.
+  event.stopPropagation();
   setSidebarCollapsed(true);
 });
 document.getElementById("sidebar-expand").addEventListener("click", () => {
