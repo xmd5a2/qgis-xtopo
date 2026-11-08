@@ -31,9 +31,9 @@
 приводятся к сетке 1″ в EPSG:4326, поэтому метрики сравнимы с SRTM.
 Для ``manual`` или своего файла укажите ``--dem-file``.
 
-Для ALOS и Copernicus автоматически включается профиль порогов: их
-поверхность (DSM) сдвигает часть метрик относительно SRTM, и базовые
-пороги ловят верные пики.  Профиль можно отключить ``--no-source-profile``.
+Для ALOS, Copernicus и NASADEM автоматически включается профиль порогов:
+их поверхность сдвигает часть метрик относительно SRTM, и базовые пороги
+ловят верные пики.  Профиль можно отключить ``--no-source-profile``.
 """
 
 import argparse
@@ -70,10 +70,10 @@ SRTM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{dir}/{tile}.hgt
 
 DEFAULT_DEM_CACHE = Path.home() / "qgis_projects" / "qgisxtopo-cache" / "srtm"
 
-# Пороги для растровых DSM (ALOS, Copernicus).  Поверхность у них другая:
-# растительность, шум и пропуски сдвигают часть метрик на границу порога.
-# Профиль поднимает самые неустойчивые пороги, чтобы не ловить верные пики.
-# SRTM и SRTM-подобные источники остаются на базовом правиле.
+# Пороги для растровых DSM (ALOS, Copernicus, NASADEM).  Поверхность у них
+# другая: растительность, шум и пропуски сдвигают часть метрик на границу
+# порога.  Профиль поднимает самые неустойчивые пороги, чтобы не ловить
+# верные пики.  SRTM и SRTM-подобные источники остаются на базовом правиле.
 SOURCE_THRESHOLD_PROFILES = {
     "alos": {
         "no_crest_450": 80.0,
@@ -91,6 +91,18 @@ SOURCE_THRESHOLD_PROFILES = {
         "ele_below": 4.6,
         "summit_far_neighbour": 900.0,
     },
+    # У NASADEM near_max_d остаётся базовым: с 400 теряется ошибочный пик,
+    # который базовая пара «провал в 200 м + вершина далеко» ещё ловит.
+    # Дополнительно первая конъюнкция не срабатывает в 100 м от вершины:
+    # на этой поверхности так помечались верные пики у самой вершины.
+    "nasadem": {
+        "no_crest_450": 80.0,
+        "far_drop": 260.0,
+        "stream_distance": 50.0,
+        "ele_below": 4.6,
+        "summit_far_neighbour": 900.0,
+        "valley_summit_min": 100.0,
+    },
 }
 
 # Базовые значения аргументов, которые меняет профиль.  Явно заданный
@@ -102,6 +114,7 @@ PROFILE_ARGUMENT_DEFAULTS = {
     "stream_distance": 200.0,
     "ele_below": 4.0,
     "summit_far_neighbour": 600.0,
+    "valley_summit_min": 0.0,
 }
 
 # Теги, по которым объект считается названным.
@@ -1228,9 +1241,13 @@ def classify(peak, metrics, thresholds, neighbour=None):
     # условие срабатывает и на настоящих вершинах.
     reasons = []
     # 1. Далеко от строгого водораздела и поперёк склона в 900 м рельеф
-    #    заметно выше — пик на дне долины.
+    #    заметно выше — пик на дне долины.  Для части растровых DSM
+    #    дополнительно требуется, чтобы и вершина была не рядом.
     if (far(metrics.divide_strict_distance, thresholds["far_divide"])
-            and far(metrics.cross900, thresholds["valley_cross900"])):
+            and far(metrics.cross900, thresholds["valley_cross900"])
+            and (thresholds["valley_summit_min"] <= 0.0
+                 or far(metrics.summit_distance,
+                        thresholds["valley_summit_min"]))):
         reasons.append(
             "далеко от водораздела и поперёк склона выше на "
             f"{metrics.cross900:.0f} м (900 м)"
@@ -1549,6 +1566,12 @@ def build_report(peaks, results, radii, thresholds, source_label="SRTM"):
         share = wrong / len(group) * 100 if group else 0
         lines.append(f"{label:<28}{len(group):>8}{wrong:>8}{share:>7.1f}%")
     lines.append("")
+    valley_suffix = ""
+    if thresholds["valley_summit_min"] > 0:
+        valley_suffix = (
+            ", а ближайшая вершина рельефа — дальше "
+            f"{thresholds['valley_summit_min']:.0f} м"
+        )
     lines.append(
         "Ошибка: пик не на вершине и не на хребте.  Правило — набор пар "
         "признаков: ошибка отмечается, если сработала хотя бы одна пара.  "
@@ -1557,7 +1580,7 @@ def build_report(peaks, results, radii, thresholds, source_label="SRTM"):
         "  * дальше "
         f"{thresholds['far_divide']:.0f} м от строгого водораздела и "
         f"поперёк склона в 900 м рельеф выше на "
-        f"{thresholds['valley_cross900']:.0f} м;\n"
+        f"{thresholds['valley_cross900']:.0f} м{valley_suffix};\n"
         "  * нет острого гребня: перепад 25 м на 150 м дальше "
         f"{thresholds['no_steep_crest']:.0f} м и перепад 15 м на 450 м "
         f"дальше {thresholds['no_crest_450']:.0f} м;\n"
@@ -1693,7 +1716,7 @@ def main(argv=None):
         "--dem-source", default="srtm",
         choices=[item.key for item in dem_sources.SOURCES],
         help="источник рельефа, как в плагине (по умолчанию srtm); "
-             "для alos/cop30 включается устойчивый профиль порогов",
+             "для alos/cop30/nasadem включается устойчивый профиль порогов",
     )
     parser.add_argument(
         "--dem-file", default=None,
@@ -1701,7 +1724,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--no-source-profile", action="store_true",
-        help="не подставлять профиль порогов для ALOS/Copernicus",
+        help="не подставлять профиль порогов для ALOS/Copernicus/NASADEM",
     )
     parser.add_argument(
         "--no-download", action="store_true",
@@ -1790,6 +1813,12 @@ def main(argv=None):
     parser.add_argument(
         "--far-divide", type=float, default=50.0,
         help="расстояние до строгого водораздела, м",
+    )
+    parser.add_argument(
+        "--valley-summit", dest="valley_summit_min", type=float,
+        default=0.0,
+        help="минимальное расстояние до ближайшей вершины рельефа для "
+             "признака дна долины, м (0 — не проверять)",
     )
     parser.add_argument(
         "--deep-ring-drop", type=float, default=450.0,
@@ -1893,6 +1922,7 @@ def main(argv=None):
         "pit_drop": arguments.pit_drop,
         "far_drop": arguments.far_drop,
         "far_divide": arguments.far_divide,
+        "valley_summit_min": arguments.valley_summit_min,
         "deep_drop": arguments.deep_ring_drop,
         "no_crest_450": arguments.no_crest_450,
         "valley_cross900": arguments.valley_cross900,
