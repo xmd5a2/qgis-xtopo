@@ -250,7 +250,11 @@
   #profile-box.active h2 { color: var(--accent); }
   #profile-box.active svg { border-color: var(--accent); }
   #profile-box svg { width: 100%; height: 170px; background: var(--panel-2);
-    border: 1px solid var(--line); border-radius: 4px; }
+    border: 1px solid var(--line); border-radius: 4px; cursor: crosshair; }
+  #profile-legend { display: flex; gap: 14px; margin: 2px 0 4px;
+    font-size: 11px; color: var(--muted); }
+  #profile-legend .swatch { display: inline-block; width: 14px; height: 3px;
+    margin: 0 4px 2px 0; vertical-align: middle; }
   .legend-bar { height: 10px; border-radius: 2px; margin: 4px 0 2px;
     background: linear-gradient(90deg,#3a6a3e,#6e9b5c,#b0c484,#dedba8,#c4ac7a,#92745a,#604a3e); }
   .legend-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
@@ -330,6 +334,7 @@
 
     <div id="profile-box">
       <h2>Профиль высот</h2>
+      <div id="profile-legend"></div>
       <svg id="profile-svg" viewBox="0 0 300 170" preserveAspectRatio="none"></svg>
       <div class="note" id="profile-note"></div>
     </div>
@@ -584,6 +589,13 @@ const state = {
   // Применённая линия профиля [[lon, lat], [lon, lat]] или null: рисуется
   // поверх карты, пока не сброшена кликом.
   profileLine: null,
+  // Интерактив профиля: кривые и геометрия графика, длина отрезка и текущая
+  // позиция курсора (t 0..1). Наведение на график и на линию пишут сюда —
+  // оба слоя рисуют маркер по одному значению.
+  profileSeries: null,
+  profileGeom: null,
+  profileLen: 0,
+  profileHover: null,
   press: null,
   tiles: new Map(),
   cursor: null,
@@ -1047,12 +1059,47 @@ function drawProfileOverlay(left, top) {
     ctx.arc(x, y, 3.5, 0, Math.PI * 2);
     ctx.fill();
   }
+  // Концы подписываем: на графике отсчёт идёт от A к B.
+  ctx.font = "bold 12px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#e6e9ec";
+  ctx.strokeStyle = "rgba(16,22,26,.85)";
+  ctx.lineWidth = 3;
+  const labels = preview ? [] : [["A", ax, ay], ["B", bx, by]];
+  for (const [text, x, y] of labels) {
+    ctx.strokeText(text, x, y - 10);
+    ctx.fillText(text, x, y - 10);
+  }
+  ctx.restore();
+}
+
+// Точка профиля под курсором на карте: зеркало маркера на графике.
+function drawProfileHover(left, top) {
+  const t = state.profileHover;
+  if (t === null || !state.profileLine) return;
+  const [a, b] = state.profileLine;
+  const lon = a[0] + (b[0] - a[0]) * t;
+  const lat = a[1] + (b[1] - a[1]) * t;
+  const p = project(lon, lat, state.zoom);
+  const x = p.x - left, y = p.y - top;
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#6fb3d2";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
 
 // Сброс построенного профиля: линия с карты и график из панели.
 function clearProfile() {
   state.profileLine = null;
+  state.profileHover = null;
+  state.profileSeries = null;
+  state.profileGeom = null;
+  document.getElementById("profile-legend").innerHTML = "";
   const box = document.getElementById("profile-box");
   box.classList.remove("active");
   box.style.display = "none";
@@ -1227,6 +1274,7 @@ function draw() {
   drawTileGrid(left, top, w, h);
   if (splitAt !== null) drawDivider(splitAt, h);
   drawProfileOverlay(left, top);
+  drawProfileHover(left, top);
 
   state.progress = progress;
   state.progressTotals = {wanted, loaded};
@@ -1440,6 +1488,19 @@ async function refreshReadout() {
 // ---------------------------------------------------------------------------
 // Профиль высот
 // ---------------------------------------------------------------------------
+// Расстояние по сфере: для подписи «N км от A» у маркера профиля.
+function sphereDistanceKm(lon1, lat1, lon2, lat2) {
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad, dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatDistance(km) {
+  return km >= 1 ? (km).toFixed(2) + " км" : (km * 1000).toFixed(0) + " м";
+}
+
 async function buildProfile(a, b) {
   const box = document.getElementById("profile-box");
   const svg = document.getElementById("profile-svg");
@@ -1457,21 +1518,42 @@ async function buildProfile(a, b) {
     state.a ? fetchProfile(state.a) : Promise.resolve(null),
     state.b ? fetchProfile(state.b) : Promise.resolve(null)
   ]);
+  const short = ds => state.datasets[ds].short ||
+    state.datasets[ds].title.split(" (")[0];
   const series = [];
-  if (pa && pa.samples) series.push({name: state.datasets[state.a].title, samples: pa.samples, color: "#6fb3d2"});
-  if (pb && pb.samples) series.push({name: state.datasets[state.b].title, samples: pb.samples, color: "#e0a458"});
+  // Буквы A и B совпадают с подписями концов на карте и в легенде.
+  if (pa && pa.samples) series.push({label: "A", key: state.a, short: short(state.a),
+                                     samples: pa.samples, color: "#6fb3d2"});
+  if (pb && pb.samples) series.push({label: "B", key: state.b, short: short(state.b),
+                                     samples: pb.samples, color: "#e0a458"});
+  state.profileSeries = series;
+  state.profileLen = sphereDistanceKm(lon1, lat1, lon2, lat2);
+  state.profileHover = null;
   drawProfile(svg, series);
-  document.getElementById("profile-note").textContent =
-    series.map(s => s.name).join(" · ");
+  drawProfileLegend(series);
+  updateProfileNote();
+}
+
+// Легенда кривых: цветной штрих и краткое имя набора для A и B.
+function drawProfileLegend(series) {
+  document.getElementById("profile-legend").innerHTML = series.map(s =>
+    `<span><i class="swatch" style="background:${s.color}"></i>` +
+    `${s.label} ${s.short}</span>`).join("");
 }
 
 function drawProfile(svg, series) {
   const width = 300, height = 170, pad = 24;
   const values = [];
   series.forEach(s => s.samples.forEach(p => { if (p[2] !== null) values.push(p[2]); }));
-  if (!values.length) { svg.innerHTML = ""; return; }
+  if (!values.length) {
+    svg.innerHTML = "";
+    state.profileGeom = null;
+    return;
+  }
   const min = Math.min(...values), max = Math.max(...values);
   const span = (max - min) || 1;
+  state.profileGeom = {width, height, pad, n: series[0].samples.length,
+                       min, max, span};
   let parts = "";
   series.forEach(s => {
     const n = s.samples.length;
@@ -1486,6 +1568,98 @@ function drawProfile(svg, series) {
   parts += `<text x="4" y="${height - 4}" fill="#9aa4ad" font-size="9">${min.toFixed(0)} м</text>`;
   svg.innerHTML = parts;
 }
+
+// Подпись под графиком: без курсора — имена наборов, с курсором — позиция
+// маркера и высоты кривых в ней.
+function updateProfileNote() {
+  const t = state.profileHover;
+  if (t === null || !state.profileSeries || !state.profileGeom) {
+    document.getElementById("profile-note").textContent =
+      state.profileSeries.map(s => s.name || s.short).join(" · ");
+    return;
+  }
+  const geom = state.profileGeom;
+  const i = Math.round(t * (geom.n - 1));
+  const heights = state.profileSeries.map(s => {
+    const v = s.samples[i] && s.samples[i][2];
+    return `${s.label} ${v === null || v === undefined ? "—" : v.toFixed(0) + " м"}`;
+  });
+  document.getElementById("profile-note").textContent =
+    `${formatDistance(t * state.profileLen)} от A · ` + heights.join(" · ");
+}
+
+// Маркер на графике: вертикальная линия в позиции t и точки на кривых.
+// Рисуется поверх polyline отдельной группой — полная перерисовка не нужна.
+function updateProfileMarker() {
+  const svg = document.getElementById("profile-svg");
+  svg.querySelector("#profile-marker")?.remove();
+  const t = state.profileHover;
+  const geom = state.profileGeom, series = state.profileSeries;
+  if (t === null || !geom || !series) return;
+  const i = Math.round(t * (geom.n - 1));
+  const x = geom.pad + t * (geom.width - 2 * geom.pad);
+  let parts = "";
+  parts += `<line x1="${x.toFixed(1)}" y1="${geom.pad - 6}" ` +
+           `x2="${x.toFixed(1)}" y2="${geom.height - geom.pad}" ` +
+           `stroke="#8b949c" stroke-width="1" stroke-dasharray="3,2"/>`;
+  series.forEach(s => {
+    const v = s.samples[i] && s.samples[i][2];
+    if (v === null || v === undefined) return;
+    const y = geom.height - geom.pad -
+      (v - geom.min) / geom.span * (geom.height - 2 * geom.pad);
+    parts += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" ` +
+             `fill="${s.color}" stroke="#10161a" stroke-width="1"/>`;
+  });
+  parts += `<text x="${Math.min(x + 3, geom.width - 34).toFixed(1)}" ` +
+           `y="${geom.pad - 8}" fill="#c8cfd4" font-size="9">` +
+           `${formatDistance(t * state.profileLen)}</text>`;
+  svg.insertAdjacentHTML("beforeend",
+    `<g id="profile-marker">${parts}</g>`);
+}
+
+// Единая точка входа для обоих направлений: график → карта и карта → график.
+// t в [0, 1] или null; без изменений ничего не перерисовывает.
+function setProfileHover(t) {
+  if (t === state.profileHover) return;
+  state.profileHover = t;
+  updateProfileMarker();
+  updateProfileNote();
+  requestRender();
+}
+
+// Ближайшая позиция на линии профиля к курсору в экранных координатах:
+// t в [0, 1], если курсор в пределах порога, иначе null.
+function profileHitTest(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const px = clientX - rect.left, py = clientY - rect.top;
+  const {w, h} = viewSize();
+  const center = centerPoint();
+  const left = center.x - w / 2, top = center.y - h / 2;
+  const [a, b] = state.profileLine;
+  const pa = project(a[0], a[1], state.zoom);
+  const pb = project(b[0], b[1], state.zoom);
+  const ax = pa.x - left, ay = pa.y - top;
+  const bx = pb.x - left, by = pb.y - top;
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1,
+    ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+  const cx = ax + dx * t, cy = ay + dy * t;
+  return Math.hypot(px - cx, py - cy) <= 10 ? t : null;
+}
+
+// Наведение на график: позиция по X курсора → точка на карте.
+// viewBox растянут на ширину панели (preserveAspectRatio="none"), поэтому
+// считаем t от реальной ширины, а не от координат viewBox.
+const profileSvg = document.getElementById("profile-svg");
+profileSvg.addEventListener("mousemove", event => {
+  if (!state.profileGeom || !state.profileLine) return;
+  const rect = profileSvg.getBoundingClientRect();
+  const padPx = state.profileGeom.pad * (rect.width / state.profileGeom.width);
+  const t = (event.clientX - rect.left - padPx) / (rect.width - 2 * padPx);
+  setProfileHover(Math.max(0, Math.min(1, t)));
+});
+profileSvg.addEventListener("mouseleave", () => setProfileHover(null));
 
 // ---------------------------------------------------------------------------
 // Взаимодействие
@@ -1547,6 +1721,12 @@ canvas.addEventListener("pointermove", event => {
   if (state.profileMode && state.profilePts.length === 1) {
     // Резиновая линия от первой точки к курсору.
     requestRender();
+  }
+  // Наведение на линию профиля подсвечивает точку на графике. Во время
+  // панорамирования и драга разделителя не мешаем.
+  if (!state.dragging && !state.dragDivider && !state.profileMode &&
+      state.profileLine && state.profileSeries) {
+    setProfileHover(profileHitTest(event.clientX, event.clientY));
   }
   if (state.dragDivider) {
     const rect = canvas.getBoundingClientRect();
