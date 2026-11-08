@@ -623,6 +623,8 @@ const state = {
   // Общие пределы шкалы для режимов «высоты»/«горизонтали»: null, пока
   // сервер не посчитал их по видимой области.
   limits: null,
+  // Что с шкалой: null — всё в порядке, иначе причина ожидания.
+  limitsError: null,
   limitsSig: ""
 };
 
@@ -755,6 +757,9 @@ function limitsSignature() {
 
 let limitsTimer = 0;
 let limitsRequest = 0;
+// Сколько ждём ответа с пределами, прежде чем повторить: сервер считает
+// шкалу по DEM и может докачивать набор минутами.
+const LIMITS_TIMEOUT = 20000;
 
 function scheduleLimits(delay = 0) {
   clearTimeout(limitsTimer);
@@ -765,21 +770,37 @@ async function updateLimits() {
   if (!scaledMode() || !reliefAvailable()) return;
   const sig = limitsSignature();
   if (sig === state.limitsSig && state.limits) return;
+  // Пока пределов нет, в масштабируемом режиме тайлы не запрашиваются вовсе,
+  // поэтому надпись должна объяснять, что происходит, а не молчать.
+  if (!state.limits) state.limitsError = "считаем шкалу высот…";
   const request = ++limitsRequest;
   const r = visibleTileRange();
   const query = `ds=${limitDatasets().join(",")}&z=${r.z}` +
     `&x0=${r.x0}&x1=${r.x1}&y0=${r.y0}&y1=${r.y1}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LIMITS_TIMEOUT);
   try {
-    const response = await fetch(`/api/limits?${query}`);
-    if (!response.ok) return;
+    const response = await fetch(`/api/limits?${query}`,
+                               {signal: controller.signal});
+    if (!response.ok) {
+      state.limitsError = `сервер не смог посчитать шкалу (${response.status})`;
+      scheduleLimits(3000);
+      return;
+    }
     const data = await response.json();
     // Пока считали, вид мог уйти дальше — такой ответ выбрасываем.
     if (request !== limitsRequest) return;
     state.limits = {lo: data.lo, hi: data.hi};
     state.limitsSig = sig;
+    state.limitsError = null;
     requestRender();
   } catch (error) {
-    // Сеть отвалилась — оставляем прежние пределы.
+    // Сеть отвалилась или истекло время ожидания: прежние пределы оставляем,
+    // но повторяем попытку — без шкалы карта в режиме высот пустая.
+    state.limitsError = "считаем шкалу высот…";
+    scheduleLimits(3000);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1357,7 +1378,12 @@ function renderProgress() {
       ? ` +${downloads.length - 1}` : "";
     return `${first.label}${extra} · ${Math.round(first.seconds)} с`;
   };
-  if (state.zoom < RELIEF_MIN_ZOOM) {
+  if (state.limitsError && scaledMode() && !state.limits) {
+    // Шкалы ещё нет: без неё тайлы в этом режиме не запрашиваются, и
+    // карта пустая — надо сказать, что происходит.
+    hint.className = "hint net";
+    hint.textContent = state.limitsError;
+  } else if (state.zoom < RELIEF_MIN_ZOOM) {
     hint.className = "hint";
     hint.textContent = "до z9 показывается только OSM";
   } else if (state.osm && state.reliefAlpha <= 0.002) {

@@ -826,7 +826,12 @@ class SourceStore:
         folder = self.prepared_dir(ds)
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"{name}_{digest}.tif"
-        temporary = folder / f"{name}_{digest}.tmp.tif"
+        # Временное имя с PID и потоком: два процесса (например, рабочий
+        # сервер и второй экземпляр на том же кэше) готовили бы один и тот
+        # же файл и мешали друг другу — один переименовывал tmp, второй его
+        # уже не находил и ронял весь запрос.
+        temporary = folder / (f"{name}_{digest}.{os.getpid()}."
+                              f"{threading.get_ident()}.tmp.tif")
         options = gdal.WarpOptions(
             format="GTiff",
             dstSRS="EPSG:4326",
@@ -861,7 +866,21 @@ class SourceStore:
             return None
         result.FlushCache()
         result = None
-        temporary.replace(target)
+        try:
+            temporary.replace(target)
+        except FileNotFoundError:
+            # Временный файл исчез: его убрал другой процесс или уборка.
+            # Если цель уже готова — она и нужна, иначе регион считаем
+            # неготовым и набор скачается при следующем запросе.
+            if target.exists():
+                self._register_prepared(ds, target.name, bbox)
+                return target
+            _log(f"{ds}: временный файл области пропал, регион не готов")
+            return None
+        except OSError as exc:
+            _log(f"{ds}: не удалось сохранить область: {exc}")
+            temporary.unlink(missing_ok=True)
+            return None
         self._register_prepared(ds, target.name, bbox)
         return target
     def _register_prepared(self, ds, filename, bbox):
@@ -1516,7 +1535,12 @@ def _limits_for_tiles(store, datasets, z, x0, x1, y0, y1):
 
     def one(task):
         ds, tile_z, x, y = task
-        values = _dem3857(store, ds, tile_z, x, y)
+        try:
+            values = _dem3857(store, ds, tile_z, x, y)
+        except Exception:
+            # Один негодный тайл не должен рушить всю шкалу: остальные
+            # считаются, пределы получаются чуть шире.
+            return None
         if values is None:
             return None
         valid = ~np.isnan(values)
