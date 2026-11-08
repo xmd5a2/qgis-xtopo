@@ -1522,10 +1522,17 @@ async function buildProfile(a, b, scroll = true) {
   const fetchProfile = ds => fetch(
     `/api/profile?ds=${ds}&lon1=${lon1}&lat1=${lat1}&lon2=${lon2}&lat2=${lat2}&n=120`
   ).then(r => r.json()).catch(() => null);
-  const [pa, pb] = await Promise.all([
-    state.a ? fetchProfile(state.a) : Promise.resolve(null),
-    state.b ? fetchProfile(state.b) : Promise.resolve(null)
-  ]);
+  let pa = null, pb = null;
+  try {
+    [pa, pb] = await Promise.all([
+      state.a ? fetchProfile(state.a) : Promise.resolve(null),
+      state.b ? fetchProfile(state.b) : Promise.resolve(null)
+    ]);
+  } catch (error) {
+    // Сервер не ответил: график останется пустым, но без падения страницы.
+    pa = null;
+    pb = null;
+  }
   const short = ds => state.datasets[ds].short ||
     state.datasets[ds].title.split(" (")[0];
   const series = [];
@@ -1605,8 +1612,12 @@ function drawProfile(svg, series) {
   const values = [];
   series.forEach(s => s.samples.forEach(p => { if (p[2] !== null) values.push(p[2]); }));
   if (!values.length) {
-    svg.innerHTML = "";
+    // Данных нет — график молча пустой сбивает с толку, объясняем причину.
+    svg.innerHTML = `<text x="150" y="88" fill="#9aa4ad" font-size="11" ` +
+                    `text-anchor="middle">нет данных по этому набору</text>`;
     state.profileGeom = null;
+    updateProfileMarker();
+    updateProfileNote();
     return;
   }
   const min = Math.min(...values), max = Math.max(...values);
@@ -1659,22 +1670,38 @@ function drawProfile(svg, series) {
   // Шаг может быть дробным (2.5 км) — тогда подпись без округления.
   const label = d => stepKm >= 1 ? `${Number(d.toFixed(2))} км`
                                 : `${Math.round(d * 1000)} м`;
+  // Полная длина у B: в метрах, пока профиль километровый — так точнее.
+  const endLabel = km >= 10 ? `${km.toFixed(0)} км`
+                : km >= 1 ? `${km.toFixed(1)} км`
+                : `${Math.round(km * 1000)} м`;
+  let rightLabelDrawn = false;
   if (stepKm > 0) {
+    let last = 0;
     for (let d = stepKm; d < km - 1e-9; d += stepKm) {
       const x = xOf(d / km).toFixed(1);
       parts += `<line x1="${x}" y1="${padTop}" x2="${x}" ` +
                `y2="${padTop + plotH}" stroke="#2b333a" stroke-width="1"/>`;
-      parts += `<text x="${x}" y="${height - 6}" fill="#9aa4ad" ` +
-               `font-size="9" text-anchor="middle">${label(d)}</text>`;
+      last = d;
+      // Подпись последней линии сетки уступает подписи полной длины: на
+      // узкой панели они слипаются в «1250 м1318 м».
+      if (d + stepKm < km - 1e-9 || (km - d) / km > 0.12) {
+        parts += `<text x="${x}" y="${height - 6}" fill="#9aa4ad" ` +
+                 `font-size="9" text-anchor="middle">${label(d)}</text>`;
+      }
+    }
+    if ((km - last) / km <= 0.12) {
+      parts += `<text x="${width - padRight}" y="${height - 6}" fill="#9aa4ad" ` +
+               `font-size="9" text-anchor="end">${endLabel}</text>`;
+      rightLabelDrawn = true;
     }
   }
-  // Концы шкалы расстояния: 0 у A и полная длина у B.
+  // Начало шкалы расстояния: 0 у A.
   parts += `<text x="${padLeft}" y="${height - 6}" fill="#9aa4ad" ` +
            `font-size="9" text-anchor="start">0</text>`;
-  parts += `<text x="${width - padRight}" y="${height - 6}" fill="#9aa4ad" ` +
-           `font-size="9" text-anchor="end">` +
-           `${km >= 1 ? km.toFixed(0) + " км" : (km * 1000).toFixed(0) + " м"}` +
-           `</text>`;
+  if (!rightLabelDrawn) {
+    parts += `<text x="${width - padRight}" y="${height - 6}" fill="#9aa4ad" ` +
+             `font-size="9" text-anchor="end">${endLabel}</text>`;
+  }
 
   // Оси: Y слева, X снизу.
   parts += `<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" ` +
@@ -1696,18 +1723,18 @@ function drawProfile(svg, series) {
 }
 
 // Цвет разности высот — как в режиме «дельта высот»: красным вверх (B
-// выше A), синим вниз, насыщенность по величине расхождения. Нулевая
-// разность — нейтральный серый.
+// выше A), синим вниз. Оттенок тот же, но светлее: на тёмном фоне панели
+// чистый синий и тёмно-красный не читаются, а мелкая дельта именно такая.
 function diffColor(delta, limit) {
   if (delta === null || delta === undefined || !isFinite(delta)) {
     return "var(--muted)";
   }
   const norm = Math.max(-1, Math.min(1, delta / (limit || 1)));
-  if (Math.abs(norm) < 1e-6) return "#9aa4ad";
-  // У сервера насыщенность идёт от нуля к полному цвету; на тёмном фоне
-  // совсем тёмный текст не читается, поэтому поднимаем нижнюю границу.
-  const level = Math.round(90 + Math.abs(norm) * 165);
-  return norm > 0 ? `rgb(${level},0,0)` : `rgb(0,0,${level})`;
+  const k = Math.abs(norm);
+  if (k < 1e-6) return "#9aa4ad";
+  // Чем больше расхождение, тем чище цвет: от светлого к насыщенному.
+  const mix = Math.round(130 - 90 * k);
+  return norm > 0 ? `rgb(255,${mix},${mix})` : `rgb(${mix},${mix},255)`;
 }
 
 // Подпись под графиком: разница высот B − A, окрашенная как дельта на
