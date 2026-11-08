@@ -35,9 +35,12 @@
   }
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
+  button:disabled { cursor: default; opacity: .55; }
   button.active { background: var(--accent); color: #10161a; border-color: var(--accent); }
   input[type="range"] { padding: 0; height: 18px; accent-color: var(--accent); }
-  #osm-alpha { width: 72px; }
+  input[type="range"]:disabled { opacity: .45; }
+  #relief-alpha { width: 72px; }
+  #tools label { color: var(--muted); font-size: 11px; }
   .spacer { flex: 1; }
   .badge {
     font-size: 11px; padding: 2px 7px; border-radius: 10px;
@@ -269,9 +272,11 @@
     <button id="profile-btn" title="Профиль высот по отрезку">профиль</button>
     <button id="zoom-native" title="Приблизить до полного разрешения">1:1</button>
     <button id="osm" class="active"
-            title="Полупрозрачная подложка OpenStreetMap">OSM</button>
-    <input id="osm-alpha" type="range" min="0" max="100" value="30"
-           title="Доля подложки OSM: 100 % — только OSM, без рельефа">
+            title="Подложка OpenStreetMap">OSM</button>
+    <label for="relief-alpha" id="relief-label"
+           title="Доля рельефа поверх подложки OSM">рельеф</label>
+    <input id="relief-alpha" type="range" min="0" max="100" value="70"
+           title="Доля рельефа поверх OSM: 0 % — только OSM, 100 % — непрозрачный рельеф">
   </div>
   <aside>
     <div id="sidebar-head">
@@ -322,21 +327,23 @@
       тянут мышью. «Δ высот» показывает разность B − A: синий — ниже,
       красный — выше. «профиль» — кликните две точки.
       <br><br>
-      <b>OSM</b> — полупрозрачная подложка OpenStreetMap: по ней видно, куда
-      вы сдвинули карту. Кнопка <b>OSM</b> в полосе над панелью отключает
-      её, ползунок
-      задаёт долю подложки: на 100 % остаётся только OSM, рельеф скрывается
-      и не считается.
+      <b>OSM</b> — непрозрачная подложка OpenStreetMap: по ней видно, куда
+      вы сдвинули карту. Кнопка <b>OSM</b> в полосе над панелью включает и
+      выключает её, ползунок <b>рельеф</b> задаёт долю рельефа поверх
+      подложки: 0 % — только OSM (рельеф не считается), 100 % — рельеф
+      полностью перекрывает подложку. Если подложка выключена, рельеф
+      непрозрачный.
       <br><br>
       <b>Свой рельеф</b> — укажите каталог с GeoTIFF, HGT или VRT: сервер
       проиндексирует файлы, и набор появится в списках A и B. Данные
       локальные, сеть и прогрев не нужны.
       <br><br>
       Пунктир — границы градусных тайлов 1×1°, подписаны как <b>N45E007</b>:
-      так же называются исходники SRTM и Copernicus.
+      так же называются исходники SRTM и Copernicus. Подпись стоит над своим
+      тайлом: угол в имени файла — юго-западный.
       <br><br>
-      Ниже <b>z9</b> рельеф не рисуется — остаётся подложка OSM: на таких
-      масштабах обобщённые тайлы только мешают ориентироваться.
+      Ниже <b>z9</b> показывается только подложка OSM: рельеф на таких
+      масштабах слишком обобщён. Кнопка OSM и ползунок там заблокированы.
       <br><br>
       <b>3DEP</b> покрывает только США — в остальных точках он пуст.
       <b>NASADEM</b> не заходит выше 61° и ниже −56°.
@@ -450,7 +457,7 @@ const state = {
   compare: true,
   diff: false,
   osm: true,
-  osmAlpha: 0.3,
+  reliefAlpha: 0.7,
   center: {lon: 7.6586, lat: 45.9763},
   zoom: 12,
   minZoom: 2,
@@ -630,8 +637,35 @@ function updateZoomBadge() {
     `${groundResolution(state.center.lat, state.zoom).toFixed(1)} м/пикс`;
 }
 
+// Ниже z9 рельеф не рисуется: остаётся только подложка OSM.
+function reliefAvailable() {
+  return state.zoom >= RELIEF_MIN_ZOOM;
+}
+
+// Подложка всегда непрозрачная; ползунок задаёт, насколько сильно её
+// перекрывает рельеф. Ниже z9 рельефа нет, поэтому кнопка OSM заблокирована
+// в нажатом состоянии, а ползунок — в выключенном.
+function syncBasemapUi() {
+  const forced = !reliefAvailable();
+  const osmActive = state.osm || forced;
+  const button = document.getElementById("osm");
+  button.classList.toggle("active", osmActive);
+  button.disabled = forced;
+  button.title = forced ? "До z9 показывается только OSM"
+    : (state.osm ? "Скрыть подложку OSM" : "Показать подложку OSM");
+  const slider = document.getElementById("relief-alpha");
+  slider.disabled = forced || !osmActive;
+  slider.value = String(Math.round((osmActive ? state.reliefAlpha : 1) * 100));
+  slider.title = forced
+    ? "До z9 рельеф не показывается"
+    : (osmActive
+      ? "Доля рельефа поверх OSM: 0 % — только OSM, 100 % — непрозрачный рельеф"
+      : "Подложка OSM выключена — рельеф непрозрачный");
+}
+
 function requestRender() {
   updateZoomBadge();
+  syncBasemapUi();
   if (renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(() => { renderQueued = false; draw(); });
@@ -693,18 +727,19 @@ function drawTileGrid(left, top, w, h) {
   ctx.setLineDash([]);
 
   // Подписи только там, где ячейка достаточно крупная и её левый верхний
-  // угол виден: иначе они налезают друг на друга.
+  // угол виден: иначе они налезают друг на друга. Имя — как у файлов
+  // исходников: по юго-западному углу ячейки.
   if (cell >= 70) {
     ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.lineWidth = 3;
     for (let lon = lonFrom; lon < lonTo; lon++) {
-      for (let lat = latFrom; lat < latTo; lat++) {
+      for (let latTop = latFrom + 1; latTop <= latTo; latTop++) {
         const x = screenX(lon);
-        const y = screenY(lat);
+        const y = screenY(latTop);
         if (x < -2 || y < -2 || x > w || y > h) continue;
-        const name = tileLabel(lat, lon);
+        const name = tileLabel(latTop - 1, lon);
         ctx.strokeStyle = "rgba(13,17,20,0.85)";
         ctx.strokeText(name, x + 4, y + 3);
         ctx.fillStyle = "rgba(230,233,236,0.82)";
@@ -737,20 +772,25 @@ function drawDivider(split, h) {
 function draw() {
   const {w, h} = viewSize();
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
-  const scale = Math.pow(2, state.zoom - tz);
   const center = centerPoint();
-  // Левый верхний угол видимой области в мировых пикселях тайлов.
-  const left = center.x * scale - w / 2;
-  const top = center.y * scale - h / 2;
+  // Левый верхний угол видимой области в пикселях мира текущего зума.
+  // Один пиксель мира равен одному пикселю экрана, поэтому масштабировать
+  // центр ещё раз нельзя: сетка уезжала бы на пол-мира.
+  const left = center.x - w / 2;
+  const top = center.y - h / 2;
 
   let wanted = 0;
   let loaded = 0;
-  let osmLoaded = 0;
+  // Сколько видимых тайлов ещё не пришло: по этому решаем, класть ли прежний
+  // кадр и можно ли снимать новый.
+  let missing = 0;
+  let painted = 0;
   const progress = {};
 
-  const drawLayer = (ds, mode, clip, bucket, layerZoom = tz,
-                     counted = true) => {
-    if (!ds) return;
+  // Слой сначала собираем, потом рисуем: так видно, что ещё в пути.
+  const collectLayer = (ds, mode, clip, bucket, layerZoom = tz,
+                        counted = true) => {
+    if (!ds) return null;
     const layerScale = Math.pow(2, state.zoom - layerZoom);
     const layerCount = Math.pow(2, layerZoom);
     // Шаг сетки и размер тайла обязаны быть в одном масштабе, иначе при
@@ -763,16 +803,11 @@ function draw() {
     const stats = counted
       ? (progress[bucket] || {wanted: 0, loaded: 0}) : null;
     if (stats) progress[bucket] = stats;
-    ctx.save();
-    if (clip !== null) {
-      ctx.beginPath();
-      ctx.rect(clip[0], 0, clip[1] - clip[0], h);
-      ctx.clip();
-    }
     const firstX = Math.floor(layerLeft / tileSize) - 1;
     const firstY = Math.floor(layerTop / tileSize) - 1;
     const lastX = Math.floor((layerLeft + w) / tileSize) + 1;
     const lastY = Math.floor((layerTop + h) / tileSize) + 1;
+    const items = [];
     for (let tx = firstX; tx <= lastX; tx++) {
       for (let ty = firstY; ty <= lastY; ty++) {
         if (ty < 0 || ty >= layerCount) continue;
@@ -784,21 +819,22 @@ function draw() {
         const screenY = ty * tileSize - layerTop;
         const visible = screenX + tileSize > 0 && screenX < w &&
                         screenY + tileSize > 0 && screenY < h;
-        if (visible && stats) {
-          stats.wanted += 1;
-          wanted += 1;
-          if (entry.loaded) {
-            stats.loaded += 1;
-            loaded += 1;
+        if (visible) {
+          // Пустой тайл (404) тоже считаем готовым: он не придёт уже никогда.
+          if (!entry.loaded && !entry.failed) missing += 1;
+          if (stats) {
+            stats.wanted += 1;
+            wanted += 1;
+            if (entry.loaded) {
+              stats.loaded += 1;
+              loaded += 1;
+            }
           }
         }
-        if (!entry.loaded) continue;
-        if (!counted) osmLoaded += 1;
-        ctx.drawImage(entry.image, screenX, screenY,
-                      tileSize + 1, tileSize + 1);
+        items.push({entry, screenX, screenY});
       }
     }
-    // Догружаем соседей, чтобы панорамирование не ждало сеть.
+    // Соседей догружаем, чтобы панорамирование не ждало сеть.
     if (mode !== "diff") {
       for (let tx = firstX - 1; tx <= lastX + 1; tx++) {
         for (let ty = firstY - 1; ty <= lastY + 1; ty++) {
@@ -808,77 +844,95 @@ function draw() {
         }
       }
     }
+    return {items, tileSize, clip};
+  };
+
+  // Рисуем слой по собранным тайлам.
+  const paintLayer = (layer, alpha) => {
+    if (!layer) return;
+    ctx.save();
+    if (layer.clip !== null) {
+      ctx.beginPath();
+      ctx.rect(layer.clip[0], 0, layer.clip[1] - layer.clip[0], h);
+      ctx.clip();
+    }
+    ctx.globalAlpha = alpha;
+    for (const item of layer.items) {
+      if (!item.entry.loaded) continue;
+      ctx.drawImage(item.entry.image, item.screenX, item.screenY,
+                    layer.tileSize + 1, layer.tileSize + 1);
+      painted += 1;
+    }
     ctx.restore();
   };
 
-  const single = !state.diff && !(state.compare && state.a && state.b);
-  if (single) {
-    wanted = 0; loaded = 0;
-  }
-
-  // Фон всегда, потом прошлый кадр, пока часть тайлов не готова.
-  ctx.fillStyle = "#0d1114";
-  ctx.fillRect(0, 0, w, h);
-
-  // Подложка OSM лежит под рельефом, поэтому рельеф рисуем полупрозрачным.
+  // Подложка OSM всегда непрозрачная и лежит под рельефом. Ниже z9
+  // показываем только её: рельеф там слишком обобщён, и его тайлы даже не
+  // запрашиваются.
+  const forcedOsm = !reliefAvailable();
+  const osmVisible = state.osm || forcedOsm;
+  const reliefVisible = !forcedOsm &&
+    (!state.osm || state.reliefAlpha > 0.002);
+  const demAlpha = state.osm ? state.reliefAlpha : 1;
   // Выше 19-го зума OSM тайлов нет — растягиваем последний доступный.
   const osmZoom = Math.min(tz, 19);
-  if (state.osm && state.osmAlpha > 0) {
-    ctx.save();
-    drawLayer("__osm__", "osm", null, "osm", osmZoom, false);
-    ctx.restore();
-  }
+  const osmLayer = osmVisible
+    ? collectLayer("__osm__", "osm", null, "osm", osmZoom, false)
+    : null;
 
-  if (loaded < wanted && frameState) {
-    const k = scale / frameState.scale;
-    ctx.drawImage(frameCanvas, frameState.left * scale - left,
-                  frameState.top * scale - top, w * k, h * k);
-  }
-
-  // Ползунок задаёт долю подложки: при 100 % рельеф не рисуем совсем и
-  // тайлы не запрашиваем, при 0 % — подложка не видна.
-  const reliefHidden = state.osm && state.osmAlpha >= 0.995;
-  const demAlpha = !state.osm ? 1 : Math.max(0, 1 - state.osmAlpha);
+  // Ползунок задаёт долю рельефа поверх подложки: при 0 % остаётся только
+  // OSM и тайлы рельефа не запрашиваются, при 100 % рельеф непрозрачный.
+  // Если подложка выключена, рельеф всегда непрозрачный.
   let splitAt = null;
-  if (reliefHidden || state.zoom < RELIEF_MIN_ZOOM) {
-    // Рельеф не рисуем и тайлы не запрашиваем: либо подложка OSM на 100 %,
-    // либо зум ниже z9 — там обобщённые тайлы только мешают.
-  } else if (state.diff && state.a && state.b) {
-    ctx.save();
-    ctx.globalAlpha = demAlpha;
-    drawLayer("__diff__", "diff", null, "diff");
-    ctx.restore();
-  } else if (state.compare && state.a && state.b) {
-    const split = Math.round(w * state.divider);
-    ctx.save();
-    ctx.globalAlpha = demAlpha;
-    // Каждая половина рисуется ровно один раз: иначе B ложится поверх A,
-    // и справа подложка видна слабее, чем слева.
-    drawLayer(state.a, state.mode, [0, split], "a");
-    drawLayer(state.b, state.mode, [split, w], "b");
-    ctx.restore();
-    splitAt = split;
-  } else {
-    ctx.save();
-    ctx.globalAlpha = demAlpha;
-    drawLayer(state.a || state.b, state.mode, null, "a");
-    ctx.restore();
+  let reliefLayer = null;
+  let reliefLayerB = null;
+  if (reliefVisible) {
+    if (state.diff && state.a && state.b) {
+      reliefLayer = collectLayer("__diff__", "diff", null, "diff");
+    } else if (state.compare && state.a && state.b) {
+      const split = Math.round(w * state.divider);
+      // Каждая половина рисуется ровно один раз: иначе B ложится поверх A,
+      // и справа подложка видна слабее, чем слева.
+      reliefLayer = collectLayer(state.a, state.mode, [0, split], "a");
+      reliefLayerB = collectLayer(state.b, state.mode, [split, w], "b");
+      splitAt = split;
+    } else {
+      reliefLayer = collectLayer(state.a || state.b, state.mode, null, "a");
+    }
+  }
+
+  // Фон всегда, потом прошлый кадр: пока тайлы едут, в дырах подложки
+  // видно прежнюю картинку, а не чёрные пятна.
+  ctx.fillStyle = "#0d1114";
+  ctx.fillRect(0, 0, w, h);
+  if (frameState && missing > 0) {
+    // Кадр снят на своём зуме: пересчитываем его углы в пиксели текущего.
+    const k = Math.pow(2, state.zoom - frameState.zoom);
+    ctx.drawImage(frameCanvas, frameState.left * k - left,
+                  frameState.top * k - top, frameState.w * k, frameState.h * k);
+  }
+
+  paintLayer(osmLayer, 1);
+  paintLayer(reliefLayer, demAlpha);
+  paintLayer(reliefLayerB, demAlpha);
+
+  // Кадр целиком собран — запоминаем его как подложку. Снимаем до сетки и
+  // разделителя: они рисуются поверх и в подложке им не место.
+  if (missing === 0 && painted > 0) {
+    const dpr = window.devicePixelRatio || 1;
+    if (frameCanvas.width !== Math.round(w * dpr) ||
+        frameCanvas.height !== Math.round(h * dpr)) {
+      frameCanvas.width = Math.round(w * dpr);
+      frameCanvas.height = Math.round(h * dpr);
+    }
+    const fctx = frameCanvas.getContext("2d");
+    fctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
+    fctx.drawImage(canvas, 0, 0);
+    frameState = {left, top, zoom: state.zoom, w, h};
   }
 
   drawTileGrid(left, top, w, h);
   if (splitAt !== null) drawDivider(splitAt, h);
-
-  // Кадр целиком собран — запоминаем его как подложку.
-  if (loaded >= wanted && wanted > 0) {
-    if (frameCanvas.width !== w || frameCanvas.height !== h) {
-      frameCanvas.width = w;
-      frameCanvas.height = h;
-    }
-    const fctx = frameCanvas.getContext("2d");
-    fctx.clearRect(0, 0, w, h);
-    fctx.drawImage(canvas, 0, 0, w, h);
-    frameState = {left, top, scale};
-  }
 
   state.progress = progress;
   state.progressTotals = {wanted, loaded};
@@ -940,12 +994,12 @@ function renderProgress() {
       ? ` +${downloads.length - 1}` : "";
     return `${first.label}${extra} · ${Math.round(first.seconds)} с`;
   };
-  if (state.osm && state.osmAlpha >= 0.995) {
+  if (state.zoom < RELIEF_MIN_ZOOM) {
     hint.className = "hint";
-    hint.textContent = "подложка OSM 100 % — рельеф скрыт";
-  } else if (state.zoom < RELIEF_MIN_ZOOM) {
+    hint.textContent = "до z9 показывается только OSM";
+  } else if (state.osm && state.reliefAlpha <= 0.002) {
     hint.className = "hint";
-    hint.textContent = "рельеф рисуется с z9";
+    hint.textContent = "рельеф скрыт — только OSM";
   } else if (downloads.length) {
     // Пока сервер тянет исходники, честно показываем это, даже если
     // видимые тайлы уже готовы (докачиваются соседние).
@@ -1303,9 +1357,10 @@ document.getElementById("zoom-native").addEventListener("click", async () => {
   requestRender();
   refreshReadout();
 });
-document.getElementById("osm").addEventListener("click", event => {
+document.getElementById("osm").addEventListener("click", () => {
+  // Ниже z9 подложка обязательна: кнопка заблокирована.
+  if (!reliefAvailable()) return;
   state.osm = !state.osm;
-  event.target.classList.toggle("active", state.osm);
   if (state.osm) {
     // Неудачные тайлы подложки пробуем загрузить снова.
     for (const key of [...state.tiles.keys()]) {
@@ -1316,15 +1371,12 @@ document.getElementById("osm").addEventListener("click", event => {
   writeUrl();
 });
 
-document.getElementById("osm-alpha").addEventListener("input", event => {
-  state.osmAlpha = Number(event.target.value) / 100;
-  if (state.osmAlpha > 0 && !state.osm) {
-    state.osm = true;
-    document.getElementById("osm").classList.add("active");
-  }
+document.getElementById("relief-alpha").addEventListener("input", event => {
+  const value = Number(event.target.value) / 100;
+  state.reliefAlpha = Math.max(0, Math.min(1, value));
   requestRender();
 });
-document.getElementById("osm-alpha").addEventListener("change", writeUrl);
+document.getElementById("relief-alpha").addEventListener("change", writeUrl);
 
 // ---------------------------------------------------------------------------
 // Выбор каталога с рельефом: серверный обзор (браузер не отдаёт путь к
@@ -1584,10 +1636,17 @@ function readUrl() {
   }
   if (params.get("z")) state.zoom = parseFloat(params.get("z"));
   if (params.get("osm") === "0") state.osm = false;
-  if (params.get("osma") !== null) {
-    const alpha = parseFloat(params.get("osma")) / 100;
-    if (Number.isFinite(alpha)) {
-      state.osmAlpha = Math.max(0, Math.min(1, alpha));
+  if (params.get("relief") !== null) {
+    const value = parseFloat(params.get("relief")) / 100;
+    if (Number.isFinite(value)) {
+      state.reliefAlpha = Math.max(0, Math.min(1, value));
+    }
+  } else if (params.get("osma") !== null) {
+    // Старые ссылки хранили долю подложки; теперь ползунок задаёт долю
+    // рельефа, то есть обратную величину.
+    const value = parseFloat(params.get("osma")) / 100;
+    if (Number.isFinite(value)) {
+      state.reliefAlpha = 1 - Math.max(0, Math.min(1, value));
     }
   }
 }
@@ -1599,7 +1658,7 @@ function writeUrl() {
   params.set("mode", state.mode);
   if (state.diff) params.set("diff", "1");
   params.set("osm", state.osm ? "1" : "0");
-  params.set("osma", String(Math.round(state.osmAlpha * 100)));
+  params.set("relief", String(Math.round(state.reliefAlpha * 100)));
   params.set("lon", state.center.lon.toFixed(5));
   params.set("lat", state.center.lat.toFixed(5));
   params.set("z", state.zoom.toFixed(1));
@@ -1658,9 +1717,7 @@ loadDatasets().then(() => {
   document.getElementById("mode").value = state.mode;
   document.getElementById("diff").classList.toggle("active", state.diff);
   document.getElementById("compare").classList.toggle("active", state.compare);
-  document.getElementById("osm").classList.toggle("active", state.osm);
-  document.getElementById("osm-alpha").value =
-    String(Math.round(state.osmAlpha * 100));
+  syncBasemapUi();
   const found = matchPlace(state.center.lon, state.center.lat);
   if (found) {
     selectPlace(found.point, found.index);
