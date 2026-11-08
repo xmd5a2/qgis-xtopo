@@ -618,7 +618,9 @@ python3 tools/build_plugin.py --install   # сборка + обновление 
 (`mActionMeasure`, `mActionMeasureArea`, `mActionMeasureAngle`,
 `mActionMeasureBearing`, `mActionIdentify`), поэтому работают ровно так
 же, как в самом QGIS. В Python-обёртках QGIS 3.44 классов измерения
-нет, а готовые действия — есть.
+нет, а готовые действия — есть. Закрытие окна «Измерение» возвращает
+карту в «Перетаскивание карты»: сам QGIS инструмент при этом с холста
+не снимает.
 
 ### Окно выбора охвата
 

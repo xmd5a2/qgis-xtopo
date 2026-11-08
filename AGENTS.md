@@ -59,7 +59,9 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   по `objectName`: `mActionMeasure`, `mActionMeasureArea`,
   `mActionMeasureAngle`, `mActionMeasureBearing`, `mActionIdentify`. В
   Python-обёртках QGIS 3.44 классов измерения нет
-  (`gui/projectpanel.py: _trigger_qgis_action`).
+  (`gui/projectpanel.py: _trigger_qgis_action`). Закрытие окна
+  `QgsMeasureDialog` не снимает инструмент с холста, поэтому панель ловит
+  `QEvent.Close` и включает `QgsMapToolPan` (`_connect_measure_dialogs`).
 - **Подписи размеров** — `core/measure.py` по эллипсоиду WGS84; в окне охвата
   они берутся у `MeasuredCanvas.set_frame_provider` при каждой отрисовке.
   Шкала масштаба считается от ширины видимой области, а не от знаменателя

@@ -822,6 +822,97 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_measure_dialog_close_activates_pan_tool(self):
+        from unittest import mock
+
+        from qgis.gui import QgsMapCanvas, QgsMapTool
+        from qgis.PyQt.QtWidgets import QDialog
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        class QgsMeasureTool(QgsMapTool):
+            # Имя Python-класса попадает в metaObject(): по нему панель
+            # отличает измерительный инструмент от остальных.
+            pass
+
+        canvas = QgsMapCanvas()
+        panel = ProjectPanel(Iface(canvas))
+        dialog = QDialog()
+        tool = QgsMeasureTool(canvas)
+        try:
+            canvas.setMapTool(tool)
+            dialog.installEventFilter(panel)
+            dialog.show()
+            self.app.processEvents()
+            # Скрытие окна при смене инструмента — не закрытие.
+            dialog.hide()
+            self.app.processEvents()
+            self.assertFalse(panel.pan_action.isChecked())
+            self.assertIs(canvas.mapTool(), tool)
+            dialog.show()
+            self.app.processEvents()
+            with mock.patch.object(
+                ProjectPanel,
+                "_is_measure_dialog",
+                staticmethod(lambda widget: widget is dialog),
+            ):
+                dialog.close()
+                self.app.processEvents()
+            # После закрытия окна карта снова таскается штатной прокруткой.
+            self.assertTrue(panel.pan_action.isChecked())
+            self.assertIsNotNone(panel._pan_tool)
+            self.assertIs(canvas.mapTool(), panel._pan_tool)
+        finally:
+            panel.deleteLater()
+            dialog.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
+    def test_measure_dialog_close_keeps_other_tool(self):
+        from unittest import mock
+
+        from qgis.gui import QgsMapCanvas, QgsMapTool
+        from qgis.PyQt.QtWidgets import QDialog
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        panel = ProjectPanel(Iface(canvas))
+        dialog = QDialog()
+        tool = QgsMapTool(canvas)
+        try:
+            canvas.setMapTool(tool)
+            dialog.installEventFilter(panel)
+            dialog.show()
+            self.app.processEvents()
+            with mock.patch.object(
+                ProjectPanel,
+                "_is_measure_dialog",
+                staticmethod(lambda widget: widget is dialog),
+            ):
+                dialog.close()
+                self.app.processEvents()
+            # Другой инструмент не снимаем: переключаем только измерение.
+            self.assertFalse(panel.pan_action.isChecked())
+            self.assertIs(canvas.mapTool(), tool)
+        finally:
+            panel.deleteLater()
+            dialog.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
     def test_configure_map_layers_keeps_project_visibility(self):
         from qgis.core import (
             QgsFeature, QgsGeometry, QgsLayoutItemMap, QgsPointXY,

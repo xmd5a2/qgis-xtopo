@@ -35,7 +35,9 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapToolPan, QgsRubberBand
-from qgis.PyQt.QtCore import QEventLoop, QPoint, QRectF, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtCore import (
+    QEvent, QEventLoop, QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal,
+)
 from qgis.PyQt.QtGui import (
     QColor, QFontMetrics, QIcon, QPainter, QPalette, QPen, QPixmap,
 )
@@ -513,6 +515,10 @@ class ProjectPanel(QWidget):
         self._style_layer = None
         self._pan_tool = None
         self._canvas_object = None
+        self._measure_dialogs_connected = False
+        self._measure_dialog_timer = QTimer(self)
+        self._measure_dialog_timer.setSingleShot(True)
+        self._measure_dialog_timer.timeout.connect(self._measure_dialog_closed)
         self._layer_boxes = []
         self._rule_checks = []
         self._rule_available = {}
@@ -532,6 +538,7 @@ class ProjectPanel(QWidget):
         self._baseline_project = None
         self._build_ui()
         self._connect_root()
+        self._connect_measure_dialogs()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2058,6 +2065,7 @@ class ProjectPanel(QWidget):
 
     def refresh(self):
         self._connect_root()
+        self._connect_measure_dialogs()
         own = self.is_xtopo_project()
         self.setEnabled(own)
         self._update_tool_actions(own)
@@ -2126,6 +2134,71 @@ class ProjectPanel(QWidget):
             except Exception:
                 pass
 
+    def _connect_measure_dialogs(self):
+        """Подключает слежение за окнами «Измерение» QGIS.
+
+        Закрытие окна не снимает измерительный инструмент с холста:
+        карта остаётся в режиме измерения, и перетаскивание не работает.
+        Ловим закрытие окна и возвращаем «Перетаскивание карты».
+        """
+        if self.iface is None or self._measure_dialogs_connected:
+            return
+        try:
+            window = self.iface.mainWindow()
+        except Exception:
+            return
+        connected = False
+        for dialog in window.findChildren(QDialog):
+            try:
+                name = dialog.metaObject().className()
+            except Exception:
+                continue
+            if name != "QgsMeasureDialog":
+                continue
+            dialog.installEventFilter(self)
+            connected = True
+        if connected:
+            self._measure_dialogs_connected = True
+
+    @staticmethod
+    def _is_measure_dialog(widget):
+        try:
+            return widget.metaObject().className() == "QgsMeasureDialog"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_measure_tool(tool):
+        if tool is None:
+            return False
+        try:
+            name = tool.metaObject().className()
+        except Exception:
+            return False
+        return name.startswith("QgsMeasureTool") or name.startswith(
+            "QgsMapToolMeasure"
+        )
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Close and self._is_measure_dialog(obj):
+            # Инструмент снимается не сразу: проверяем холст, когда
+            # обработка закрытия окна закончится.
+            self._measure_dialog_timer.start(0)
+        return super().eventFilter(obj, event)
+
+    def _measure_dialog_closed(self):
+        """Возвращает перетаскивание после закрытия окна «Измерение»."""
+        canvas = self._canvas()
+        if canvas is None:
+            return
+        try:
+            tool = canvas.mapTool()
+        except Exception:
+            return
+        if not self._is_measure_tool(tool):
+            return
+        self._activate_pan()
+
     def _trigger_qgis_action(self, object_name):
         """Включает штатный инструмент QGIS по имени его действия.
 
@@ -2134,6 +2207,8 @@ class ProjectPanel(QWidget):
         3.44 недоступны, поэтому вызывается готовое действие главного
         окна: пользователь получает ровно инструмент QGIS.
         """
+        if object_name.startswith("mActionMeasure"):
+            self._connect_measure_dialogs()
         iface = self.iface
         if iface is None:
             return False
@@ -2171,11 +2246,11 @@ class ProjectPanel(QWidget):
             canvas.unsetMapTool(self._pan_tool)
 
     def _activate_pan(self):
-        """Принудительно включает «Прокрутку карты».
+        """Принудительно включает «Перетаскивание карты».
 
-        После очистки листов атласа на холсте остаётся пустой инструмент:
-        кастомный инструмент снят, а новый не назначен, поэтому карту
-        нельзя перетащить. Возвращаем штатную прокрутку.
+        Нужно там, где инструмент остался без управления: после очистки
+        листов атласа и после закрытия окна «Измерение» карта иначе
+        остаётся без прокрутки. Возвращаем штатное перетаскивание.
         """
         canvas = self._canvas()
         if canvas is None:
