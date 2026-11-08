@@ -68,6 +68,8 @@ RENDER_SLOTS = threading.BoundedSemaphore(
     max(1, int(os.environ.get("DEM_COMPARE_SLOTS", "6"))))
 
 TILE_SIZE = 256
+# Режимы, где цвет тайла зависит от высот: их шкала задаётся пределами.
+SCALED_MODES = ("elevation", "contours")
 # Версия кэша: старые каталоги не удаляются, но и не используются, чтобы
 # после правок рендера не отдавать тайлы, нарисованные прежним кодом.
 CACHE_VERSION = 5
@@ -1418,17 +1420,26 @@ def _draw_line(mask, x0, y0, x1, y1):
             mask[y, x] = 255
 
 
-def _elevation_colors(array, sea_level=0.0):
-    """Гипсометрическая раскраска."""
+def _elevation_colors(array, sea_level=0.0, limits=None):
+    """Гипсометрическая раскраска.
+
+    limits — общие пределы (мин, макс) для всех тайлов вида: тогда картинка
+    читается как одна шкала. Без них пределы берутся из самого тайла, и
+    соседние тайлы окрашены по-разному.
+    """
     if array is None:
         return None
     valid = ~np.isnan(array)
     value = np.where(valid, array, sea_level).astype("float64")
-    lo = min(sea_level, float(value.min()))
-    hi = float(value.max())
+    if limits:
+        lo, hi = float(limits[0]), float(limits[1])
+    else:
+        lo = min(sea_level, float(value.min()))
+        hi = float(value.max())
     if hi <= lo:
         hi = lo + 1.0
-    norm = (value - lo) / (hi - lo)
+    # Значения вне пределов прижимаем к краям шкалы, а не оставляем чёрными.
+    norm = np.clip((value - lo) / (hi - lo), 0.0, 1.0)
     stops = [
         (0.00, (58, 106, 62)),
         (0.18, (110, 155, 92)),
@@ -1472,6 +1483,48 @@ def _diff_colors(diff, valid):
     return rgb
 
 
+def _limits_for_tiles(store, datasets, z, x0, x1, y0, y1):
+    """Пределы высот по набору тайлов: общая шкала для всех наборов.
+
+    Считаются по тем же массивам DEM, из которых рисуются тайлы, поэтому
+    шкала совпадает с картинкой. Наборов несколько — пределы общие: иначе
+    две половины шторки сравнивались бы по разным шкалам.
+    """
+    count = 2 ** z
+    tasks = []
+    for ds in datasets:
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                if 0 <= y < count:
+                    wrapped = ((x % count) + count) % count
+                    tasks.append((ds, z, wrapped, y))
+    if not tasks:
+        return None
+
+    def one(task):
+        ds, tile_z, x, y = task
+        values = _dem3857(store, ds, tile_z, x, y)
+        if values is None:
+            return None
+        valid = ~np.isnan(values)
+        if not valid.any():
+            return None
+        return float(values[valid].min()), float(values[valid].max())
+
+    lo = hi = None
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for part in pool.map(one, tasks):
+            if part is None:
+                continue
+            if lo is None or part[0] < lo:
+                lo = part[0]
+            if hi is None or part[1] > hi:
+                hi = part[1]
+    if lo is None:
+        return None
+    return _round_limits(lo, hi)
+
+
 def _nice_step(value):
     """Круглое число ступеней для горизонталей."""
     import math as _math
@@ -1483,6 +1536,36 @@ def _nice_step(value):
         if value <= factor * base:
             return factor * base
     return 10 * base
+
+
+def _round_limits(lo, hi):
+    """Округлить пределы до круглых чисел.
+
+    Шкала не должна меняться от каждого сдвига мыши: округление до шага
+    примерно в тридцатую часть размаха убирает дрожание цвета.
+    """
+    span = hi - lo
+    step = _nice_step(span / 30.0) if span > 0 else 1.0
+    low = math.floor(lo / step) * step
+    high = math.ceil(hi / step) * step
+    if high <= low:
+        high = low + step
+    return low, high
+
+
+def _limits_from_query(query):
+    """Пределы шкалы высот из запроса тайла."""
+    values = query.get("lo", [None])[0], query.get("hi", [None])[0]
+    if values[0] is None or values[1] is None:
+        return None
+    try:
+        low = float(values[0])
+        high = float(values[1])
+    except (TypeError, ValueError):
+        return None
+    if high <= low:
+        return None
+    return low, high
 
 
 def _math_ceil(value):
@@ -1520,10 +1603,20 @@ def _png_bytes(rgb, alpha=None):
 # Рендер тайлов
 # ---------------------------------------------------------------------------
 
-def tile_cache_path(tile_cache, ds, mode, z, x, y):
-    """Путь готового тайла в кэше (общий для сервера и прогрева)."""
-    return (Path(tile_cache) / f"v{TILE_CACHE_VERSION}" / ds / mode /
-            str(z) / str(x) / f"{y}.png")
+def tile_cache_path(tile_cache, ds, mode, z, x, y, limits=None):
+    """Путь готового тайла в кэше (общий для сервера и прогрева).
+
+    limits — общие пределы шкалы высот. Окраска тайла от них зависит, поэтому
+    тайлы с разными пределами лежат в разных каталогах: иначе отдался бы
+    PNG, нарисованный по чужой шкале.
+    """
+    base = Path(tile_cache) / f"v{TILE_CACHE_VERSION}" / ds / mode
+    if limits and mode in SCALED_MODES:
+        base = base / f"r{limits[0]:.1f}_{limits[1]:.1f}"
+    elif mode in SCALED_MODES:
+        # Пределы не передали — своя шкала на каждый тайл.
+        base = base / "auto"
+    return base / str(z) / str(x) / f"{y}.png"
 
 
 def write_bytes_atomic(path, data):
@@ -1535,21 +1628,26 @@ def write_bytes_atomic(path, data):
     temporary.replace(path)
 
 
-def render_tile(store, ds, z, x, y, mode="hillshade"):
+def render_tile(store, ds, z, x, y, mode="hillshade", limits=None):
     values = _dem3857(store, ds, z, x, y)
     if values is None:
         return None, None
     valid = ~np.isnan(values)
     lat_center = (tile_bounds(z, x, y)[1] + tile_bounds(z, x, y)[3]) / 2
     if mode == "elevation":
-        rgb = _elevation_colors(values)
+        rgb = _elevation_colors(values, limits=limits)
     elif mode == "contours":
-        rgb = _elevation_colors(values)
+        rgb = _elevation_colors(values, limits=limits)
         shade = _hillshade(values, z)
         if shade is not None:
             factor = (shade.astype("float64") / 255.0 * 0.6 + 0.4)[:, :, None]
             rgb = np.clip(rgb.astype("float64") * factor, 0, 255).astype("uint8")
-        step = _nice_step(156543.03392 / (2 ** z) * 8)
+        if limits:
+            # Шаг по размаху видимой области: горизонтали идут ровно по
+            # шкале цветов, а не по разрешению экрана.
+            step = _nice_step(max(1.0, (limits[1] - limits[0]) / 10.0))
+        else:
+            step = _nice_step(156543.03392 / (2 ** z) * 8)
         mask = _contour_mask(values, step)
         if mask is not None:
             rgb[mask > 0] = (58, 38, 28)
@@ -1968,7 +2066,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if head == "tile" and len(parts) == 5:
             mode = query.get("mode", ["hillshade"])[0]
-            self._tile(parts[1], parts[2], parts[3], parts[4], mode)
+            self._tile(parts[1], parts[2], parts[3], parts[4], mode,
+                       _limits_from_query(query))
             return
         if head == "diff" and len(parts) == 6:
             self._diff(parts[1], parts[2], parts[3], parts[4], parts[5])
@@ -2014,6 +2113,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if action == "browse":
             self._browse(query)
+            return
+        if action == "limits":
+            self._limits(query)
             return
         if action == "osm-resolve":
             # Короткие ссылки osm.org/go/… редиректят на #map=…; браузер
@@ -2070,6 +2172,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"error": "unknown api"}, code=404)
 
+    def _limits(self, query):
+        """Пределы высот по видимым тайлам: общая шкала для всех наборов."""
+        names = [n for n in query.get("ds", [""])[0].split(",") if n]
+        names = [n for n in names if n in DATASETS]
+        if not names:
+            self._json({"error": "unknown dataset"}, code=404)
+            return
+        try:
+            z = int(query.get("z", ["0"])[0])
+            x0 = int(query.get("x0", ["0"])[0])
+            x1 = int(query.get("x1", ["0"])[0])
+            y0 = int(query.get("y0", ["0"])[0])
+            y1 = int(query.get("y1", ["0"])[0])
+        except ValueError:
+            self._json({"error": "плохие параметры"}, code=400)
+            return
+        limits = _limits_for_tiles(self.store, names, z, x0, x1, y0, y1)
+        if limits is None:
+            self._json({"error": "нет данных"}, code=404)
+            return
+        self._json({"lo": limits[0], "hi": limits[1]})
+
     def _browse(self, query):
         """Подкаталоги для выбора локального набора прямо в интерфейсе."""
         raw = query.get("dir", [""])[0].strip()
@@ -2092,12 +2216,14 @@ class Handler(BaseHTTPRequestHandler):
         parent = str(path.parent) if path.parent != path else None
         self._json({"path": str(path), "parent": parent, "dirs": dirs})
 
-    def _tile(self, ds, z, x, y, mode):
+    def _tile(self, ds, z, x, y, mode, limits=None):
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
             return
         z, x, y = int(z), int(x), int(y.split(".")[0])
-        cache_file = tile_cache_path(self.tile_cache, ds, mode, z, x, y)
+        # У режимов с высотой цвет зависит от шкалы, поэтому тайлы с разными
+        # пределами лежат в разных каталогах.
+        cache_file = tile_cache_path(self.tile_cache, ds, mode, z, x, y, limits)
         if cache_file.exists():
             _status_leave(f"{ds}/{mode}/{z}/{x}/{y}", rendered=False)
             self._send(200, cache_file.read_bytes(), "image/png",
@@ -2107,7 +2233,7 @@ class Handler(BaseHTTPRequestHandler):
         _status_enter(key, ds, z, x, y)
         started = time.monotonic()
         try:
-            result = render_tile(self.store, ds, z, x, y, mode)
+            result = render_tile(self.store, ds, z, x, y, mode, limits)
         finally:
             _status_leave(key, rendered=True)
         seconds = time.monotonic() - started
