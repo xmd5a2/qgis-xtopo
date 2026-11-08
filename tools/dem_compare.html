@@ -888,6 +888,46 @@ function resize() {
   requestRender();
 }
 
+// Координаты тайлов окна квадратной спиралью от центра экрана: центр —
+// фокус внимания, и рисовать и запрашивать его хочется в первую очередь.
+// Возвращает [tx, ty] в пределах заданного прямоугольника, без повторов.
+function spiralTiles(firstX, firstY, lastX, lastY, centerTx, centerTy) {
+  const tiles = [];
+  const seen = new Set();
+  const push = (tx, ty) => {
+    if (tx < firstX || tx > lastX || ty < firstY || ty > lastY) return;
+    const key = tx + "," + ty;
+    if (seen.has(key)) return;
+    seen.add(key);
+    tiles.push([tx, ty]);
+  };
+  const maxRing = Math.max(Math.abs(firstX - centerTx), Math.abs(lastX - centerTx),
+                           Math.abs(firstY - centerTy), Math.abs(lastY - centerTy));
+  for (let ring = 0; ring <= maxRing; ring++) {
+    if (ring === 0) {
+      push(centerTx, centerTy);
+      continue;
+    }
+    // Верхняя грань кольца слева направо.
+    for (let tx = centerTx - ring; tx <= centerTx + ring; tx++) {
+      push(tx, centerTy - ring);
+    }
+    // Правая грань сверху вниз (угол уже добавлен).
+    for (let ty = centerTy - ring + 1; ty <= centerTy + ring; ty++) {
+      push(centerTx + ring, ty);
+    }
+    // Нижняя грань справа налево.
+    for (let tx = centerTx + ring - 1; tx >= centerTx - ring; tx--) {
+      push(tx, centerTy + ring);
+    }
+    // Левая грань снизу вверх (нижний угол уже добавлен).
+    for (let ty = centerTy + ring - 1; ty >= centerTy - ring + 1; ty--) {
+      push(centerTx - ring, ty);
+    }
+  }
+  return tiles;
+}
+
 // ---------------------------------------------------------------------------
 // Границы градусных тайлов 1×1: так же называются исходники SRTM и
 // Copernicus — N45E007, S03W062.
@@ -1057,32 +1097,35 @@ function draw() {
     const firstY = Math.floor(layerTop / tileSize) - 1;
     const lastX = Math.floor((layerLeft + w) / tileSize) + 1;
     const lastY = Math.floor((layerTop + h) / tileSize) + 1;
+    // Отрисовка и запросы идут от центра экрана по спирали: центральный
+    // тайл появляется первым, крайние окна добирают в последнюю очередь.
+    const centerTx = Math.floor((layerLeft + w / 2) / tileSize);
+    const centerTy = Math.floor((layerTop + h / 2) / tileSize);
     const items = [];
-    for (let tx = firstX; tx <= lastX; tx++) {
-      for (let ty = firstY; ty <= lastY; ty++) {
-        if (ty < 0 || ty >= layerCount) continue;
-        // Западнее нулевого меридиана мир повторяется: рисуем тот же тайл
-        // с другого края, но на своей позиции.
-        const wrapped = ((tx % layerCount) + layerCount) % layerCount;
-        const entry = getTile(ds, mode, layerZoom, wrapped, ty);
-        const screenX = tx * tileSize - layerLeft;
-        const screenY = ty * tileSize - layerTop;
-        const visible = screenX + tileSize > 0 && screenX < w &&
-                        screenY + tileSize > 0 && screenY < h;
-        if (visible) {
-          // Пустой тайл (404) тоже считаем готовым: он не придёт уже никогда.
-          if (!entry.loaded && !entry.failed) missing += 1;
-          if (stats) {
-            stats.wanted += 1;
-            wanted += 1;
-            if (entry.loaded) {
-              stats.loaded += 1;
-              loaded += 1;
-            }
+    for (const [tx, ty] of spiralTiles(firstX, firstY, lastX, lastY,
+                                       centerTx, centerTy)) {
+      if (ty < 0 || ty >= layerCount) continue;
+      // Западнее нулевого меридиана мир повторяется: рисуем тот же тайл
+      // с другого края, но на своей позиции.
+      const wrapped = ((tx % layerCount) + layerCount) % layerCount;
+      const entry = getTile(ds, mode, layerZoom, wrapped, ty);
+      const screenX = tx * tileSize - layerLeft;
+      const screenY = ty * tileSize - layerTop;
+      const visible = screenX + tileSize > 0 && screenX < w &&
+                      screenY + tileSize > 0 && screenY < h;
+      if (visible) {
+        // Пустой тайл (404) тоже считаем готовым: он не придёт уже никогда.
+        if (!entry.loaded && !entry.failed) missing += 1;
+        if (stats) {
+          stats.wanted += 1;
+          wanted += 1;
+          if (entry.loaded) {
+            stats.loaded += 1;
+            loaded += 1;
           }
         }
-        items.push({entry, screenX, screenY});
       }
+      items.push({entry, screenX, screenY});
     }
     // Соседей догружаем, чтобы панорамирование не ждало сеть.
     if (mode !== "diff") {
