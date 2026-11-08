@@ -1008,8 +1008,14 @@ class SourceStore:
                       "3dep": "3dep-seamless"}[DATASETS[ds]["source"]]
         suffix = DATASETS[ds].get("id_suffix")
         query_bbox = bbox or (0, 0, 1, 1)
-        key = self.cache_dir / f"pc_{collection}_{int(query_bbox[0])}_" \
-                                 f"{int(query_bbox[1])}.json"
+        # Гранулы наборов — целые градусы (N37E031 и т.п.). Ключ обязан
+        # покрывать весь запрошенный блок: по начальной ячейке нельзя — окно
+        # в той же ячейке, но с большим охватом получало короткий список
+        # первого запроса и готовилось с дырами там, где гранул не хватало.
+        cell = (math.floor(query_bbox[0]), math.floor(query_bbox[1]),
+                math.ceil(query_bbox[2]), math.ceil(query_bbox[3]))
+        key = self.cache_dir / (f"pc_{collection}_{cell[0]}_{cell[1]}_"
+                                f"{cell[2]}_{cell[3]}.json")
         # Один запрос STAC на ячейку: параллельные потоки ждут его, а не
         # дублируют и не пишут файл одновременно.
         with self._named_lock(self._pc_locks, str(key)):
