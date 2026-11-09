@@ -77,7 +77,7 @@ SCALED_MODES = ("elevation", "contours")
 CACHE_VERSION = 5
 # Версия только готовых PNG: отмывка и гипсометрия меняются чаще, чем
 # исходные окна DEM. Отдельный номер не заставит заново качать prepared.
-TILE_CACHE_VERSION = 6
+TILE_CACHE_VERSION = 7
 # Подгрузка тайла с запасом, чтобы шов между тайлами не был виден.
 TILE_OVERLAP = 1
 # Ограничение на размер промежуточного растра (пиксели по стороне).
@@ -1484,72 +1484,33 @@ def _elevation_colors(values):
 
 
 def _contour_mask(values, step):
-    """Маска горизонталей методом marching squares по сетке высот."""
+    """Маска горизонталей: полоса вокруг уровня шириной в половину шага.
+
+    Расстояние до ближайшего уровня сравнивается с перепадом высоты на
+    пиксель, поэтому линия выходит толщиной около пикселя и не расползается
+    на крутом склоне. Всё считается массивами numpy: прежний поячеечный
+    marching squares с отрисовкой отрезками на Python занимал до 0,7 с на
+    тайл и держал GIL, из-за чего тайлы не считались параллельно.
+    """
     if values is None:
         return None
-    valid = ~np.isnan(values)
+    valid = np.isfinite(values)
     if not valid.any():
         return None
-    data = np.where(valid, values, np.nan)
-    mask = np.zeros(data.shape, dtype="uint8")
+    data = np.where(valid, values, np.nan).astype("float64")
     lo = float(np.nanmin(data))
     hi = float(np.nanmax(data))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        return mask
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo or step <= 0:
+        return np.zeros(values.shape, dtype="uint8")
     first = math.ceil(lo / step) * step
-    v00 = data[:-1, :-1]
-    v10 = data[:-1, 1:]
-    v11 = data[1:, 1:]
-    v01 = data[1:, :-1]
-    cell_valid = (np.isfinite(v00) & np.isfinite(v10) &
-                  np.isfinite(v11) & np.isfinite(v01))
-    for level in np.arange(first, hi + step, step):
-        corners = np.stack([v00, v10, v11, v01])
-        # Пустые углы заменяем на бесконечности: nanmin/nanmax на ячейке,
-        # где все четыре угла — NaN, печатают «All-NaN slice encountered».
-        # Для таких ячеек lowest > highest, и пересечения всё равно нет.
-        finite = np.isfinite(corners)
-        lowest = np.min(np.where(finite, corners, np.inf), axis=0)
-        highest = np.max(np.where(finite, corners, -np.inf), axis=0)
-        # Плоская ячейка (все углы равны уровню) пересечения не даёт: иначе
-        # ровное море или плато на уровне 0 рисует горизонтали по всей площади.
-        crossing = (cell_valid & (highest > lowest) &
-                    (lowest <= level) & (highest >= level))
-        ys, xs = np.nonzero(crossing)
-        for y, x in zip(ys, xs):
-            points = []
-            for (ax, ay, bx, by) in ((x, y, x + 1, y), (x + 1, y, x + 1, y + 1),
-                                     (x + 1, y + 1, x, y + 1),
-                                     (x, y + 1, x, y)):
-                va = data[ay, ax]
-                vb = data[by, bx]
-                if not (np.isfinite(va) and np.isfinite(vb)):
-                    continue
-                if (va - level) * (vb - level) > 0:
-                    continue
-                ratio = (level - va) / (vb - va) if vb != va else 0.0
-                points.append((ax + (bx - ax) * ratio,
-                               ay + (by - ay) * ratio))
-            if len(points) == 2:
-                _draw_line(mask, points[0][0], points[0][1],
-                           points[1][0], points[1][1])
-            elif len(points) == 4:
-                _draw_line(mask, points[0][0], points[0][1],
-                           points[1][0], points[1][1])
-                _draw_line(mask, points[2][0], points[2][1],
-                           points[3][0], points[3][1])
-    return mask
-
-
-def _draw_line(mask, x0, y0, x1, y1):
-    """Рисует отрезок по пикселям (DDA)."""
-    steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
-    for index in range(steps + 1):
-        t = index / steps if steps else 0
-        x = int(round(x0 + (x1 - x0) * t))
-        y = int(round(y0 + (y1 - y0) * t))
-        if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1]:
-            mask[y, x] = 255
+    phase = (data - first) / step
+    distance = np.abs(phase - np.round(phase)) * step
+    # Перепад высоты на пиксель — он же масштаб толщины линии.
+    grad_y, grad_x = np.gradient(data)
+    slope = np.hypot(grad_x, grad_y)
+    # Плоское место (море, плато) горизонталей не даёт: там перепад нулевой
+    # и полоса выродилась бы в сплошную заливку.
+    return ((distance <= 0.5 * slope) & valid & (slope > 0)).astype("uint8") * 255
 
 
 def _elevation_colors(array, sea_level=0.0, limits=None):
