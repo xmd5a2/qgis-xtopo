@@ -23,6 +23,8 @@ NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или л
 
 * ``/api/datasets`` — список наборов с метаданными;
 * ``/tile/<ds>/<z>/<x>/<y>.png?mode=hillshade|elevation|contours`` — тайл;
+* ``/tiles?ds=&z=&mode=&lo=&hi=&t=x,y&t=x,y…`` — пачка тайлов по мере
+  готовности (см. :meth:`Handler._tiles`);
 * ``/osm/<z>/<x>/<y>.png`` — тайл подложки OpenStreetMap;
 * ``/diff/<a>/<b>/<z>/<x>/<y>.png`` — разность высот B−A;
 * ``/api/value?ds=&lon=&lat=`` — высота в точке;
@@ -66,8 +68,13 @@ gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
 gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff")
 # Одновременных перепроекций тайлов: больше — сеть и кэш GDAL только
 # мешают друг другу, а память растёт.
-RENDER_SLOTS = threading.BoundedSemaphore(
-    max(1, int(os.environ.get("DEM_COMPARE_SLOTS", "6"))))
+RENDER_PARALLEL = max(1, int(os.environ.get("DEM_COMPARE_SLOTS", "6")))
+RENDER_SLOTS = threading.BoundedSemaphore(RENDER_PARALLEL)
+# Потоковая пачка /tiles рисует несколько тайлов сразу. Пул общий на процесс:
+# иначе каждая вкладка плодила бы свои потоки.
+BATCH_POOL = ThreadPoolExecutor(max_workers=RENDER_PARALLEL)
+# Предел тайлов в одном ответе: остальное клиент шлёт следующими пачками.
+TILE_BATCH_MAX = 32
 
 TILE_SIZE = 256
 # Режимы, где цвет тайла зависит от высот: их шкала задаётся пределами.
@@ -2178,6 +2185,9 @@ class Handler(BaseHTTPRequestHandler):
             self._tile(parts[1], parts[2], parts[3], parts[4], mode,
                        _limits_from_query(query))
             return
+        if head == "tiles":
+            self._tiles(query)
+            return
         if head == "diff" and len(parts) == 6:
             self._diff(parts[1], parts[2], parts[3], parts[4], parts[5])
             return
@@ -2325,20 +2335,15 @@ class Handler(BaseHTTPRequestHandler):
         parent = str(path.parent) if path.parent != path else None
         self._json({"path": str(path), "parent": parent, "dirs": dirs})
 
-    def _tile(self, ds, z, x, y, mode, limits=None):
-        if ds not in DATASETS:
-            self._json({"error": "unknown dataset"}, code=404)
-            return
-        z, x, y = int(z), int(x), int(y.split(".")[0])
+    def _tile_payload(self, ds, z, x, y, mode, limits=None):
+        """PNG тайла: общий путь для одиночного запроса и для пачки."""
         # У режимов с высотой цвет зависит от шкалы, поэтому тайлы с разными
         # пределами лежат в разных каталогах.
         cache_file = tile_cache_path(self.tile_cache, ds, mode, z, x, y, limits)
-        if cache_file.exists():
-            _status_leave(f"{ds}/{mode}/{z}/{x}/{y}", rendered=False)
-            self._send(200, cache_file.read_bytes(), "image/png",
-                       {"X-Tile-Status": "cached", "X-Tile-Seconds": "0"})
-            return
         key = f"{ds}/{mode}/{z}/{x}/{y}"
+        if cache_file.exists():
+            _status_leave(key, rendered=False)
+            return "cached", cache_file.read_bytes(), 0.0, None
         _status_enter(key, ds, z, x, y)
         started = time.monotonic()
         try:
@@ -2346,24 +2351,93 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _status_leave(key, rendered=True)
         seconds = time.monotonic() - started
-        if result is None or result[0] is None:
-            self._send(404, b"", "text/plain",
-                       {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
-            return
-        data, native = result
-        if len(data) < 256:
+        if result is None or result[0] is None or len(result[0]) < 256:
             # Пустой результат — источник не отдался: не кэшируем.
-            self._send(404, b"", "text/plain",
-                       {"X-Tile-Status": "empty", "X-Tile-Seconds": f"{seconds:.2f}"})
-            return
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
+            return "empty", b"", seconds, None
+        data, native = result
         write_bytes_atomic(cache_file, data)
         _log(f"tile {ds}/{mode} {z}/{x}/{y} {seconds:.2f}s очередь {_queue_size()}")
-        self._send(200, data, "image/png",
-                   {"X-Native-X": f"{native[0]:.2f}",
-                    "X-Native-Y": f"{native[1]:.2f}",
-                    "X-Tile-Status": "rendered",
-                    "X-Tile-Seconds": f"{seconds:.2f}"})
+        return "rendered", data, seconds, native
+
+    def _tile(self, ds, z, x, y, mode, limits=None):
+        if ds not in DATASETS:
+            self._json({"error": "unknown dataset"}, code=404)
+            return
+        z, x, y = int(z), int(x), int(y.split(".")[0])
+        status, data, seconds, native = self._tile_payload(
+            ds, z, x, y, mode, limits)
+        if status == "empty":
+            self._send(404, b"", "text/plain",
+                       {"X-Tile-Status": "empty",
+                        "X-Tile-Seconds": f"{seconds:.2f}"})
+            return
+        headers = {"X-Tile-Status": status,
+                   "X-Tile-Seconds": f"{seconds:.2f}"}
+        if native:
+            headers["X-Native-X"] = f"{native[0]:.2f}"
+            headers["X-Native-Y"] = f"{native[1]:.2f}"
+        self._send(200, data, "image/png", headers)
+
+    def _tiles(self, query):
+        """Пачка тайлов одним потоковым ответом.
+
+        Браузер держит не больше шести соединений на хост, поэтому при
+        поштучных запросах простаивала половина слотов рендера. Здесь тайлы
+        рисуются в общем пуле и уходят кадрами по мере готовности, не ожидая
+        самый медленный. Формат кадра — строка ``DEMFRAME x y status seconds
+        length`` и сразу за ней ``length`` байт PNG; порядок кадров не важен,
+        клиент раскладывает их по координатам.
+        """
+        ds = query.get("ds", [""])[0]
+        if ds not in DATASETS:
+            self._json({"error": "unknown dataset"}, code=404)
+            return
+        try:
+            z = int(query.get("z", ["0"])[0])
+        except ValueError:
+            self._json({"error": "bad zoom"}, code=400)
+            return
+        mode = query.get("mode", ["hillshade"])[0]
+        limits = _limits_from_query(query)
+        tasks = []
+        for raw in query.get("t", []):
+            try:
+                tx, ty = raw.split(",")
+                tasks.append((int(tx), int(ty)))
+            except ValueError:
+                continue
+        tasks = tasks[:TILE_BATCH_MAX]
+        if not tasks:
+            self._json({"error": "нужны тайлы"}, code=400)
+            return
+        # Content-Length неизвестен: ответ закрывается концом данных.
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        futures = {
+            BATCH_POOL.submit(self._tile_payload, ds, z, x, y, mode, limits):
+                (x, y) for x, y in tasks
+        }
+        try:
+            for future in as_completed(futures):
+                x, y = futures[future]
+                try:
+                    status, data, seconds, _native = future.result()
+                except Exception:
+                    status, data, seconds = "empty", b"", 0.0
+                header = (f"DEMFRAME {x} {y} {status} {seconds:.3f} "
+                          f"{len(data)}\n").encode("ascii")
+                self.wfile.write(header)
+                if data:
+                    self.wfile.write(data)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            for future in futures:
+                future.cancel()
 
     def _osm(self, z, x, y):
         """Тайл подложки OpenStreetMap, с локальным кэшем."""

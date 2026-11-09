@@ -804,16 +804,23 @@ async function updateLimits() {
   }
 }
 
-function tileKey(ds, mode, z, x, y) {
-  const lim = SCALED_MODES.includes(mode) && state.limits
-    ? `r${state.limits.lo}_${state.limits.hi}` : "";
-  return [ds, mode, z, x, y, lim].join("/");
+function tileCacheKey(ds, mode, z, x, y, lim) {
+  const suffix = SCALED_MODES.includes(mode) && lim
+    ? `r${lim.lo}_${lim.hi}` : "";
+  return [ds, mode, z, x, y, suffix].join("/");
 }
+
+// Браузер держит не больше шести соединений на хост, поэтому тайлы уходят
+// пачками: один потоковый ответ несёт несколько тайлов и отдаёт их по мере
+// готовности. Так заняты все слоты рендера сервера, а не только шесть.
+const BATCH_SIZE = 8;
+const pendingBatches = new Map();
+let batchTimer = 0;
 
 function getTile(ds, mode, z, x, y) {
   const scaled = SCALED_MODES.includes(mode);
   const lim = scaled ? state.limits : null;
-  const key = tileKey(ds, mode, z, x, y);
+  const key = tileCacheKey(ds, mode, z, x, y, lim);
   let entry = state.tiles.get(key);
   if (entry) return entry;
   // Пределы ещё не посчитаны: тайлы с произвольной шкалой не запрашиваем,
@@ -821,15 +828,129 @@ function getTile(ds, mode, z, x, y) {
   if (scaled && !lim) {
     return {image: null, loaded: false, failed: true, status: "", seconds: 0};
   }
-  entry = {image: null, loaded: false, failed: false, status: "", seconds: 0};
+  entry = {image: null, loaded: false, failed: false,
+           queued: false, status: "", seconds: 0};
   state.tiles.set(key, entry);
-  const scale = lim ? `&lo=${lim.lo}&hi=${lim.hi}` : "";
-  const url = ds === "__diff__"
-    ? `/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`
-    : ds === "__osm__"
-      ? `/osm/${z}/${x}/${y}.png`
-      : `/tile/${ds}/${z}/${x}/${y}.png?mode=${mode}${scale}`;
-  const log = ds !== "__osm__";
+  if (ds === "__diff__") {
+    fetchSingleTile(`/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`,
+                    ds, z, x, y, entry, true);
+  } else if (ds === "__osm__") {
+    fetchSingleTile(`/osm/${z}/${x}/${y}.png`, ds, z, x, y, entry, false);
+  } else {
+    queueTile(ds, mode, z, x, y, lim, entry);
+  }
+  return entry;
+}
+
+function queueTile(ds, mode, z, x, y, lim, entry) {
+  const key = [ds, mode, z, lim ? `${lim.lo}_${lim.hi}` : ""].join("/");
+  let group = pendingBatches.get(key);
+  if (!group) {
+    group = {ds, mode, z, lim, items: []};
+    pendingBatches.set(key, group);
+  }
+  entry.queued = true;
+  group.items.push({x, y, entry});
+  // Все тайлы текущего прохода отрисовки попадают в одну пачку.
+  if (!batchTimer) batchTimer = setTimeout(flushBatches, 0);
+}
+
+function flushBatches() {
+  batchTimer = 0;
+  const groups = Array.from(pendingBatches.values());
+  pendingBatches.clear();
+  for (const group of groups) {
+    for (let i = 0; i < group.items.length; i += BATCH_SIZE) {
+      requestBatch(group, group.items.slice(i, i + BATCH_SIZE));
+    }
+  }
+}
+
+async function requestBatch(group, items) {
+  const params = new URLSearchParams();
+  params.set("ds", group.ds);
+  params.set("z", group.z);
+  params.set("mode", group.mode);
+  if (group.lim) {
+    params.set("lo", group.lim.lo);
+    params.set("hi", group.lim.hi);
+  }
+  for (const item of items) params.append("t", `${item.x},${item.y}`);
+  const decoder = new TextDecoder();
+  try {
+    const response = await fetch(`/tiles?${params}`);
+    if (!response.ok || !response.body) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    let buffer = new Uint8Array(0);
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer = concatBytes(buffer, value);
+      for (;;) {
+        const newline = buffer.indexOf(10);
+        if (newline < 0) break;
+        const header = decoder.decode(buffer.subarray(0, newline));
+        const parts = header.split(" ");
+        if (parts[0] !== "DEMFRAME" || parts.length < 6) {
+          buffer = buffer.subarray(newline + 1);
+          continue;
+        }
+        const size = parseInt(parts[5], 10);
+        if (!Number.isFinite(size) ||
+            buffer.length < newline + 1 + size) break;
+        const body = buffer.slice(newline + 1, newline + 1 + size);
+        buffer = buffer.subarray(newline + 1 + size);
+        applyFrame(group, parseInt(parts[1], 10), parseInt(parts[2], 10),
+                   parts[3], parseFloat(parts[4]), body);
+      }
+    }
+  } catch (error) {
+    for (const item of items) {
+      item.entry.queued = false;
+      item.entry.failed = true;
+      addLog(group.ds, `${group.z}/${item.x}/${item.y}`, "нет данных", 0);
+    }
+    requestRender();
+  }
+}
+
+function concatBytes(first, second) {
+  if (!first.length) return second;
+  const merged = new Uint8Array(first.length + second.length);
+  merged.set(first, 0);
+  merged.set(second, first.length);
+  return merged;
+}
+
+function applyFrame(group, x, y, status, seconds, body) {
+  const key = tileCacheKey(group.ds, group.mode, group.z, x, y, group.lim);
+  const entry = state.tiles.get(key);
+  if (!entry) return;
+  entry.queued = false;
+  if (status === "empty" || !body.length) {
+    entry.failed = true;
+    addLog(group.ds, `${group.z}/${x}/${y}`, "нет данных", 0);
+    requestRender();
+    return;
+  }
+  entry.status = status;
+  entry.seconds = seconds;
+  const image = new Image();
+  image.onload = () => {
+    entry.image = image;
+    entry.loaded = true;
+    // Перерисовка важнее журнала: если запись в журнал сломается,
+    // тайл всё равно должен появиться без действий пользователя.
+    requestRender();
+    addLog(group.ds, `${group.z}/${x}/${y}`, entry.status, entry.seconds);
+  };
+  image.onerror = () => { entry.failed = true; requestRender(); };
+  image.src = URL.createObjectURL(new Blob([body], {type: "image/png"}));
+}
+
+function fetchSingleTile(url, ds, z, x, y, entry, log) {
   // fetch вместо <img>: нужны заголовки — откуда тайл (кэш или рендер)
   // и сколько секунд он считался.
   fetch(url)
@@ -859,7 +980,6 @@ function getTile(ds, mode, z, x, y) {
       entry.failed = true;
       requestRender();
     });
-  return entry;
 }
 
 function addLog(ds, tile, status, seconds) {
