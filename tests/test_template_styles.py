@@ -10,6 +10,7 @@ import unittest
 import zipfile
 from xml.etree import ElementTree
 
+from qgis_xtopo.core import poi_icons
 from qgis_xtopo.core.resources import PACKAGE_DIR, template_path
 
 # Слой пересыхающей воды рисуется горизонтальной штриховкой.
@@ -328,6 +329,95 @@ class AttributionLabelTest(unittest.TestCase):
         self.assertIsNotNone(color)
         for channel in ("red", "green", "blue"):
             self.assertEqual(color.get(channel), "255")
+
+
+class PoiSuppressionTest(unittest.TestCase):
+    """Значки POI подавляются, если рядом более приоритетный объект.
+
+    Подавление задаётся фильтрами правил рендерера и правил подписей
+    в шаблоне: служебный слой `poi icons` собирается при подготовке
+    проекта, а правила ссылаются на него по имени.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _template_root()
+        cls.layers = poi_icons.read_template_poi()
+        cls.bands = poi_icons.canonical_bands(cls.layers)
+
+    def test_service_layers_exist_and_are_hidden(self):
+        names = {
+            layer.findtext("layername")
+            for layer in self.root.iter("maplayer")
+        }
+        for name in (poi_icons.AUX_LAYER_NAME, poi_icons.AUX_LAYER_NAME_3857):
+            self.assertIn(name, names)
+        tree = {
+            element.get("name")
+            for element in self.root.iter("layer-tree-layer")
+        }
+        # Служебные слои не показываются пользователю: они нужны только
+        # для выборки соседей.
+        self.assertNotIn(poi_icons.AUX_LAYER_NAME, tree)
+        self.assertNotIn(poi_icons.AUX_LAYER_NAME_3857, tree)
+
+    def test_service_layers_are_not_poi_layers(self):
+        names = [layer.name for layer in self.layers]
+        self.assertNotIn(poi_icons.AUX_LAYER_NAME, names)
+        self.assertNotIn(poi_icons.AUX_LAYER_NAME_3857, names)
+        self.assertEqual(
+            [layer.rank for layer in self.layers],
+            list(range(1, len(self.layers) + 1)),
+        )
+
+    def test_icon_rules_suppress_overlaps(self):
+        checked = 0
+        for layer in self.layers:
+            for leaf in poi_icons.leaves(layer.root):
+                if not poi_icons.band_indexes(
+                    leaf.minimum, leaf.maximum, self.bands,
+                ):
+                    # Правило не рисуется ни в одном диапазоне.
+                    continue
+                self.assertIn(
+                    "overlay_nearest(", leaf.filter,
+                    f"у слоя {layer.name} нет подавления значков",
+                )
+                self.assertIn('"rank"', leaf.filter)
+                self.assertIn("@level_of_detail", leaf.filter)
+                checked += 1
+        self.assertTrue(checked, "в шаблоне нет правил значков POI")
+
+    def test_icon_rules_pick_scale_outside_overlay(self):
+        """Текущий диапазон выбирается снаружи overlay_nearest.
+
+        Аргументы overlay_nearest считаются в контексте служебного
+        слоя, где @map_scale недоступен.  Поэтому диапазон выбирается
+        условием правила, а в выборку соседей попадает индекс диапазона.
+        """
+        for layer in self.layers:
+            for leaf in poi_icons.leaves(layer.root):
+                if not poi_icons.band_indexes(
+                    leaf.minimum, leaf.maximum, self.bands,
+                ):
+                    continue
+                self.assertIn("@map_scale", leaf.filter)
+                inside = leaf.filter.split("overlay_nearest", 1)[1]
+                self.assertIn('"band_min"', inside)
+                self.assertIn('"band_max"', inside)
+
+    def test_label_rules_suppress_overlaps(self):
+        checked = 0
+        for layer in self.layers:
+            if poi_icons.layer_suppression_expression(layer, self.bands) == "false":
+                continue
+            for rule in layer.labels:
+                self.assertIn(
+                    "overlay_nearest(", rule.filter,
+                    f"у слоя {layer.name} нет подавления подписей",
+                )
+                checked += 1
+        self.assertTrue(checked, "в шаблоне нет подписей POI")
 
 
 if __name__ == "__main__":

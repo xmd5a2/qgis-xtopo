@@ -7,8 +7,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, gdal_log, i18n, osm_convert, peak_filter, project, sources,
-    terrain,
+    coastline, gdal_log, i18n, osm_convert, peak_filter, poi_icons, project,
+    sources, terrain,
 )
 from .bbox import parse_bbox
 from .query_recipes import recipe_for
@@ -1373,6 +1373,19 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("проверка пиков", time.monotonic() - started)
+        report("Размещение значков POI")
+        started = time.monotonic()
+        try:
+            poi_icons.build_poi_icons(
+                config, progress=report, cancel=cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            # Без служебного слоя try(...) в правилах оставляет все
+            # значки видимыми, поэтому ошибка не отменяет сборку карты.
+            report(f"WARNING: POI: {exc}; подавление наложений пропущено")
+        timings.add_stage("значки POI", time.monotonic() - started)
         report("Удаление пустых слоёв")
         started = time.monotonic()
         project.clean_project_layers(project_path)

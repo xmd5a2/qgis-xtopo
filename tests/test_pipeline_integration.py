@@ -2600,6 +2600,89 @@ class PipelineIntegrationTest(unittest.TestCase):
                     f"unavailable layer source: {value}",
                 )
 
+    def test_poi_icons_service_layer_is_built(self):
+        """Служебный слой значков собирается при подготовке проекта."""
+        from qgis_xtopo.core import poi_icons
+        from qgis_xtopo.core.config import Config
+        from qgis_xtopo.core.pipeline import run_project
+
+        osm = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+ <node id="1" lat="42.90" lon="44.98"><tag k="place" v="city"/></node>
+ <node id="2" lat="42.86" lon="44.96"><tag k="natural" v="peak"/></node>
+ <node id="3" lat="42.86" lon="44.96"/>
+ <node id="4" lat="42.86" lon="44.98"/>
+</osm>
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "sample.osm"
+            source.write_text(osm, encoding="utf-8")
+            config = Config(
+                qgis_projects_dir=str(root / "projects"),
+                project_name="poi",
+                bbox="44.95,42.85,45.05,42.95",
+                array_queries=["peak", "places_main"],
+                source_mode="pbf",
+                pbf_path=str(source),
+            )
+            project_path = run_project(config)
+            aux = config.vector_dir / poi_icons.AUX_FILE_NAME
+            self.assertTrue(aux.exists(), "нет служебного слоя значков")
+
+            from osgeo import ogr
+
+            dataset = ogr.Open(str(aux))
+            try:
+                layer = dataset.GetLayer(0)
+                self.assertGreater(layer.GetFeatureCount(), 0)
+                names = {
+                    layer.GetLayerDefn().GetFieldDefn(index).GetName()
+                    for index in range(layer.GetLayerDefn().GetFieldCount())
+                }
+            finally:
+                dataset = None
+            for field in ("rank", "band_min", "band_max", "lod"):
+                self.assertIn(field, names)
+
+            with zipfile.ZipFile(project_path) as archive:
+                name = next(
+                    item for item in archive.namelist() if item.endswith(".qgs")
+                )
+                text = archive.read(name).decode("utf-8")
+            # Служебный слой есть в проекте, но не показывается в дереве.
+            self.assertIn("<layername>poi icons</layername>", text)
+            tree = re.findall(r'<layer-tree-layer[^>]*name="([^"]+)"', text)
+            self.assertNotIn("poi icons", tree)
+            # Правила значков ссылаются на служебный слой.
+            self.assertIn("overlay_nearest('poi icons'", html.unescape(text))
+
+            # Слой доступен по имени: на нём строится выборка соседей.
+            from qgis.core import (
+                QgsExpression, QgsExpressionContext,
+                QgsExpressionContextUtils, QgsProject,
+            )
+
+            project = QgsProject.instance()
+            project.clear()
+            project.read(str(project_path))
+            service = project.mapLayersByName(poi_icons.AUX_LAYER_NAME)
+            self.assertEqual(len(service), 1, "нет служебного слоя в проекте")
+            self.assertTrue(service[0].isValid())
+            expression = QgsExpression(
+                "overlay_nearest('poi icons', expression:=\"rank\", limit:=-1, "
+                "max_distance:=0.1)"
+            )
+            context = QgsExpressionContext()
+            context.appendScope(QgsExpressionContextUtils.projectScope(project))
+            context.appendScope(
+                QgsExpressionContextUtils.layerScope(service[0]))
+            feature = next(service[0].getFeatures())
+            context.setFeature(feature)
+            value = expression.evaluate(context)
+            self.assertFalse(expression.hasEvalError(), expression.evalErrorString())
+            self.assertIsInstance(value, list)
+
     def test_project_is_regenerated_from_template(self):
         from qgis_xtopo.core import project as project_module
         from qgis_xtopo.core.config import Config
