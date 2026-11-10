@@ -31,8 +31,26 @@ def _line_geometries(geometry):
     return []
 
 
-def _write_lines(source, destination):
-    """Write only line geometries; closed coastline ways arrive as polygons."""
+def _is_closed_ring(geometry):
+    """Замыкается ли линия в кольцо."""
+    if geometry is None or geometry.IsEmpty():
+        return False
+    if geometry.GetGeometryName() not in ("LINESTRING", "LINEARRING"):
+        return False
+    count = geometry.GetPointCount()
+    if count < 3:
+        return False
+    first = geometry.GetPoint(0)
+    last = geometry.GetPoint(count - 1)
+    return abs(first[0] - last[0]) < 1e-12 and abs(first[1] - last[1]) < 1e-12
+
+
+def _write_lines(source, destination, open_only=False):
+    """Write only line geometries; closed coastline ways arrive as polygons.
+
+    ``open_only`` drops the closed rings: those are islands and they must
+    not take part in the search for the water side of the coastline.
+    """
     from osgeo import ogr
 
     dataset = ogr.Open(str(source))
@@ -47,6 +65,8 @@ def _write_lines(source, destination):
         source_layer = dataset.GetLayer(0)
         for feature in source_layer:
             for geometry in _line_geometries(feature.GetGeometryRef()):
+                if open_only and _is_closed_ring(geometry):
+                    continue
                 item = ogr.Feature(layer.GetLayerDefn())
                 item.SetGeometry(geometry)
                 layer.CreateFeature(item)
@@ -120,6 +140,9 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
     try:
         notify("Береговая линия: подготовка линий")
         line_source = _write_lines(lines, config.temp_dir / "coastline_lines.geojson")
+        open_source = _write_lines(
+            lines, config.temp_dir / "coastline_open_lines.geojson", open_only=True
+        )
         dissolved = _run(runner, "native:dissolve", {
             "INPUT": str(line_source),
             "FIELD": [],
@@ -141,9 +164,25 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         })
 
         notify("Береговая линия: определение стороны океана")
+        # Сторону океана показывают только незамкнутые линии берега:
+        # замкнутые кольца — это острова, и по ним сторона выходит неверной
+        # (в дельте Дуная океаном оказывался крошечный обломок у края
+        # области, а море не заливалось вовсе).
+        open_dissolved = _run(runner, "native:dissolve", {
+            "INPUT": str(open_source),
+            "FIELD": [],
+            "SEPARATE_DISJOINT": False,
+            "OUTPUT": _temp(config, "coastline_open_dissolved.geojson"),
+        })
+        open_simplified = _run(runner, "native:simplifygeometries", {
+            "INPUT": open_dissolved,
+            "METHOD": 0,
+            "TOLERANCE": 0.00005,
+            "OUTPUT": _temp(config, "coastline_open_simplified.geojson"),
+        })
         one_side = _run(runner, "native:singlesidedbuffer", {
-            "INPUT": simplified,
-            "DISTANCE": 0.000001,
+            "INPUT": open_simplified,
+            "DISTANCE": 0.0002,
             "SIDE": 1,
             "SEGMENTS": 5,
             "JOIN_STYLE": 0,
@@ -152,7 +191,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         })
         thin = _run(runner, "native:buffer", {
             "INPUT": one_side,
-            "DISTANCE": -0.00000048,
+            "DISTANCE": -0.0001,
             "SEGMENTS": 5,
             "END_CAP_STYLE": 0,
             "JOIN_STYLE": 0,
@@ -169,16 +208,18 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             "OVERLAY": str(crop),
             "OUTPUT": _temp(config, "coastline_side_clipped.geojson"),
         })
-        vertices = _run(runner, "native:extractspecificvertices", {
+        # Точка берётся строго внутри отступа по водной стороне, а часть
+        # области выбирается по «содержит»: вершина на самой линии берега
+        # принадлежит сразу двум частям, и океаном выбирался обломок.
+        vertices = _run(runner, "native:pointonsurface", {
             "INPUT": clipped,
-            "VERTICES": "0",
             "OUTPUT": _temp(config, "coastline_side_vertices.geojson"),
         })
 
         ocean = _run(runner, "native:extractbylocation", {
             "INPUT": split,
             "INTERSECT": vertices,
-            "PREDICATE": [0, 6],
+            "PREDICATE": [1],
             "OUTPUT": _temp(config, "coastline_ocean.geojson"),
         })
         if not _has_features(ocean):
