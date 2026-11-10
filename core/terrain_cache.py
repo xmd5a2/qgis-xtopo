@@ -30,6 +30,10 @@ DEM_FILES = (
 # Меняя направление света, преувеличение или подсветку теней, поднимайте
 # число: иначе кэш вернёт растры, посчитанные по старым параметрам.
 HILLSHADE_STYLE_VERSION = 2
+
+# Версия расчёта изолиний: 2 — DEM режется на тайлы с нахлёстом,
+# контуры считаются параллельно, в результат попадает середина тайла.
+ISOLINES_VERSION = 2
 # Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
 DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
@@ -172,6 +176,9 @@ def isolines_signature(config, bbox, dem_key):
         _layer_digest(config.vector_dir / "water_intermittent_dissolved.sqlite"),
         _layer_digest(config.vector_dir / "water_intermittent.sqlite"),
         _layer_digest(config.vector_dir / "glacier.sqlite"),
+        # Нарезка DEM на тайлы изменилась: старые изолинии считались
+        # одним проходом и переиспользовать их нельзя.
+        ISOLINES_VERSION,
     ]
     return _digest(parts)
 

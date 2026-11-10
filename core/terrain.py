@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import math
+import os
 import shutil
 import threading
 import time
@@ -24,6 +25,24 @@ COG_PADDING = 0.002
 # окно иначе занимает гигабайты; разрешение в этом случае немного
 # снижается, а сообщение об этом выводится в журнал.
 MAX_DEM_PIXELS = 120_000_000
+
+# Запас вокруг тайла при нарезке DEM на изолинии.  Алгоритм GDAL считает
+# контур по соседним ячейкам, и без запаса линия у края тайла обрывается
+# и загибается.  В результат попадает только ядро тайла, поэтому куски
+# соседних тайлов не дублируются и стыкуются по границе.
+CONTOUR_HALO = 32
+
+# Начиная с этого числа пикселей DEM нарезка на тайлы даёт выигрыш:
+# при меньшем размере нарезка стоит дороже самого расчёта.
+CONTOUR_TILE_PIXELS = 4_000_000
+
+# Сколько пикселей должно приходиться на один тайл: окно держится в
+# памяти, а нахлёст тайла съедает часть выигрыша от параллельности.
+CONTOUR_TILE_MAX_PIXELS = 6_000_000
+
+# Сколько долей ядер можно занять расчётом контуров: больше потоков —
+# быстрее, но дальше потолок, GEOS держит GIL, и лишние потоки мешают.
+CONTOUR_TILE_WORKERS_RATIO = 0.75
 
 
 def _gdal():
@@ -670,6 +689,194 @@ def _water_mask_paths(config):
     return paths
 
 
+def _contour_workers(tiles):
+    """Сколько потоков считает контуры тайлов.
+
+    Занимаем три четверти ядер: замер на реальном рельефе показывает,
+    что дальше потолок — GEOS держит GIL, и лишние потоки мешают.
+    """
+    available = os.cpu_count() or 2
+    limit = max(1, int(available * CONTOUR_TILE_WORKERS_RATIO))
+    return max(1, min(tiles, limit))
+
+
+def _contour_tile_side(pixels):
+    """Сколько тайлов по стороне нарезать DEM.
+
+    Тайлов тем больше, чем больше растр: у большого DEM выигрыш от
+    параллельности перекрывает работу на нахлёст, а тайл в памяти
+    должен оставаться небольшим.
+    """
+    if pixels < CONTOUR_TILE_PIXELS:
+        return 1
+    side = 2
+    while pixels / (side * side) > CONTOUR_TILE_MAX_PIXELS:
+        side += 1
+    return side
+
+
+def _contour_tiles(raster, side, halo=CONTOUR_HALO):
+    """Окна нарезки DEM: ядро тайла и окно с запасом вокруг него."""
+    width = raster.RasterXSize
+    height = raster.RasterYSize
+    step_x = width // side
+    step_y = height // side
+    tiles = []
+    for row in range(side):
+        for column in range(side):
+            xoff = column * step_x
+            yoff = row * step_y
+            xsize = step_x if column < side - 1 else width - xoff
+            ysize = step_y if row < side - 1 else height - yoff
+            window_xoff = max(0, xoff - halo)
+            window_yoff = max(0, yoff - halo)
+            tiles.append({
+                "core": (xoff, yoff, xsize, ysize),
+                "window": (
+                    window_xoff,
+                    window_yoff,
+                    min(width - window_xoff, xsize + 2 * halo),
+                    min(height - window_yoff, ysize + 2 * halo),
+                ),
+            })
+    return tiles
+
+
+def _core_box(transform, core):
+    """Границы ядра тайла в координатах карты."""
+    xoff, yoff, xsize, ysize = core
+    corners = [
+        (xoff, yoff),
+        (xoff + xsize, yoff),
+        (xoff, yoff + ysize),
+        (xoff + xsize, yoff + ysize),
+    ]
+    xs = []
+    ys = []
+    for x, y in corners:
+        xs.append(transform[0] + x * transform[1] + y * transform[2])
+        ys.append(transform[3] + x * transform[4] + y * transform[5])
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def _clip_to_core(geometry, box):
+    """Части линии, попавшие в ядро тайла.
+
+    Линия целиком внутри ядра остаётся как есть; пересекающая границу
+    обрезается по ней, поэтому кусок соседнего тайла продолжается с
+    той же точки и шва не видно.
+    """
+    if geometry is None or geometry.IsEmpty():
+        return []
+    envelope = geometry.GetEnvelope()
+    if (envelope[0] >= box[0] and envelope[1] <= box[1]
+            and envelope[2] >= box[2] and envelope[3] <= box[3]):
+        return [geometry]
+    if (envelope[1] < box[0] or envelope[0] > box[1]
+            or envelope[3] < box[2] or envelope[2] > box[3]):
+        # Ядро линия не задевает — обрезать нечего.
+        return []
+    from osgeo import ogr, osr
+
+    ring = ogr.Geometry(ogr.wkbLinearRing)
+    ring.AddPoint(box[0], box[2])
+    ring.AddPoint(box[1], box[2])
+    ring.AddPoint(box[1], box[3])
+    ring.AddPoint(box[0], box[3])
+    ring.AddPoint(box[0], box[2])
+    polygon = ogr.Geometry(ogr.wkbPolygon)
+    polygon.AddGeometry(ring)
+    try:
+        clipped = geometry.Intersection(polygon)
+    except Exception:  # noqa: BLE001 - битая геометрия не должна ронять сборку
+        return []
+    return _geometry_lines(clipped) if clipped is not None else []
+
+
+def _contour_tile(task):
+    """Контуры одного тайла: только то, что попадает в его ядро.
+
+    Тайл считается по окну с запасом, а в результат попадает только
+    ядро: так линия у края получается такой же, как при расчёте по
+    всему DEM, и тайлы не дублируют друг друга.
+
+    Возвращает слой с отрезками: файл на тайл не пишется — создание
+    GeoPackage обходится дороже самой генерации.
+    """
+    source_path, tile, step = task
+    gdal, ogr, osr = _gdal()
+    raster = gdal.Open(source_path)
+    if raster is None:
+        raise RuntimeError(f"Cannot open DEM: {source_path}")
+    band = raster.GetRasterBand(1)
+    transform = raster.GetGeoTransform()
+    xoff, yoff, xsize, ysize = tile["window"]
+    # Окно читается прямо в память: копия массива в памяти обошлась бы
+    # вдвое дороже по месту.
+    memory = gdal.Translate(
+        "", source_path, format="MEM",
+        srcWin=[xoff, yoff, xsize, ysize],
+    )
+    memory_band = memory.GetRasterBand(1)
+    if band.GetNoDataValue() is not None:
+        memory_band.SetNoDataValue(band.GetNoDataValue())
+    spatial_ref = osr.SpatialReference()
+    spatial_ref.ImportFromWkt(raster.GetProjection())
+
+    contours = ogr.GetDriverByName("Memory").CreateDataSource("contours")
+    contour_layer = contours.CreateLayer(
+        "isolines", spatial_ref, ogr.wkbLineString)
+    # GDAL пишет контуры в поля ID и ELEV: без обоих он падает с
+    # «Invalid index».
+    contour_layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+    contour_layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+    gdal.ContourGenerate(
+        memory_band, float(step), 0.0, [], 0, 0.0, contour_layer, 0, 1)
+
+    box = _core_box(transform, tile["core"])
+    result = ogr.GetDriverByName("Memory").CreateDataSource("tile")
+    layer = result.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
+    layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+    layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+    written = 0
+    for feature in contour_layer:
+        geometry = feature.GetGeometryRef()
+        for piece in _clip_to_core(geometry, box):
+            item = ogr.Feature(layer.GetLayerDefn())
+            item.SetField("ID", written)
+            item.SetField("ELEV", feature.GetField("ELEV"))
+            # Копировать геометрию поточечно нельзя: контуров миллионы
+            # точек, и обход через Python занимает больше, чем весь
+            # расчёт.  Лишнее измерение убирает сам writer.
+            item.SetGeometry(piece.Clone())
+            layer.CreateFeature(item)
+            item = None
+            written += 1
+    memory = None
+    raster = None
+    return result, written
+
+
+def _merge_contour_tiles(target, tiles):
+    """Склеивает контуры тайлов в один слой, перенумеровывая ID."""
+    from osgeo import ogr
+
+    written = 0
+    definition = target.GetLayerDefn()
+    for _index, dataset, _count in tiles:
+        source_layer = dataset.GetLayer(0)
+        for feature in source_layer:
+            item = ogr.Feature(definition)
+            for index in range(definition.GetFieldCount()):
+                item.SetField(index, feature.GetField(index))
+            item.SetField("ID", written)
+            item.SetGeometry(feature.GetGeometryRef().Clone())
+            target.CreateFeature(item)
+            item = None
+            written += 1
+    return written
+
+
 def generate_isolines(config, bbox, progress=None, cancel=None):
     gdal, ogr, osr = _gdal()
     source = config.raster_dir / "merged_dem.tif"
@@ -690,20 +897,53 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
 
     raster = gdal.Open(str(source))
-    band = raster.GetRasterBand(1)
-    gdal.ContourGenerate(
-        band,
-        float(config.isolines_step),
-        0.0,
-        [],
-        0,
-        0.0,
-        layer,
-        0,
-        1,
-    )
+    pixels = raster.RasterXSize * raster.RasterYSize
+    side = _contour_tile_side(pixels)
+    if side <= 1:
+        band = raster.GetRasterBand(1)
+        gdal.ContourGenerate(
+            band,
+            float(config.isolines_step),
+            0.0,
+            [],
+            0,
+            0.0,
+            layer,
+            0,
+            1,
+        )
+        raster = None
+    else:
+        # DEM режется на тайлы с запасом, контуры считаются параллельно,
+        # в результат попадает только середина тайла.
+        tiles = _contour_tiles(raster, side, CONTOUR_HALO)
+        raster = None
+        tasks = [
+            (str(source), tile, config.isolines_step)
+            for tile in tiles
+        ]
+        workers = _contour_workers(len(tasks))
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_contour_tile, task): index
+                for index, task in enumerate(tasks)
+            }
+            done = 0
+            for future in as_completed(futures):
+                results.append((futures[future], *future.result()))
+                done += 1
+                if progress:
+                    progress(f"Contour lines: tile {done} of {len(tasks)}")
+                if cancel is not None and cancel.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    raise InterruptedError("Preparation cancelled")
+        results.sort()
+        written = _merge_contour_tiles(layer, results)
+        if progress:
+            progress(f"Contour lines: {written} segments")
     dataset = None
-    raster = None
 
     dataset = ogr.Open(str(shape_path), 1)
     layer = dataset.GetLayer(0)
@@ -779,9 +1019,18 @@ def _geometry_lines(geometry):
 
 
 def _flat_line(geometry):
-    """Копия линии без третьего измерения."""
+    """Копия линии без третьего измерения.
+
+    Точки копируются поштучно только когда геометрия не линейная: у
+    контуров их миллионы, и обход через Python занимает больше, чем
+    весь остальной расчёт.  Простая линия копируется целиком — лишнее
+    измерение убирает сам writer.
+    """
     from osgeo import ogr
 
+    kind = ogr.GT_Flatten(geometry.GetGeometryType())
+    if kind == ogr.wkbLineString:
+        return geometry.Clone()
     line = ogr.Geometry(ogr.wkbLineString)
     for point in geometry.GetPoints():
         line.AddPoint(point[0], point[1])
@@ -907,6 +1156,10 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
             field = definition.GetFieldDefn(index)
             glacier_target.CreateField(field)
             regular_target.CreateField(field)
+        # Без транзакции SQLite фиксирует каждую линию отдельно, и
+        # запись изолиний занимает больше времени, чем их расчёт.
+        glacier_target.StartTransaction()
+        regular_target.StartTransaction()
         for feature in source_layer:
             geometry = feature.GetGeometryRef()
             if geometry is None or geometry.IsEmpty():
@@ -919,7 +1172,12 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
                     intersection = remainder.Intersection(polygon)
                 except Exception:  # noqa: BLE001 - битая геометрия ледника
                     continue
-                inside.extend(_geometry_lines(intersection))
+                pieces = _geometry_lines(intersection)
+                if not pieces:
+                    # Ледник не задевает линию: разность всё равно не
+                    # изменится, а операция дороже пересечения.
+                    continue
+                inside.extend(pieces)
                 try:
                     remainder = remainder.Difference(polygon)
                 except Exception:  # noqa: BLE001 - битая геометрия ледника
@@ -942,6 +1200,8 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
                 item.SetGeometry(_flat_line(piece))
                 regular_target.CreateFeature(item)
                 regular_written += 1
+        glacier_target.CommitTransaction()
+        regular_target.CommitTransaction()
         glacier_output = None
         regular_output = None
     except Exception as exc:  # noqa: BLE001 - слой не должен ломать сборку

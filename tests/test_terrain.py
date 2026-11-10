@@ -1,3 +1,5 @@
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -905,6 +907,123 @@ class CogDownloadTest(unittest.TestCase):
             values = band.ReadAsArray()
             self.assertGreater(int(values.max()), 1000)
             dataset = None
+
+
+class ContourTilingTest(unittest.TestCase):
+    """Контуры по тайлам совпадают с расчётом по всему DEM."""
+
+    @classmethod
+    def setUpClass(cls):
+        import numpy
+        from osgeo import gdal, ogr, osr
+
+        ogr.RegisterAll()
+        cls.directory = tempfile.mkdtemp()
+        cls.source = Path(cls.directory) / "dem.tif"
+        raster = gdal.GetDriverByName("GTiff").Create(
+            str(cls.source), 600, 600, 1, gdal.GDT_Float32)
+        spatial_ref = osr.SpatialReference()
+        spatial_ref.ImportFromEPSG(4326)
+        raster.SetProjection(spatial_ref.ExportToWkt())
+        raster.SetGeoTransform((0.0, 0.001, 0.0, 0.6, 0.0, -0.001))
+        ys, xs = numpy.mgrid[0:600, 0:600]
+        centre = 300.0
+        distance = numpy.sqrt((xs - centre) ** 2 + (ys - centre) ** 2)
+        raster.GetRasterBand(1).WriteArray(
+            (1000.0 - distance * 2.0).astype("float32"))
+        raster = None
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def _contours(self, side):
+        """Контуры тайлов: уровни и суммарная длина."""
+        from osgeo import gdal, ogr, osr
+
+        from qgis_xtopo.core import terrain
+
+        raster = gdal.Open(str(self.source))
+        tiles = terrain._contour_tiles(raster, side, terrain.CONTOUR_HALO)
+        raster = None
+        levels = set()
+        length = 0.0
+        for index, tile in enumerate(tiles):
+            dataset, _count = terrain._contour_tile(
+                (str(self.source), tile, 50))
+            layer = dataset.GetLayer(0)
+            for feature in layer:
+                levels.add(round(feature.GetField("ELEV"), 6))
+                length += feature.GetGeometryRef().Length()
+        return levels, length
+
+    def _reference(self):
+        """Контуры одним проходом по всему DEM."""
+        from osgeo import gdal, ogr, osr
+
+        raster = gdal.Open(str(self.source))
+        band = raster.GetRasterBand(1)
+        spatial_ref = osr.SpatialReference()
+        spatial_ref.ImportFromWkt(raster.GetProjection())
+        dataset = ogr.GetDriverByName("Memory").CreateDataSource("reference")
+        layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
+        layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+        layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+        gdal.ContourGenerate(band, 50.0, 0.0, [], 0, 0.0, layer, 0, 1)
+        levels = set()
+        length = 0.0
+        for feature in layer:
+            levels.add(round(feature.GetField("ELEV"), 6))
+            length += feature.GetGeometryRef().Length()
+        return levels, length
+
+    def test_tiled_contours_match_single_pass(self):
+        """Нарезка не меняет изолинии: те же уровни и та же длина."""
+        reference_levels, reference_length = self._reference()
+        for side in (2, 4):
+            levels, length = self._contours(side)
+            self.assertEqual(levels, reference_levels)
+            self.assertAlmostEqual(length, reference_length, places=6)
+
+    def test_tile_side_grows_with_raster(self):
+        """Тайлов тем больше, чем больше растр."""
+        from qgis_xtopo.core import terrain
+
+        self.assertEqual(terrain._contour_tile_side(1_000_000), 1)
+        self.assertGreaterEqual(terrain._contour_tile_side(8_000_000), 2)
+        small = terrain._contour_tile_side(8_000_000)
+        large = terrain._contour_tile_side(200_000_000)
+        self.assertGreater(large, small)
+
+    def test_workers_take_three_quarters_of_cores(self):
+        """Потоков — три четверти ядер, но не больше числа тайлов."""
+        from qgis_xtopo.core import terrain
+
+        cores = os.cpu_count() or 2
+        expected = max(1, int(cores * terrain.CONTOUR_TILE_WORKERS_RATIO))
+        self.assertEqual(terrain._contour_workers(1000), expected)
+        self.assertEqual(terrain._contour_workers(1), 1)
+
+    def test_halo_covers_neighbouring_cells(self):
+        """У тайла есть запас вокруг ядра: иначе линия у края рвётся."""
+        from qgis_xtopo.core import terrain
+
+        raster = None
+        from osgeo import gdal
+
+        raster = gdal.Open(str(self.source))
+        tiles = terrain._contour_tiles(raster, 2, terrain.CONTOUR_HALO)
+        raster = None
+        self.assertEqual(len(tiles), 4)
+        for tile in tiles:
+            xoff, yoff, xsize, ysize = tile["core"]
+            window_xoff, window_yoff, window_xsize, window_ysize = tile["window"]
+            self.assertLessEqual(window_xoff, xoff)
+            self.assertLessEqual(window_yoff, yoff)
+            self.assertGreaterEqual(
+                window_xoff + window_xsize, xoff + xsize)
+            self.assertGreaterEqual(
+                window_yoff + window_ysize, yoff + ysize)
 
 
 if __name__ == "__main__":
