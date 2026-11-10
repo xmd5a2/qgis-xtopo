@@ -218,6 +218,14 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
                 "LAYERS": [str(water), ocean],
                 "OUTPUT": _temp(config, "coastline_merged.geojson"),
             })
+            # Растворение останавливается на первом невалидном объекте, а
+            # во внутренних водах попадается полигон с самопересечением.
+            # Без починки геометрии растворение падает, океан не попадает
+            # в water_dissolved — и море на карте не рисуется вовсе.
+            merged = _run(runner, "native:fixgeometries", {
+                "INPUT": merged,
+                "OUTPUT": _temp(config, "coastline_merged_fixed.geojson"),
+            })
             ocean = _run(runner, "native:dissolve", {
                 "INPUT": merged,
                 "FIELD": [],
