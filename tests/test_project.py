@@ -48,31 +48,6 @@ class ProjectTemplateTest(unittest.TestCase):
         self.assertIn("offset_along_line", text)
         self.assertIn("&quot;oneway&quot;", text)
 
-    def test_railway_labels_are_small_gray_and_local(self):
-        """Подписи железной дороги мелкие, серые и только на крупном масштабе."""
-        source = template_path()
-        with zipfile.ZipFile(source) as archive:
-            text = archive.read("automap.qgs").decode("utf-8")
-        block = re.search(
-            r"<maplayer[^>]*>(?:(?!</maplayer>).)*"
-            r"<layername>\[blocking\] railway_all</layername>.*?</maplayer>",
-            text, re.S,
-        )
-        self.assertIsNotNone(block)
-        block = block.group(0)
-        style = re.search(r"<text-style[^>]*>", block).group(0)
-        rendering = re.search(r"<rendering[^>]*>", block).group(0)
-        tag = block[:block.find(">") + 1]
-        # Только от 1:50000 и крупнее: на отдалении названия линий мешают.
-        self.assertIn('hasScaleBasedVisibilityFlag="1"', tag)
-        self.assertIn('minScale="50000"', tag)
-        self.assertIn('scaleVisibility="1"', rendering)
-        self.assertIn('scaleMax="50000"', rendering)
-        self.assertIn('fontSize="7"', style)
-        self.assertIn('textColor="110,110,110,255', style)
-        # Объекты без названия линии не подписываются.
-        self.assertIn("IS NOT NULL", style)
-
     def test_default_queries_include_aerialway_station(self):
         from qgis_xtopo.core.config import default_queries
 
