@@ -14,10 +14,11 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
-from qgis.PyQt.QtCore import (
-    QRectF, QSize, QStringListModel, Qt, QThread, QTimer, pyqtSignal,
+from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import (
+    QColor, QKeySequence, QPainter, QPainterPath, QPen, QStandardItem,
+    QStandardItemModel,
 )
-from qgis.PyQt.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPen
 from qgis.PyQt.QtWidgets import (
     QApplication, QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QShortcut, QVBoxLayout,
@@ -105,8 +106,8 @@ PLACE_SPAN = 0.02
 # минимальная длина запроса, иначе Nominatim дёргался бы на каждую букву.
 SEARCH_DELAY_MS = 450
 MIN_SEARCH_LENGTH = 2
-SEARCH_FIELD_WIDTH = 190
-# Выпадающий список шире поля, иначе длинные названия не прочитать.
+SEARCH_FIELD_WIDTH = 380
+# Выпадающий список не уже поля.
 SEARCH_POPUP_WIDTH = 380
 
 DRAW_TOOL_STYLE = (
@@ -460,11 +461,14 @@ class ExtentDialog(QDialog):
         self.search_input.textChanged.connect(self._search_text_changed)
         self.search_input.returnPressed.connect(self._start_search)
         # Результаты показываются выпадающим списком под строкой поиска.
-        self._search_model = QStringListModel(self)
+        self._search_model = QStandardItemModel(self)
         self._completer = QCompleter(self._search_model, self)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setFilterMode(Qt.MatchContains)
-        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        # Nominatim отвечает на запрос «Париж» названием «Paris»: локальная
+        # фильтрация выбросила бы все результаты, поэтому список показывается
+        # целиком, как его вернул сервер.
+        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         self._completer.setMaxVisibleItems(10)
         self._completer.activated[str].connect(self._place_activated)
         self._completer.popup().setMinimumWidth(SEARCH_POPUP_WIDTH)
@@ -640,8 +644,7 @@ class ExtentDialog(QDialog):
         if self.sender() is self.search_input:
             # Enter при выбранном результате из выпадающего списка сам
             # переходит к месту: повторный запрос к Nominatim не нужен.
-            popup = self._completer.popup()
-            if popup.isVisible() and popup.currentIndex().isValid():
+            if self._activate_index(self._completion_index()):
                 return
         query = self.search_input.text().strip()
         if len(query) < MIN_SEARCH_LENGTH:
@@ -653,8 +656,40 @@ class ExtentDialog(QDialog):
             return
         self._run_search(query)
 
+    def _completion_index(self):
+        """Текущий элемент выпадающего списка, если он указывает на место."""
+        popup = self._completer.popup()
+        if not popup.isVisible():
+            return None
+        index = popup.currentIndex()
+        if not index.isValid() or index.data() not in self._places:
+            return None
+        return index
+
+    def _activate_index(self, index):
+        """Перейти к месту, выбранному в выпадающем списке."""
+        name = index.data() if index is not None else None
+        if name not in self._places:
+            return False
+        self._search_timer.stop()
+        # QCompleter уже подставил название в строку; сигналы блокируем,
+        # чтобы по полному названию не ушёл новый запрос.
+        self.search_input.blockSignals(True)
+        try:
+            self.search_input.setText(name)
+            self.search_input.setCursorPosition(len(name))
+        finally:
+            self.search_input.blockSignals(False)
+        self._place_activated(name)
+        return True
+
     def _run_search(self, query):
         self._pending_query = None
+        # Старые результаты к новому запросу не относятся. Чистим их здесь,
+        # а не в textChanged: QCompleter сначала подставляет выбранное
+        # название в строку и только потом шлёт сигнал активации, а очистка
+        # модели на этом шаге его обрывала.
+        self._set_search_results([])
         # Поток — не ребёнок окна: окно может закрыться во время запроса,
         # и тогда поток должен спокойно доработать и удалиться сам.
         worker = NominatimWorker(query, QgsApplication.instance())
@@ -667,9 +702,12 @@ class ExtentDialog(QDialog):
 
     def _search_done(self, places):
         """Показать результаты выпадающим списком под строкой поиска."""
-        self._set_search_results(places)
         self.search_input.setToolTip("")
-        if places and self.search_input.hasFocus():
+        if not places:
+            self._show_search_message(i18n.tr("Ничего не найдено"))
+            return
+        self._set_search_results(places)
+        if self.search_input.hasFocus():
             self._completer.complete()
 
     def _search_failed(self, message):
@@ -691,11 +729,31 @@ class ExtentDialog(QDialog):
             self._run_search(pending)
 
     def _set_search_results(self, places):
-        self._places = {place.name: place for place in places}
-        self._search_model.setStringList([place.name for place in places])
-        popup = self._completer.popup()
-        if not places:
-            popup.hide()
+        # Nominatim может вернуть несколько объектов с одинаковым
+        # отображаемым названием: в списке они выглядели бы повторами.
+        self._places = {}
+        for place in places:
+            self._places.setdefault(place.name, place)
+        self._search_model.clear()
+        for name in self._places:
+            item = QStandardItem(name)
+            item.setEditable(False)
+            self._search_model.appendRow(item)
+        if not self._places:
+            self._completer.popup().hide()
+
+    def _show_search_message(self, text):
+        """Показать в выпадающем списке сообщение вместо результатов."""
+        self._places = {}
+        self._search_model.clear()
+        item = QStandardItem(text)
+        item.setEditable(False)
+        # Сообщение нельзя выбрать: иначе оно подставилось бы в строку.
+        item.setEnabled(False)
+        item.setSelectable(False)
+        self._search_model.appendRow(item)
+        if self.search_input.hasFocus():
+            self._completer.complete()
 
     def _place_activated(self, text):
         """Выбран результат поиска — переходим к найденному месту."""

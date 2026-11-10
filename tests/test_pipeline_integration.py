@@ -529,6 +529,38 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             panel.deleteLater()
 
+    def test_project_panel_tool_order_and_identify_panel(self):
+        """«Прокрутка» стоит перед «Вписать», панель определения закрывается."""
+        from unittest import mock
+
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtWidgets import QDockWidget, QMainWindow
+
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        panel = ProjectPanel(None)
+        window = QMainWindow()
+        try:
+            self.assertEqual(
+                panel.toolbar.actions()[:2],
+                [panel.pan_action, panel.fit_action],
+            )
+            window.show()
+            dock = QDockWidget("Результат определения", window)
+            dock.setObjectName("IdentifyResultsDock")
+            window.addDockWidget(Qt.LeftDockWidgetArea, dock)
+            dock.show()
+            self.app.processEvents()
+            self.assertTrue(dock.isVisible())
+            panel.iface = mock.Mock()
+            panel.iface.mainWindow.return_value = window
+            panel._close_identify_results()
+            self.app.processEvents()
+            self.assertFalse(dock.isVisible())
+        finally:
+            panel.deleteLater()
+            window.deleteLater()
+
     def test_short_status_keeps_path_tail(self):
         """Длинный путь в строке статуса обрезается, но читается."""
         from qgis_xtopo.gui.dockwidget import _short_status
@@ -2509,7 +2541,13 @@ class PipelineIntegrationTest(unittest.TestCase):
                     time.sleep(0.02)
                 self.app.processEvents()
             search.assert_called()
-            self.assertEqual(dialog._search_model.stringList(), [place.name])
+            self.assertEqual(
+                [
+                    dialog._search_model.item(row).text()
+                    for row in range(dialog._search_model.rowCount())
+                ],
+                [place.name],
+            )
             dialog._place_activated(place.name)
             self.app.processEvents()
             bbox = dialog._extent_as_bbox()
@@ -2543,16 +2581,156 @@ class PipelineIntegrationTest(unittest.TestCase):
                 dialog.search_input.setText("Кис")
                 deadline = time.time() + 20
                 while (
-                    not dialog._search_model.stringList()
+                    dialog._search_model.rowCount() == 0
                     and time.time() < deadline
                 ):
                     self.app.processEvents()
                     time.sleep(0.02)
             self.app.processEvents()
             search.assert_called()
-            self.assertEqual(dialog._search_model.stringList(), [place.name])
+            self.assertEqual(
+                [
+                    dialog._search_model.item(row).text()
+                    for row in range(dialog._search_model.rowCount())
+                ],
+                [place.name],
+            )
         finally:
             dialog.done(0)
+
+    def test_extent_dialog_unfiltered_results_and_empty_message(self):
+        """Список показывает ответ сервера целиком и сообщает о пустом."""
+        import time
+        from unittest import mock
+
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtTest import QTest
+
+        from qgis_xtopo.core import i18n, nominatim
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        place = nominatim.Place(
+            name="Paris, Île-de-France, France", lat=48.85, lon=2.35
+        )
+        dialog = ExtentDialog("")
+        try:
+            dialog.show()
+            self.app.processEvents()
+            dialog.search_input.setFocus()
+            self.app.processEvents()
+
+            def wait_search():
+                deadline = time.time() + 20
+                while (
+                    dialog._search_worker is not None
+                    and time.time() < deadline
+                ):
+                    self.app.processEvents()
+                    time.sleep(0.02)
+                self.app.processEvents()
+
+            def texts():
+                return [
+                    dialog._search_model.item(row).text()
+                    for row in range(dialog._search_model.rowCount())
+                ]
+
+            with mock.patch.object(
+                nominatim, "search", return_value=[place]
+            ) as search:
+                # Название не содержит запрос: фильтрация по введённому
+                # тексту скрыла бы этот результат.
+                dialog.search_input.setText("Париж")
+                dialog._start_search()
+                wait_search()
+                self.assertEqual(texts(), [place.name])
+                self.assertTrue(dialog._completer.popup().isVisible())
+                # Выбор мышью переходит к месту и не повторяет запрос:
+                # QCompleter подставляет название в строку, и поиск по
+                # полному названию запускаться не должен.
+                calls = search.call_count
+                popup = dialog._completer.popup()
+                rect = popup.visualRect(popup.model().index(0, 0))
+                QTest.mouseClick(
+                    popup.viewport(), Qt.LeftButton, Qt.NoModifier,
+                    rect.center(),
+                )
+                self.app.processEvents()
+                self.assertEqual(dialog.search_input.text(), place.name)
+                bbox = dialog._extent_as_bbox()
+                self.assertAlmostEqual(
+                    (bbox.lon_min + bbox.lon_max) / 2, place.lon, delta=0.2
+                )
+                self.assertAlmostEqual(
+                    (bbox.lat_min + bbox.lat_max) / 2, place.lat, delta=0.2
+                )
+                self.app.processEvents()
+                time.sleep(0.6)
+                self.app.processEvents()
+                self.assertEqual(search.call_count, calls)
+
+            with mock.patch.object(nominatim, "search", return_value=[]):
+                dialog.search_input.setText("Нет такого места")
+                dialog._start_search()
+                wait_search()
+            self.assertEqual(texts(), [i18n.tr("Ничего не найдено")])
+            self.assertTrue(dialog._completer.popup().isVisible())
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_enter_selects_result(self):
+        """Enter при выбранном результате переходит к месту без запроса."""
+        import time
+        from unittest import mock
+
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtTest import QTest
+
+        from qgis_xtopo.core import nominatim
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        place = nominatim.Place(
+            name="Paris, Île-de-France, France", lat=48.85, lon=2.35
+        )
+        dialog = ExtentDialog("")
+        try:
+            dialog.show()
+            self.app.processEvents()
+            dialog.search_input.setFocus()
+            self.app.processEvents()
+            with mock.patch.object(
+                nominatim, "search", return_value=[place]
+            ) as search:
+                dialog.search_input.setText("Париж")
+                dialog._search_timer.stop()
+                dialog._start_search()
+                deadline = time.time() + 20
+                while (
+                    dialog._search_worker is not None
+                    and time.time() < deadline
+                ):
+                    self.app.processEvents()
+                    time.sleep(0.02)
+                self.app.processEvents()
+                calls = search.call_count
+                QTest.keyClick(dialog.search_input, Qt.Key_Down)
+                QTest.keyClick(dialog.search_input, Qt.Key_Return)
+                self.app.processEvents()
+                self.assertEqual(dialog.search_input.text(), place.name)
+                bbox = dialog._extent_as_bbox()
+                self.assertAlmostEqual(
+                    (bbox.lon_min + bbox.lon_max) / 2, place.lon, delta=0.2
+                )
+                self.assertAlmostEqual(
+                    (bbox.lat_min + bbox.lat_max) / 2, place.lat, delta=0.2
+                )
+                self.app.processEvents()
+                time.sleep(0.6)
+                self.app.processEvents()
+                self.assertEqual(search.call_count, calls)
+        finally:
+            dialog.done(0)
+            self.app.processEvents()
 
     def test_extent_dialog_enter_in_search_does_not_close(self):
         """Enter в строке поиска запускает поиск, а не закрывает окно."""

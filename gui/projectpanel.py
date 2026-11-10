@@ -44,10 +44,10 @@ from qgis.PyQt.QtGui import (
 )
 from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
-    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu, QMessageBox,
-    QPushButton, QSlider, QStyle, QStyleOptionComboBox, QStylePainter,
-    QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDockWidget,
+    QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu,
+    QMessageBox, QPushButton, QSlider, QStyle, QStyleOptionComboBox,
+    QStylePainter, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 from qgis.PyQt.QtXml import QDomDocument
 
@@ -605,8 +605,8 @@ class ProjectPanel(QWidget):
         self.pan_action.setToolTip("Прокрутка карты: перетаскивание мышью")
         self.pan_action.setCheckable(True)
         self.pan_action.toggled.connect(self._toggle_pan)
-        self.toolbar.addAction(self.fit_action)
         self.toolbar.addAction(self.pan_action)
+        self.toolbar.addAction(self.fit_action)
         # Штатные инструменты QGIS: измерение и определение объектов.
         self.measure_action = QAction(
             QgsApplication.getThemeIcon("mActionMeasure.svg"),
@@ -2287,6 +2287,37 @@ class ProjectPanel(QWidget):
             "QgsMapToolMeasure"
         )
 
+    @staticmethod
+    def _is_identify_tool(tool):
+        if tool is None:
+            return False
+        try:
+            name = tool.metaObject().className()
+        except Exception:
+            return False
+        return name.startswith("QgsMapToolIdentify")
+
+    def _close_identify_results(self):
+        """Закрывает панель QGIS «Результат определения».
+
+        Панель остаётся висеть после того, как с инструмента определения
+        переключились на другой: она занимает место и относится к уже
+        неактивному инструменту.
+        """
+        if self.iface is None:
+            return
+        try:
+            window = self.iface.mainWindow()
+        except Exception:
+            return
+        dock = window.findChild(QDockWidget, "IdentifyResultsDock")
+        if dock is None:
+            return
+        try:
+            dock.close()
+        except Exception:
+            pass
+
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Close and self._is_measure_dialog(obj):
             # Инструмент снимается не сразу: проверяем холст, когда
@@ -2373,7 +2404,11 @@ class ProjectPanel(QWidget):
             self._tool_syncing = False
         canvas.setMapTool(self._pan_tool)
 
-    def _map_tool_changed(self, new_tool, _old_tool):
+    def _map_tool_changed(self, new_tool, old_tool):
+        if self._is_identify_tool(old_tool) and not self._is_identify_tool(
+            new_tool
+        ):
+            self._close_identify_results()
         if (
             self._pan_tool is not None
             and new_tool is not self._pan_tool
