@@ -252,10 +252,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `(minx, miny, maxx, maxy)`, а `GetEnvelope()` отдаёт
   `(minx, maxx, miny, maxy)`. Не смешивать; отбор полигонов — через
   `terrain.py: _PolygonIndex`.
-- **Драйвер OSM читается по кругу**: опрашивать слои по одному объекту в
-  порядке `INTERLEAVED_LAYER_ORDER` (`points → lines → multilinestrings →
-  multipolygons → other_relations`). Чтение слоя до конца теряет
-  мультиполигоны.
+- **Драйвер OSM читается датасетным API**: объекты забираются
+  `dataset.GetNextFeature(include_layer=True)` — драйвер сам переключает
+  слои и разбирает файл потоково (GDAL ≥ 3.6). Опрос слоёв по кругу
+  (`INTERLEAVED_LAYER_ORDER`) работает только на маленьких выгрузках: на
+  больших очередь слоя переполняется (в GDAL 100000 объектов), драйвер
+  обрывает чтение, и линии с мультиполигонами теряются целиком.
 - **Замкнутые coastline-way внутри мультиполигона драйвер отдельно не
   отдаёт**: у группы островов остаётся только relation (например,
   `place=archipelago`). Поэтому `resources/queries/island.txt` включает

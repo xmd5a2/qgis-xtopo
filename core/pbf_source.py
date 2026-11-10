@@ -590,6 +590,21 @@ def _apply_spatial_filter(layers, source, bbox):
     return True
 
 
+def _dataset_reading_supported():
+    """Есть ли в GDAL датасетное чтение с указанием слоя.
+
+    ``Dataset.GetNextFeature(include_layer=True)`` появился в GDAL 3.6.
+    Без него остаётся опрос слоёв по кругу, а на больших выгрузках он
+    обрывается переполнением очередей слоёв.
+    """
+    try:
+        from osgeo import gdal
+
+        return int(gdal.VersionInfo("VERSION_NUM")) >= 3060000
+    except Exception:
+        return False
+
+
 def _iter_features(dataset, cancel=None):
     """Отдаёт пары (объект, имя слоя) при чтении PBF.
 
@@ -602,7 +617,7 @@ def _iter_features(dataset, cancel=None):
     с выгрузки Румынии в проект попадало 316 записей леса вместо 6661.
     """
     getter = getattr(dataset, "GetNextFeature", None)
-    if getter is None:
+    if getter is None or not _dataset_reading_supported():
         # Старый GDAL без датасетного API: опрашиваем слои по кругу.
         layers = []
         for name in INTERLEAVED_LAYER_ORDER:
@@ -629,19 +644,6 @@ def _iter_features(dataset, cancel=None):
         if feature is None:
             return
         yield feature, layer.GetName() if layer is not None else ""
-
-
-def _dataset_reading_supported(gdal):
-    """Есть ли в GDAL датасетное чтение с указанием слоя.
-
-    ``Dataset.GetNextFeature(include_layer=True)`` появился в GDAL 3.6.
-    Без него остаётся опрос слоёв по кругу, а на больших выгрузках он
-    обрывается переполнением очередей слоёв.
-    """
-    try:
-        return int(gdal.VersionInfo("VERSION_NUM")) >= 3060000
-    except Exception:
-        return False
 
 
 def _expected_objects(source, bbox):
@@ -971,7 +973,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
         "PBF mode reads the extract with a coarse bbox filter: only the objects "
         "of the area are decoded, the rest of the file is skipped."
     )
-    if not _dataset_reading_supported(gdal):
+    if not _dataset_reading_supported():
         warnings.append(
             "GDAL старше 3.6: чтение идёт опросом слоёв по кругу, "
             "на больших выгрузках часть объектов может потеряться."
