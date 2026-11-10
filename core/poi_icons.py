@@ -8,39 +8,40 @@ QGIS не разводит значки разных слоёв: кластер�
 
 Приоритет — порядок слоёв в дереве проекта: верхний в списке рисуется
 поверх и побеждает.  Чтобы не сравнивать каждый слой с каждым, все
-POI-точки собираются в один служебный слой ``poi icons`` с полем
-``rank`` (1 — самый приоритетный).  Правило слоя с рангом R скрывает
-точку, когда рядом есть точка с меньшим рангом.
+POI-точки собираются в служебные слои ``poi icons`` с полем ``rank``
+(1 — самый приоритетный).  Правило слоя с рангом R скрывает точку,
+когда рядом есть точка с меньшим рангом.
 
 Сосед должен быть виден в текущем масштабе и уровне детализации, иначе
 значок исчезал бы из-за объекта, который не рисуется.  Видимость
-считается по правилам шаблона: точка попадает в служебный слой с
-индексами диапазонов масштаба (поля ``band_min``/``band_max``), в
-которых она рисуется, и минимальным уровнем детализации (поле
-``lod``).
+считается по правилам шаблона, а служебный слой свой для каждого
+диапазона масштаба: у диапазона свой набор видимых точек, и правило
+ссылается на слой своего диапазона.
 
-В фильтрах правил рендерера и правил подписей доступен @map_scale,
-поэтому текущий диапазон масштаба выбирается снаружи вызова
-overlay_nearest: внутри его аргументов выражения считаются в контексте
-служебного слоя, где @map_scale не видно.  В выборку соседей поэтому
-попадает индекс диапазона, а не сам масштаб.
+Служебных слоёв два — по одной системе координат: overlay_nearest
+пере проецирует цель в CRS источника, но кэш пространственного
+индекса CRS не учитывает, и один слой из разных систем дал бы неверные
+расстояния.
 
-Уровень детализации доступен в подвыражении overlay_nearest как
-переменная проекта — порог видимости хранится в поле ``lod`` и
-сравнивается на лету, поэтому смена детализации в панели не требует
-пересборки данных.
+Точки, которые не могут подавить ни одного соседа, в служебный слой не
+попадают: overlay_nearest перебирает весь слой целиком, поэтому размер
+слоя прямо складывается в время отрисовки.
+
+Текущий диапазон масштаба выбирается снаружи вызова overlay_nearest:
+внутри его аргументов выражения считаются в контексте служебного
+слоя, где @map_scale не видно.  Уровень детализации, наоборот, доступен
+в подвыражении как переменная проекта — порог видимости хранится в
+поле ``lod`` и сравнивается на лету, поэтому смена детализации в панели
+не требует пересборки данных.
 
 Расстояние подавления — размер значка правила в миллиметрах, переведённый
 в единицы слоя через @map_scale.  Для слоёв в EPSG:4326 добавлен множитель
 cos(широты): градус долготы короче градуса широты, а QGIS сравнивает
 расстояния плоско в единицах слоя.  Для слоёв в EPSG:3857 широта
 вычисляется из меркаторской координаты y.
-
-Служебный слой пишется в двух CRS: overlay_nearest пере проецирует цель
-в CRS источника, но кэш пространственного индекса CRS не учитывает, и
-один и тот же слой из разных систем дал бы неверные расстояния.
 """
 
+import math
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -51,8 +52,8 @@ from .resources import template_path
 
 AUX_LAYER_NAME = "poi icons"
 AUX_LAYER_NAME_3857 = "poi icons 3857"
-AUX_FILE_NAME = "poi_icons.sqlite"
-AUX_FILE_NAME_3857 = "poi_icons_3857.sqlite"
+AUX_FILE_NAME = "poi_icons.gpkg"
+AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
 
 LOD_LEVELS = (3, 4, 5, 6)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
@@ -107,16 +108,15 @@ class PoiLabelRule:
 
 
 @dataclass
-class PoiRecord:
-    """Запись служебного слоя: точка и её видимость в диапазоне."""
+class _Point:
+    """Точка служебного слоя: координаты, ранг и диапазоны видимости."""
 
     wkt: str
     rank: int
-    band_min: int
-    band_max: int
-    lod: int
-    layer: str
     crs: str
+    lon: float
+    lat: float
+    bands: dict = field(default_factory=dict)  # диапазон -> минимальный LOD
 
 
 def _scale_bounds(element):
@@ -271,7 +271,7 @@ def read_template_poi(path=None):
     layers = []
     for element in root.iter("maplayer"):
         name = element.findtext("layername")
-        if name in (AUX_LAYER_NAME, AUX_LAYER_NAME_3857):
+        if not name or name.startswith(AUX_LAYER_NAME):
             continue
         renderer = _renderer_element(element)
         if renderer is None:
@@ -375,9 +375,22 @@ def band_indexes(minimum, maximum, bands):
     return indexes
 
 
-def _aux_reference(layer):
-    """Имя служебного слоя с той же CRS, что у слоя-источника."""
-    return AUX_LAYER_NAME_3857 if layer.crs == "EPSG:3857" else AUX_LAYER_NAME
+def aux_layer_name(layer, index):
+    """Имя служебного слоя диапазона масштаба для слоя-источника."""
+    prefix = AUX_LAYER_NAME_3857 if layer.crs == "EPSG:3857" else AUX_LAYER_NAME
+    return f"{prefix} {index}"
+
+
+def aux_file_name(layer):
+    """Файл служебных слоёв для системы координат слоя-источника."""
+    if layer.crs == "EPSG:3857":
+        return AUX_FILE_NAME_3857
+    return AUX_FILE_NAME
+
+
+def aux_table_name(index):
+    """Имя таблицы служебного слоя внутри GeoPackage."""
+    return f"band{index}"
 
 
 def _distance_expression(layer, size):
@@ -403,7 +416,7 @@ def suppression_expression(layer, leaf, bands):
     выбирается снаружи: @map_scale в аргументах overlay_nearest
     недоступен, доступен он только в фильтре правила.  Для каждого
     диапазона, который покрывает правило, выбираются соседи из
-    служебного слоя с соответствующим индексом диапазона.
+    служебного слоя этого диапазона.
 
     array_min по рангам соседей отвечает на вопрос «есть ли рядом более
     приоритетный объект», а coalesce подставляет наш ранг, когда соседей
@@ -421,7 +434,7 @@ def suppression_expression(layer, leaf, bands):
             scale.append(f"@map_scale >= {lower:g}")
         if upper:
             scale.append(f"@map_scale < {upper:g}")
-        nearest = _nearest_expression(layer, leaf.size, index)
+        nearest = _nearest_expression(layer, leaf.size, index, rank)
         term = f"try(coalesce(array_min({nearest}), {rank}) < {rank}, false)"
         if scale:
             term = "(" + " AND ".join(scale) + f") AND {term}"
@@ -431,12 +444,17 @@ def suppression_expression(layer, leaf, bands):
     return "(" + " OR ".join(terms) + ")"
 
 
-def _nearest_expression(layer, size, index):
-    """Выборка соседей из служебного слоя для диапазона масштаба."""
+def _nearest_expression(layer, size, index, rank):
+    """Выборка соседей из служебного слоя диапазона масштаба.
+
+    Соседи отбираются прямо по рангу: в выборку попадают только более
+    приоритетные объекты, поэтому их немного, а проверка идёт по
+    одному значению вместо перебора всех точек в радиусе.
+    """
     return (
-        f"overlay_nearest('{_aux_reference(layer)}', "
+        f"overlay_nearest('{aux_layer_name(layer, index)}', "
         f"expression:=if(\"lod\" <= @level_of_detail, \"rank\", {NEVER_RANK}), "
-        f"filter:=\"band_min\" <= {index} AND \"band_max\" >= {index}, "
+        f"filter:=\"rank\" < {rank}, "
         f"limit:=-1, "
         f"max_distance:={_distance_expression(layer, size)})"
     )
@@ -453,15 +471,23 @@ def extend_filter(filter_text, layer, leaf, bands):
     return condition
 
 
-def layer_suppression_expression(layer, bands):
-    """Подавление по всем правилам значка слоя.
+def layer_suppression_expression(layer, bands, minimum=None, maximum=None):
+    """Подавление по правилам значка слоя.
 
-    Подпись скрывается вместе со значком: условие собирается из всех
-    листовых правил слоя, а текущий диапазон масштаба выбирается
-    снаружи, где @map_scale доступен.
+    Подпись скрывается вместе со значком: условие собирается из листовых
+    правил слоя, а текущий диапазон масштаба выбирается снаружи, где
+    @map_scale доступен.  Для правила подписи берутся только те правила
+    значка, чей диапазон масштаба пересекается с диапазоном подписи:
+    остальные всё равно неактивны на этом масштабе, а условие от них
+    только удлиняет выражение.
     """
     expressions = []
     for leaf in leaves(layer.root):
+        if minimum is not None or maximum is not None:
+            if minimum and leaf.maximum and leaf.maximum <= minimum:
+                continue
+            if maximum and leaf.minimum >= maximum:
+                continue
         expression = suppression_expression(layer, leaf, bands)
         if expression != "false" and expression not in expressions:
             expressions.append(expression)
@@ -472,9 +498,9 @@ def layer_suppression_expression(layer, bands):
     return "(" + " OR ".join(expressions) + ")"
 
 
-def extend_label_filter(filter_text, layer, bands):
+def extend_label_filter(filter_text, layer, bands, minimum=None, maximum=None):
     """Скрывает подпись вместе со значком того же объекта."""
-    suppression = layer_suppression_expression(layer, bands)
+    suppression = layer_suppression_expression(layer, bands, minimum, maximum)
     if suppression == "false":
         return filter_text
     condition = f"NOT ({suppression})"
@@ -559,7 +585,11 @@ def _overlay_sources(layers):
             names.update(re.findall(
                 r"overlay_\w+\(\s*'([^']+)'", leaf.filter,
             ))
-    names -= poi_names | {AUX_LAYER_NAME, AUX_LAYER_NAME_3857}
+    names -= poi_names
+    names = {
+        name for name in names
+        if not name.startswith(AUX_LAYER_NAME)
+    }
     if not names:
         return {}
     with zipfile.ZipFile(template_path()) as archive:
@@ -702,19 +732,8 @@ def _visible_bands(evaluator, tree, feature, bands, detailed):
     return result
 
 
-def _compress_bands(visible):
-    """Сжимает видимость по диапазонам: подряд идущие с одним LOD."""
-    segments = []
-    for index, level in visible:
-        if segments and segments[-1][1] + 1 == index and segments[-1][2] == level:
-            segments[-1][1] = index
-            continue
-        segments.append([index, index, level])
-    return segments
-
-
-def _collect_records(config, layers, bands, cancel=None):
-    """Записи служебного слоя по всем POI-слоям проекта.
+def _collect_points(config, layers, bands, cancel=None):
+    """Точки POI-слоёв с диапазонами, в которых они видны.
 
     Временный проект содержит также не-POI слои из исходных фильтров:
     без них overlay_within не смог бы учесть реальную видимость соседа.
@@ -727,7 +746,7 @@ def _collect_records(config, layers, bands, cancel=None):
         layer = _open_source(config, source, name)
         if layer is not None:
             project.addMapLayer(layer)
-    records = []
+    points = []
     for info in layers:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Preparation cancelled")
@@ -741,21 +760,90 @@ def _collect_records(config, layers, bands, cancel=None):
             visible = _visible_bands(
                 evaluator, info.root, feature, bands, detailed,
             )
-            for first, last, level in _compress_bands(visible):
-                records.append(PoiRecord(
-                    wkt=feature.geometry().asWkt(),
-                    rank=info.rank,
-                    band_min=first,
-                    band_max=last,
-                    lod=level,
-                    layer=info.name,
-                    crs=info.crs,
-                ))
-    return records
+            if not visible:
+                continue
+            geometry = feature.geometry().asPoint()
+            if info.crs == "EPSG:3857":
+                lon = math.degrees(geometry.x() / 6378137.0)
+                lat = math.degrees(
+                    2 * math.atan(math.exp(geometry.y() / 6378137.0))
+                    - math.pi / 2
+                )
+            else:
+                lon = geometry.x()
+                lat = geometry.y()
+            points.append(_Point(
+                wkt=feature.geometry().asWkt(),
+                rank=info.rank,
+                crs=info.crs,
+                lon=lon,
+                lat=lat,
+                bands={index: level for index, level in visible},
+            ))
+    return points
+
+
+def _prune_band(points, index, distance_meters, latitude_max):
+    """Оставляет точки, которые могут подавить кого-то в диапазоне.
+
+    Точка без более низкого приоритета рядом подавлять нечего: в
+    служебном слое она только замедляет выборку соседей.
+    """
+    entries = [point for point in points if index in point.bands]
+    if not entries:
+        return []
+    if not distance_meters:
+        # Диапазон без верхней границы: расстояние не ограничено.
+        return entries
+    limit = distance_meters
+    # Ячейка сетки должна покрывать весь радиус поиска: градус долготы
+    # короче градуса широты, и в метрах радиус больше.
+    worst = math.cos(math.radians(latitude_max))
+    cell = max(limit / (111320.0 * max(worst, 0.01)), 1e-6)
+    grid = {}
+    for position, point in enumerate(entries):
+        key = (int(point.lon // cell), int(point.lat // cell))
+        grid.setdefault(key, []).append(position)
+    keep = []
+    for position, point in enumerate(entries):
+        gx = int(point.lon // cell)
+        gy = int(point.lat // cell)
+        useful = False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for other in grid.get((gx + dx, gy + dy), ()):
+                    if other == position:
+                        continue
+                    neighbour = entries[other]
+                    # Подавить можно только объект более низкого
+                    # приоритета, то есть с большим рангом.
+                    if neighbour.rank <= point.rank:
+                        continue
+                    # Расстояние между точками в градусах, переведённое
+                    # в метры.  Метрика завышена (cos не учитывается),
+                    # поэтому лишние точки в служебном слое не мешают.
+                    distance = math.hypot(
+                        neighbour.lon - point.lon,
+                        neighbour.lat - point.lat,
+                    ) * 111320.0
+                    if distance <= limit:
+                        useful = True
+                        break
+                if useful:
+                    break
+            if useful:
+                break
+        if useful:
+            keep.append(point)
+    return keep
 
 
 def _write_aux(config, records, crs, file_name):
-    """Записывает служебный слой в SQLite через OGR."""
+    """Записывает служебные слои по диапазонам в GeoPackage.
+
+    Формат — GeoPackage: драйвер SQLite не создаёт для слоя индекс
+    RTree, и запрос по прямоугольнику читает всю таблицу целиком.
+    """
     from osgeo import ogr, osr
 
     path = Path(config.vector_dir) / file_name
@@ -763,59 +851,40 @@ def _write_aux(config, records, crs, file_name):
     target = osr.SpatialReference()
     target.ImportFromEPSG(int(crs.split(":")[1]))
     target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+    dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(path))
     try:
-        layer = dataset.CreateLayer(path.stem, target, ogr.wkbPoint)
-        for name, kind in (
-            ("rank", ogr.OFTInteger),
-            ("band_min", ogr.OFTInteger), ("band_max", ogr.OFTInteger),
-            ("lod", ogr.OFTInteger), ("layer", ogr.OFTString),
-        ):
-            layer.CreateField(ogr.FieldDefn(name, kind))
-        definition = layer.GetLayerDefn()
-        transforms = {}
-        # Без транзакции OGR фиксирует каждую точку отдельно: запись
-        # нескольких тысяч диапазонов занимает десятки секунд.
-        layer.StartTransaction()
-        for record in records:
-            geometry = ogr.CreateGeometryFromWkt(record.wkt)
-            if record.crs != crs:
-                key = (record.crs, crs)
-                if key not in transforms:
-                    transforms[key] = _ogr_transform(*key)
-                geometry.Transform(transforms[key])
-            feature = ogr.Feature(definition)
-            feature.SetField("rank", record.rank)
-            feature.SetField("band_min", record.band_min)
-            feature.SetField("band_max", record.band_max)
-            feature.SetField("lod", record.lod)
-            feature.SetField("layer", record.layer)
-            feature.SetGeometry(geometry)
-            layer.CreateFeature(feature)
-            feature = None
-        layer.CommitTransaction()
+        for index, items in sorted(records.items()):
+            if not items:
+                continue
+            layer = dataset.CreateLayer(
+                aux_table_name(index), target, ogr.wkbPoint)
+            for name, kind in (
+                ("rank", ogr.OFTInteger), ("lod", ogr.OFTInteger),
+                ("layer", ogr.OFTString),
+            ):
+                layer.CreateField(ogr.FieldDefn(name, kind))
+            definition = layer.GetLayerDefn()
+            layer.StartTransaction()
+            for point in items:
+                feature = ogr.Feature(definition)
+                feature.SetField("rank", point.rank)
+                feature.SetField("lod", point.bands[index])
+                feature.SetField("layer", str(point.rank))
+                feature.SetGeometry(
+                    ogr.CreateGeometryFromWkt(point.wkt))
+                layer.CreateFeature(feature)
+                feature = None
+            layer.CommitTransaction()
     finally:
         dataset = None
-
-
-def _ogr_transform(source_crs, target_crs):
-    """Преобразование координат OGR между двумя EPSG-кодами."""
-    from osgeo import osr
-
-    source = osr.SpatialReference()
-    source.ImportFromEPSG(int(source_crs.split(":")[1]))
-    source.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    target = osr.SpatialReference()
-    target.ImportFromEPSG(int(target_crs.split(":")[1]))
-    target.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    return osr.CoordinateTransformation(source, target)
 
 
 def build_poi_icons(config, progress=None, cancel=None):
     """Собирает служебные слои POI-значков в каталоге проекта.
 
-    Возвращает число записанных записей.  Слой содержит одну запись на
-    каждую видимую пару «точка — диапазон масштабов».
+    Возвращает число записанных записей.  Служебный слой свой для
+    каждого диапазона масштаба: в нём только те точки, которые видны в
+    этом диапазоне и могут подавить кого-то рядом.
     """
     report = progress or (lambda message: None)
     layers = read_template_poi()
@@ -823,15 +892,30 @@ def build_poi_icons(config, progress=None, cancel=None):
         return 0
     bands = canonical_bands(layers)
     restore_base_filters(layers, bands)
-    records = _collect_records(config, layers, bands, cancel=cancel)
-    if not records:
+    points = _collect_points(config, layers, bands, cancel=cancel)
+    if not points:
         for file_name in (AUX_FILE_NAME, AUX_FILE_NAME_3857):
             (Path(config.vector_dir) / file_name).unlink(missing_ok=True)
         return 0
-    _write_aux(config, records, "EPSG:4326", AUX_FILE_NAME)
-    _write_aux(config, records, "EPSG:3857", AUX_FILE_NAME_3857)
+    latitude_max = max(abs(point.lat) for point in points)
+    max_size = max(
+        (layer.icon_size for layer in layers), default=0.0,
+    )
+    records = {"EPSG:4326": {}, "EPSG:3857": {}}
+    total = 0
+    for index, band in enumerate(bands):
+        _lower, upper = band
+        distance = max_size * upper / 1000 if upper else 0.0
+        kept = _prune_band(points, index, distance, latitude_max)
+        if not kept:
+            continue
+        for point in kept:
+            records[point.crs].setdefault(index, []).append(point)
+            total += 1
+    _write_aux(config, records["EPSG:4326"], "EPSG:4326", AUX_FILE_NAME)
+    _write_aux(config, records["EPSG:3857"], "EPSG:3857", AUX_FILE_NAME_3857)
     report(
-        f"POI: служебный слой значков, {len(records)} записей "
+        f"POI: служебные слои значков, {total} записей "
         f"для {len(layers)} слоёв"
     )
-    return len(records)
+    return total

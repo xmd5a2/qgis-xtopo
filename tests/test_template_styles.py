@@ -335,8 +335,8 @@ class PoiSuppressionTest(unittest.TestCase):
     """Значки POI подавляются, если рядом более приоритетный объект.
 
     Подавление задаётся фильтрами правил рендерера и правил подписей
-    в шаблоне: служебный слой `poi icons` собирается при подготовке
-    проекта, а правила ссылаются на него по имени.
+    в шаблоне: служебные слои `poi icons` собираются при подготовке
+    проекта, а правила ссылаются на них по имени.
     """
 
     @classmethod
@@ -350,25 +350,33 @@ class PoiSuppressionTest(unittest.TestCase):
             layer.findtext("layername")
             for layer in self.root.iter("maplayer")
         }
-        for name in (poi_icons.AUX_LAYER_NAME, poi_icons.AUX_LAYER_NAME_3857):
-            self.assertIn(name, names)
+        for index in range(len(self.bands)):
+            self.assertIn(f"poi icons {index}", names)
         tree = {
             element.get("name")
             for element in self.root.iter("layer-tree-layer")
         }
         # Служебные слои не показываются пользователю: они нужны только
         # для выборки соседей.
-        self.assertNotIn(poi_icons.AUX_LAYER_NAME, tree)
-        self.assertNotIn(poi_icons.AUX_LAYER_NAME_3857, tree)
+        for name in tree:
+            self.assertFalse(name.startswith("poi icons"))
 
     def test_service_layers_are_not_poi_layers(self):
         names = [layer.name for layer in self.layers]
-        self.assertNotIn(poi_icons.AUX_LAYER_NAME, names)
-        self.assertNotIn(poi_icons.AUX_LAYER_NAME_3857, names)
+        self.assertFalse([name for name in names if name.startswith("poi icons")])
         self.assertEqual(
             [layer.rank for layer in self.layers],
             list(range(1, len(self.layers) + 1)),
         )
+
+    def test_service_layers_have_spatial_index(self):
+        """Служебный слой лежит в GeoPackage: у SQLite нет индекса."""
+        for layer in self.root.iter("maplayer"):
+            name = layer.findtext("layername") or ""
+            if not name.startswith("poi icons"):
+                continue
+            source = layer.findtext("datasource") or ""
+            self.assertIn(".gpkg", source)
 
     def test_icon_rules_suppress_overlaps(self):
         checked = 0
@@ -383,7 +391,7 @@ class PoiSuppressionTest(unittest.TestCase):
                     "overlay_nearest(", leaf.filter,
                     f"у слоя {layer.name} нет подавления значков",
                 )
-                self.assertIn('"rank"', leaf.filter)
+                self.assertIn('"rank" <', leaf.filter)
                 self.assertIn("@level_of_detail", leaf.filter)
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет правил значков POI")
@@ -393,7 +401,8 @@ class PoiSuppressionTest(unittest.TestCase):
 
         Аргументы overlay_nearest считаются в контексте служебного
         слоя, где @map_scale недоступен.  Поэтому диапазон выбирается
-        условием правила, а в выборку соседей попадает индекс диапазона.
+        условием правила, а в выборку соседей попадает слой нужного
+        диапазона.
         """
         for layer in self.layers:
             for leaf in poi_icons.leaves(layer.root):
@@ -403,15 +412,19 @@ class PoiSuppressionTest(unittest.TestCase):
                     continue
                 self.assertIn("@map_scale", leaf.filter)
                 inside = leaf.filter.split("overlay_nearest", 1)[1]
-                self.assertIn('"band_min"', inside)
-                self.assertIn('"band_max"', inside)
+                self.assertIn("'poi icons ", inside)
 
     def test_label_rules_suppress_overlaps(self):
         checked = 0
         for layer in self.layers:
-            if poi_icons.layer_suppression_expression(layer, self.bands) == "false":
-                continue
             for rule in layer.labels:
+                expected = poi_icons.layer_suppression_expression(
+                    layer, self.bands, rule.minimum, rule.maximum,
+                )
+                if expected == "false":
+                    # В этом диапазоне значок не рисуется: подавлять
+                    # подписи нечем.
+                    continue
                 self.assertIn(
                     "overlay_nearest(", rule.filter,
                     f"у слоя {layer.name} нет подавления подписей",

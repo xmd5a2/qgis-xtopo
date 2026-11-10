@@ -2634,15 +2634,21 @@ class PipelineIntegrationTest(unittest.TestCase):
 
             dataset = ogr.Open(str(aux))
             try:
-                layer = dataset.GetLayer(0)
-                self.assertGreater(layer.GetFeatureCount(), 0)
-                names = {
-                    layer.GetLayerDefn().GetFieldDefn(index).GetName()
-                    for index in range(layer.GetLayerDefn().GetFieldCount())
-                }
+                self.assertGreater(dataset.GetLayerCount(), 0)
+                total = 0
+                names = set()
+                for index in range(dataset.GetLayerCount()):
+                    layer = dataset.GetLayer(index)
+                    total += layer.GetFeatureCount()
+                    definition = layer.GetLayerDefn()
+                    names.update(
+                        definition.GetFieldDefn(position).GetName()
+                        for position in range(definition.GetFieldCount())
+                    )
             finally:
                 dataset = None
-            for field in ("rank", "band_min", "band_max", "lod"):
+            self.assertGreater(total, 0)
+            for field in ("rank", "lod"):
                 self.assertIn(field, names)
 
             with zipfile.ZipFile(project_path) as archive:
@@ -2650,12 +2656,12 @@ class PipelineIntegrationTest(unittest.TestCase):
                     item for item in archive.namelist() if item.endswith(".qgs")
                 )
                 text = archive.read(name).decode("utf-8")
-            # Служебный слой есть в проекте, но не показывается в дереве.
-            self.assertIn("<layername>poi icons</layername>", text)
+            # Служебные слои есть в проекте, но не показываются в дереве.
+            self.assertIn("<layername>poi icons ", text)
             tree = re.findall(r'<layer-tree-layer[^>]*name="([^"]+)"', text)
-            self.assertNotIn("poi icons", tree)
-            # Правила значков ссылаются на служебный слой.
-            self.assertIn("overlay_nearest('poi icons'", html.unescape(text))
+            self.assertFalse([item for item in tree if item.startswith("poi icons")])
+            # Правила значков ссылаются на служебные слои.
+            self.assertIn("overlay_nearest('poi icons ", html.unescape(text))
 
             # Слой доступен по имени: на нём строится выборка соседей.
             from qgis.core import (
@@ -2666,11 +2672,15 @@ class PipelineIntegrationTest(unittest.TestCase):
             project = QgsProject.instance()
             project.clear()
             project.read(str(project_path))
-            service = project.mapLayersByName(poi_icons.AUX_LAYER_NAME)
-            self.assertEqual(len(service), 1, "нет служебного слоя в проекте")
-            self.assertTrue(service[0].isValid())
+            service = [
+                layer for layer in project.mapLayers().values()
+                if layer.name().startswith('poi icons ')
+            ]
+            self.assertTrue(service, "нет служебных слоёв в проекте")
+            self.assertTrue(all(layer.isValid() for layer in service))
+            name = service[0].name()
             expression = QgsExpression(
-                "overlay_nearest('poi icons', expression:=\"rank\", limit:=-1, "
+                f"overlay_nearest('{name}', expression:=\"rank\", limit:=-1, "
                 "max_distance:=0.1)"
             )
             context = QgsExpressionContext()
