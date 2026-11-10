@@ -230,6 +230,11 @@ class PipelineIntegrationTest(unittest.TestCase):
         )
         self.assertFalse(dock.browse_source.isEnabled())
         self.assertEqual(dock.area_label.text(), "Охват:")
+        self.assertEqual(dock.bbox.placeholderText(), "")
+        self.assertEqual(
+            [dock.tabs.tabText(index) for index in range(dock.tabs.count())],
+            ["Данные", "Рельеф", "Слои", "Проект"],
+        )
         from qgis.PyQt.QtWidgets import QPushButton
 
         button_texts = [button.text() for button in dock.findChildren(QPushButton)]
@@ -242,6 +247,27 @@ class PipelineIntegrationTest(unittest.TestCase):
         )
         self.assertTrue(dock.prepare_button.styleSheet())
         dock.deleteLater()
+
+    def test_dock_terrain_enabled_by_default(self):
+        """Без сохранённых настроек рельеф обрабатывается по умолчанию."""
+        from qgis.PyQt.QtCore import QSettings
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        settings = QSettings("qgis-xtopo", "qgis-xtopo")
+        saved = settings.value("generate_terrain")
+        settings.remove("generate_terrain")
+        try:
+            dock = XtopoDockWidget(None)
+            try:
+                self.assertTrue(dock.generate_terrain.isChecked())
+            finally:
+                dock.deleteLater()
+        finally:
+            if saved is None:
+                settings.remove("generate_terrain")
+            else:
+                settings.setValue("generate_terrain", saved)
 
     def test_dock_project_panel(self):
         import tempfile
@@ -2428,7 +2454,7 @@ class PipelineIntegrationTest(unittest.TestCase):
                 for index in range(dialog.basemap_combo.count())
             ]
             for expected in (
-                "OpenStreetMap", "OpenTopoMap", "ArcGIS Topo",
+                "OpenStreetMap", "OpenTopoMap", "ArcGIS Satellite",
                 "Google Satellite", "Google Hybrid",
             ):
                 self.assertIn(expected, names)
@@ -2438,6 +2464,10 @@ class PipelineIntegrationTest(unittest.TestCase):
             dialog.basemap_combo.setCurrentIndex(index)
             self.assertIn("opentopomap.org", dialog.attribution.text())
             self.assertIn("opentopomap.org", dialog.layer.source())
+            self.assertTrue(dialog.layer.isValid())
+            index = dialog.basemap_combo.findData("arcgis")
+            dialog.basemap_combo.setCurrentIndex(index)
+            self.assertIn("World_Imagery", dialog.layer.source())
             self.assertTrue(dialog.layer.isValid())
             index = dialog.basemap_combo.findData("google_satellite")
             dialog.basemap_combo.setCurrentIndex(index)
@@ -2479,9 +2509,8 @@ class PipelineIntegrationTest(unittest.TestCase):
                     time.sleep(0.02)
                 self.app.processEvents()
             search.assert_called()
-            self.assertEqual(dialog.search_results.count(), 1)
-            self.assertIn("1", dialog.search_status.text())
-            dialog.search_results.setCurrentRow(0)
+            self.assertEqual(dialog._search_model.stringList(), [place.name])
+            dialog._place_activated(place.name)
             self.app.processEvents()
             bbox = dialog._extent_as_bbox()
             middle_lon = (bbox.lon_min + bbox.lon_max) / 2
@@ -2491,6 +2520,37 @@ class PipelineIntegrationTest(unittest.TestCase):
             # Нарисованная рамка больше не задаёт охват.
             self.assertIsNone(dialog._drawn_extent)
             self.assertFalse(dialog.reset_button.isEnabled())
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_searches_while_typing(self):
+        """Пока идёт ввод, поиск запускается сам после паузы."""
+        import time
+        from unittest import mock
+
+        from qgis_xtopo.core import nominatim
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        place = nominatim.Place(name="Кисловодск, Россия", lat=43.9, lon=42.7)
+        dialog = ExtentDialog("")
+        try:
+            with mock.patch.object(
+                nominatim, "search", return_value=[place]
+            ) as search:
+                dialog.show()
+                self.app.processEvents()
+                dialog.search_input.setFocus()
+                dialog.search_input.setText("Кис")
+                deadline = time.time() + 20
+                while (
+                    not dialog._search_model.stringList()
+                    and time.time() < deadline
+                ):
+                    self.app.processEvents()
+                    time.sleep(0.02)
+            self.app.processEvents()
+            search.assert_called()
+            self.assertEqual(dialog._search_model.stringList(), [place.name])
         finally:
             dialog.done(0)
 

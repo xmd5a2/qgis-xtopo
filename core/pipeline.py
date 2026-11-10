@@ -1274,6 +1274,21 @@ def _clean_layers(config):
     return removed
 
 
+def _use_project_temp(config):
+    """Держать временные файлы подготовки в каталоге проекта.
+
+    GDAL иначе пишет крупные промежуточные файлы в системный каталог
+    временных файлов: он может быть мал или очищаться при перезагрузке.
+    """
+    directory = config.temp_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        from osgeo import gdal
+    except ImportError:
+        return
+    gdal.SetConfigOption("CPL_TMPDIR", str(directory))
+
+
 def run_project(config, progress=None, cancel=None, percent=None, status=None):
     notify = progress or (lambda message: None)
     tracker = _ProgressTracker(
@@ -1286,6 +1301,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     timings = Timings()
     report("Проверка параметров")
     config.validate()
+    _use_project_temp(config)
     gdal_log.LOG.reset()
     bbox = parse_bbox(config.bbox)
     report("Очистка прежних слоёв")

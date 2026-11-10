@@ -66,6 +66,10 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(Config().qgis_projects_dir, default_projects_dir())
 
+    def test_temp_dir_lives_in_project_dir(self):
+        config = Config(qgis_projects_dir="projects", project_name="demo")
+        self.assertEqual(config.temp_dir, Path("projects") / "demo" / "tmp")
+
     def test_terrain_source_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.ini"

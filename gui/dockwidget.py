@@ -594,7 +594,6 @@ class XtopoDockWidget(QDockWidget):
         project_form.addRow(self.project_name_hint)
 
         self.bbox = QLineEdit()
-        self.bbox.setPlaceholderText("lon_min,lat_min,lon_max,lat_max или ссылка на OpenStreetMap")
         self.bbox.textChanged.connect(self._bbox_text_changed)
         self.choose_extent = _primary_button(QPushButton("Выбрать…"))
         self.choose_extent.setToolTip(
@@ -737,6 +736,7 @@ class XtopoDockWidget(QDockWidget):
         terrain_group = QGroupBox("Рельеф")
         terrain_form = QFormLayout(terrain_group)
         self.generate_terrain = QCheckBox("Обрабатывать рельеф")
+        self.generate_terrain.setChecked(True)
         self.generate_terrain.toggled.connect(self._terrain_changed)
         terrain_form.addRow(self.generate_terrain)
         self.dem_source = QComboBox()
@@ -845,11 +845,11 @@ class XtopoDockWidget(QDockWidget):
         terrain_layout.addWidget(terrain_group)
         terrain_layout.addStretch(1)
         self._set_isolines_step(10)
-        self._terrain_changed(False)
+        self._terrain_changed(self.generate_terrain.isChecked())
 
         self.tabs.addTab(data_tab, "Данные")
-        self.tabs.addTab(layers_tab, "Слои")
         self.tabs.addTab(terrain_tab, "Рельеф")
+        self.tabs.addTab(layers_tab, "Слои")
         self.project_panel = ProjectPanel(self.iface, self)
         self.project_panel.statusMessage.connect(self._append_log)
         self.project_tab_index = self.tabs.addTab(self.project_panel, "Проект")
@@ -2143,7 +2143,9 @@ class XtopoDockWidget(QDockWidget):
         self.resample_method.setCurrentIndex(
             max(0, self.resample_method.findData(method))
         )
-        self.generate_terrain.setChecked(self.settings.value("generate_terrain", "false") == "true")
+        self.generate_terrain.setChecked(
+            self.settings.value("generate_terrain", "true") == "true"
+        )
         self._terrain_changed(self.generate_terrain.isChecked())
         hidden = self.settings.value("hidden_panels", [])
         if isinstance(hidden, str):

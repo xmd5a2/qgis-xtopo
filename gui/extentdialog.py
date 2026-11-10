@@ -14,12 +14,13 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
-from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, pyqtSignal
+from qgis.PyQt.QtCore import (
+    QRectF, QSize, QStringListModel, Qt, QThread, QTimer, pyqtSignal,
+)
 from qgis.PyQt.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPen
 from qgis.PyQt.QtWidgets import (
-    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QShortcut,
-    QVBoxLayout,
+    QApplication, QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QShortcut, QVBoxLayout,
 )
 
 from ..core import i18n, nominatim
@@ -69,13 +70,12 @@ BASEMAPS = (
     ),
     Basemap(
         "arcgis",
-        "ArcGIS Topo",
+        "ArcGIS Satellite",
         "https://server.arcgisonline.com/ArcGIS/rest/services/"
-        "World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        "World_Imagery/MapServer/tile/{z}/{y}/{x}",
         19,
-        '© <a href="https://www.esri.com">Esri</a>, HERE, Garmin, USGS, '
-        "Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), "
-        "Esri (Thailand), TomTom",
+        '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar '
+        "Geographics, and the GIS User Community",
     ),
     Basemap(
         "google_satellite",
@@ -101,6 +101,13 @@ MAX_LATITUDE = 85.0511287798
 
 # Размер окна вокруг точки, если у найденного места нет границ.
 PLACE_SPAN = 0.02
+# Поиск начинается по мере ввода: пауза после последнего нажатия и
+# минимальная длина запроса, иначе Nominatim дёргался бы на каждую букву.
+SEARCH_DELAY_MS = 450
+MIN_SEARCH_LENGTH = 2
+SEARCH_FIELD_WIDTH = 190
+# Выпадающий список шире поля, иначе длинные названия не прочитать.
+SEARCH_POPUP_WIDTH = 380
 
 DRAW_TOOL_STYLE = (
     "QPushButton {"
@@ -438,40 +445,40 @@ class ExtentDialog(QDialog):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        search_row = QHBoxLayout()
-        search_row.setSpacing(4)
+        self._places = {}
+        self._pending_query = None
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(SEARCH_DELAY_MS)
+        self._search_timer.timeout.connect(self._start_search)
+
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText(
-            "Поиск места: например, «Кисловодск»"
-        )
+        self.search_input.setPlaceholderText("Поиск места")
         self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMaximumWidth(SEARCH_FIELD_WIDTH)
+        self.search_input.setMinimumWidth(120)
+        self.search_input.textChanged.connect(self._search_text_changed)
         self.search_input.returnPressed.connect(self._start_search)
-        self.search_button = QPushButton("Найти")
-        self.search_button.clicked.connect(self._start_search)
-        self.search_status = QLabel("")
-        self.search_status.setMinimumWidth(120)
-        search_row.addWidget(self.search_input, 1)
-        search_row.addWidget(self.search_button)
-        search_row.addWidget(self.search_status)
+        # Результаты показываются выпадающим списком под строкой поиска.
+        self._search_model = QStringListModel(self)
+        self._completer = QCompleter(self._search_model, self)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchContains)
+        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.setMaxVisibleItems(10)
+        self._completer.activated[str].connect(self._place_activated)
+        self._completer.popup().setMinimumWidth(SEARCH_POPUP_WIDTH)
+        self.search_input.setCompleter(self._completer)
+
         self.basemap_combo = QComboBox()
         for basemap in BASEMAPS:
             self.basemap_combo.addItem(basemap.name, basemap.key)
         self.basemap_combo.setToolTip("Подложка карты")
         self.basemap_combo.currentIndexChanged.connect(self._basemap_changed)
-        search_row.addWidget(self.basemap_combo)
-        layout.addLayout(search_row)
 
         # Подпись под подложкой меняется вместе с ней.
         self.attribution = QLabel("")
         self.attribution.setOpenExternalLinks(True)
-
-        self.search_results = QListWidget()
-        self.search_results.setMaximumHeight(110)
-        self.search_results.itemSelectionChanged.connect(
-            self._search_result_selected
-        )
-        self.search_results.hide()
-        layout.addWidget(self.search_results)
 
         tools = QHBoxLayout()
         self.draw_button = QPushButton()
@@ -499,6 +506,9 @@ class ExtentDialog(QDialog):
         tools.addStretch(1)
         self.coords = QLabel("")
         tools.addWidget(self.coords)
+        # Поиск — в одной строке с инструментами, справа от координат.
+        tools.addWidget(self.search_input)
+        tools.addWidget(self.basemap_combo)
         layout.addLayout(tools)
 
         self.canvas = MeasuredCanvas(self)
@@ -615,21 +625,36 @@ class ExtentDialog(QDialog):
         self.canvas.setLayers([layer] if layer.isValid() else [])
         self.attribution.setText(basemap.attribution)
 
+    def _search_text_changed(self, text):
+        """Поиск по мере ввода: пауза, затем запрос к Nominatim."""
+        query = text.strip()
+        if len(query) < MIN_SEARCH_LENGTH:
+            self._search_timer.stop()
+            self._set_search_results([])
+            return
+        self._search_timer.start()
+
     def _start_search(self):
         """Запустить поиск места по Nominatim."""
+        self._search_timer.stop()
+        if self.sender() is self.search_input:
+            # Enter при выбранном результате из выпадающего списка сам
+            # переходит к месту: повторный запрос к Nominatim не нужен.
+            popup = self._completer.popup()
+            if popup.isVisible() and popup.currentIndex().isValid():
+                return
         query = self.search_input.text().strip()
-        if not query:
+        if len(query) < MIN_SEARCH_LENGTH:
             return
-        worker = self._search_worker
-        if worker is not None:
-            try:
-                if worker.isRunning():
-                    return
-            except RuntimeError:
-                # Поток уже удалён: можно искать снова.
-                self._search_worker = None
-        self.search_button.setEnabled(False)
-        self.search_status.setText(i18n.tr("Поиск…"))
+        if self._search_worker is not None:
+            # Предыдущий запрос ещё выполняется: его результат уже не
+            # нужен, но Nominatim не любит параллельные обращения.
+            self._pending_query = query
+            return
+        self._run_search(query)
+
+    def _run_search(self, query):
+        self._pending_query = None
         # Поток — не ребёнок окна: окно может закрыться во время запроса,
         # и тогда поток должен спокойно доработать и удалиться сам.
         worker = NominatimWorker(query, QgsApplication.instance())
@@ -641,38 +666,42 @@ class ExtentDialog(QDialog):
         worker.start()
 
     def _search_done(self, places):
-        """Результаты поиска показаны списком."""
-        self.search_results.clear()
-        for place in places:
-            item = QListWidgetItem(place.name)
-            item.setData(Qt.UserRole, place)
-            self.search_results.addItem(item)
-        self.search_results.setVisible(bool(places))
-        if places:
-            self.search_status.setText(
-                i18n.trf("Найдено: {}", len(places))
-            )
-        else:
-            self.search_status.setText(i18n.tr("Ничего не найдено"))
+        """Показать результаты выпадающим списком под строкой поиска."""
+        self._set_search_results(places)
+        self.search_input.setToolTip("")
+        if places and self.search_input.hasFocus():
+            self._completer.complete()
 
     def _search_failed(self, message):
-        self.search_results.clear()
-        self.search_results.hide()
-        self.search_status.setText(
-            i18n.trf("Ошибка поиска: {}", message)
-        )
+        self._set_search_results([])
+        # Ошибку не показываем отдельной строкой: она не должна занимать
+        # место в панели инструментов.
+        self.search_input.setToolTip(i18n.trf("Ошибка поиска: {}", message))
 
     def _search_finished(self):
-        """Поиск закончен — кнопки снова доступны."""
-        self.search_button.setEnabled(True)
+        """Поиск закончен — можно выполнить отложенный запрос."""
         self._search_worker = None
-
-    def _search_result_selected(self):
-        """Выбран результат поиска — переходим к найденному месту."""
-        items = self.search_results.selectedItems()
-        if not items:
+        pending = self._pending_query
+        if pending is None:
             return
-        place = items[0].data(Qt.UserRole)
+        query = self.search_input.text().strip()
+        if query and query != pending:
+            pending = query
+        if len(pending) >= MIN_SEARCH_LENGTH:
+            self._run_search(pending)
+
+    def _set_search_results(self, places):
+        self._places = {place.name: place for place in places}
+        self._search_model.setStringList([place.name for place in places])
+        popup = self._completer.popup()
+        if not places:
+            popup.hide()
+
+    def _place_activated(self, text):
+        """Выбран результат поиска — переходим к найденному месту."""
+        # Название подставлено в строку поиска: повторный запрос не нужен.
+        self._search_timer.stop()
+        place = self._places.get(text)
         if place is None:
             return
         self._show_place(place)
