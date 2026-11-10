@@ -14,11 +14,8 @@ from .osm_convert import FieldNames
 
 LAYER_NAMES = ("points", "lines", "multipolygons", "multilinestrings", "other_relations")
 
-# Порядок опроса слоёв при INTERLEAVED_READING: драйвер читает файл
-# потоково (nodes -> ways -> relations), и слои нужно опрашивать по
-# одному объекту за цикл строго в этом порядке.  Чтение слоя до конца
-# подряд ломает сборку мультиполигонов: в охвате с 52 реляциями-ледниками
-# доходило лишь 1-2 (остальные молча терялись вместе с way-полигонами).
+# Порядок слоёв драйвера OSM: драйвер читает файл потоково
+# (nodes -> ways -> relations) и раскладывает объекты по этим слоям.
 INTERLEAVED_LAYER_ORDER = (
     "points", "lines", "multilinestrings", "multipolygons", "other_relations",
 )
@@ -593,6 +590,60 @@ def _apply_spatial_filter(layers, source, bbox):
     return True
 
 
+def _iter_features(dataset, cancel=None):
+    """Отдаёт пары (объект, имя слоя) при чтении PBF.
+
+    Объекты забираются датасетным ``GetNextFeature``: драйвер сам
+    переключает слои и разбирает файл потоково.  Опрос слоёв по кругу
+    (по одному объекту из каждого) на больших файлах обрывается: очередь
+    слоя переполняется — в GDAL она вмещает 100000 объектов, — и драйвер
+    обрывает чтение ошибкой «Too many features have accumulated in
+    points layer».  Дальше слои lines и multipolygons остаются пустыми:
+    с выгрузки Румынии в проект попадало 316 записей леса вместо 6661.
+    """
+    getter = getattr(dataset, "GetNextFeature", None)
+    if getter is None:
+        # Старый GDAL без датасетного API: опрашиваем слои по кругу.
+        layers = []
+        for name in INTERLEAVED_LAYER_ORDER:
+            layer = dataset.GetLayerByName(name)
+            if layer is not None:
+                layers.append(layer)
+        while True:
+            any_feature = False
+            for layer in layers:
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("PBF processing cancelled")
+                feature = layer.GetNextFeature()
+                if feature is None:
+                    continue
+                any_feature = True
+                yield feature, layer.GetName()
+            if not any_feature:
+                return
+    while True:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("PBF processing cancelled")
+        result = getter(include_layer=True)
+        feature, layer = result[0], result[1]
+        if feature is None:
+            return
+        yield feature, layer.GetName() if layer is not None else ""
+
+
+def _dataset_reading_supported(gdal):
+    """Есть ли в GDAL датасетное чтение с указанием слоя.
+
+    ``Dataset.GetNextFeature(include_layer=True)`` появился в GDAL 3.6.
+    Без него остаётся опрос слоёв по кругу, а на больших выгрузках он
+    обрывается переполнением очередей слоёв.
+    """
+    try:
+        return int(gdal.VersionInfo("VERSION_NUM")) >= 3060000
+    except Exception:
+        return False
+
+
 def _expected_objects(source, bbox):
     """Оценка числа объектов в той части файла, которая читается."""
     try:
@@ -752,7 +803,8 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         if layer is not None
                     ]
                     definitions = {
-                        layer: layer.GetLayerDefn() for layer in layers
+                        layer.GetName(): layer.GetLayerDefn()
+                        for layer in layers
                     }
                     # Два прохода.  Первый — грубый фильтр GDAL по области
                     # с запасом: драйвер не строит геометрию объектов,
@@ -766,7 +818,6 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         and _apply_spatial_filter(layers, source, bbox)
                     )
                     read_box = None
-                    has_features = False
                     # Снимок состояния для отката: если фильтр драйвера
                     # не сработал, файл читается заново целиком, и запись
                     # текущего прохода надо отменить.  Откат затрагивает
@@ -778,107 +829,97 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                     file_ids = set()
                     seen_before = features_seen
                     written_before = features_written
-                    # Слои опрашиваются по одному объекту за цикл
-                    # (см. INTERLEAVED_LAYER_ORDER): иначе драйвер теряет
-                    # мультиполигоны.
-                    while True:
-                        any_feature = False
-                        for layer in layers:
-                            if cancel is not None and cancel.is_set():
-                                raise InterruptedError(
-                                    "PBF processing cancelled"
-                                )
-                            feature = layer.GetNextFeature()
-                            if feature is None:
-                                continue
-                            any_feature = True
-                            has_features = True
-                            features_seen += 1
-                            if use_filter:
-                                raw = feature.GetGeometryRef()
-                                if raw is not None and not raw.IsEmpty():
-                                    try:
-                                        read_box = _extend_box(
-                                            read_box, *raw.GetEnvelope()
-                                        )
-                                    except Exception:
-                                        pass
-                            if features_seen % 10000 == 0 and progress:
-                                percent = min(
-                                    99, features_seen * 100 // max(1, expected)
-                                )
-                                if percent - last_percent >= 5:
-                                    last_percent = percent
-                                    progress(
-                                        f"PBF: processed {features_seen} "
-                                        f"objects ({percent}%)"
+                    # Объекты забираются датасетным API: драйвер сам
+                    # переключает слои, иначе на больших файлах чтение
+                    # обрывается переполнением очереди слоя points
+                    # (см. _iter_features).
+                    for feature, layer_name in _iter_features(dataset, cancel):
+                        features_seen += 1
+                        if use_filter:
+                            raw = feature.GetGeometryRef()
+                            if raw is not None and not raw.IsEmpty():
+                                try:
+                                    read_box = _extend_box(
+                                        read_box, *raw.GetEnvelope()
                                     )
-
-                            raw_geometry = feature.GetGeometryRef()
-                            if raw_geometry is None or raw_geometry.IsEmpty():
-                                continue
-                            try:
-                                if not raw_geometry.Intersects(bbox_geometry):
-                                    continue
-                            except Exception:
-                                continue
-
-                            definition = definitions[layer]
-                            kind = _kind_for_layer(layer.GetName(), feature)
-                            properties = _feature_properties(feature, definition, kind)
-                            if not properties:
-                                continue
-
-                            matched = index.matching_names(kind, properties)
-                            if not matched:
-                                continue
-                            # Геометрию в JSON переводим только для объектов,
-                            # которые действительно попадут в выход.
-                            geometry = _feature_geometry_json(feature)
-                            if geometry is None:
-                                continue
-                            identity = (layer.GetName(), properties.get("@id"))
-                            if identity[1]:
-                                if identity in seen:
-                                    continue
-                                seen.add(identity)
-                                file_ids.add(identity)
-                            base_json = json.dumps(
-                                properties, ensure_ascii=False, separators=(",", ":")
+                                except Exception:
+                                    pass
+                        if features_seen % 10000 == 0 and progress:
+                            percent = min(
+                                99, features_seen * 100 // max(1, expected)
                             )
-                            for name in matched:
-                                handle = handles.get(name)
-                                if handle is None:
-                                    path = pbf_dir / f"{name}.ndjson"
-                                    # Файл открыт в двоичном режиме: позиция
-                                    # записи нужна побайтовая, чтобы при
-                                    # откате обрезать файл до нужного места.
-                                    handle = path.open("wb")
-                                    handles[name] = handle
-                                    feature_files[name] = path
-                                # Имена полей приводятся к уникальным без учёта
-                                # регистра: иначе SQLite не создаёт таблицу.
-                                resolved = field_names[name].apply(properties)
-                                properties_json = (
-                                    base_json
-                                    if resolved is properties
-                                    else json.dumps(
-                                        resolved, ensure_ascii=False,
-                                        separators=(",", ":"),
-                                    )
+                            if percent - last_percent >= 5:
+                                last_percent = percent
+                                progress(
+                                    f"PBF: processed {features_seen} "
+                                    f"objects ({percent}%)"
                                 )
-                                handle.write(
-                                    (
-                                        '{"type":"Feature","properties":'
-                                        + properties_json
-                                        + ',"geometry":'
-                                        + geometry
-                                        + "}\n"
-                                    ).encode("utf-8")
+
+                        raw_geometry = feature.GetGeometryRef()
+                        if raw_geometry is None or raw_geometry.IsEmpty():
+                            continue
+                        try:
+                            if not raw_geometry.Intersects(bbox_geometry):
+                                continue
+                        except Exception:
+                            continue
+
+                        definition = definitions.get(layer_name)
+                        if definition is None:
+                            continue
+                        kind = _kind_for_layer(layer_name, feature)
+                        properties = _feature_properties(feature, definition, kind)
+                        if not properties:
+                            continue
+
+                        matched = index.matching_names(kind, properties)
+                        if not matched:
+                            continue
+                        # Геометрию в JSON переводим только для объектов,
+                        # которые действительно попадут в выход.
+                        geometry = _feature_geometry_json(feature)
+                        if geometry is None:
+                            continue
+                        identity = (layer_name, properties.get("@id"))
+                        if identity[1]:
+                            if identity in seen:
+                                continue
+                            seen.add(identity)
+                            file_ids.add(identity)
+                        base_json = json.dumps(
+                            properties, ensure_ascii=False, separators=(",", ":")
+                        )
+                        for name in matched:
+                            handle = handles.get(name)
+                            if handle is None:
+                                path = pbf_dir / f"{name}.ndjson"
+                                # Файл открыт в двоичном режиме: позиция
+                                # записи нужна побайтовая, чтобы при
+                                # откате обрезать файл до нужного места.
+                                handle = path.open("wb")
+                                handles[name] = handle
+                                feature_files[name] = path
+                            # Имена полей приводятся к уникальным без учёта
+                            # регистра: иначе SQLite не создаёт таблицу.
+                            resolved = field_names[name].apply(properties)
+                            properties_json = (
+                                base_json
+                                if resolved is properties
+                                else json.dumps(
+                                    resolved, ensure_ascii=False,
+                                    separators=(",", ":"),
                                 )
-                            features_written += 1
-                        if not any_feature:
-                            break
+                            )
+                            handle.write(
+                                (
+                                    '{"type":"Feature","properties":'
+                                    + properties_json
+                                    + ',"geometry":'
+                                    + geometry
+                                    + "}\n"
+                                ).encode("utf-8")
+                            )
+                        features_written += 1
                     if use_filter and not _filter_delivered(read_box, area):
                         # Фильтр драйвера не доставил нужную область: файл
                         # закрываем и читаем заново целиком.  Сбросить фильтр
@@ -930,6 +971,11 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
         "PBF mode reads the extract with a coarse bbox filter: only the objects "
         "of the area are decoded, the rest of the file is skipped."
     )
+    if not _dataset_reading_supported(gdal):
+        warnings.append(
+            "GDAL старше 3.6: чтение идёт опросом слоёв по кругу, "
+            "на больших выгрузках часть объектов может потеряться."
+        )
     if total_files > 1:
         warnings.append(f"GeoFabrik: {total_files} карты обработаны как один источник.")
     if progress:
@@ -979,44 +1025,36 @@ def probe_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                 if layer is not None
             ]
             definitions = {
-                layer: layer.GetLayerDefn() for layer in layers
+                layer.GetName(): layer.GetLayerDefn() for layer in layers
             }
             # Тот же грубый фильтр, что и при подготовке: оценка не должна
-            # перебирать весь файл.  Чтение — тем же round-robin протоколом.
+            # перебирать весь файл.  Чтение — тем же датасетным API.
             _apply_spatial_filter(layers, source, bbox)
-            while True:
-                any_feature = False
-                for layer in layers:
-                    if cancel is not None and cancel.is_set():
-                        raise InterruptedError("PBF probe cancelled")
-                    feature = layer.GetNextFeature()
-                    if feature is None:
+            for feature, layer_name in _iter_features(dataset, cancel):
+                total += 1
+                if total % 50000 == 0 and progress:
+                    progress(f"PBF: проверено {total} объектов")
+                geometry = feature.GetGeometryRef()
+                if geometry is None or geometry.IsEmpty():
+                    continue
+                try:
+                    if not geometry.Intersects(bbox_geometry):
                         continue
-                    any_feature = True
-                    total += 1
-                    if total % 50000 == 0 and progress:
-                        progress(f"PBF: проверено {total} объектов")
-                    geometry = feature.GetGeometryRef()
-                    if geometry is None or geometry.IsEmpty():
-                        continue
-                    try:
-                        if not geometry.Intersects(bbox_geometry):
+                except Exception:
+                    continue
+                in_bbox += 1
+                kind = _kind_for_layer(layer_name, feature)
+                definition = definitions.get(layer_name)
+                if definition is None:
+                    continue
+                properties = _feature_properties(feature, definition, kind)
+                if properties and index.matching_names(kind, properties):
+                    identity = (layer_name, properties.get("@id"))
+                    if identity[1]:
+                        if identity in seen:
                             continue
-                    except Exception:
-                        continue
-                    in_bbox += 1
-                    kind = _kind_for_layer(layer.GetName(), feature)
-                    definition = definitions[layer]
-                    properties = _feature_properties(feature, definition, kind)
-                    if properties and index.matching_names(kind, properties):
-                        identity = (layer.GetName(), properties.get("@id"))
-                        if identity[1]:
-                            if identity in seen:
-                                continue
-                            seen.add(identity)
-                        matched += 1
-                if not any_feature:
-                    break
+                        seen.add(identity)
+                    matched += 1
         finally:
             dataset = None
             for path in temporary:
