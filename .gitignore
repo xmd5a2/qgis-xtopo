@@ -6,6 +6,7 @@ __pycache__/
 # Сборка
 dist/
 installer/payload/
+gui/build/
 # Шаблон проекта хранится один раз — в корне (automap.qgz).
 # Копия в resources/ появляется только в собранном пакете.
 resources/automap.qgz
