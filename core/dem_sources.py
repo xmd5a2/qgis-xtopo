@@ -62,6 +62,11 @@ STAC_MAX_ITEMS = 5000
 # Слой Natural Earth в ресурсах QGIS: по нему определяется суша.
 WORLD_MAP_LAYER = "countries"
 
+# Средний размер одного архива SRTM .hgt.gz: для больших охватов объём
+# считается по нему, чтобы не делать десятки HEAD-запросов.
+SRTM_AVERAGE_BYTES = 15 * 1024 * 1024
+SRTM_HEAD_LIMIT = 32
+
 # Подпись SAS кэшируется: сервис отвечает 429, если подписывать подряд.
 _SIGN_LOCK = threading.Lock()
 _SIGN_CACHE = {}
@@ -626,6 +631,10 @@ class Availability:
     required_tiles: frozenset = frozenset()
     covered_tiles: frozenset = frozenset()
     missing_tiles: frozenset = frozenset()
+    # Объём данных к загрузке. Для SRTM — точный размер архивов,
+    # для COG — оценка окна DEM (исходные тайлы читаются по частям).
+    size_bytes: int = 0
+    size_estimated: bool = False
 
 
 def _bbox_tuple(bbox):
@@ -668,6 +677,24 @@ def _range_availability(item, bbox):
     tiles = frozenset(tiles_for_bbox(clipped_bbox))
     total = len(tiles)
     partial = clipped != _bbox_tuple(bbox)
+    size_bytes = 0
+    size_estimated = False
+    if item.key == "srtm":
+        # Размер .hgt.gz — это ровно то, что будет скачано. Без сети
+        # проверка покрытия всё равно работает, просто без объёма.
+        if len(tiles) <= SRTM_HEAD_LIMIT:
+            try:
+                urls = [aws_tile_url("srtm", lat, lon) for lat, lon in tiles]
+                size_bytes, complete = _head_sizes(urls, timeout=15)
+                if not complete:
+                    size_bytes = len(tiles) * SRTM_AVERAGE_BYTES
+                    size_estimated = True
+            except Exception:
+                size_bytes = 0
+                size_estimated = False
+        else:
+            size_bytes = len(tiles) * SRTM_AVERAGE_BYTES
+            size_estimated = True
     if partial:
         message = i18n.trf("не весь охват, тайлов: {}", total)
         detail = i18n.trf(
@@ -683,7 +710,23 @@ def _range_availability(item, bbox):
         available=True, checked=True, partial=partial,
         message=message, detail=detail, missing=0, total=total,
         required_tiles=tiles, covered_tiles=tiles,
+        size_bytes=size_bytes, size_estimated=size_estimated,
     )
+
+
+def _window_size(bbox, item):
+    """Оценка объёма окна DEM: Int16 на пиксель, с запасом вокруг области."""
+    try:
+        from .terrain import COG_PADDING, MAX_DEM_PIXELS
+    except Exception:
+        COG_PADDING = 0.002
+        MAX_DEM_PIXELS = 120_000_000
+    span_x = bbox.lon_max - bbox.lon_min + 2 * COG_PADDING
+    span_y = bbox.lat_max - bbox.lat_min + 2 * COG_PADDING
+    resolution = item.native_resolution or 1 / 3600.0
+    width = max(1, int(math.ceil(span_x / resolution)))
+    height = max(1, int(math.ceil(span_y / resolution)))
+    return min(width * height, MAX_DEM_PIXELS) * 2
 
 
 def _stac_availability(item, bbox, timeout=30, retries=2):
@@ -742,6 +785,8 @@ def _stac_availability(item, bbox, timeout=30, retries=2):
         required_tiles=frozenset(required),
         covered_tiles=frozenset(covered),
         missing_tiles=frozenset(missing),
+        size_bytes=_window_size(clipped_bbox, item),
+        size_estimated=True,
     )
 
 
@@ -756,6 +801,26 @@ def cop30_tile_exists(lat, lon, timeout=15):
             return response.status == 200
     except Exception:  # noqa: BLE001 - сеть не должна ломать проверку
         return False
+
+
+def _head_size(url, timeout=30):
+    """Размер файла по HEAD.
+
+    Возвращает байты, 0 если файла нет, None если сервер не сообщил размер.
+    """
+    request = urllib.request.Request(
+        url, method="HEAD", headers={"User-Agent": USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                return 0
+            length = response.headers.get("Content-Length")
+            return int(length) if length is not None else None
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 404):
+            return 0
+        raise
 
 
 def cop30_existing_tiles(tiles, timeout=15, workers=8):
@@ -875,6 +940,25 @@ def _cop30_file_availability(bbox, timeout=10):
         covered_tiles=frozenset(covered),
         missing_tiles=frozenset(missing),
     )
+
+
+def _head_sizes(urls, timeout=30):
+    """Суммарный размер файлов; второй результат — все размеры известны."""
+    if not urls:
+        return 0, True
+    total = 0
+    complete = True
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_head_size, url, timeout) for url in urls]
+        for future in futures:
+            size = future.result()
+            if size is None:
+                complete = False
+            elif size > 0:
+                total += size
+            else:
+                complete = False
+    return total, complete
 
 
 def _check_failed(exc):
@@ -1300,6 +1384,15 @@ def mixed_datum_warning(key, bbox, availability, sonny_tiles=()):
     )
 
 
+def format_size(value):
+    """Объём в удобных единицах: КБ, МБ или ГБ."""
+    if value >= 1024 ** 3:
+        return f"{value / 1024 ** 3:.1f} {i18n.tr('ГБ')}"
+    if value >= 1024 ** 2:
+        return f"{value / 1024 ** 2:.0f} {i18n.tr('МБ')}"
+    return f"{max(1, round(value / 1024))} {i18n.tr('КБ')}"
+
+
 def describe(key, availability=None):
     """Краткое описание источника для интерфейса.
 
@@ -1318,11 +1411,15 @@ def describe(key, availability=None):
     )
     lines = [first]
     if availability is not None:
-        lines.append(
-            i18n.tr("Доступность: {}").replace(
-                "{}", i18n.tr(availability.message)
-            )
+        line = i18n.tr("Доступность: {}").replace(
+            "{}", i18n.tr(availability.message)
         )
+        if availability.size_bytes:
+            size = format_size(availability.size_bytes)
+            if availability.size_estimated:
+                size = "≈ " + size
+            line += " · " + i18n.trf("к загрузке: {}", size)
+        lines.append(line)
     tooltip = [
         i18n.trf("Провайдер: {}", provider),
         i18n.trf("Разрешение: {}", i18n.tr(item.resolution)),
@@ -1335,6 +1432,15 @@ def describe(key, availability=None):
         tooltip.append(
             i18n.tr("Доступность: {}").replace("{}", i18n.tr(detail))
         )
+        if availability.size_bytes:
+            size = format_size(availability.size_bytes)
+            if availability.size_estimated:
+                tooltip.append(i18n.trf(
+                    "Объём окна DEM: ≈ {} (исходные тайлы читаются по частям)",
+                    size,
+                ))
+            else:
+                tooltip.append(i18n.trf("Будет скачано: {}", size))
     if item.attribution:
         tooltip.append(i18n.trf(
             "Атрибуция: {}", i18n.tr(item.attribution)

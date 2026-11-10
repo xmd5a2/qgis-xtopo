@@ -699,6 +699,26 @@ class DemSourceTest(unittest.TestCase):
         self.assertEqual(state.covered_tiles, frozenset({(46, 7)}))
         self.assertEqual(state.missing_tiles, frozenset({(45, 7)}))
 
+    def test_format_size(self):
+        from qgis_xtopo.core import dem_sources
+
+        self.assertIn("ГБ", dem_sources.format_size(2 * 1024 ** 3))
+        self.assertIn("МБ", dem_sources.format_size(20 * 1024 ** 2))
+        self.assertIn("КБ", dem_sources.format_size(2048))
+
+    def test_describe_shows_download_size(self):
+        from qgis_xtopo.core import dem_sources
+
+        state = dem_sources.Availability(
+            available=True, checked=True,
+            message="весь охват, тайлов: 1",
+            size_bytes=1024 ** 3,
+        )
+        text, tooltip = dem_sources.describe("srtm", state)
+        size = dem_sources.format_size(1024 ** 3)
+        self.assertIn(f"к загрузке: {size}", text)
+        self.assertIn(f"Будет скачано: {size}", tooltip)
+
     def test_preferred_source_ignores_ocean_tiles(self):
         from qgis_xtopo.core import dem_sources
 
