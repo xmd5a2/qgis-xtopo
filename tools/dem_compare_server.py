@@ -279,6 +279,24 @@ DATASETS = {
         "src_nodata": None,
         "resolution_m": 30.0,
     },
+    "fabdem": {
+        "title": "FABDEM v1.2 (1″, 30 м)",
+        "short": "FABDEM",
+        "provider": "University of Bristol, COG-зеркало Fondazione LINKS "
+                    "(Hugging Face)",
+        "source": "fabdem",
+        "kind": "bare-earth",
+        "datum": "EGM2008, высоты над геоидом",
+        "note": "Copernicus GLO-30 с убранными лесами и постройками. "
+                "Некоммерческая лицензия (Non-Commercial Government "
+                "Licence v2.0), покрытие 60° ю.ш. – 80° с.ш.",
+        "attribution": "FABDEM v1.2 — © University of Bristol, "
+                       "CC BY-NC-SA 4.0 / Non-Commercial Government "
+                       "Licence v2.0; исходные данные Copernicus GLO-30 "
+                       "© ESA",
+        "src_nodata": -9999.0,
+        "resolution_m": 30.0,
+    },
     "nasadem": {
         "title": "NASADEM HGT (1″)",
         "short": "NASADEM",
@@ -429,6 +447,27 @@ def _aws_url(source, lat, lon):
                 f"Copernicus_DSM_COG_10_{token}_DEM/"
                 f"Copernicus_DSM_COG_10_{token}_DEM.tif")
     raise KeyError(source)
+
+
+# FABDEM лежит на Hugging Face тайлами 1°×1° в каталогах по 10°×10°.
+FABDEM_BASE = ("https://huggingface.co/buckets/links-ads/fabdem/"
+               "resolve/tiles")
+FABDEM_TILE = "FABDEM_V1-2"
+
+
+def _fabdem_group(lat, lon):
+    """Каталог 10°×10°: юго-западный и северо-восточный углы."""
+    lat0 = int(math.floor(lat / 10.0)) * 10
+    lon0 = int(math.floor(lon / 10.0)) * 10
+    return (f"{_tile_label(lat0, lon0)}-"
+            f"{_tile_label(lat0 + 10, lon0 + 10)}")
+
+
+def _fabdem_url(lat, lon):
+    """Адрес COG-тайла FABDEM по юго-западному углу."""
+    tile = f"{_tile_label(lat, lon)}_{FABDEM_TILE}"
+    group = f"{_fabdem_group(lat, lon)}_{FABDEM_TILE}"
+    return f"{FABDEM_BASE}/{group}/{tile}.tif"
 
 
 def _http_json(url, retries=6, timeout=180):
@@ -1021,6 +1060,14 @@ class SourceStore:
                 self.remember_source(
                     path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}")
             return paths
+        if source == "fabdem":
+            paths = []
+            for lat, lon in _tiles_for(bbox):
+                path = "/vsicurl/" + _fabdem_url(lat, lon)
+                paths.append(path)
+                self.remember_source(
+                    path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}")
+            return paths
         return self._pc_sources(ds, bbox)
 
     # ------------------------------------------------------------------
@@ -1355,6 +1402,11 @@ class SourceStore:
             if not allow_download:
                 return None, None
             url = _aws_url(source, int(math.floor(lat)), int(math.floor(lon)))
+            return gdal.Open("/vsicurl/" + url), None
+        if source == "fabdem":
+            if not allow_download:
+                return None, None
+            url = _fabdem_url(int(math.floor(lat)), int(math.floor(lon)))
             return gdal.Open("/vsicurl/" + url), None
         if not allow_download:
             return None, None
