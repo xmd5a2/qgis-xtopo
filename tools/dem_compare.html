@@ -357,7 +357,7 @@
     <div class="legend-bar"></div>
     <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
     <label class="coverage-toggle"
-           title="Границы охвата наборов A и B по именам 1°-тайлов (с z5)">
+           title="Границы охвата наборов A и B по именам 1°-тайлов (z5–z9)">
       <input id="coverage" type="checkbox" checked>
       охват наборов
     </label>
@@ -389,10 +389,10 @@
         Ниже <b>z9</b> показывается только подложка OSM: рельеф на таких
         масштабах слишком обобщён. Кнопка OSM и ползунок там заблокированы.
         <br><br>
-        <b>Охват</b> — пунктирные границы наборов A и B, собранные по
-        именам 1°-тайлов: у Sonny из каталога, у SRTM по диапазону широт,
-        у остальных из STAC. Показывается с z5; если набор покрывает весь
-        экран, границы не рисуются.
+        <b>Охват</b> — границы наборов A и B, собранные по именам
+        1°-тайлов: у Sonny из каталога, у SRTM по диапазону широт, у
+        остальных из STAC. Показывается с z5 до z9; если набор покрывает
+        весь экран, границы не рисуются.
         <br><br>
         <b>3DEP</b> покрывает только США — в остальных точках он пуст.
         <b>NASADEM</b> не заходит выше 61° и ниже −56°.
@@ -665,8 +665,9 @@ let frameState = null;
 const TILE = 256;
 // Ниже этого зума рельеф не рисуется: остаётся подложка OSM.
 const RELIEF_MIN_ZOOM = 9;
-// С этого зума показываются границы охвата выбранных наборов.
+// Охват выбранных наборов показывается только на малых зумах: с z5 до z9.
 const COVERAGE_MIN_ZOOM = 5;
+const COVERAGE_MAX_ZOOM = 9;
 
 function project(lon, lat, zoom) {
   const scale = TILE * Math.pow(2, zoom);
@@ -1338,11 +1339,17 @@ function paintCoverage(data, color, left, top) {
   }
   ctx.save();
   coveragePath(data, left, top);
-  ctx.fillStyle = color + "22";
+  // Плотная заливка и сплошная линия с тёмной обводкой: пунктир сетки
+  // тайлов иначе сливается с границей охвата.
+  ctx.fillStyle = color + "55";
   ctx.fill("evenodd");
+  ctx.lineJoin = "round";
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+  ctx.lineWidth = 4;
+  ctx.stroke();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([7, 5]);
+  ctx.lineWidth = 2;
   ctx.stroke();
   ctx.restore();
 }
@@ -1542,8 +1549,8 @@ function draw() {
     frameState = {left, top, zoom: state.zoom, w, h};
   }
 
-  drawCoverage(left, top, w, h);
   drawTileGrid(left, top, w, h);
+  drawCoverage(left, top, w, h);
   if (splitAt !== null) drawDivider(splitAt, h);
   drawProfileOverlay(left, top);
   drawProfileHover(left, top);
@@ -1753,7 +1760,9 @@ function updateResolutionBadge() {
 // Охват наборов
 // ---------------------------------------------------------------------------
 function coverageVisible() {
-  return state.coverageOn && state.zoom >= COVERAGE_MIN_ZOOM;
+  return state.coverageOn &&
+    state.zoom >= COVERAGE_MIN_ZOOM &&
+    state.zoom <= COVERAGE_MAX_ZOOM;
 }
 
 function coverageBounds() {
@@ -1791,7 +1800,12 @@ function setCoverageNote(text) {
 
 async function updateCoverage() {
   if (!coverageVisible()) {
-    setCoverageNote(state.coverageOn ? "охват: с z5" : "охват: выкл");
+    let text = "охват: выкл";
+    if (state.coverageOn) {
+      text = state.zoom < COVERAGE_MIN_ZOOM
+        ? "охват: с z5" : "охват: до z9";
+    }
+    setCoverageNote(text);
     if (state.coverage.a || state.coverage.b) {
       state.coverage = {a: null, b: null};
       requestRender();
