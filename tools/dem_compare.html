@@ -201,6 +201,10 @@
     min-width: 0; flex: 1 1 320px;
   }
   #statusbar .coord { color: var(--muted); }
+  #statusbar .tile {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text);
+  }
   #statusbar #progress {
     position: static; min-width: 250px; background: none; border: 0; padding: 0;
     display: flex; align-items: center; gap: 10px; font-size: 11px;
@@ -1904,10 +1908,14 @@ async function refreshReadout() {
   if (delta !== null && parts.length === 2) {
     parts.push(`Δ: ${delta >= 0 ? "+" : ""}${delta.toFixed(1)} м`);
   }
+  // Имя 1°-тайла, в который попадает курсор (или центр карты).
+  const tileLat = Math.min(89, Math.max(-90, Math.floor(lat)));
+  const tileLon = Math.min(179, Math.max(-180, Math.floor(lon)));
+  const tile = tileLabel(tileLat, tileLon);
   const readout = document.getElementById("readout");
   readout.innerHTML =
     `<span class="coord">${lon.toFixed(5)}°, ${lat.toFixed(5)}°</span> · ` +
-    parts.join(" · ");
+    `<span class="tile">${tile}</span> · ` + parts.join(" · ");
   readout.title = readout.textContent;
 }
 
