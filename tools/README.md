@@ -11,9 +11,30 @@
 | `run_qgis.sh` | сборка + установка + запуск QGIS с открытой панелью |
 | `check_pbf_coverage.py` | сверяет подготовленную выгрузку с эталоном osmium |
 | `check_peak_placement.py` | проверяет положение пиков OSM по рельефу |
+| `bench_label_line.py` | замер скорости линий подписи и сравнение со старой цепочкой GRASS |
 | `render_peak_review.py` | рисует фрагменты карты с изолиниями по CSV разметки |
 | `make_peak_map.py` | собирает интерактивную карту пиков по CSV |
 | `dem_compare_server.py` + `dem_compare.html` | сравнение наборов DEM между собой |
+
+## Замер скорости линий подписи
+
+`tools/bench_label_line.py` считает время построения линий подписи на целых
+слоях проекта. По умолчанию берутся `~/qgis_projects/bike-marafon/vector`
+и слои `wood`, `wetland`, `water`, `bay_polygon`, `strait`; каталог можно
+задать переменной `QGIS_XTOPO_BENCH_VECTOR` или ключом `--vector`.
+
+```sh
+python3 tools/bench_label_line.py --vector ~/qgis_projects/bike-marafon/vector
+python3 tools/bench_label_line.py --vector ... --layer glacier --main-flow
+python3 tools/bench_label_line.py --vector ... --grass
+```
+
+`--main-flow` включает поиск концов по длине фигуры — так обрабатываются
+ледники. `--grass` дополнительно прогоняет прежнюю цепочку Processing
+(`fix` → `polygonstolines` → `buffer` ×2 → `simplify` → GRASS skeleton →
+`simplify` → `smooth` → `dissolve`) и показывает ускорение; для неё нужен
+установленный GRASS. Рабочие данные только читаются, промежуточные файлы
+GRASS удаляются.
 
 ## Сравнение DEM-наборов
 

@@ -38,8 +38,10 @@ HOLE_SHARE = 0.02
 # Шаг прореживания готовой линии, в ячейках растра.
 FINAL_CELLS = 3.0
 MAX_POINTS = 200
-# Крупные изогнутые объекты: концы ищем по расстоянию вдоль фигуры.
-GEODESIC_CELLS = 32
+# Ледники: концы ищем по расстоянию вдоль фигуры, а сетка не грубее
+# этого — иначе узкие ветки и дыры теряются и линия идёт не по главному
+# потоку.
+GEODESIC_CELLS = 64
 GEODESIC_TARGET = 24
 WIDTH_BONUS = 45
 METRES_LONGITUDE = 111320.0
@@ -94,7 +96,10 @@ def label_line(geom, main_flow=False):
     part, _area = max(measured, key=lambda item: item[1])
     try:
         centre = part.Centroid()
-        return _axis_of_part(part, grid_size(part, centre.GetY()), main_flow)
+        cells = grid_size(part, centre.GetY())
+        if main_flow:
+            cells = max(cells, GEODESIC_CELLS)
+        return _axis_of_part(part, cells, main_flow)
     except Exception:  # noqa: BLE001 - битая геометрия не должна ронять слой
         return []
 

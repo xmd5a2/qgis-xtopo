@@ -633,6 +633,7 @@ qgis-xtopo/            корень = корень плагина QGIS
 python3 tools/build_plugin.py             # сборка dist/qgis_xtopo-<версия>.zip
 python3 tools/build_plugin.py --install   # сборка + обновление профиля QGIS
 ./tools/run_qgis.sh                       # сборка + установка + запуск QGIS с открытой панелью
+python3 tools/bench_label_line.py         # замер скорости линий подписи
 ```
 
 Шаблон проекта хранится один раз — в корне репозитория (`automap.qgz`).

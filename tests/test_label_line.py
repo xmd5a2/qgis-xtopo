@@ -514,6 +514,31 @@ class AutomapCasesTest(unittest.TestCase):
         self.assertGreater(new_y, old_y + 0.005)
         self.assertGreater(new_y, 46.035)
 
+    def test_stelligletscher_runs_to_upper_right_corner(self):
+        geometry = self._load("glacier", "way/34561345")
+        line = label_line.label_line(geometry, main_flow=True)
+        self.assertGreaterEqual(len(line), 2)
+
+        dense = _dense(line, step=0.00003)
+        probe = ogr.Geometry(ogr.wkbPoint)
+        outside = 0
+        for x, y in dense:
+            probe.SetPoint_2D(0, x, y)
+            if geometry.Distance(probe) * METRES_PER_DEGREE > 15.0:
+                outside += 1
+        self.assertLess(outside / len(dense), 0.05)
+
+        points = np.asarray(line)
+        # старт — у нижнего края основной лопасти, а не на левом языке
+        self.assertLess(points[0][1], 46.1515)
+        self.assertGreater(points[0][0], 7.742)
+        # конец — в правом верхнем углу ледника
+        self.assertGreater(points[-1][0], 7.748)
+        self.assertGreater(points[-1][1], 46.1595)
+        # линия проходит вдоль всего ледника, а не срезает его по прямой
+        self.assertGreater(float(np.sum(np.hypot(*np.diff(points, axis=0).T))),
+                           0.014)
+
 
 if __name__ == "__main__":
     unittest.main()
