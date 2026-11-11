@@ -1065,6 +1065,13 @@ function reliefAvailable() {
   return state.zoom >= RELIEF_MIN_ZOOM;
 }
 
+// Шторка видна только там, где рисуется рельеф: ниже z9 и при полностью
+// скрытом рельефе её нет, значит нет и зоны перетаскивания.
+function dividerVisible() {
+  return state.compare && state.a && state.b && reliefAvailable() &&
+    (!state.osm || state.reliefAlpha > 0.002);
+}
+
 // Подложка всегда непрозрачная; ползунок задаёт, насколько сильно её
 // перекрывает рельеф. Ниже z9 рельефа нет, поэтому кнопка OSM заблокирована
 // в нажатом состоянии, а ползунок — в выключенном.
@@ -1357,7 +1364,8 @@ function paintCoverage(data, color, left, top) {
 // Границы охвата: в шторке A слева, B справа; в разности — оба.
 function drawCoverage(left, top, w, h) {
   if (!coverageVisible()) return;
-  if (state.compare && state.a && state.b) {
+  // Делим охват по половинам только когда шторка действительно видна.
+  if (dividerVisible()) {
     const split = Math.round(w * state.divider);
     ctx.save();
     ctx.beginPath();
@@ -1373,7 +1381,8 @@ function drawCoverage(left, top, w, h) {
     ctx.restore();
     return;
   }
-  if (state.diff) {
+  // Шторки нет (z<9, разность или одиночный набор): оба охвата в одном окне.
+  if (state.compare || state.diff) {
     paintCoverage(state.coverage.a, "#6fb3d2", left, top);
     paintCoverage(state.coverage.b, "#e0a458", left, top);
     return;
@@ -2289,7 +2298,7 @@ canvas.addEventListener("pointerdown", event => {
   // Захват границы шторки.
   const rect = canvas.getBoundingClientRect();
   const split = viewSize().w * state.divider;
-  if (state.compare && state.a && state.b &&
+  if (dividerVisible() &&
       Math.abs(event.clientX - rect.left - split) < 14) {
     state.dragDivider = true;
     return;
@@ -2303,6 +2312,7 @@ canvas.addEventListener("pointerdown", event => {
 });
 
 canvas.addEventListener("pointermove", event => {
+  if (state.dragDivider && !dividerVisible()) state.dragDivider = false;
   const point = lonLatAt(event.clientX, event.clientY);
   state.cursor = point;
   if (state.profileMode && state.profilePts.length === 1) {
@@ -2334,7 +2344,7 @@ canvas.addEventListener("pointermove", event => {
     // Курсор у разделителя шторки — двигаем границу.
     const {w} = viewSize();
     const split = w * state.divider;
-    if (state.compare && state.a && state.b &&
+    if (dividerVisible() &&
         Math.abs(event.clientX - canvas.getBoundingClientRect().left - split) < 14) {
       canvas.style.cursor = "col-resize";
     } else {
