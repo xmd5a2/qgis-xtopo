@@ -2710,11 +2710,17 @@ class Handler(BaseHTTPRequestHandler):
         raw = query.get("dir", [""])[0].strip()
         path = Path(raw).expanduser() if raw else Path.home()
         try:
-            path = path.resolve()
+            # Не разыменовываем симлинки: пользователь должен видеть и
+            # выбирать тот путь, который он ввёл (terrain_src/...), а не
+            # длинный путь sshfs-монтирования.
+            path = Path(os.path.abspath(str(path)))
         except OSError:
             path = Path.home()
         if not path.is_dir():
-            path = path.parent if path.parent.is_dir() else Path.home()
+            # Введённый вручную путь не должен молча заменяться домашним
+            # каталогом: иначе «выбрать» индексирует не то, что просили.
+            self._json({"error": f"нет каталога: {raw}"}, code=400)
+            return
         try:
             children = sorted(path.iterdir(),
                               key=lambda item: item.name.lower())

@@ -77,6 +77,9 @@
     font: 11px ui-monospace, monospace; color: var(--muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  .browser-go { display: flex; gap: 6px; margin-top: 6px; }
+  .browser-go input { flex: 1; min-width: 0; font: 11px ui-monospace, monospace; }
+  #browser-note { min-height: 15px; margin-top: 4px; }
   .browser-list { flex: 1; overflow-y: auto; padding: 6px; min-height: 180px; }
   .browser-list button {
     display: block; width: 100%; text-align: left; border: 0;
@@ -353,9 +356,6 @@
     <div class="note" id="local-note">GeoTIFF, HGT, VRT. Локальные данные,
       прогревать не нужно. Два каталога можно сравнивать между собой.</div>
 
-    <h2>Легенда высот</h2>
-    <div class="legend-bar"></div>
-    <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
     <label class="coverage-toggle"
            title="Границы охвата наборов A и B по именам 1°-тайлов (z5–z9)">
       <input id="coverage" type="checkbox" checked>
@@ -363,9 +363,16 @@
     </label>
     <div class="note" id="coverage-note">охват: —</div>
 
+    <h2>Журнал тайлов</h2>
+    <div id="log" class="note">пока ничего не загружено</div>
+
     <details id="help">
       <summary>Как читать</summary>
       <div class="note">
+        <b>Легенда высот</b>
+        <div class="legend-bar"></div>
+        <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
+        <br>
         Колесо — масштаб, перетаскивание — сдвиг. <b>1:1</b> приближает до
         пикселя источника. В режиме «шторка» слева набор A, справа B — границу
         тянут мышью. «Δ высот» показывает разность B − A: синий — ниже,
@@ -399,9 +406,6 @@
         <b>GLO-30</b> не отдаёт тайлы Армении, Азербайджана и СЗ Ирана.
       </div>
     </details>
-
-    <h2>Журнал тайлов</h2>
-    <div id="log" class="note">пока ничего не загружено</div>
   </aside>
 
   <div id="sidebar-rail">
@@ -432,6 +436,12 @@
     <div class="browser-head">
       <h3>Каталог с рельефом</h3>
       <div class="browser-path" id="browser-path">—</div>
+      <div class="browser-go">
+        <input id="browser-input" type="text" spellcheck="false"
+               placeholder="/home/user/terrain">
+        <button id="browser-go">перейти</button>
+      </div>
+      <div class="note" id="browser-note"></div>
     </div>
     <div class="browser-list" id="browser-list"></div>
     <div class="browser-actions">
@@ -2521,6 +2531,9 @@ document.getElementById("relief-alpha").addEventListener("change", writeUrl);
 // ---------------------------------------------------------------------------
 let browserKey = "local";
 let browserPath = "";
+// Медленный ответ на первый список не должен перетирать путь, который уже
+// ввели в поле.
+let browseRequest = 0;
 
 function setLocalPath(key, directory) {
   const label = document.getElementById(`path-${key}`);
@@ -2529,25 +2542,44 @@ function setLocalPath(key, directory) {
   label.title = directory || "";
 }
 
+function browserNote(text) {
+  const note = document.getElementById("browser-note");
+  if (note) note.textContent = text || "";
+}
+
 async function openBrowser(key) {
   browserKey = key;
+  browserPath = "";
   document.getElementById("browser").hidden = false;
+  document.getElementById("browser-path").textContent = "—";
+  document.getElementById("browser-input").value = "";
+  document.getElementById("browser-choose").disabled = true;
+  browserNote("");
   const known = state.datasets[key] && state.datasets[key].directory;
   await browseTo(known || "");
 }
 
 async function browseTo(dir) {
-  const note = document.getElementById("local-note");
+  const request = ++browseRequest;
+  const choose = document.getElementById("browser-choose");
+  choose.disabled = true;
+  browserNote("загрузка…");
   try {
     const response = await fetch(
       `/api/browse?dir=${encodeURIComponent(dir)}`);
     const data = await response.json();
+    // Пока шёл запрос, пользователь мог ввести другой путь.
+    if (request !== browseRequest) return;
     if (!response.ok) {
-      note.textContent = data.error || "не удалось прочитать каталог";
+      browserPath = "";
+      browserNote(data.error || "не удалось прочитать каталог");
       return;
     }
     browserPath = data.path;
     document.getElementById("browser-path").textContent = data.path;
+    document.getElementById("browser-input").value = data.path;
+    browserNote("");
+    choose.disabled = false;
     const up = document.getElementById("browser-up");
     up.disabled = !data.parent;
     up.dataset.dir = data.parent || "";
@@ -2567,24 +2599,35 @@ async function browseTo(dir) {
       list.appendChild(button);
     });
   } catch (error) {
-    note.textContent = "сервер не ответил";
+    if (request !== browseRequest) return;
+    browserPath = "";
+    browserNote("сервер не ответил");
   }
 }
 
 function closeBrowser() {
+  // Ответы на запросы закрытого окна больше не нужны.
+  browseRequest += 1;
   document.getElementById("browser").hidden = true;
 }
 
 async function chooseBrowserDir() {
+  if (!browserPath) {
+    browserNote("сначала выберите каталог");
+    return;
+  }
   const note = document.getElementById("local-note");
-  note.textContent = "индексирую…";
+  const choose = document.getElementById("browser-choose");
+  choose.disabled = true;
+  browserNote("индексирую…");
   try {
     const response = await fetch(
       `/api/local?key=${encodeURIComponent(browserKey)}` +
       `&dir=${encodeURIComponent(browserPath)}`);
     const info = await response.json();
     if (!response.ok) {
-      note.textContent = info.error || "не удалось прочитать каталог";
+      choose.disabled = false;
+      browserNote(info.error || "не удалось прочитать каталог");
       return;
     }
     closeBrowser();
@@ -2603,7 +2646,8 @@ async function chooseBrowserDir() {
     refreshProfile();
     writeUrl();
   } catch (error) {
-    note.textContent = "сервер не ответил";
+    choose.disabled = false;
+    browserNote("сервер не ответил");
   }
 }
 
@@ -2613,6 +2657,15 @@ document.querySelectorAll(".local-pick").forEach(button => {
 document.getElementById("browser-cancel").addEventListener("click", closeBrowser);
 document.getElementById("browser-up").addEventListener("click", event => {
   browseTo(event.target.dataset.dir || "");
+});
+document.getElementById("browser-go").addEventListener("click", () => {
+  browseTo(document.getElementById("browser-input").value.trim());
+});
+document.getElementById("browser-input").addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    browseTo(event.target.value.trim());
+  }
 });
 document.getElementById("browser-choose").addEventListener("click", chooseBrowserDir);
 document.getElementById("browser").addEventListener("click", event => {
