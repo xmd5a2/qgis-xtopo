@@ -564,6 +564,22 @@ class LabelAxisTest(unittest.TestCase):
             dataset = None
 
 
+class LabelAxisRecipeTest(unittest.TestCase):
+    """Рецепт подписи не должен заранее сглаживать контур."""
+
+    def test_label_axis_uses_unsmoothed_geometry(self):
+        # buffer/simplify перед label_axis глушают узкие ветки ледников
+        # (у Allalingletscher линия уходила под надпись «3346 м» вместо
+        # главной ветки): алгоритм сам упрощает контур, как ему нужно.
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        for name in ("glacier", "bay_polygon", "wetland", "wood", "strait"):
+            steps = [operation for operation, _ in recipe_for(name).steps]
+            axis = steps.index("label_axis")
+            self.assertNotIn("buffer", steps[:axis], name)
+            self.assertNotIn("simplify", steps[:axis], name)
+
+
 class DissolveFieldsTest(unittest.TestCase):
     """Растворение по пустому или отсутствующему полю не сливает слой."""
 

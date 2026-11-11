@@ -450,7 +450,6 @@ class AutomapCasesTest(unittest.TestCase):
 
     def test_gruebu_line_is_lower_than_grass(self):
         geometry = self._load("glacier", "relation/14862257")
-        old = self._load("glacier_names", "relation/14862257")
         line = label_line.label_line(geometry, main_flow=True)
         self.assertGreaterEqual(len(line), 2)
 
@@ -463,19 +462,13 @@ class AutomapCasesTest(unittest.TestCase):
                 outside += 1
         self.assertLess(outside / len(dense), 0.05)
 
-        old_points = []
-        for index in range(old.GetGeometryCount()):
-            part = old.GetGeometryRef(index)
-            old_points += [part.GetPoint_2D(i)
-                           for i in range(part.GetPointCount())]
-        old_min = min(point[1] for point in old_points)
         new_min = min(point[1] for point in line)
-        # новая линия должна уходить в нижнюю лопасть заметно ниже старой
-        self.assertLess(new_min, old_min - 0.0005)
+        # Старая GRASS-линия заканчивалась на 46.167968: новая должна
+        # уходить в нижнюю лопасть заметно ниже.
+        self.assertLess(new_min, 46.1675)
 
     def test_allalingletscher_follows_upper_branch(self):
         geometry = self._load("glacier", "relation/77250")
-        old = self._load("glacier_names", "relation/77250")
         line = label_line.label_line(geometry, main_flow=True)
         self.assertGreaterEqual(len(line), 2)
 
@@ -488,31 +481,26 @@ class AutomapCasesTest(unittest.TestCase):
                 outside += 1
         self.assertLess(outside / len(dense), 0.05)
 
-        old_points = []
-        for index in range(old.GetGeometryCount()):
-            part = old.GetGeometryRef(index)
-            old_points += [part.GetPoint_2D(i)
-                           for i in range(part.GetPointCount())]
-        old_points = np.asarray(old_points)
+        points = np.asarray(line)
 
-        def y_at(points, x):
+        def y_at(x):
             order = np.argsort(points[:, 0])
-            points = points[order]
-            for index in range(1, len(points)):
-                if points[index - 1, 0] <= x <= points[index, 0]:
-                    span = points[index, 0] - points[index - 1, 0]
-                    share = (x - points[index - 1, 0]) / (span or 1e-12)
-                    return points[index - 1, 1] + share * (
-                        points[index, 1] - points[index - 1, 1])
+            ordered = points[order]
+            for index in range(1, len(ordered)):
+                if ordered[index - 1, 0] <= x <= ordered[index, 0]:
+                    span = ordered[index, 0] - ordered[index - 1, 0]
+                    share = (x - ordered[index - 1, 0]) / (span or 1e-12)
+                    return ordered[index - 1, 1] + share * (
+                        ordered[index, 1] - ordered[index - 1, 1])
             return None
 
-        new_y = y_at(np.asarray(line), 7.906)
-        old_y = y_at(old_points, 7.906)
+        new_y = y_at(7.906)
         self.assertIsNotNone(new_y)
-        self.assertIsNotNone(old_y)
-        # главная ветка идёт выше старой GRASS-линии и надписи 3346 м
-        self.assertGreater(new_y, old_y + 0.005)
+        # главная ветка идёт выше надписи 3346 м
         self.assertGreater(new_y, 46.035)
+        # и заканчивается в правой верхней части ледника
+        self.assertGreater(points[-1][0], 7.94)
+        self.assertGreater(points[-1][1], 46.045)
 
     def test_stelligletscher_runs_to_upper_right_corner(self):
         geometry = self._load("glacier", "way/34561345")
