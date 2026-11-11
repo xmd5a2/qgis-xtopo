@@ -196,7 +196,8 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   иначе берётся более грубый шаг. `download_sonny_dem` — тот же код с
   приоритетом `sonny` → `cop30` → `srtm`.
 - **Sonny DTM — один источник из нескольких наборов** (`core/sonny.py`):
-  `at-05s`, `ch-05s` (0,5″), `europe-1s`, `europe-3s`. Список тайлов
+  `at-05s`, `ch-05s` (0,5″), `europe-1s`. Набор 3″ (около 90 м) не
+  используется: где нет 1″, фоном идёт Copernicus 30 м. Список тайлов
   берётся из Google Drive (`embeddedfolderview`, коллективным папкам нужен
   `resourcekey`), кэшируется на неделю в `~/.cache/qgis-xtopo/sonny` и
   обновляется в фоновом потоке при старте панели. Скачанные тайлы лежат в

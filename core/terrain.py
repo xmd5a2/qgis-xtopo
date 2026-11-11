@@ -715,7 +715,7 @@ def download_sonny_dem(bbox, destination, progress=None, cancel=None,
     """Скачивает рельеф Sonny DTM, а недостающие тайлы — фоном Copernicus.
 
     Набор выбран один, но тайлы в нём могут быть разной подробности:
-    0,5″ для Австрии и Швейцарии, 1″ и 3″ для остальной Европы.
+    0,5″ для Австрии и Швейцарии, 1″ для остальной Европы.
     """
     return download_auto_dem(
         bbox, destination, progress=progress, cancel=cancel,

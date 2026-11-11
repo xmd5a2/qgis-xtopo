@@ -1023,8 +1023,7 @@ class SonnyDatasetTest(unittest.TestCase):
         from qgis_xtopo.core import sonny
 
         catalogue = {
-            "europe-1s": {"N46E009.zip": "id1"},
-            "europe-3s": {"N46E009.zip": "id3", "N47E010.zip": "id4"},
+            "europe-1s": {"N46E009.zip": "id1", "N47E010.zip": "id4"},
             "at-05s": {"N46E009.zip": "id05"},
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -1032,8 +1031,20 @@ class SonnyDatasetTest(unittest.TestCase):
             tiles = sonny.catalogue_tiles(directory)
             assignment = sonny.assign_datasets(catalogue, tiles)
         self.assertEqual(tiles[(46, 9)], "at-05s")
-        self.assertEqual(tiles[(47, 10)], "europe-3s")
+        self.assertEqual(tiles[(47, 10)], "europe-1s")
         self.assertEqual(assignment[(46, 9)], "at-05s")
+
+    def test_catalogue_skips_unknown_datasets(self):
+        from qgis_xtopo.core import sonny
+
+        catalogue = {
+            "europe-1s": {"N46E009.zip": "id1"},
+            "europe-3s": {"N47E010.zip": "id3"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            sonny.store_catalogue(catalogue, directory)
+            tiles = sonny.catalogue_tiles(directory)
+        self.assertEqual(tiles, {(46, 9): "europe-1s"})
 
     def test_catalogue_age_and_missing_cache(self):
         from qgis_xtopo.core import sonny

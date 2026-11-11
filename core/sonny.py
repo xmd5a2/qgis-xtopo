@@ -1,9 +1,10 @@
 """Рельеф Sonny: LiDAR DTM Европы с Google Drive.
 
 Наборы разложены по общим папкам Google Drive: коллективная «Европа 1″»
-и «Европа 3″», а также отдельные папки Австрии и Швейцарии с более
-подробной моделью 0,5″.  Плагин склеивает их в один источник «Sonny DTM»
-и сам выбирает набор под каждый тайл охвата.
+и отдельные папки Австрии и Швейцарии с более подробной моделью 0,5″.
+Плагин склеивает их в один источник «Sonny DTM» и сам выбирает набор
+под каждый тайл охвата.  Набор 3″ (около 90 м) не используется: там,
+где нет 1″, фоном идёт Copernicus GLO-30 с 30 м.
 
 Списки файлов читаются одним запросом к ``embeddedfolderview`` и
 кэшируются на диске: при старте плагина они обновляются в фоне, чтобы
@@ -12,7 +13,7 @@
 Особенности формата:
 
 * ``.hgt`` без заголовка, big-endian int16, размер ``N×N`` (3601 для
-  1″, 7201 для 0,5″, 1201 для 3″);
+  1″, 7201 для 0,5″);
 * GDAL читает ``.hgt`` только если имя файла соответствует SRTM
   (``N46E009.hgt``) — из имени берётся привязка;
 * драйвер SRTMHGT понимает только 1201 и 3601, поэтому для тайлов
@@ -51,13 +52,12 @@ DOWNLOAD = (
 # Сколько живёт кэш списка тайлов, дней.
 CACHE_DAYS = 7
 
-# Ширина тайла в точках: 1″ — 3601, 0,5″ — 7201, 3″ — 1201.
+# Ширина тайла в точках: 1″ — 3601, 0,5″ — 7201.
 SAMPLES_05 = 7201
 SAMPLES_1 = 3601
-SAMPLES_3 = 1201
 
 # Размеры, которые драйвер SRTMHGT понимает без обёртки.
-SRTMHGT_SAMPLES = (SAMPLES_1, SAMPLES_3)
+SRTMHGT_SAMPLES = (SAMPLES_1,)
 
 
 @dataclass(frozen=True)
@@ -106,15 +106,6 @@ DATASETS = (
         step=1.0 / 3600.0,
         samples=SAMPLES_1,
         rank=2,
-    ),
-    SonnyDataset(
-        key="europe-3s",
-        title="Sonny DTM 3″ (Европа)",
-        folder_id="0BxphPoRgwhnoekRQZUZJT2ZRX2M",
-        resource_key="0-j5_ZwbdfBp0KnGoFixPm9A",
-        step=3.0 / 3600.0,
-        samples=SAMPLES_3,
-        rank=3,
     ),
 )
 
@@ -249,7 +240,11 @@ def refresh_catalogue(directory=None, progress=None):
     интерфейс.  Ошибка одного набора не мешает остальным, а его прежний
     список остаётся в кэше.
     """
-    datasets = load_catalogue(directory)
+    datasets = {
+        key: value
+        for key, value in load_catalogue(directory).items()
+        if key in DATASET_BY_KEY
+    }
     updated = False
     for dataset in DATASETS:
         if progress:
@@ -308,8 +303,8 @@ def dataset_cells(catalogue, dataset_key):
 def catalogue_tiles(directory=None):
     """Покрытие тайлами: ``тайл → набор``.
 
-    Для одного тайла подходит лучший набор: 0,5″ важнее 1″, а 1″
-    важнее 3″.  Наборы сравниваются по ``rank``.
+    Для одного тайла подходит лучший набор: 0,5″ важнее 1″.
+    Наборы сравниваются по ``rank``.
     """
     result = {}
     for dataset_key, listing in load_catalogue(directory).items():
@@ -415,8 +410,8 @@ def _extract(zip_path, destination):
 def download_tile(dataset, file_id, destination, progress=None):
     """Скачивает один тайл и возвращает путь к файлу для чтения GDAL.
 
-    Для 1″ и 3″ драйвер SRTMHGT читает ``.hgt`` сам, для 0,5″
-    возвращается VRT-обёртка.
+    Для 1″ драйвер SRTMHGT читает ``.hgt`` сам, для 0,5″ возвращается
+    VRT-обёртка.
     """
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
