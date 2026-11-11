@@ -1171,6 +1171,28 @@ class SonnyDatasetTest(unittest.TestCase):
         self.assertIsNotNone(age)
         self.assertLess(age, 1.0)
 
+    def test_hgt_vrt_is_reused_until_hgt_changes(self):
+        import os
+
+        from qgis_xtopo.core import sonny
+
+        with tempfile.TemporaryDirectory() as directory:
+            hgt = Path(directory) / "N47E011.hgt"
+            hgt.write_bytes(b"\x00" * 18)  # 3×3 int16
+            vrt = sonny.hgt_vrt(hgt, 0.5 / 3600.0, 3)
+            before = vrt.stat()
+            again = sonny.hgt_vrt(hgt, 0.5 / 3600.0, 3)
+            after = again.stat()
+            self.assertEqual(vrt, again)
+            # Свежий VRT не перезаписывается: параллельный рендер соседних
+            # тайлов не должен заставать файл в момент записи.
+            self.assertEqual(before.st_ino, after.st_ino)
+            self.assertEqual(before.st_mtime_ns, after.st_mtime_ns)
+            # Новый .hgt (скачали заново) требует нового VRT.
+            os.utime(hgt, (before.st_atime + 10, before.st_mtime + 10))
+            sonny.hgt_vrt(hgt, 0.5 / 3600.0, 3)
+            self.assertNotEqual(vrt.stat().st_ino, before.st_ino)
+
     def test_hgt_vrt_matches_srtm_georeferencing(self):
         import numpy
         from osgeo import gdal

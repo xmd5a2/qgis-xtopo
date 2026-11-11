@@ -95,7 +95,8 @@ SCALED_MODES = ("elevation", "contours")
 CACHE_VERSION = 5
 # Версия только готовых PNG: отмывка и гипсометрия меняются чаще, чем
 # исходные окна DEM. Отдельный номер не заставит заново качать prepared.
-TILE_CACHE_VERSION = 7
+# 8 — чёрные тайлы Sonny, нарисованные при гонке перезаписи VRT.
+TILE_CACHE_VERSION = 8
 # Подгрузка тайла с запасом, чтобы шов между тайлами не был виден.
 TILE_OVERLAP = 1
 # Ограничение на размер промежуточного растра (пиксели по стороне).
@@ -315,7 +316,9 @@ DATASETS = {
                 "Европа. Тайлы скачиваются с Google Drive.",
         "attribution": "LiDAR Digital Terrain Models of Europe by Sonny — "
                        "https://sonny.4lima.de (CC BY 4.0)",
-        "src_nodata": None,
+        # Вода и пустоты у Sonny — нули (это данные), а -32768 встречается
+        # только на краях тайлов.
+        "src_nodata": -32768,
         "resolution_m": 30.0,
     },
 }

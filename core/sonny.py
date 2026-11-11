@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -362,13 +363,26 @@ def hgt_vrt(hgt_path, step, samples):
     """
     path = Path(hgt_path)
     vrt_path = path.with_suffix(".vrt")
+    # Свежий VRT уже описывает этот файл: перезапись не нужна.  Это важно
+    # при параллельном рендере соседних тайлов — GDAL не должен открывать
+    # файл в момент записи.
+    try:
+        if (vrt_path.stat().st_mtime >= path.stat().st_mtime and
+                vrt_path.stat().st_size > 0):
+            text = vrt_path.read_text(encoding="utf-8", errors="replace")
+            # Недописанный VRT от прерванной записи не годится: GDAL его
+            # не откроет, поэтому такой файл перезаписываем.
+            if "<VRTDataset" in text and "</VRTDataset>" in text:
+                return vrt_path
+    except OSError:
+        pass
     tile = tile_from_name(path.name)
     if tile is None:
         raise ValueError(f"unexpected tile name: {path.name}")
     lat, lon = tile
     origin_x = lon - step / 2.0
     origin_y = lat + 1.0 + step / 2.0
-    vrt_path.write_text(
+    content = (
         "<VRTDataset rasterXSize=\"{samples}\" rasterYSize=\"{samples}\">\n"
         "  <SRS>EPSG:4326</SRS>\n"
         "  <GeoTransform>{ox}, {step}, 0.0, {oy}, 0.0, {ystep}</GeoTransform>\n"
@@ -388,9 +402,14 @@ def hgt_vrt(hgt_path, step, samples):
             step=step,
             name=path.name,
             line=samples * 2,
-        ),
-        encoding="utf-8",
+        ))
+    # Уникальное временное имя и атомарная замена: два потока могут
+    # одновременно создавать VRT одного тайла.
+    temporary = vrt_path.with_name(
+        f"{vrt_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(vrt_path)
     return vrt_path
 
 
