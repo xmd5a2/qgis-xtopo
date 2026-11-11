@@ -473,6 +473,47 @@ class AutomapCasesTest(unittest.TestCase):
         # новая линия должна уходить в нижнюю лопасть заметно ниже старой
         self.assertLess(new_min, old_min - 0.0005)
 
+    def test_allalingletscher_follows_upper_branch(self):
+        geometry = self._load("glacier", "relation/77250")
+        old = self._load("glacier_names", "relation/77250")
+        line = label_line.label_line(geometry, main_flow=True)
+        self.assertGreaterEqual(len(line), 2)
+
+        dense = _dense(line, step=0.00003)
+        probe = ogr.Geometry(ogr.wkbPoint)
+        outside = 0
+        for x, y in dense:
+            probe.SetPoint_2D(0, x, y)
+            if geometry.Distance(probe) * METRES_PER_DEGREE > 15.0:
+                outside += 1
+        self.assertLess(outside / len(dense), 0.05)
+
+        old_points = []
+        for index in range(old.GetGeometryCount()):
+            part = old.GetGeometryRef(index)
+            old_points += [part.GetPoint_2D(i)
+                           for i in range(part.GetPointCount())]
+        old_points = np.asarray(old_points)
+
+        def y_at(points, x):
+            order = np.argsort(points[:, 0])
+            points = points[order]
+            for index in range(1, len(points)):
+                if points[index - 1, 0] <= x <= points[index, 0]:
+                    span = points[index, 0] - points[index - 1, 0]
+                    share = (x - points[index - 1, 0]) / (span or 1e-12)
+                    return points[index - 1, 1] + share * (
+                        points[index, 1] - points[index - 1, 1])
+            return None
+
+        new_y = y_at(np.asarray(line), 7.906)
+        old_y = y_at(old_points, 7.906)
+        self.assertIsNotNone(new_y)
+        self.assertIsNotNone(old_y)
+        # главная ветка идёт выше старой GRASS-линии и надписи 3346 м
+        self.assertGreater(new_y, old_y + 0.005)
+        self.assertGreater(new_y, 46.035)
+
 
 if __name__ == "__main__":
     unittest.main()
