@@ -387,7 +387,8 @@ def _recipe_dependencies(name, producers):
 class _GpkgWriter:
     """Потоковая запись в GeoPackage одной транзакцией."""
 
-    def __init__(self, path, layer_name, definition, spatial_ref=None):
+    def __init__(self, path, layer_name, definition, spatial_ref=None,
+                 geometry_type=None):
         from osgeo import ogr
 
         self.path = Path(path)
@@ -395,7 +396,8 @@ class _GpkgWriter:
         self.driver = ogr.GetDriverByName("GPKG")
         self.dataset = self.driver.CreateDataSource(str(self.path))
         self.layer = self.dataset.CreateLayer(
-            layer_name, spatial_ref, ogr.wkbUnknown
+            layer_name, spatial_ref,
+            ogr.wkbUnknown if geometry_type is None else geometry_type,
         )
         for index in range(definition.GetFieldCount()):
             field = definition.GetFieldDefn(index)
@@ -504,10 +506,9 @@ class Pipeline:
         dependencies = {
             name: _recipe_dependencies(name, producers) for name in query_names
         }
-        serial = {
-            name for name in query_names
-            if any(operation == "skeleton" for operation, _ in recipe_for(name).steps)
-        }
+        # Раньше здесь были рецепты со скелетом GRASS: он не переносит
+        # параллельные вызовы. Свой расчёт линии подписи потокобезопасен.
+        serial = set()
 
         lock = threading.Lock()
 
@@ -762,21 +763,10 @@ class Pipeline:
                 "LAYERS": layers,
                 "OUTPUT": self._temp_path(name, "merged"),
             })
-        if operation == "skeleton":
-            if not self.runner.has_algorithm("grass7:v.voronoi.skeleton"):
-                self.warnings.append(
-                    f"{name}: GRASS v.voronoi.skeleton is unavailable; names layer skipped"
-                )
-                return current
-            original = _source_fields(current)
-            output = self._algorithm("grass7:v.voronoi.skeleton", {
-                "input": current,
-                "smoothness": parameters.get("smoothness", 0.25),
-                "thin": parameters.get("thin", -1),
-                "-s": True,
-                "output": self._temp_path(name, "skel"),
-            })
-            return self._restore_field_names(name, output, original)
+        if operation == "label_axis":
+            return self._label_axis(
+                name, current, bool(parameters.get("main_flow", False))
+            )
         if operation == "split_layer":
             return self._split_layer(name, current)
         raise PipelineError(f"Unknown pipeline operation: {operation}")
@@ -805,66 +795,6 @@ class Pipeline:
             if not path.exists() or not _layer_has_features(path):
                 raise PipelineError(f"{algorithm} produced an empty or unreadable layer")
         return output
-
-    def _restore_field_names(self, name, path, original_names):
-        """Возвращает слою исходные имена полей.
-
-        GRASS при импорте атрибутов переименовывает поля: «name:ru» становится
-        «name_ru», «@id» — «xid». Подписи в шаблоне проекта ищут поля по
-        исходным именам тегов OSM, поэтому после скелета имена возвращаются.
-        """
-        from osgeo import ogr
-
-        if not original_names:
-            return path
-        source = ogr.Open(str(path))
-        if source is None:
-            return path
-        layer = source.GetLayer(0)
-        definition = layer.GetLayerDefn()
-        fields = [
-            definition.GetFieldDefn(index).GetName()
-            for index in range(definition.GetFieldCount())
-        ]
-        reverse = {}
-        for original in original_names:
-            mangled = _grass_field_name(original)
-            if mangled != original and mangled not in reverse:
-                reverse[mangled] = original
-        renames = {
-            field: reverse[field]
-            for field in fields
-            if field in reverse and reverse[field] not in fields
-        }
-        if not renames:
-            source = None
-            return path
-        destination = self._temp_path(name, "fields")
-        destination.unlink(missing_ok=True)
-        driver = ogr.GetDriverByName("GPKG")
-        output = driver.CreateDataSource(str(destination))
-        target = output.CreateLayer(
-            layer.GetName(), layer.GetSpatialRef(), layer.GetGeomType()
-        )
-        for index in range(definition.GetFieldCount()):
-            field = definition.GetFieldDefn(index)
-            target.CreateField(
-                ogr.FieldDefn(
-                    renames.get(field.GetName(), field.GetName()),
-                    field.GetType(),
-                )
-            )
-        for feature in layer:
-            item = ogr.Feature(target.GetLayerDefn())
-            for index in range(definition.GetFieldCount()):
-                item.SetField(index, feature.GetField(index))
-            geometry = feature.GetGeometryRef()
-            if geometry is not None:
-                item.SetGeometry(geometry)
-            target.CreateFeature(item)
-        output = None
-        source = None
-        return destination
 
     def _save(self, name, current, suffix="", layer_name=None, target_crs=None):
         destination = self.config.vector_dir / f"{name}{suffix}.sqlite"
@@ -940,6 +870,49 @@ class Pipeline:
             )
         return writer.path
 
+    def _label_axis(self, name, current, main_flow=False):
+        """Линия подписи вдоль полигона: свой алгоритм вместо скелета GRASS."""
+        from osgeo import ogr
+
+        from .label_line import label_line_geometry
+
+        source = ogr.Open(str(current))
+        if source is None:
+            raise PipelineError(f"Cannot open {current}")
+        layer = source.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        spatial_ref = layer.GetSpatialRef()
+        path = self.config.temp_dir / f"{name}_axis.gpkg"
+        path.unlink(missing_ok=True)
+        writer = _GpkgWriter(
+            path, name, definition, spatial_ref,
+            geometry_type=ogr.wkbMultiLineString,
+        )
+        built = 0
+        try:
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                if geometry is None or geometry.IsEmpty():
+                    continue
+                line = label_line_geometry(geometry, main_flow=main_flow)
+                if line is None:
+                    continue
+                # Шаблон проекта ждёт мультилинию, как у прежнего скелета.
+                multi = ogr.Geometry(ogr.wkbMultiLineString)
+                multi.AddGeometry(line)
+                writer.add(feature, multi)
+                built += 1
+        except Exception:
+            writer.close(commit=False)
+            raise
+        finally:
+            source = None
+        writer.close()
+        if not writer.count:
+            raise PipelineError(f"{name}: no label lines built")
+        self.progress(f"{name}: label lines for {built} objects")
+        return writer.path
+
     def _split_layer(self, name, current):
         """Делит слой на три группы по значению тега layer."""
         from osgeo import ogr
@@ -995,26 +968,6 @@ class Pipeline:
                 base_path = writer.path
             self.progress(f"{name}: saved {suffix or 'base'} layer")
         return base_path
-
-
-def _grass_field_name(name):
-    """Имя поля после импорта в GRASS.
-
-    GRASS допускает в именах только латиницу, цифры и подчёркивание: первый
-    недопустимый символ заменяется на «x», остальные — на «_». Так «name:ru»
-    превращается в «name_ru», а «@id» — в «xid».
-    """
-    if not name:
-        return name
-    result = []
-    for position, char in enumerate(name):
-        if char.isascii() and (char.isalnum() or char == "_"):
-            result.append(char)
-        else:
-            result.append("x" if position == 0 else "_")
-    if result and result[0].isdigit():
-        result[0] = "x"
-    return "".join(result)
 
 
 def _ring_points(line):

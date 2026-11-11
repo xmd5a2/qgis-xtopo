@@ -49,11 +49,11 @@ class PipelineLogicTest(unittest.TestCase):
                 array_queries=["water"],
             )
             config.ensure_directories()
-            output = _feature_collection(config.temp_dir / "skeleton.geojson")
+            output = _feature_collection(config.temp_dir / "output.geojson")
             runner = _FakeRunner(lambda parameters: {"output": str(output)})
             pipeline = Pipeline(config, BBox(1, 2, 3, 4), runner)
             result = pipeline._algorithm(
-                "grass7:v.voronoi.skeleton",
+                "native:test",
                 {"input": "source.geojson", "output": str(output)},
             )
         self.assertEqual(result, str(output))
@@ -456,63 +456,48 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class GrassFieldNameTest(unittest.TestCase):
-    """Имена полей после импорта в GRASS и их возврат."""
+class LabelAxisTest(unittest.TestCase):
+    """Шаг label_axis строит линии подписи без GRASS."""
 
-    def test_grass_field_name(self):
-        from qgis_xtopo.core.pipeline import _grass_field_name
-
-        self.assertEqual(_grass_field_name("@id"), "xid")
-        self.assertEqual(_grass_field_name("@type"), "xtype")
-        self.assertEqual(_grass_field_name("name:ru"), "name_ru")
-        self.assertEqual(_grass_field_name("name"), "name")
-        self.assertEqual(_grass_field_name("1abc"), "xabc")
-        self.assertEqual(_grass_field_name("a b"), "a_b")
-
-    def test_field_names_are_restored_after_skeleton(self):
+    def test_builds_lines_and_keeps_fields(self):
         from osgeo import ogr
 
         from qgis_xtopo.core.pipeline import Pipeline
 
         ogr.RegisterAll()
         with tempfile.TemporaryDirectory() as directory:
-            config = Config(
-                qgis_projects_dir=directory, project_name="logic"
-            )
+            config = Config(qgis_projects_dir=directory, project_name="logic")
             config.ensure_directories()
-            path = config.temp_dir / "skeleton.gpkg"
-            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(path))
-            layer = dataset.CreateLayer("skeleton", None, ogr.wkbLineString)
-            for name in ("xid", "xtype", "name_ru", "name"):
-                layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
+            source = config.temp_dir / "wood.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("wood", None, ogr.wkbPolygon)
+            layer.CreateField(ogr.FieldDefn("id", ogr.OFTString))
+            layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
             feature = ogr.Feature(layer.GetLayerDefn())
-            feature.SetField("xid", "relation/1")
-            feature.SetField("xtype", "relation")
-            feature.SetField("name_ru", "ледник Зопхито")
-            feature.SetField("name", "Zopkhitos")
-            line = ogr.Geometry(ogr.wkbLineString)
-            line.AddPoint(0, 0)
-            line.AddPoint(1, 1)
-            feature.SetGeometry(line)
+            feature.SetField("id", "way/1")
+            feature.SetField("name", "Лес")
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            corners = ((0.0, 0.0), (0.02, 0.0), (0.02, 0.006), (0.0, 0.006))
+            for x, y in corners + corners[:1]:
+                ring.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature.SetGeometry(polygon)
             layer.CreateFeature(feature)
             dataset = None
 
-            pipeline = Pipeline(config, BBox(1, 1, 3, 3), _FakeRunner(None))
-            restored = pipeline._restore_field_names(
-                "glacier", path, ["@id", "@type", "name:ru", "name"]
+            pipeline = Pipeline(config, BBox(0, 0, 0.02, 0.006), _FakeRunner(None))
+            output = pipeline._label_axis("wood", source, False)
+            dataset = ogr.Open(str(output))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiLineString)
+            self.assertEqual(layer.GetFeatureCount(), 1)
+            feature = next(iter(layer))
+            self.assertEqual(feature.GetField("id"), "way/1")
+            self.assertEqual(feature.GetField("name"), "Лес")
+            self.assertEqual(
+                feature.GetGeometryRef().GetGeometryName(), "MULTILINESTRING"
             )
-            self.assertNotEqual(str(restored), str(path))
-            dataset = ogr.Open(str(restored))
-            names = [
-                dataset.GetLayer(0).GetLayerDefn().GetFieldDefn(index).GetName()
-                for index in range(
-                    dataset.GetLayer(0).GetLayerDefn().GetFieldCount()
-                )
-            ]
-            self.assertEqual(names, ["@id", "@type", "name:ru", "name"])
-            feature = next(iter(dataset.GetLayer(0)))
-            self.assertEqual(feature.GetField("name:ru"), "ледник Зопхито")
-            self.assertEqual(feature.GetField("@id"), "relation/1")
             dataset = None
 
 

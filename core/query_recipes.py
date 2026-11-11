@@ -70,8 +70,9 @@ def merge(layers):
     return step("merge", layers=layers)
 
 
-def skeleton(smoothness, thin):
-    return step("skeleton", smoothness=smoothness, thin=thin)
+def label_axis(main_flow=False):
+    """Линия подписи вдоль формы; main_flow — концы по длине фигуры."""
+    return step("label_axis", main_flow=main_flow)
 
 
 def split_layer():
@@ -183,22 +184,22 @@ RECIPES = {
         linestopolygons(drop_others=True), fix(), save(),
         polygonstolines(), save("_lines"), load("glacier"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
+        label_axis(main_flow=True), save("_names"),
     ]),
     "bay_polygon": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("bay_polygon"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(0.25, -1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
+        label_axis(), save("_names"),
     ]),
     "wetland": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("wetland"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
+        label_axis(), save("_names"),
     ]),
     "wood": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("wood"),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(20, 1), simplify(0.002), smooth(10), dissolve("@id"), save("_names"),
+        label_axis(), save("_names"),
     ]),
     "strait": Recipe([
         # Шаблон ждёт два файла: strait.sqlite (исходные объекты — точки
@@ -207,8 +208,7 @@ RECIPES = {
         save(),
         linestopolygons(drop_others=True), fix(),
         buffer(0.002), buffer(-0.002), simplify(0.0002),
-        skeleton(0.25, -1), simplify(0.002), smooth(10),
-        dissolve("@id"), save("_skel"),
+        label_axis(), save("_skel"),
     ]),
     "coastline": Recipe([
         save(),
