@@ -816,6 +816,9 @@ class XtopoDockWidget(QDockWidget):
         source_row.addWidget(self.dem_source, 1)
         source_row.addWidget(self.dem_refresh)
         terrain_form.addRow("Источник:", self.dem_source_row)
+        self.dem_source_label = terrain_form.labelForField(
+            self.dem_source_row
+        )
         self.dem_info = WrappedLabel()
         self.dem_info.setWordWrap(True)
         try:
@@ -874,6 +877,9 @@ class XtopoDockWidget(QDockWidget):
             self.resample_method.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.resample_method.setMaximumWidth(170)
         terrain_form.addRow("Масштабирование:", self.resample_method)
+        self.resample_label = terrain_form.labelForField(
+            self.resample_method
+        )
         separator = QFrame()
         try:
             separator.setFrameShape(QFrame.Shape.HLine)
@@ -912,6 +918,9 @@ class XtopoDockWidget(QDockWidget):
             steps_layout.addWidget(box, index // 3, index % 3)
             self.isolines_steps[value] = box
         terrain_form.addRow("Кратность, м:", self.isolines_steps_widget)
+        self.isolines_steps_label = terrain_form.labelForField(
+            self.isolines_steps_widget
+        )
         self.smooth_isolines = QCheckBox("Сглаживать контуры")
         terrain_form.addRow(self.smooth_isolines)
         terrain_layout.addWidget(terrain_group)
@@ -1880,9 +1889,18 @@ class XtopoDockWidget(QDockWidget):
         manual = self.dem_source.currentData() == dem_sources.MANUAL_SOURCE
         for widget in (
             self.dem_source, self.hillshade_slope, self.isolines,
-            self.smooth_isolines,
+            self.smooth_isolines, self.dem_info, self.dem_warning,
         ):
             widget.setEnabled(enabled)
+        for label in (
+            self.dem_source_label, self.resample_label,
+            self.isolines_steps_label,
+        ):
+            if label is not None:
+                label.setEnabled(enabled)
+        # Кнопка обновления недоступна и без рельефа, и пока идёт
+        # проверка доступности.
+        self.dem_refresh.setEnabled(enabled and not self._dem_worker_running())
         self.dem_dir.setEnabled(enabled and manual)
         self.browse_dem.setEnabled(enabled and manual)
         self.dem_dir_row.setVisible(enabled and manual)
@@ -1895,6 +1913,17 @@ class XtopoDockWidget(QDockWidget):
         for box in self.isolines_steps.values():
             box.setEnabled(steps_enabled)
         self._update_dem_info()
+        self._update_dem_warning()
+
+    def _dem_worker_running(self):
+        worker = self.dem_availability_worker
+        if worker is None:
+            return False
+        try:
+            return worker.isRunning()
+        except RuntimeError:
+            # Объект уже удалён QThread — проверки нет.
+            return False
 
     def _dem_source_changed(self, _index):
         self._terrain_changed(self.generate_terrain.isChecked())
@@ -1966,7 +1995,11 @@ class XtopoDockWidget(QDockWidget):
                 self._dem_sonny_tiles,
             )
         self.dem_warning.setText(warning)
-        self.dem_warning.setVisible(bool(warning))
+        # Без обработки рельефа предупреждение о системах высот не нужно:
+        # блок затенён целиком.
+        self.dem_warning.setVisible(
+            bool(warning) and self.generate_terrain.isChecked()
+        )
         self.dem_warning.setToolTip(warning)
 
     def _schedule_dem_availability(self):
@@ -2045,7 +2078,11 @@ class XtopoDockWidget(QDockWidget):
     def _dem_worker_finished(self, worker):
         if self.dem_availability_worker is worker:
             self.dem_availability_worker = None
-            self.dem_refresh.setEnabled(True)
+            # При выключенной обработке рельефа кнопка остаётся
+            # недоступной вместе с остальным блоком.
+            self.dem_refresh.setEnabled(
+                self.generate_terrain.isChecked()
+            )
 
     def _dem_availability_ready(self, generation, availability, sonny_cells):
         if generation != self._dem_availability_generation:

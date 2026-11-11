@@ -1336,6 +1336,29 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_terrain_block_disabled_without_processing(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock._dem_check_timer.stop()
+            dock.generate_terrain.setChecked(False)
+            for widget in (
+                dock.dem_source, dock.dem_refresh, dock.dem_source_label,
+                dock.dem_info, dock.dem_warning, dock.resample_method,
+                dock.resample_label, dock.isolines_steps_label,
+            ):
+                self.assertFalse(widget.isEnabled(), widget)
+            # После включения блок снова доступен.
+            dock.generate_terrain.setChecked(True)
+            for widget in (
+                dock.dem_source, dock.dem_refresh, dock.dem_source_label,
+                dock.dem_info, dock.resample_label,
+            ):
+                self.assertTrue(widget.isEnabled(), widget)
+        finally:
+            dock.deleteLater()
+
     def test_dem_refresh_button_rechecks(self):
         from unittest import mock
 
