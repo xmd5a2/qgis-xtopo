@@ -357,7 +357,7 @@
       прогревать не нужно. Два каталога можно сравнивать между собой.</div>
 
     <label class="coverage-toggle"
-           title="Границы охвата наборов A и B по именам 1°-тайлов (z5–z9)">
+           title="Границы охвата наборов A и B по именам 1°-тайлов (z4–z9)">
       <input id="coverage" type="checkbox" checked>
       охват наборов
     </label>
@@ -398,7 +398,7 @@
         <br><br>
         <b>Охват</b> — границы наборов A и B, собранные по именам
         1°-тайлов: у Sonny из каталога, у SRTM по диапазону широт, у
-        остальных из STAC. Показывается с z5 до z9; если набор покрывает
+        остальных из STAC. Показывается с z4 до z9; если набор покрывает
         весь экран, границы не рисуются.
         <br><br>
         <b>3DEP</b> покрывает только США — в остальных точках он пуст.
@@ -675,8 +675,8 @@ let frameState = null;
 const TILE = 256;
 // Ниже этого зума рельеф не рисуется: остаётся подложка OSM.
 const RELIEF_MIN_ZOOM = 9;
-// Охват выбранных наборов показывается только на малых зумах: с z5 до z9.
-const COVERAGE_MIN_ZOOM = 5;
+// Охват выбранных наборов показывается только на малых зумах: с z4 до z9.
+const COVERAGE_MIN_ZOOM = 4;
 const COVERAGE_MAX_ZOOM = 9;
 
 function project(lon, lat, zoom) {
@@ -1831,7 +1831,7 @@ async function updateCoverage() {
     let text = "охват: выкл";
     if (state.coverageOn) {
       text = state.zoom < COVERAGE_MIN_ZOOM
-        ? "охват: с z5" : "охват: до z9";
+        ? "охват: с z4" : "охват: до z9";
     }
     setCoverageNote(text);
     if (state.coverage.a || state.coverage.b) {
