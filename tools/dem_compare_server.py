@@ -612,6 +612,50 @@ def register_local_source(store, directory, key=LOCAL_KEY):
             "resolution_m": resolution}
 
 
+def _local_marker_directory(store, key):
+    """Путь каталога из маркера прошлого выбора (пусто — маркера нет)."""
+    marker = store.cache_dir / f"{key}.json"
+    try:
+        return json.loads(
+            marker.read_text(encoding="utf-8")
+        ).get("directory", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def ensure_local_source(store, key):
+    """Поднимает локальный набор по маркеру, если сервер его ещё не знает."""
+    if key not in LOCAL_KEYS or key in DATASETS:
+        return
+    directory = _local_marker_directory(store, key)
+    if not directory:
+        return
+    try:
+        register_local_source(store, directory, key)
+    except (OSError, ValueError):
+        pass
+
+
+def restore_local_sources(store):
+    """Восстанавливает каталоги, выбранные в прошлом сеансе.
+
+    Иначе после перезапуска сервера открытая страница продолжает просить
+    ``ds=local``, а сервер отвечает 404: набор существует только в памяти.
+    """
+    restored = []
+    for key in LOCAL_KEYS:
+        directory = _local_marker_directory(store, key)
+        if not directory:
+            continue
+        try:
+            info = register_local_source(store, directory, key)
+        except (OSError, ValueError) as exc:
+            _log(f"{key}: не удалось восстановить каталог {directory}: {exc}")
+            continue
+        restored.append(info)
+    return restored
+
+
 class SourceStore:
     """Источники DEM: локальный кэш для gzip-SRTM, HTTP-чтение — для COG.
 
@@ -2666,6 +2710,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"url": final})
             return
         ds = query.get("ds", [""])[0]
+        ensure_local_source(self.store, ds)
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
             return
@@ -2793,6 +2838,7 @@ class Handler(BaseHTTPRequestHandler):
         return "rendered", data, seconds, native
 
     def _tile(self, ds, z, x, y, mode, limits=None):
+        ensure_local_source(self.store, ds)
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
             return
@@ -2822,6 +2868,7 @@ class Handler(BaseHTTPRequestHandler):
         клиент раскладывает их по координатам.
         """
         ds = query.get("ds", [""])[0]
+        ensure_local_source(self.store, ds)
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
             return
@@ -2994,6 +3041,9 @@ def main():
     cache = Path(args.cache).expanduser()
     temp_dir = configure_temp_dir(args.temp_dir)
     store = SourceStore(cache, temp_dir=temp_dir)
+    # Каталоги из прошлого сеанса: страница помнит a=local и после
+    # перезапуска сервера иначе получала бы 404.
+    restore_local_sources(store)
     for key, folder in ((LOCAL_KEY, args.local_dem),
                         (LOCAL_KEY_2, args.local_dem2)):
         if not folder:
