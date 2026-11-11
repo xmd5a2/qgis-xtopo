@@ -270,6 +270,12 @@
   .legend-bar { height: 10px; border-radius: 2px; margin: 4px 0 2px;
     background: linear-gradient(90deg,#3a6a3e,#6e9b5c,#b0c484,#dedba8,#c4ac7a,#92745a,#604a3e); }
   .legend-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
+  .coverage-toggle {
+    display: flex; align-items: center; gap: 6px;
+    margin: 8px 0 2px; color: var(--muted); font-size: 12px;
+    cursor: pointer; user-select: none;
+  }
+  .coverage-toggle input { margin: 0; }
   code { background: var(--panel-2); padding: 1px 4px; border-radius: 3px; }
   .note { color: var(--muted); font-size: 11px; }
 </style>
@@ -350,6 +356,12 @@
     <h2>Легенда высот</h2>
     <div class="legend-bar"></div>
     <div class="legend-scale"><span>0 м</span><span>гипсометрия</span><span>max</span></div>
+    <label class="coverage-toggle"
+           title="Границы охвата наборов A и B по именам 1°-тайлов (с z5)">
+      <input id="coverage" type="checkbox" checked>
+      охват наборов
+    </label>
+    <div class="note" id="coverage-note">охват: —</div>
 
     <details id="help">
       <summary>Как читать</summary>
@@ -376,6 +388,11 @@
         <br><br>
         Ниже <b>z9</b> показывается только подложка OSM: рельеф на таких
         масштабах слишком обобщён. Кнопка OSM и ползунок там заблокированы.
+        <br><br>
+        <b>Охват</b> — пунктирные границы наборов A и B, собранные по
+        именам 1°-тайлов: у Sonny из каталога, у SRTM по диапазону широт,
+        у остальных из STAC. Показывается с z5; если набор покрывает весь
+        экран, границы не рисуются.
         <br><br>
         <b>3DEP</b> покрывает только США — в остальных точках он пуст.
         <b>NASADEM</b> не заходит выше 61° и ниже −56°.
@@ -594,6 +611,11 @@ const state = {
   zoom: 12,
   minZoom: 2,
   maxZoom: 21,
+  // Охват A и B по именам 1°-тайлов: приходит из /api/coverage.
+  coverage: {a: null, b: null},
+  coverageOn: true,
+  coverageRequest: 0,
+  coverageTimer: 0,
   divider: 0.5,
   dragging: false,
   dragDivider: false,
@@ -643,6 +665,8 @@ let frameState = null;
 const TILE = 256;
 // Ниже этого зума рельеф не рисуется: остаётся подложка OSM.
 const RELIEF_MIN_ZOOM = 9;
+// С этого зума показываются границы охвата выбранных наборов.
+const COVERAGE_MIN_ZOOM = 5;
 
 function project(lon, lat, zoom) {
   const scale = TILE * Math.pow(2, zoom);
@@ -1076,6 +1100,7 @@ function resize() {
   canvas.height = Math.round(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   scheduleLimits();
+  scheduleCoverage();
   requestRender();
 }
 
@@ -1287,6 +1312,69 @@ function clearProfile() {
   requestRender();
 }
 
+function coveragePath(data, left, top) {
+  ctx.beginPath();
+  for (const outline of data.outlines || []) {
+    outline.forEach(([lon, lat], index) => {
+      const point = project(lon, lat, state.zoom);
+      const x = point.x - left;
+      const y = point.y - top;
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+  }
+  for (const area of data.boxes || []) {
+    const [minx, miny, maxx, maxy] = area;
+    const nw = project(minx, maxy, state.zoom);
+    const se = project(maxx, miny, state.zoom);
+    ctx.rect(nw.x - left, nw.y - top, se.x - nw.x, se.y - nw.y);
+  }
+}
+
+function paintCoverage(data, color, left, top) {
+  if (!data || data.full ||
+      (!(data.outlines || []).length && !(data.boxes || []).length)) {
+    return;
+  }
+  ctx.save();
+  coveragePath(data, left, top);
+  ctx.fillStyle = color + "22";
+  ctx.fill("evenodd");
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([7, 5]);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Границы охвата: в шторке A слева, B справа; в разности — оба.
+function drawCoverage(left, top, w, h) {
+  if (!coverageVisible()) return;
+  if (state.compare && state.a && state.b) {
+    const split = Math.round(w * state.divider);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, split, h);
+    ctx.clip();
+    paintCoverage(state.coverage.a, "#6fb3d2", left, top);
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(split, 0, w - split, h);
+    ctx.clip();
+    paintCoverage(state.coverage.b, "#e0a458", left, top);
+    ctx.restore();
+    return;
+  }
+  if (state.diff) {
+    paintCoverage(state.coverage.a, "#6fb3d2", left, top);
+    paintCoverage(state.coverage.b, "#e0a458", left, top);
+    return;
+  }
+  paintCoverage(state.coverage.a || state.coverage.b,
+                state.a ? "#6fb3d2" : "#e0a458", left, top);
+}
+
 function draw() {
   const {w, h} = viewSize();
   // Ниже z9 рельеф не рисуется и не запрашивается.
@@ -1454,6 +1542,7 @@ function draw() {
     frameState = {left, top, zoom: state.zoom, w, h};
   }
 
+  drawCoverage(left, top, w, h);
   drawTileGrid(left, top, w, h);
   if (splitAt !== null) drawDivider(splitAt, h);
   drawProfileOverlay(left, top);
@@ -1658,6 +1747,87 @@ function updateResolutionBadge() {
     badge.className = "badge";
     badge.title = `кратность к разрешению источника ${native.toFixed(0)} м/пикс`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Охват наборов
+// ---------------------------------------------------------------------------
+function coverageVisible() {
+  return state.coverageOn && state.zoom >= COVERAGE_MIN_ZOOM;
+}
+
+function coverageBounds() {
+  const {w, h} = viewSize();
+  const center = centerPoint();
+  const nw = unproject(center.x - w / 2, center.y - h / 2, state.zoom);
+  const se = unproject(center.x + w / 2, center.y + h / 2, state.zoom);
+  const padX = Math.abs(se.lon - nw.lon) * 0.05;
+  const padY = Math.abs(nw.lat - se.lat) * 0.05;
+  let minLon = nw.lon - padX;
+  let maxLon = se.lon + padX;
+  if (minLon > maxLon) {
+    // Вид пересекает антимеридиан: просим весь диапазон долгот.
+    minLon = -180;
+    maxLon = 180;
+  }
+  return [
+    Math.max(-180, minLon), Math.max(-90, se.lat - padY),
+    Math.min(180, maxLon), Math.min(90, nw.lat + padY)
+  ];
+}
+
+function coverageText(data) {
+  if (!data) return "—";
+  if (data.full) return "весь экран";
+  if (data.tiles) return `${data.tiles} тайлов`;
+  if ((data.boxes || []).length) return `${data.boxes.length} файлов`;
+  return "нет данных";
+}
+
+function setCoverageNote(text) {
+  const box = document.getElementById("coverage-note");
+  if (box) box.textContent = text;
+}
+
+async function updateCoverage() {
+  if (!coverageVisible()) {
+    setCoverageNote(state.coverageOn ? "охват: с z5" : "охват: выкл");
+    if (state.coverage.a || state.coverage.b) {
+      state.coverage = {a: null, b: null};
+      requestRender();
+    }
+    return;
+  }
+  const bbox = coverageBounds().map(value => value.toFixed(4)).join(",");
+  const keys = [...new Set([state.a, state.b].filter(Boolean))];
+  const request = ++state.coverageRequest;
+  setCoverageNote("охват: загрузка…");
+  const results = await Promise.all(keys.map(ds =>
+    fetch(`/api/coverage?ds=${ds}&bbox=${bbox}`)
+      .then(response => response.json())
+      .catch(() => null)));
+  // Пока считали, вид, наборы или видимость слоя могли смениться.
+  if (request !== state.coverageRequest || !coverageVisible()) return;
+  const next = {a: null, b: null};
+  keys.forEach((ds, index) => {
+    const data = results[index];
+    if (!data || data.error) return;
+    if (state.a === ds) next.a = data;
+    if (state.b === ds) next.b = data;
+  });
+  state.coverage = next;
+  const parts = [];
+  if (state.a) parts.push(`A: ${coverageText(next.a)}`);
+  if (state.b && state.b !== state.a) {
+    parts.push(`B: ${coverageText(next.b)}`);
+  }
+  setCoverageNote("охват: " + (parts.join(" · ") || "—"));
+  requestRender();
+}
+
+function scheduleCoverage(delay = 250) {
+  clearTimeout(state.coverageTimer);
+  state.coverageTimer = setTimeout(updateCoverage, delay);
 }
 
 // ---------------------------------------------------------------------------
@@ -2164,9 +2334,10 @@ canvas.addEventListener("pointerup", event => {
   if (state.dragging) {
     state.dragging = false;
     canvas.classList.remove("grabbing");
-    // Вид уехал — пересчитываем шкалу. До отпускания тайлы рисовались по
-    // прежним пределам, поэтому перетаскивание не ждёт сервер.
+    // Вид уехал — пересчитываем шкалу и охват. До отпускания тайлы
+    // рисовались по прежним пределам, поэтому перетаскивание не ждёт сервер.
     scheduleLimits();
+    scheduleCoverage();
   }
   state.dragDivider = false;
   // Клик без перетаскивания сбрасывает построенный профиль. Панорамирование
@@ -2199,6 +2370,7 @@ canvas.addEventListener("wheel", event => {
   refreshReadout();
   // Колесо во время жеста (пинч) шлёт события пачками — ждём тишины.
   scheduleLimits(300);
+  scheduleCoverage(300);
 }, {passive: false});
 
 window.addEventListener("resize", resize);
@@ -2208,11 +2380,13 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------------------
 document.getElementById("ds-a").addEventListener("change", event => {
   state.a = event.target.value;
-  scheduleLimits(); requestRender(); refreshReadout(); refreshProfile();
+  scheduleLimits(); scheduleCoverage(0);
+  requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("ds-b").addEventListener("change", event => {
   state.b = event.target.value;
-  scheduleLimits(); requestRender(); refreshReadout(); refreshProfile();
+  scheduleLimits(); scheduleCoverage(0);
+  requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("mode").addEventListener("change", event => {
   state.mode = event.target.value;
@@ -2230,6 +2404,7 @@ document.getElementById("swap").addEventListener("click", () => {
   const a = state.a; state.a = state.b; state.b = a;
   document.getElementById("ds-a").value = state.a;
   document.getElementById("ds-b").value = state.b;
+  scheduleCoverage(0);
   requestRender(); refreshReadout();
   // Меняются только буквы A и B, но график и легенда к ним привязаны.
   refreshProfile();
@@ -2280,8 +2455,20 @@ document.getElementById("zoom-native").addEventListener("click", async () => {
   const zoom = Math.log2(156543.03392 *
     Math.cos(state.center.lat * Math.PI / 180) / native);
   state.zoom = Math.min(state.maxZoom, Math.max(state.minZoom, zoom));
+  scheduleCoverage();
   requestRender();
   refreshReadout();
+});
+document.getElementById("coverage").addEventListener("change", event => {
+  state.coverageOn = event.target.checked;
+  if (state.coverageOn) {
+    scheduleCoverage(0);
+  } else {
+    state.coverageRequest += 1;
+    state.coverage = {a: null, b: null};
+    setCoverageNote("охват: выкл");
+    requestRender();
+  }
 });
 document.getElementById("osm").addEventListener("click", () => {
   // Ниже z9 подложка обязательна: кнопка заблокирована.
@@ -2385,6 +2572,7 @@ async function chooseBrowserDir() {
     await loadDatasets();
     fillSelect(document.getElementById("ds-a"), state.a);
     fillSelect(document.getElementById("ds-b"), state.b);
+    scheduleCoverage(0);
     requestRender();
     refreshReadout();
     // Набор сменился — профиль по нему строим заново.
@@ -2469,6 +2657,7 @@ document.getElementById("points").addEventListener("click", event => {
   selectPlace(point, Number(button.dataset.index), true);
   state.center = {lon: point.lon, lat: point.lat};
   state.zoom = point.zoom;
+  scheduleCoverage();
   requestRender();
   refreshReadout();
 });
@@ -2577,6 +2766,7 @@ async function openOsmLink() {
   }
   note.textContent = `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} · ` +
     `z=${state.zoom.toFixed(1)}`;
+  scheduleCoverage();
   requestRender();
   refreshReadout();
   writeUrl();

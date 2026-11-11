@@ -63,6 +63,15 @@ try:
     from core import sonny
 except Exception:  # noqa: BLE001 - инструмент может работать без QGIS
     sonny = None
+try:
+    # STAC-хост иногда отдаёт адрес Azure Front Door с закрытым портом 443;
+    # запасной opener перебирает адреса из публичных DNS.
+    from core import dem_sources as core_dem_sources
+except Exception:  # noqa: BLE001
+    core_dem_sources = None
+HTTP_OPENER = getattr(core_dem_sources, "_OPENER", None)
+if HTTP_OPENER is None:
+    HTTP_OPENER = urllib.request.build_opener()
 
 import numpy as np
 from osgeo import gdal, osr
@@ -225,6 +234,7 @@ DEFAULT_CACHE = (
 )
 
 USER_AGENT = "qgis-xtopo-dem-compare/1.0"
+STAC_SEARCH = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 # Подложка OpenStreetMap: тайлы 256×256 в той же проекции, что и рельеф.
 OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 OSM_MAX_ZOOM = 19
@@ -327,6 +337,14 @@ DATASETS = {
     },
 }
 
+# Коллекции Planetary Computer для COG-наборов.
+PC_COLLECTIONS = {
+    "nasadem": "nasadem",
+    "alos30": "alos-dem",
+    "3dep": "3dep-seamless",
+    "cop30": "cop-dem-glo-30",
+}
+
 # Наборы для попарного сравнения по умолчанию.
 DEFAULT_A = "cop30"
 DEFAULT_B = "srtm3"
@@ -407,13 +425,13 @@ def _aws_url(source, lat, lon):
     raise KeyError(source)
 
 
-def _http_json(url, retries=6):
+def _http_json(url, retries=6, timeout=180):
     """Запрос JSON с повторами: сервис может ответить 429."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     delay = 5.0
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            with HTTP_OPENER.open(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             if exc.code not in (429, 503) or attempt == retries - 1:
@@ -616,6 +634,9 @@ class SourceStore:
         self._sonny_catalogue = None
         self._sonny_lock = threading.Lock()
         self._sonny_warned = False
+        # Охват COG-наборов из STAC: (коллекция, bbox) → ячейки.
+        self._coverage_cache = {}
+        self._coverage_lock = threading.Lock()
 
     def remember_source(self, path, label):
         """Запоминает подпись удалённого источника: «ALOS AW3D30 · N43E043»."""
@@ -781,6 +802,86 @@ class SourceStore:
         return [str(path) for path, area, _resolution in items
                 if area[0] <= maxx and area[2] >= minx and
                 area[1] <= maxy and area[3] >= miny]
+
+    def local_extents(self, key, bbox):
+        """Охват файлов локального каталога, пересекающихся с областью."""
+        minx, miny, maxx, maxy = bbox
+        with self._local_lock:
+            entry = self._local.get(key)
+        items = list(entry[1]) if entry else []
+        return [list(area) for path, area, _resolution in items
+                if area[0] <= maxx and area[2] >= minx and
+                area[1] <= maxy and area[3] >= miny]
+
+    def coverage(self, ds, bbox):
+        """Охват набора по именам 1°-тайлов в видимой области.
+
+        ``full`` означает, что набор покрывает весь запрошенный bbox:
+        рисовать границу не нужно, она совпала бы с краем экрана.
+        """
+        source = DATASETS[ds]["source"]
+        if source == "local":
+            boxes = self.local_extents(ds, bbox)
+            return {"outlines": [], "boxes": boxes, "tiles": 0,
+                    "full": _boxes_cover(bbox, boxes), "truncated": False,
+                    "note": "локальные файлы"}
+        if source == "sonny":
+            available = (sonny.catalogue_tiles()
+                         if sonny is not None else {})
+            cells = {cell for cell in _cells_in_bbox(bbox)
+                     if cell in available}
+            truncated = False
+            note = "Sonny DTM"
+        elif source == "skadi":
+            cells = {cell for cell in _cells_in_bbox(bbox)
+                     if -56 <= cell[0] <= 60}
+            truncated = False
+            note = "SRTM v3: 56° ю.ш. — 60° с.ш."
+        elif source in PC_COLLECTIONS:
+            cells, truncated, note = self._stac_coverage(ds, bbox)
+        else:
+            cells, truncated, note = set(), False, ""
+        full = _cells_cover(bbox, cells)
+        return {"outlines": [] if full else _cells_outline(cells),
+                "boxes": [], "tiles": len(cells), "full": full,
+                "truncated": truncated, "note": note}
+
+    def _stac_coverage(self, ds, bbox):
+        """Тайлы COG-набора в области: имена и охват из STAC."""
+        collection = PC_COLLECTIONS[DATASETS[ds]["source"]]
+        # Округляем запрос наружу до целых градусов: небольшой сдвиг карты
+        # не должен заново дёргать STAC.  Страница всё равно обрежет
+        # нарисованное по краю экрана.
+        query_bbox = (math.floor(bbox[0]), math.floor(bbox[1]),
+                      math.ceil(bbox[2]), math.ceil(bbox[3]))
+        key = (collection,) + query_bbox
+        now = time.time()
+        with self._coverage_lock:
+            cached = self._coverage_cache.get(key)
+            if cached and now - cached[0] < 3600:
+                return cached[1], cached[2], cached[3]
+        bbox_text = ",".join(str(value) for value in query_bbox)
+        # 3DEP отдаёт по два элемента на тайл (-13 и -1), поэтому лимит
+        # должен покрывать весь континент на z5, иначе граница обрежется.
+        limit = 10000
+        url = (STAC_SEARCH + f"?collections={collection}"
+               f"&bbox={bbox_text}&limit={limit}&fields=id,bbox")
+        try:
+            data = _http_json(url, retries=2, timeout=20)
+        except Exception as exc:  # noqa: BLE001 - охват не критичен
+            _log(f"{ds}: охват недоступен: {exc}")
+            return set(), False, "охват недоступен"
+        items = data.get("features", [])
+        cells = _cells_from_items(items)
+        truncated = len(items) >= limit
+        note = f"тайлов: {len(cells)}"
+        if truncated:
+            note += " (часть)"
+        with self._coverage_lock:
+            if len(self._coverage_cache) >= 128:
+                self._coverage_cache.clear()
+            self._coverage_cache[key] = (now, cells, truncated, note)
+        return cells, truncated, note
 
     def _auto_block(self, ds, bbox):
         spec = DATASETS[ds]
@@ -1250,8 +1351,7 @@ class SourceStore:
 
     def _pc_sources(self, ds, bbox, center_only=False):
         """Ссылки на файлы наборов Planetary Computer с SAS-токеном."""
-        collection = {"nasadem": "nasadem", "alos30": "alos-dem",
-                      "3dep": "3dep-seamless"}[DATASETS[ds]["source"]]
+        collection = PC_COLLECTIONS[DATASETS[ds]["source"]]
         suffix = DATASETS[ds].get("id_suffix")
         query_bbox = bbox or (0, 0, 1, 1)
         # Гранулы наборов — целые градусы (N37E031 и т.п.). Ключ обязан
@@ -1394,6 +1494,114 @@ def _tiles_for(bbox):
             lon = max(-180, min(179, lon))
             tiles.append((lat, lon))
     return tiles
+
+
+def _cells_in_bbox(bbox):
+    """1°-клетки, пересекающие bbox с ненулевой площадью."""
+    minx, miny, maxx, maxy = bbox
+    lon_start = max(-180, math.floor(minx))
+    lon_end = min(179, math.ceil(maxx) - 1)
+    lat_start = max(-90, math.floor(miny))
+    lat_end = min(89, math.ceil(maxy) - 1)
+    return [(lat, lon) for lat in range(lat_start, lat_end + 1)
+            for lon in range(lon_start, lon_end + 1)]
+
+
+# Имя тайла в id элемента STAC: n34w116-13, NASADEM_HGT_s56w072,
+# ALPSMLC30_S084W180_DSM, Copernicus_DSM_COG_10_N45_00_E007_00_DEM.
+_TILE_IN_ID = re.compile(r"([NS])(\d{2,3}).*?([EW])(\d{3})", re.I)
+
+
+def _cell_from_id(item_id, area):
+    """1°-тайл из имени в id; запасной путь — центр bbox."""
+    match = _TILE_IN_ID.search(item_id or "")
+    if match:
+        lat = int(match.group(2))
+        lon = int(match.group(4))
+        if match.group(1).upper() == "S":
+            lat = -lat
+        if match.group(3).upper() == "W":
+            lon = -lon
+        return lat, lon
+    if area and len(area) == 4:
+        return (math.floor((area[1] + area[3]) / 2),
+                math.floor((area[0] + area[2]) / 2))
+    return None
+
+
+def _cells_from_items(items):
+    """Имена 1°-тайлов из элементов STAC."""
+    cells = set()
+    for item in items:
+        cell = _cell_from_id(item.get("id", ""), item.get("bbox"))
+        if cell is not None:
+            cells.add(cell)
+    return cells
+
+
+def _cells_cover(bbox, cells):
+    """Покрывают ли клетки весь bbox."""
+    return set(_cells_in_bbox(bbox)).issubset(cells)
+
+
+def _boxes_cover(bbox, boxes):
+    """Есть ли прямоугольник, покрывающий весь bbox."""
+    minx, miny, maxx, maxy = bbox
+    return any(area[0] <= minx and area[1] <= miny and
+               area[2] >= maxx and area[3] >= maxy for area in boxes)
+
+
+def _cells_outline(cells):
+    """Границы объединения 1°-клеток: список замкнутых контуров."""
+    edges = {}
+    for lat, lon in cells:
+        for start, end in (
+            ((lon, lat), (lon + 1, lat)),
+            ((lon + 1, lat), (lon + 1, lat + 1)),
+            ((lon + 1, lat + 1), (lon, lat + 1)),
+            ((lon, lat + 1), (lon, lat)),
+        ):
+            # Общая грань двух клеток встречается дважды в разных
+            # направлениях — она не граница.
+            if (end, start) in edges:
+                del edges[(end, start)]
+            else:
+                edges[(start, end)] = True
+    next_by_start = {}
+    for start, end in edges:
+        next_by_start.setdefault(start, []).append(end)
+    outlines = []
+    while next_by_start:
+        start = next(iter(next_by_start))
+        loop = [start]
+        current = start
+        while True:
+            ends = next_by_start.get(current)
+            if not ends:
+                break
+            following = ends.pop()
+            if not ends:
+                del next_by_start[current]
+            loop.append(following)
+            current = following
+            if current == start:
+                break
+        if len(loop) > 4:
+            # Точки на прямых не нужны: контур из 1°-клеток и так
+            # ступенчатый, лишние вершины только раздувают ответ.
+            simple = [loop[0]]
+            for index in range(1, len(loop) - 1):
+                prev = simple[-1]
+                point, following = loop[index], loop[index + 1]
+                if ((point[0] - prev[0]) * (following[1] - point[1]) ==
+                        (point[1] - prev[1]) * (following[0] - point[0])):
+                    continue
+                simple.append(point)
+            simple.append(loop[-1])
+            loop = simple
+        if len(loop) >= 4:
+            outlines.append([[lon, lat] for lon, lat in loop])
+    return outlines
 
 
 def _sources_for(store, ds, bbox, allow_download=True):
@@ -2425,6 +2633,20 @@ class Handler(BaseHTTPRequestHandler):
         ds = query.get("ds", [""])[0]
         if ds not in DATASETS:
             self._json({"error": "unknown dataset"}, code=404)
+            return
+        if action == "coverage":
+            text = query.get("bbox", [""])[0]
+            try:
+                bbox = tuple(float(value) for value in text.split(","))
+                if len(bbox) != 4:
+                    raise ValueError
+            except ValueError:
+                self._json(
+                    {"error": "нужен bbox=minx,miny,maxx,maxy"}, code=400)
+                return
+            result = self.store.coverage(ds, bbox)
+            result["dataset"] = ds
+            self._json(result)
             return
         if action == "value":
             lon = float(query.get("lon", ["0"])[0])
