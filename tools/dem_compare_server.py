@@ -403,6 +403,12 @@ def _tile_name(lat, lon):
     return f"{north}{east}"
 
 
+# Имя тайла в id элемента STAC или в имени локального файла:
+# n34w116-13, NASADEM_HGT_s56w072, ALPSMLC30_S084W180_DSM,
+# Copernicus_DSM_COG_10_N45_00_E007_00_DEM, N46E009.tif.
+_TILE_IN_ID = re.compile(r"([NS])(\d{2,3}).*?([EW])(\d{3})", re.I)
+
+
 def _bbox_intersects(area, bbox):
     """Пересекаются ли две области (minx, miny, maxx, maxy)."""
     if not area or len(area) != 4:
@@ -486,6 +492,20 @@ def _has_rasters(folder):
     except OSError:
         return False
     return False
+
+
+def _tile_extent(path):
+    """Охват 1°-тайла по имени файла (N46E009.tif) без открытия растра."""
+    match = _TILE_IN_ID.search(path.stem)
+    if match is None:
+        return None
+    lat = int(match.group(2))
+    lon = int(match.group(4))
+    if match.group(1).upper() == "S":
+        lat = -lat
+    if match.group(3).upper() == "W":
+        lon = -lon
+    return (lon, lat, lon + 1, lat + 1)
 
 
 def _raster_info(path):
@@ -783,12 +803,32 @@ class SourceStore:
                 continue
             if path.suffix.lower() not in LOCAL_SUFFIXES:
                 continue
+            area = _tile_extent(path)
+            if area is not None:
+                # Имя тайла даёт охват без открытия файла.  На медленном
+                # sshfs-каталоге это главное: 80 тайлов индексируются
+                # списком имён, а не 80 открытиями GeoTIFF.
+                items.append((path, area, None))
+                continue
             info = _raster_info(path)
             if info is None:
                 continue
             items.append((path, info[0], info[1]))
         if not items:
             raise ValueError(f"в каталоге нет растров: {folder}")
+        resolutions = [item[2] for item in items if item[2] is not None]
+        if not resolutions and not folder.is_symlink():
+            # Один пробный файл — чтобы узнать реальное разрешение.  Для
+            # симлинков этого не делаем: доступ к цели может быть медленным.
+            for path, _area, _resolution in items:
+                info = _raster_info(path)
+                if info is not None:
+                    resolutions = [info[1]]
+                    break
+        resolution = (sorted(resolutions)[len(resolutions) // 2]
+                      if resolutions else 30.0)
+        items = [(path, area, res if res is not None else resolution)
+                 for path, area, res in items]
         with self._local_lock:
             self._local[key] = (folder, items)
         return folder, items
@@ -1505,11 +1545,6 @@ def _cells_in_bbox(bbox):
     lat_end = min(89, math.ceil(maxy) - 1)
     return [(lat, lon) for lat in range(lat_start, lat_end + 1)
             for lon in range(lon_start, lon_end + 1)]
-
-
-# Имя тайла в id элемента STAC: n34w116-13, NASADEM_HGT_s56w072,
-# ALPSMLC30_S084W180_DSM, Copernicus_DSM_COG_10_N45_00_E007_00_DEM.
-_TILE_IN_ID = re.compile(r"([NS])(\d{2,3}).*?([EW])(\d{3})", re.I)
 
 
 def _cell_from_id(item_id, area):

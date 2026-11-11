@@ -1349,9 +1349,18 @@ function coveragePath(data, left, top) {
   }
 }
 
-function paintCoverage(data, color, left, top) {
-  if (!data || data.full ||
-      (!(data.outlines || []).length && !(data.boxes || []).length)) {
+function paintCoverage(data, color, left, top, w, h) {
+  if (!data) return;
+  if (data.full) {
+    // Набор покрывает весь экран: границы нет, но охват показываем
+    // заливкой, иначе кажется, что слой не работает.
+    ctx.save();
+    ctx.fillStyle = color + "33";
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+    return;
+  }
+  if (!(data.outlines || []).length && !(data.boxes || []).length) {
     return;
   }
   ctx.save();
@@ -1381,24 +1390,24 @@ function drawCoverage(left, top, w, h) {
     ctx.beginPath();
     ctx.rect(0, 0, split, h);
     ctx.clip();
-    paintCoverage(state.coverage.a, "#6fb3d2", left, top);
+    paintCoverage(state.coverage.a, "#6fb3d2", left, top, w, h);
     ctx.restore();
     ctx.save();
     ctx.beginPath();
     ctx.rect(split, 0, w - split, h);
     ctx.clip();
-    paintCoverage(state.coverage.b, "#e0a458", left, top);
+    paintCoverage(state.coverage.b, "#e0a458", left, top, w, h);
     ctx.restore();
     return;
   }
   // Шторки нет (z<9, разность или одиночный набор): оба охвата в одном окне.
   if (state.compare || state.diff) {
-    paintCoverage(state.coverage.a, "#6fb3d2", left, top);
-    paintCoverage(state.coverage.b, "#e0a458", left, top);
+    paintCoverage(state.coverage.a, "#6fb3d2", left, top, w, h);
+    paintCoverage(state.coverage.b, "#e0a458", left, top, w, h);
     return;
   }
   paintCoverage(state.coverage.a || state.coverage.b,
-                state.a ? "#6fb3d2" : "#e0a458", left, top);
+                state.a ? "#6fb3d2" : "#e0a458", left, top, w, h);
 }
 
 function draw() {
