@@ -168,6 +168,30 @@ class PanelVisibilityTest(unittest.TestCase):
             dock.restore_panels()
             dock.deleteLater()
 
+    def test_plugin_starts_catalogue_refresh(self):
+        """Список тайлов Sonny обновляется при старте плагина."""
+        from unittest import mock
+
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.plugin import QgisXtopoPlugin
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+        iface = mock.Mock()
+        iface.mainWindow.return_value = window
+        plugin = QgisXtopoPlugin(iface)
+        with mock.patch(
+            "qgis_xtopo.gui.dockwidget.XtopoDockWidget."
+            "refresh_sonny_catalogue"
+        ) as refresh:
+            plugin.initGui()
+        try:
+            refresh.assert_called_once_with()
+            self.assertIsNotNone(plugin.dock)
+        finally:
+            plugin.unload()
+
 
 if __name__ == "__main__":
     unittest.main()
