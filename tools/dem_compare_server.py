@@ -88,6 +88,10 @@ BATCH_POOL = ThreadPoolExecutor(max_workers=RENDER_PARALLEL)
 TILE_BATCH_MAX = 32
 
 TILE_SIZE = 256
+# Ниже этого зума рельеф не рисуется и не запрашивается: один тайл там
+# покрывает несколько градусных тайлов источника, и загрузка данных не
+# оправдана.  Совпадает с RELIEF_MIN_ZOOM на странице.
+RELIEF_MIN_ZOOM = 9
 # Режимы, где цвет тайла зависит от высот: их шкала задаётся пределами.
 SCALED_MODES = ("elevation", "contours")
 # Версия кэша: старые каталоги не удаляются, но и не используются, чтобы
@@ -703,12 +707,16 @@ class SourceStore:
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"{_tile_name(lat, lon)}.tif"
 
-    def sources(self, ds, bbox):
-        """Список источников для области: локальные файлы и /vsicurl."""
+    def sources(self, ds, bbox, allow_download=True):
+        """Список источников для области: локальные файлы и /vsicurl.
+
+        ``allow_download=False`` разрешает только уже закэшированные данные:
+        ни одного нового сетевого запроса за исходниками.
+        """
         prepared = self._prepared_for(ds, bbox)
         if prepared:
             return prepared
-        return self._remote_sources(ds, bbox)
+        return self._remote_sources(ds, bbox, allow_download)
 
     # Промах мимо прогретого окна раньше уходил в /vsicurl на каждый тайл:
     # сдвиг карты на пару десятых градуса стоил 20–50 с на тайл. Поэтому
@@ -719,16 +727,16 @@ class SourceStore:
     AUTO_BLOCK_PAD = 0.01
     AUTO_BLOCK_LIMIT = 160
 
-    def tile_sources(self, ds, bbox):
+    def tile_sources(self, ds, bbox, allow_download=True):
         """Источники для одного тайла: прогретое окно или автоблок."""
         prepared = self._prepared_for(ds, bbox)
         if prepared:
             return prepared
-        if self._auto_block_fits(ds, bbox):
+        if allow_download and self._auto_block_fits(ds, bbox):
             block = self._auto_block(ds, bbox)
             if block:
                 return block
-        return self._remote_sources(ds, bbox)
+        return self._remote_sources(ds, bbox, allow_download)
 
     def _auto_block_fits(self, ds, bbox):
         """Автоблок имеет смысл только у родного разрешения.
@@ -799,21 +807,25 @@ class SourceStore:
         path = self.prepare_region(ds, area, f"auto_{x1}_{y1}")
         return [str(path)] if path else None
 
-    def _remote_sources(self, ds, bbox):
+    def _remote_sources(self, ds, bbox, allow_download=True):
         """Источники в хранилище: без локальной копии, только сеть."""
         spec = DATASETS[ds]
         source = spec["source"]
         if source == "local":
             return self.local_sources(ds, bbox)
         if source == "sonny":
-            return self._sonny_sources(ds, bbox)
+            return self._sonny_sources(ds, bbox, allow_download)
         if source == "skadi":
             paths = []
             for lat, lon in _tiles_for(bbox):
-                path = self._ensure_srtm(ds, lat, lon)
+                path = self._ensure_srtm(ds, lat, lon, allow_download)
                 if path:
                     paths.append(path)
             return paths
+        # COG-наборы читаются по сети (STAC, подпись, /vsicurl): ниже z9
+        # обходимся только прогретыми окнами, которые проверены выше.
+        if not allow_download:
+            return []
         if source == "cop30":
             paths = []
             for lat, lon in _tiles_for(bbox):
@@ -830,11 +842,12 @@ class SourceStore:
     # Sonny DTM (Google Drive)
     # ------------------------------------------------------------------
 
-    def sonny_catalogue(self):
+    def sonny_catalogue(self, allow_refresh=True):
         """Список тайлов Sonny: ``{набор: {файл: id}}``.
 
         Кэш общий с плагином. Если его ещё нет (первый запуск на машине),
-        список загружается с Google Drive один раз на процесс.
+        список загружается с Google Drive один раз на процесс.  При
+        ``allow_refresh=False`` используется только локальный кэш.
         """
         if sonny is None:
             return {}
@@ -842,20 +855,24 @@ class SourceStore:
             if self._sonny_catalogue is None:
                 catalogue = sonny.load_catalogue()
                 if not any(key in sonny.DATASET_BY_KEY for key in catalogue):
+                    if not allow_refresh:
+                        # Пустой результат не запоминаем: при возврате на
+                        # рабочий зум список должен загрузиться.
+                        return catalogue
                     with _net_read(
                             f"{DATASETS['sonny']['short']} · список файлов"):
                         catalogue = sonny.refresh_catalogue()
                 self._sonny_catalogue = catalogue
             return self._sonny_catalogue
 
-    def _sonny_sources(self, ds, bbox):
+    def _sonny_sources(self, ds, bbox, allow_download=True):
         """Локальные файлы Sonny для области: скачивает недостающие тайлы."""
         if sonny is None:
             if not self._sonny_warned:
                 self._sonny_warned = True
                 _log("Sonny DTM: нет доступа к ядру плагина (qgis.PyQt)")
             return []
-        catalogue = self.sonny_catalogue()
+        catalogue = self.sonny_catalogue(allow_refresh=allow_download)
         if not catalogue:
             return []
         # Для каждого тайла берётся лучший набор: 0,5″ важнее 1″.
@@ -871,18 +888,21 @@ class SourceStore:
             for cell, file_id in sonny.tile_sources(
                     catalogue, dataset_key, groups[dataset_key]):
                 path = self._ensure_sonny_tile(
-                    ds, dataset, file_id, cell, folder)
+                    ds, dataset, file_id, cell, folder, allow_download)
                 if path is not None:
                     paths.append(str(path))
         return paths
 
-    def _ensure_sonny_tile(self, ds, dataset, file_id, cell, folder):
+    def _ensure_sonny_tile(self, ds, dataset, file_id, cell, folder,
+                           allow_download=True):
         """Скачивает один тайл Sonny и возвращает путь для GDAL."""
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"{sonny.tile_name(*cell)}.hgt"
         with self._tile_lock(f"sonny:{dataset.key}:{target.name}"):
             path = target
             if not target.exists() or target.stat().st_size == 0:
+                if not allow_download:
+                    return None
                 key = f"sonny:{dataset.key}:{target.name}"
                 label = f"{DATASETS[ds]['short']} · {_tile_label(*cell)}"
                 _download_enter(key, label)
@@ -1110,12 +1130,14 @@ class SourceStore:
             with self._lock:
                 self._prepared_cache.pop(ds, None)
 
-    def open_at(self, ds, lon, lat):
+    def open_at(self, ds, lon, lat, allow_download=True):
         """Открывает набор так, чтобы в него попала точка.
 
         Возвращает ``(dataset, lock)``: общий датасет из кэша нельзя читать
         из двух потоков сразу — libtiff на этом падает. Для свежеоткрытых
         датасетов блокировка не нужна, поэтому ``lock`` равен ``None``.
+        ``allow_download=False`` ограничивает выбор уже закэшированными
+        данными.
         """
         prepared = self._prepared_for(ds, (lon, lat, lon, lat))
         if prepared:
@@ -1131,9 +1153,10 @@ class SourceStore:
                     return dataset, lock
             return None, None
         if source == "sonny":
+            # Точечный bbox: иначе _tiles_for захватит ещё три соседних
+            # тайла на границе градуса и скачает их зря.
             paths = self._sonny_sources(
-                ds, (math.floor(lon), math.floor(lat),
-                     math.floor(lon) + 1, math.floor(lat) + 1))
+                ds, (lon, lat, lon, lat), allow_download)
             for path in paths:
                 dataset, lock = self.open_source(path)
                 if dataset is not None:
@@ -1141,11 +1164,15 @@ class SourceStore:
             return None, None
         if source == "skadi":
             path = self._ensure_srtm(ds, int(math.floor(lat)),
-                                     int(math.floor(lon)))
+                                     int(math.floor(lon)), allow_download)
             return (gdal.Open(path), None) if path else (None, None)
         if source == "cop30":
+            if not allow_download:
+                return None, None
             url = _aws_url(source, int(math.floor(lat)), int(math.floor(lon)))
             return gdal.Open("/vsicurl/" + url), None
+        if not allow_download:
+            return None, None
         sources = self._pc_sources(ds, (math.floor(lon), math.floor(lat),
                                          math.floor(lon) + 1,
                                          math.floor(lat) + 1),
@@ -1173,11 +1200,13 @@ class SourceStore:
             dataset = None
         return None, None
 
-    def _ensure_srtm(self, ds, lat, lon):
+    def _ensure_srtm(self, ds, lat, lon, allow_download=True):
         """Скачивает .hgt.gz и превращает в GeoTIFF (gzip по HTTP не читаем)."""
         target = self.local_path(ds, lat, lon)
         if target.exists() and target.stat().st_size > 0:
             return target
+        if not allow_download:
+            return None
         with self._tile_lock(f"{ds}:{target.name}"):
             if target.exists() and target.stat().st_size > 0:
                 return target
@@ -1341,6 +1370,21 @@ def ground_resolution(z, lat):
 # Работа с DEM
 # ---------------------------------------------------------------------------
 
+def _allow_download(query):
+    """Разрешены ли новые загрузки по зуму из запроса.
+
+    Страница передаёт текущий зум; ниже z9 сервер использует только уже
+    закэшированные данные.  Без параметра поведение прежнее.
+    """
+    values = query.get("z")
+    if not values:
+        return True
+    try:
+        return float(values[0]) >= RELIEF_MIN_ZOOM
+    except (TypeError, ValueError):
+        return True
+
+
 def _tiles_for(bbox):
     """Тайлы 1°×1°, пересекающие область."""
     minx, miny, maxx, maxy = bbox
@@ -1352,24 +1396,24 @@ def _tiles_for(bbox):
     return tiles
 
 
-def _sources_for(store, ds, bbox):
+def _sources_for(store, ds, bbox, allow_download=True):
     """Источники DEM для области.
 
     Список, а не общий VRT: запросы идут параллельно, а общий файл VRT
     затирался бы соседним запросом — и на карте повторялся бы один и тот же
     участок рельефа.
     """
-    return store.sources(ds, bbox)
+    return store.sources(ds, bbox, allow_download)
 
 
-def _dem_grid(store, ds, bbox, pixels=None):
+def _dem_grid(store, ds, bbox, pixels=None, allow_download=True):
     """DEM набора на регулярной сетке EPSG:4326.
 
     Возвращает (массив высот, geotransform). Размер сетки по умолчанию —
     по нативному разрешению источника, чтобы не терять детали.
     """
     minx, miny, maxx, maxy = bbox
-    sources = _sources_for(store, ds, bbox)
+    sources = _sources_for(store, ds, bbox, allow_download)
     if not sources:
         return None, None
     source = gdal.Open(sources[0])
@@ -1463,8 +1507,11 @@ def _dem3857(store, ds, z, x, y):
 
 def _render_dem3857(store, ds, z, x, y, cache_file):
     lon1, lat1, lon2, lat2 = tile_bounds(z, x, y)
-    paths = [path for path in store.tile_sources(ds, (lon1, lat1, lon2, lat2))
-             if not store.is_missing(path)]
+    # Ниже z9 новые исходники не качаются: только то, что уже лежит в кэше.
+    allow_download = z >= RELIEF_MIN_ZOOM
+    paths = [path for path in store.tile_sources(
+        ds, (lon1, lat1, lon2, lat2), allow_download)
+        if not store.is_missing(path)]
     if not paths:
         return None
     # Сетевые источники читаются по HTTP: без отметки в статусе видно
@@ -1931,9 +1978,9 @@ def _dataset_transform(dataset, lon, lat):
     return x, y, native_x, native_y
 
 
-def sample_value(store, ds, lon, lat):
+def sample_value(store, ds, lon, lat, allow_download=True):
     """Высота в точке из исходного тайла набора."""
-    dataset, lock = store.open_at(ds, lon, lat)
+    dataset, lock = store.open_at(ds, lon, lat, allow_download)
     if dataset is None:
         return {"elevation": None, "native_x_m": None, "native_y_m": None}
     # Общий датасет из кэша читают и другие запросы: libtiff не переносит
@@ -1959,12 +2006,13 @@ def sample_value(store, ds, lon, lat):
     return {"elevation": value, "native_x_m": native_x, "native_y_m": native_y}
 
 
-def sample_profile(store, ds, lon1, lat1, lon2, lat2, count=200):
+def sample_profile(store, ds, lon1, lat1, lon2, lat2, count=200,
+                   allow_download=True):
     """Профиль высот по отрезку: выборка из DEM сетки вдоль линии."""
     pad = 0.02
     bbox = (min(lon1, lon2) - pad, min(lat1, lat2) - pad,
             max(lon1, lon2) + pad, max(lat1, lat2) + pad)
-    array, gt = _dem_grid(store, ds, bbox)
+    array, gt = _dem_grid(store, ds, bbox, allow_download=allow_download)
     if array is None:
         return []
     height, width = array.shape
@@ -2381,7 +2429,8 @@ class Handler(BaseHTTPRequestHandler):
         if action == "value":
             lon = float(query.get("lon", ["0"])[0])
             lat = float(query.get("lat", ["0"])[0])
-            result = sample_value(self.store, ds, lon, lat)
+            result = sample_value(
+                self.store, ds, lon, lat, _allow_download(query))
             result.update({"dataset": ds, "datum": DATASETS[ds]["datum"],
                            "kind": DATASETS[ds]["kind"]})
             self._json(result)
@@ -2389,7 +2438,8 @@ class Handler(BaseHTTPRequestHandler):
         if action == "info":
             lon = float(query.get("lon", ["0"])[0])
             lat = float(query.get("lat", ["0"])[0])
-            result = sample_value(self.store, ds, lon, lat)
+            result = sample_value(
+                self.store, ds, lon, lat, _allow_download(query))
             self._json({
                 "dataset": ds,
                 "has_data": bool(result and result.get("elevation") is not None),
@@ -2405,8 +2455,9 @@ class Handler(BaseHTTPRequestHandler):
             lat2 = float(query.get("lat2", ["0"])[0])
             count = int(query.get("n", ["200"])[0])
             self._json({"dataset": ds,
-                        "samples": sample_profile(self.store, ds, lon1, lat1,
-                                                  lon2, lat2, count)})
+                        "samples": sample_profile(
+                            self.store, ds, lon1, lat1, lon2, lat2, count,
+                            allow_download=_allow_download(query))})
             return
         self._json({"error": "unknown api"}, code=404)
 

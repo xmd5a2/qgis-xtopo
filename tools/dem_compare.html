@@ -855,6 +855,22 @@ function queueTile(ds, mode, z, x, y, lim, entry) {
   if (!batchTimer) batchTimer = setTimeout(flushBatches, 0);
 }
 
+// Ниже z9 новые загрузки рельефа не начинаются: ещё не отправленные
+// пачки выбрасываем, а записи тайлов убираем, чтобы при возврате на
+// рабочий зум они запросились заново.
+function dropTileEntry(group, item) {
+  item.entry.queued = false;
+  state.tiles.delete(tileCacheKey(group.ds, group.mode, group.z,
+                                  item.x, item.y, group.lim));
+}
+
+function dropReliefQueue() {
+  for (const group of pendingBatches.values()) {
+    for (const item of group.items) dropTileEntry(group, item);
+  }
+  pendingBatches.clear();
+}
+
 function flushBatches() {
   batchTimer = 0;
   const groups = Array.from(pendingBatches.values());
@@ -867,6 +883,10 @@ function flushBatches() {
 }
 
 async function requestBatch(group, items) {
+  if (!reliefAvailable()) {
+    for (const item of items) dropTileEntry(group, item);
+    return;
+  }
   const params = new URLSearchParams();
   params.set("ds", group.ds);
   params.set("z", group.z);
@@ -1269,6 +1289,8 @@ function clearProfile() {
 
 function draw() {
   const {w, h} = viewSize();
+  // Ниже z9 рельеф не рисуется и не запрашивается.
+  if (!reliefAvailable()) dropReliefQueue();
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
   const center = centerPoint();
   // Левый верхний угол видимой области в пикселях мира текущего зума.
@@ -1647,8 +1669,11 @@ async function refreshReadout() {
   state.lastReadout = now;
   const {lon, lat} = state.cursor || state.center;
   const keys = [state.a, state.b].filter(Boolean);
+  // Зум передаём серверу: ниже z9 он не качает новые исходники, а
+  // отвечает только по уже закэшированным данным.
   const results = await Promise.all(keys.map(ds =>
-    fetch(`/api/value?ds=${ds}&lon=${lon}&lat=${lat}`).then(r => r.json())
+    fetch(`/api/value?ds=${ds}&lon=${lon}&lat=${lat}&z=${state.zoom}`)
+      .then(r => r.json())
       .catch(() => null)));
   const parts = [];
   let delta = null;
@@ -1698,7 +1723,8 @@ async function buildProfile(a, b, scroll = true) {
   const [lon1, lat1] = a;
   const [lon2, lat2] = b;
   const fetchProfile = ds => fetch(
-    `/api/profile?ds=${ds}&lon1=${lon1}&lat1=${lat1}&lon2=${lon2}&lat2=${lat2}&n=120`
+    `/api/profile?ds=${ds}&lon1=${lon1}&lat1=${lat1}&lon2=${lon2}&lat2=${lat2}` +
+    `&n=120&z=${state.zoom}`
   ).then(r => r.json()).catch(() => null);
   let pa = null, pb = null;
   try {
@@ -2234,11 +2260,23 @@ document.getElementById("profile-btn").addEventListener("click", () => {
 document.getElementById("zoom-native").addEventListener("click", async () => {
   const ds = state.a || state.b;
   if (!ds) return;
-  const info = await fetch(
-    `/api/info?ds=${ds}&lon=${state.center.lon}&lat=${state.center.lat}`
-  ).then(r => r.json());
-  if (!info || !info.native_y_m) { showHint("нет данных"); return; }
-  const native = Math.max(info.native_y_m, info.native_x_m);
+  // До z9 сервер новые исходники не качает, поэтому берём разрешение из
+  // метаданных набора. На рабочих зумах уточняем по настоящему тайлу.
+  let native = null;
+  if (reliefAvailable()) {
+    const info = await fetch(
+      `/api/info?ds=${ds}&lon=${state.center.lon}&lat=${state.center.lat}` +
+      `&z=${state.zoom}`
+    ).then(r => r.json());
+    if (info && info.native_y_m) {
+      native = Math.max(info.native_y_m, info.native_x_m);
+    }
+  }
+  if (!native) {
+    const spec = state.datasets[ds];
+    native = spec && spec.resolution_m;
+  }
+  if (!native) { showHint("нет данных"); return; }
   const zoom = Math.log2(156543.03392 *
     Math.cos(state.center.lat * Math.PI / 180) / native);
   state.zoom = Math.min(state.maxZoom, Math.max(state.minZoom, zoom));
