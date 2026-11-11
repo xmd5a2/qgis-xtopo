@@ -203,13 +203,14 @@ class Config:
         """Ключ источника рельефа.
 
         В старых config.ini поля terrain_source нет: если включён
-        get_terrain_tiles, это ручной каталог, иначе SRTM.
+        get_terrain_tiles, это ручной каталог, иначе SRTM.  Новые
+        проекты записывают ключ явно — по умолчанию режим «Автоматически».
         """
         if self.terrain_source:
             return self.terrain_source
         if self.get_terrain_tiles:
             return dem_sources.MANUAL_SOURCE
-        return dem_sources.DEFAULT_SOURCE
+        return dem_sources.LEGACY_DEFAULT_SOURCE
 
     def validate(self):
         if not self.project_name:

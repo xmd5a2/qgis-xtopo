@@ -48,6 +48,9 @@ class QgisXtopoPlugin:
         self.dock = XtopoDockWidget(self.iface, self.iface.mainWindow())
         self.iface.addDockWidget(_right_dock_area(), self.dock)
         self.dock.hide()
+        # Список тайлов Sonny DTM лежит в сети: обновляем его в фоне,
+        # чтобы старт плагина не ждал ответа Google Drive.
+        self.dock.refresh_sonny_catalogue()
         if os.environ.get("QGIS_XTOPO_OPEN"):
             # Запуск из tools/run_qgis.sh: показываем панель после того, как
             # QGIS восстановит сохранённое состояние окон (иначе оно наш

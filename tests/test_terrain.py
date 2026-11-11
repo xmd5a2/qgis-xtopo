@@ -855,6 +855,333 @@ class DemSourceTest(unittest.TestCase):
         )
         self.assertEqual(dem_sources.source_warning("srtm", bbox, {}), "")
 
+    def test_auto_plan_prefers_better_datasets(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "3dep": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+            "srtm": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        plan = dem_sources.auto_plan(bbox, availability, (46, 7))
+        self.assertEqual(plan, {(46, 7): "3dep"})
+
+    def test_auto_plan_falls_back_to_background(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ())
+        self.assertEqual(plan, {(46, 7): "cop30"})
+
+    def test_auto_plan_sonny_wins_over_background(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ((46, 7),))
+        self.assertEqual(plan, {(46, 7): "sonny"})
+
+    def test_auto_plan_priority_can_be_changed(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "3dep": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        plan = dem_sources.auto_plan(
+            bbox, availability, ((46, 7),),
+            priority=(dem_sources.SONNY_SOURCE, "cop30"),
+        )
+        self.assertEqual(plan, {(46, 7): "sonny"})
+
+    def test_auto_availability_counts_datasets(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        state = dem_sources.auto_availability(bbox, availability, ())
+        self.assertTrue(state.available)
+        self.assertIn("Copernicus GLO-30", state.message)
+
+    def test_mixed_datum_warning_for_mosaic(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 45.9, 8.0, 46.9)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            ),
+        }
+        warning = dem_sources.source_warning(
+            dem_sources.AUTO_SOURCE, bbox, availability, ((46, 7),)
+        )
+        self.assertIn("EGM2008", warning)
+        self.assertEqual(
+            dem_sources.source_warning(
+                dem_sources.AUTO_SOURCE, bbox, availability, ()
+            ),
+            "",
+        )
+
+    def test_sonny_availability_from_catalogue(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        state = dem_sources.sonny_availability(bbox, ((46, 7),))
+        self.assertTrue(state.available)
+        self.assertFalse(state.partial)
+        self.assertFalse(
+            dem_sources.sonny_availability(bbox, ()).available
+        )
+
+    def test_attribution_lists_mosaic_members(self):
+        from qgis_xtopo.core import dem_sources
+
+        attribution = dem_sources.attribution_for(dem_sources.AUTO_SOURCE)
+        self.assertIn("Copernicus", attribution)
+        self.assertIn("Sonny", attribution)
+        keys = dem_sources.attribution_for_keys(["sonny"])
+        self.assertEqual(keys, dem_sources.attribution_for("sonny"))
+
+    def test_check_availability_adds_auto_mode(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        full = dem_sources.Availability(
+            available=True, checked=True,
+            required_tiles=required, covered_tiles=required,
+        )
+
+        def fake_stac(item, bbox, timeout=30, retries=2):
+            return full
+
+        with mock.patch.object(dem_sources, "_stac_availability", fake_stac):
+            availability = dem_sources.check_availability(
+                bbox, timeout=1, sonny_tiles=()
+            )
+        self.assertIn(dem_sources.AUTO_SOURCE, availability)
+        self.assertTrue(availability[dem_sources.AUTO_SOURCE].available)
+        # 3DEP имеет приоритет над остальными наборами.
+        self.assertIn("3DEP", availability[dem_sources.AUTO_SOURCE].message)
+
+
+class SonnyDatasetTest(unittest.TestCase):
+    def test_tile_names(self):
+        from qgis_xtopo.core import sonny
+
+        self.assertEqual(sonny.tile_from_name("N46E009.zip"), (46, 9))
+        self.assertEqual(sonny.tile_from_name("N27W016.hgt"), (27, -16))
+        self.assertEqual(sonny.tile_from_name("S21W030.zip"), (-21, -30))
+        self.assertIsNone(sonny.tile_from_name("readme.txt"))
+        self.assertEqual(sonny.tile_name(46, 9), "N46E009")
+        self.assertEqual(sonny.tile_name(-21, -30), "S21W030")
+
+    def test_catalogue_picks_finest_dataset(self):
+        from qgis_xtopo.core import sonny
+
+        catalogue = {
+            "europe-1s": {"N46E009.zip": "id1"},
+            "europe-3s": {"N46E009.zip": "id3", "N47E010.zip": "id4"},
+            "at-05s": {"N46E009.zip": "id05"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            sonny.store_catalogue(catalogue, directory)
+            tiles = sonny.catalogue_tiles(directory)
+            assignment = sonny.assign_datasets(catalogue, tiles)
+        self.assertEqual(tiles[(46, 9)], "at-05s")
+        self.assertEqual(tiles[(47, 10)], "europe-3s")
+        self.assertEqual(assignment[(46, 9)], "at-05s")
+
+    def test_catalogue_age_and_missing_cache(self):
+        from qgis_xtopo.core import sonny
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(sonny.catalogue_age_days(directory))
+            sonny.store_catalogue({"europe-1s": {}}, directory)
+            age = sonny.catalogue_age_days(directory)
+        self.assertIsNotNone(age)
+        self.assertLess(age, 1.0)
+
+    def test_hgt_vrt_matches_srtm_georeferencing(self):
+        import numpy
+        from osgeo import gdal
+
+        from qgis_xtopo.core import sonny
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hgt = root / "N47E011.hgt"
+            values = numpy.arange(
+                7201 * 7201, dtype=">i2"
+            ).reshape(7201, 7201)
+            values.tofile(str(hgt))
+            vrt = sonny.hgt_vrt(hgt, 0.5 / 3600.0, 7201)
+            dataset = gdal.Open(str(vrt))
+            transform = dataset.GetGeoTransform()
+            array = dataset.GetRasterBand(1).ReadAsArray()
+            size = dataset.RasterXSize
+            dataset = None
+        step = 0.5 / 3600.0
+        self.assertEqual(size, 7201)
+        self.assertAlmostEqual(transform[0], 11.0 - step / 2.0, 9)
+        self.assertAlmostEqual(transform[3], 48.0 + step / 2.0, 9)
+        self.assertAlmostEqual(transform[1], step, 12)
+        self.assertEqual(array[0, 0], 0)
+        self.assertEqual(array[1, 2], 7201 + 2)
+
+
+class AutoMosaicTest(unittest.TestCase):
+    def test_mosaic_grid_prefers_finest_that_fits(self):
+        from qgis_xtopo.core import terrain
+
+        resolution, width, height = terrain._mosaic_grid(
+            1.0, 1.0, [1 / 3600.0, 1 / 10800.0]
+        )
+        self.assertAlmostEqual(resolution, 1 / 10800.0, 12)
+        self.assertEqual(width, 10800)
+        self.assertEqual(height, 10800)
+
+    def test_mosaic_grid_reduces_large_extent(self):
+        from qgis_xtopo.core import terrain
+
+        resolution, width, height = terrain._mosaic_grid(
+            10.0, 10.0, [1 / 3600.0, 1 / 10800.0]
+        )
+        self.assertLessEqual(width * height, terrain.MAX_DEM_PIXELS)
+        self.assertGreater(resolution, 1 / 3600.0)
+
+    def test_cells_window_covers_tiles(self):
+        from qgis_xtopo.core import terrain
+
+        window = terrain._cells_window({(46, 7), (46, 8), (47, 7)})
+        self.assertEqual(window.lon_min, 7.0)
+        self.assertEqual(window.lon_max, 9.0)
+        self.assertEqual(window.lat_min, 46.0)
+        self.assertEqual(window.lat_max, 48.0)
+
+    def test_mosaic_layers_keep_priority(self):
+        """Данные более позднего слоя перекрывают более ранний."""
+        import numpy
+        from osgeo import gdal, osr
+
+        from qgis_xtopo.core import terrain
+
+        def make(path, value, nodata=None):
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(path), 10, 10, 1, gdal.GDT_Float32
+            )
+            dataset.SetGeoTransform((7.0, 0.01, 0, 47.0, 0, -0.01))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset.SetProjection(srs.ExportToWkt())
+            band = dataset.GetRasterBand(1)
+            if nodata is not None:
+                band.SetNoDataValue(nodata)
+            band.WriteArray(numpy.full((10, 10), value, dtype="float32"))
+            dataset = None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            background = root / "background.tif"
+            overlay = root / "overlay.tif"
+            make(background, 100.0)
+            make(overlay, 250.0)
+            bounds = terrain.BBox(7.0, 46.9, 7.1, 47.0)
+            gdal, _o, _s = terrain._gdal()
+            merged = terrain._write_layer(
+                gdal, [str(background), str(overlay)], bounds, 10, 10,
+                root, "merged.tif", None, None, "тест",
+            )
+            dataset = gdal.Open(str(merged))
+            array = dataset.GetRasterBand(1).ReadAsArray()
+            dataset = None
+        self.assertEqual(array[0, 0], 250.0)
+
+    def test_mosaic_layer_keeps_background_where_overlay_is_empty(self):
+        """Пустота в верхнем слое не затирает данные нижнего."""
+        import numpy
+        from osgeo import gdal, osr
+
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            background = root / "background.tif"
+            overlay = root / "overlay.tif"
+
+            def make(path, array, nodata=None):
+                dataset = gdal.GetDriverByName("GTiff").Create(
+                    str(path), 10, 10, 1, gdal.GDT_Float32
+                )
+                dataset.SetGeoTransform((7.0, 0.01, 0, 47.0, 0, -0.01))
+                srs = osr.SpatialReference()
+                srs.ImportFromEPSG(4326)
+                dataset.SetProjection(srs.ExportToWkt())
+                band = dataset.GetRasterBand(1)
+                if nodata is not None:
+                    band.SetNoDataValue(nodata)
+                band.WriteArray(array)
+                dataset = None
+
+            make(background, numpy.full((10, 10), 100.0, dtype="float32"))
+            empty = numpy.full((10, 10), -32768.0, dtype="float32")
+            empty[:, 5:] = 250.0
+            make(overlay, empty, nodata=-32768)
+            bounds = terrain.BBox(7.0, 46.9, 7.1, 47.0)
+            gdal, _o, _s = terrain._gdal()
+            merged = terrain._write_layer(
+                gdal, [str(background), str(overlay)], bounds, 10, 10,
+                root, "merged.tif", None, None, "тест",
+            )
+            dataset = gdal.Open(str(merged))
+            array = dataset.GetRasterBand(1).ReadAsArray()
+            dataset = None
+        self.assertEqual(array[0, 0], 100.0)
+        self.assertEqual(array[0, 9], 250.0)
+
 
 class CogDownloadTest(unittest.TestCase):
     def test_download_cog_dem_uses_cache(self):

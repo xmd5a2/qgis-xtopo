@@ -1289,7 +1289,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock._pbf_probe_timer.stop()
         dock.deleteLater()
 
-    def test_dock_auto_selects_3dep_and_warns(self):
+    def test_dock_does_not_force_3dep_and_warns(self):
         from qgis_xtopo.core.bbox import BBox
         from qgis_xtopo.core.dem_sources import Availability
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
@@ -1319,13 +1319,13 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock._dem_check_timer.stop()
             dock._dem_bbox = bbox
             dock._dem_availability_generation = 3
-            dock._dem_availability_ready(3, availability)
-            self.assertEqual(dock.dem_source.currentData(), "3dep")
+            dock.dem_source.setCurrentIndex(dock.dem_source.findData("srtm"))
+            dock._dem_availability_ready(3, availability, set())
+            # Автоподбор 3DEP больше не переключает список источников:
+            # он входит в режим «Автоматически».
+            self.assertEqual(dock.dem_source.currentData(), "srtm")
 
             # Ручной выбор другого источника даёт предупреждение.
-            dock.dem_source.setCurrentIndex(
-                dock.dem_source.findData("srtm")
-            )
             self.assertFalse(dock.dem_warning.isHidden())
             self.assertIn("3DEP", dock.dem_warning.text())
 

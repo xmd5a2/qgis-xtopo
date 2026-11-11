@@ -22,6 +22,21 @@ class ProjectTemplateTest(unittest.TestCase):
         self.assertIn("<title>demo</title>", text)
         self.assertIn("<qgis_xtopo", text)
 
+    def test_rewrite_in_place_updates_attribution(self):
+        """Атрибуция мозаики дописывается уже в готовый проект."""
+        source = template_path()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "demo.qgz"
+            rewrite_project_archive(source, target, "demo")
+            rewrite_project_archive(
+                target, target, "demo", dem_attribution="Copernicus · Sonny"
+            )
+            with zipfile.ZipFile(target) as archive:
+                names = archive.namelist()
+                text = archive.read("demo.qgs").decode("utf-8")
+        self.assertEqual(names.count("demo.qgs"), 1)
+        self.assertIn("Copernicus · Sonny", text)
+
     def test_template_has_aerialway_station(self):
         source = template_path()
         with zipfile.ZipFile(source) as archive:

@@ -61,6 +61,25 @@ SOURCE_THRESHOLD_PROFILES = {
         "summit_far_neighbour": 900.0,
         "valley_summit_min": 100.0,
     },
+    # Мозаика «Автоматически» и набор Sonny DTM: за основу взят профиль
+    # Copernicus — это фон мозаики.  Точные пороги для них, как и для
+    # остальных наборов, нужно подбирать на размеченной выборке.
+    "auto": {
+        "no_crest_450": 80.0,
+        "far_drop": 260.0,
+        "near_max_d": 400.0,
+        "stream_distance": 50.0,
+        "ele_below": 4.6,
+        "summit_far_neighbour": 900.0,
+    },
+    "sonny": {
+        "no_crest_450": 80.0,
+        "far_drop": 260.0,
+        "near_max_d": 400.0,
+        "stream_distance": 50.0,
+        "ele_below": 4.6,
+        "summit_far_neighbour": 900.0,
+    },
 }
 
 # Базовые пороги правила (SRTM и источники без отдельного профиля).

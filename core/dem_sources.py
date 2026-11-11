@@ -7,6 +7,12 @@
 границам покрытия для SRTM: так интерфейс не предлагает скачать набор,
 данных которого для этого охвата нет.
 
+Кроме обычных наборов есть режим «Автоматически» (``AUTO_SOURCE``):
+это не отдельный набор, а способ выбрать набор по тайлам.  Для каждого
+тайла охвата подбирается лучший доступный набор — сначала 3DEP, потом
+Sonny DTM, а фоном идёт Copernicus GLO-30.  Логика прежнего принудительного
+выбора 3DEP переехала именно сюда.
+
 Модуль не скачивает сами тайлы — только описания и проверку доступности.
 Загрузка лежит в :mod:`core.terrain`.
 """
@@ -31,8 +37,17 @@ USER_AGENT = "qgis-xtopo/1.0"
 STAC_SEARCH = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 SIGN_API = "https://planetarycomputer.microsoft.com/api/sas/v1/sign"
 
-DEFAULT_SOURCE = "srtm"
+AUTO_SOURCE = "auto"
+SONNY_SOURCE = "sonny"
 MANUAL_SOURCE = "manual"
+
+# Источник по умолчанию — режим «Автоматически»: набор подбирается под
+# охват (Copernicus GLO-30 фоном, 3DEP и Sonny DTM — где покрывают).
+DEFAULT_SOURCE = AUTO_SOURCE
+# Старые config.ini без поля terrain_source: источник был SRTM.
+LEGACY_DEFAULT_SOURCE = "srtm"
+# Набор, которым заполняется фон в режиме «Автоматически».
+AUTO_BACKGROUND = "cop30"
 
 # Сколько объектов STAC запрашиваем за один раз и всего.  Для всей страны
 # хватает одного ответа с limit=1000, но на всякий случай есть постраничный
@@ -76,9 +91,23 @@ class DemSource:
         return not self.manual
 
 
-# Порядок — как в списке интерфейса: сначала обычный SRTM, затем более
-# точные наборы, в конце ручной каталог.
+# Порядок — как в списке интерфейса: сначала автоматический подбор, затем
+# обычный SRTM, потом более точные наборы, в конце ручной каталог.
 SOURCES = (
+    DemSource(
+        key=AUTO_SOURCE,
+        title="Автоматически (подбор по охвату)",
+        short="Автоматически",
+        provider="подбор по охвату",
+        resolution="по набору",
+        datum="по набору",
+        coverage="по покрытию наборов",
+        coverage_short="по покрытию",
+        note="Для каждого тайла выбирается лучший доступный набор: "
+             "USGS 3DEP, затем Sonny DTM, фон — Copernicus GLO-30, "
+             "в крайнем случае SRTM.",
+        attribution="",
+    ),
     DemSource(
         key="srtm",
         title="SRTM v3 (skadi), 30 м",
@@ -150,6 +179,22 @@ SOURCES = (
         native_resolution=1 / 10800.0,
     ),
     DemSource(
+        key="sonny",
+        title="Sonny DTM (LiDAR), 30 м",
+        short="Sonny DTM",
+        provider="Sonny / 4lima.de",
+        resolution="30 м (1″), для Австрии и Швейцарии 15 м (0,5″)",
+        datum="национальные системы",
+        coverage="Европа",
+        coverage_short="Европа",
+        note="LiDAR DTM: земная поверхность без растительности и построек. "
+             "Точнее SRTM и Copernicus в горах и лесах. "
+             "Тайлы 1″ для всей Европы, 0,5″ — только Австрия и Швейцария.",
+        attribution="LiDAR Digital Terrain Models of Europe by Sonny — "
+                    "https://sonny.4lima.de (CC BY 4.0)",
+        native_resolution=1 / 3600.0,
+    ),
+    DemSource(
         key=MANUAL_SOURCE,
         title="Свой каталог DEM",
         short="Свой каталог",
@@ -176,9 +221,26 @@ def source(key):
 
 
 def attribution_for(key):
-    """Атрибуция источника (пустая строка, если её не требуется)."""
+    """Атрибуция источника (пустая строка, если её не требуется).
+
+    В режиме «Автоматически» подбираются сразу несколько наборов,
+    поэтому перечисляются все возможные участники мозаики; точный
+    список даёт :func:`attribution_for_keys`.
+    """
+    if key == AUTO_SOURCE:
+        return attribution_for_keys(AUTO_PRIORITY)
     item = SOURCE_BY_KEY.get(key)
     return item.attribution if item is not None else ""
+
+
+def attribution_for_keys(keys):
+    """Атрибуция перечисленных наборов через разделитель."""
+    parts = []
+    for key in keys:
+        value = attribution_for(key) if key != AUTO_SOURCE else ""
+        if value and value not in parts:
+            parts.append(value)
+    return " · ".join(parts)
 
 
 def tile_name(lat, lon):
@@ -403,7 +465,7 @@ def _range_availability(item, bbox):
     )
 
 
-def _stac_availability(item, bbox, timeout=30):
+def _stac_availability(item, bbox, timeout=30, retries=2):
     clipped = _clip_to_coverage(bbox, item)
     if clipped is None:
         return Availability(
@@ -415,7 +477,8 @@ def _stac_availability(item, bbox, timeout=30):
         )
     clipped_bbox = BBox(*clipped)
     items = stac_items(
-        item.collection, clipped, timeout=timeout, retries=2, delay=1.0
+        item.collection, clipped, timeout=timeout, retries=retries,
+        delay=1.0,
     )
     required = set(tiles_for_bbox(clipped_bbox))
     covered = required & _covered_tiles(items)
@@ -460,12 +523,96 @@ def _stac_availability(item, bbox, timeout=30):
     )
 
 
-def _check_one(item, bbox, timeout):
+def cop30_tile_exists(lat, lon, timeout=15):
+    """Есть ли файл тайла Copernicus GLO-30 (проверка по прямому адресу)."""
+    url = aws_tile_url("cop30", lat, lon)
+    request = urllib.request.Request(
+        url, method="HEAD", headers={"User-Agent": USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status == 200
+    except Exception:  # noqa: BLE001 - сеть не должна ломать проверку
+        return False
+
+
+def cop30_existing_tiles(tiles, timeout=15, workers=8):
+    """Тайлы, файлы которых есть в открытом бакете AWS.
+
+    Зеркало в AWS неполное: часть тайлов лежит только в каталоге STAC.
+    """
+    tiles = list(tiles)
+    if not tiles:
+        return set()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        found = pool.map(
+            lambda tile: cop30_tile_exists(*tile, timeout=timeout), tiles
+        )
+    return {tile for tile, ok in zip(tiles, found) if ok}
+
+
+def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=("3dep", "cop30")):
+    """Покрытие наборов, из которых складывается мозаика «Автоматически».
+
+    Проверяются только нужные наборы: 3DEP и Copernicus GLO-30 (Sonny и
+    SRTM считаются по локальным данным).  Остальные наборы в мозаику не
+    входят, поэтому их покрытие не запрашивается.
+    """
+    results = {}
+    stac_keys = [key for key in keys if key in ("3dep", "cop30")]
+
+    def check(key):
+        try:
+            return _stac_availability(
+                source(key), bbox, timeout=timeout, retries=1
+            )
+        except Exception as exc:  # noqa: BLE001 - сеть не должна ломать сборку
+            return Availability(
+                available=True, checked=False,
+                message=i18n.tr("ошибка проверки"),
+                detail=i18n.tr(
+                    "Не удалось проверить доступность: {}"
+                ).replace("{}", str(exc)),
+            )
+
+    if stac_keys:
+        with ThreadPoolExecutor(max_workers=len(stac_keys)) as pool:
+            futures = {
+                pool.submit(check, key): key for key in stac_keys
+            }
+            for future, key in futures.items():
+                results[key] = future.result()
+
+    if "cop30" in stac_keys and not results["cop30"].checked:
+        # Каталог STAC не ответил.  Адреса тайлов известны точно, а
+        # отсутствующие файлы просто пропускаются при сборке мозаики,
+        # поэтому покрытие считается полным.
+        required = set(tiles_for_bbox(bbox))
+        covered = set(required)
+        results["cop30"] = Availability(
+            available=True, checked=True, partial=False,
+            message=i18n.trf("тайлов: {}", len(covered)),
+            detail=i18n.tr(
+                "Каталог STAC недоступен, покрытие проверено по файлам."
+            ),
+            total=len(required),
+            required_tiles=frozenset(required),
+            covered_tiles=frozenset(covered),
+            missing_tiles=frozenset(),
+        )
+    results["srtm"] = _range_availability(source("srtm"), bbox)
+    results[SONNY_SOURCE] = sonny_availability(bbox, sonny_tiles)
+    return results
+
+
+def _check_one(item, bbox, timeout, sonny_tiles=()):
     if item.manual:
         return Availability(
             available=True, checked=True,
             message=i18n.tr("каталог выбирается вручную"),
         )
+    if item.key == SONNY_SOURCE:
+        return sonny_availability(bbox, sonny_tiles)
     if not item.collection:
         return _range_availability(item, bbox)
     try:
@@ -480,7 +627,7 @@ def _check_one(item, bbox, timeout):
         )
 
 
-def check_availability(bbox, cancel=None, timeout=30):
+def check_availability(bbox, cancel=None, timeout=30, sonny_tiles=()):
     """Проверяет все источники для охвата.
 
     Возвращает словарь ``ключ → Availability``.  Сетевые проверки идут
@@ -490,13 +637,19 @@ def check_availability(bbox, cancel=None, timeout=30):
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {}
         for item in SOURCES:
+            if item.key == AUTO_SOURCE:
+                # Режим подбора разбирается после остальных наборов.
+                continue
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("DEM availability check cancelled")
-            futures[pool.submit(_check_one, item, bbox, timeout)] = item
+            futures[
+                pool.submit(_check_one, item, bbox, timeout, sonny_tiles)
+            ] = item
         for future, item in futures.items():
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("DEM availability check cancelled")
             results[item.key] = future.result()
+    results[AUTO_SOURCE] = auto_availability(bbox, results, sonny_tiles)
     return results
 
 
@@ -620,6 +773,137 @@ def preferred_source(bbox, availability):
     return "3dep"
 
 
+# --- Режим «Автоматически» --------------------------------------------
+
+# Наборы, из которых складывается мозаика в режиме «Автоматически».
+# Порядок — приоритет: первый подходящий набор выигрывает тайл.
+AUTO_PRIORITY = ("3dep", "sonny", "cop30", "srtm")
+
+# Наборы с собственным набором тайлов: покрытие берётся из локального
+# каталога, а не из STAC.
+LOCAL_SOURCES = (SONNY_SOURCE,)
+
+
+def _coverage(availability, key, sonny_tiles):
+    """Множество тайлов 1°×1°, покрытых набором."""
+    if key == SONNY_SOURCE:
+        return set(sonny_tiles)
+    state = availability.get(key)
+    if state is None or not state.checked:
+        return set()
+    return set(state.covered_tiles)
+
+
+def auto_plan(bbox, availability, sonny_tiles=(), priority=None):
+    """Раскладка тайлов охвата по наборам для режима «Автоматически».
+
+    Для каждого тайла 1°×1° выбирается первый набор из ``priority``
+    (по умолчанию :data:`AUTO_PRIORITY`), который этот тайл покрывает.
+    Тайлы, которых не покрывает ни один набор, остаются без данных.
+    """
+    tiles = set(tiles_for_bbox(bbox))
+    order = tuple(priority) if priority else AUTO_PRIORITY
+    coverage = {
+        key: _coverage(availability, key, sonny_tiles)
+        for key in order
+    }
+    plan = {}
+    for tile in sorted(tiles):
+        for key in order:
+            if tile in coverage[key]:
+                plan[tile] = key
+                break
+    return plan
+
+
+def auto_availability(bbox, availability, sonny_tiles=()):
+    """Доступность режима «Автоматически» для охвата.
+
+    Показывает, какие наборы войдут в мозаику и сколько тайлов достанется
+    каждому.
+    """
+    tiles = set(tiles_for_bbox(bbox))
+    plan = auto_plan(bbox, availability, sonny_tiles)
+    counts = {}
+    for key in plan.values():
+        counts[key] = counts.get(key, 0) + 1
+    if not plan:
+        return Availability(
+            available=False, checked=True,
+            message=i18n.tr("нет данных"),
+            detail=i18n.tr(
+                "Ни один набор не покрывает выбранный охват."
+            ),
+            total=len(tiles),
+            required_tiles=frozenset(tiles),
+            missing_tiles=frozenset(tiles),
+        )
+    parts = []
+    for key in AUTO_PRIORITY:
+        if counts.get(key):
+            parts.append(f"{source(key).short}: {counts[key]}")
+    message = i18n.trf("тайлов: {}", ", ".join(parts))
+    detail = i18n.trf(
+        "Тайлы 1°×1° разложены по наборам: {}. "
+        "Системы высот у наборов разные, на границах возможны ступеньки.",
+        ", ".join(parts),
+    )
+    return Availability(
+        available=True, checked=True, partial=len(plan) < len(tiles),
+        message=message, detail=detail,
+        total=len(tiles),
+        required_tiles=frozenset(tiles),
+        covered_tiles=frozenset(plan),
+        missing_tiles=frozenset(tiles - set(plan)),
+    )
+
+
+def sonny_availability(bbox, sonny_tiles):
+    """Доступность набора Sonny DTM по локальному каталогу тайлов."""
+    tiles = set(tiles_for_bbox(bbox))
+    covered = tiles & set(sonny_tiles)
+    if not covered:
+        return Availability(
+            available=False, checked=bool(sonny_tiles),
+            message=i18n.tr("нет данных"),
+            detail=i18n.tr(
+                "Набор Sonny DTM не покрывает выбранный охват."
+            ),
+            total=len(tiles),
+            required_tiles=frozenset(tiles),
+            missing_tiles=frozenset(tiles),
+        )
+    partial = len(covered) < len(tiles)
+    if partial:
+        message = i18n.trf("{} из {} тайлов", len(covered), len(tiles))
+        detail = i18n.tr(
+            "Sonny DTM покрывает часть охвата; остальные тайлы "
+            "доберутся из другого набора."
+        )
+    else:
+        message = i18n.trf("весь охват, тайлов: {}", len(tiles))
+        detail = i18n.trf(
+            "Sonny DTM покрывает весь охват: тайлов — {}", len(tiles)
+        )
+    return Availability(
+        available=True, checked=True, partial=partial,
+        message=message, detail=detail,
+        total=len(tiles),
+        required_tiles=frozenset(tiles),
+        covered_tiles=frozenset(covered),
+        missing_tiles=frozenset(tiles - covered),
+    )
+
+
+def auto_source_keys(availability, sonny_tiles=()):
+    """Наборы, участвующие в мозаике, в порядке приоритета."""
+    keys = []
+    for key in AUTO_PRIORITY:
+        if _coverage(availability, key, sonny_tiles):
+            keys.append(key)
+    return keys
+
+
 def display_availability(key, bbox, availability):
     """Доступность для панели: океанские тайлы не считаются пропуском."""
     state = availability.get(key)
@@ -641,8 +925,15 @@ def display_availability(key, bbox, availability):
     )
 
 
-def source_warning(key, bbox, availability):
-    """Предупреждение, что для охвата есть источник точнее."""
+def source_warning(key, bbox, availability, sonny_tiles=()):
+    """Предупреждение для выбранного источника.
+
+    Для обычных наборов — предложение более точного набора.  Для
+    мозаики («Автоматически» или Sonny DTM) — предупреждение о разных
+    системах высот: на границах тайлов возможны ступеньки.
+    """
+    if key in (AUTO_SOURCE, SONNY_SOURCE):
+        return mixed_datum_warning(key, bbox, availability, sonny_tiles)
     if key in ("3dep", MANUAL_SOURCE):
         return ""
     if preferred_source(bbox, availability) != "3dep":
@@ -650,6 +941,40 @@ def source_warning(key, bbox, availability):
     return i18n.tr(
         "Для этого охвата доступен USGS 3DEP (10 м, DTM) — "
         "он точнее выбранного источника."
+    )
+
+
+def mixed_datum_warning(key, bbox, availability, sonny_tiles=()):
+    """Разные системы высот в мозаике рельефа.
+
+    Наборы, из которых складывается мозаика, приведены к своим
+    вертикальным системам: 3DEP — NAVD88, Copernicus — EGM2008,
+    SRTM — EGM96, Sonny — национальные.  Смешивать их в одном проекте
+    можно, но на границах тайлов высоты расходятся.
+    """
+    if bbox is None:
+        return ""
+    if key == AUTO_SOURCE:
+        priority = AUTO_PRIORITY
+    elif key == SONNY_SOURCE:
+        priority = (SONNY_SOURCE, AUTO_BACKGROUND, "srtm")
+    else:
+        return ""
+    plan = auto_plan(bbox, availability, sonny_tiles, priority=priority)
+    used = set(plan.values())
+    datums = []
+    for source_key in priority:
+        if source_key not in used:
+            continue
+        datum = i18n.tr(source(source_key).datum)
+        if datum not in datums:
+            datums.append(datum)
+    if len(datums) < 2:
+        return ""
+    return i18n.trf(
+        "В мозаике наборы с разными системами высот ({}): "
+        "на границах тайлов возможны ступеньки.",
+        ", ".join(datums),
     )
 
 

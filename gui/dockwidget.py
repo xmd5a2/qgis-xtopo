@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QStyleOptionViewItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core import dem_sources, geofabrik, i18n
+from ..core import dem_sources, geofabrik, i18n, sonny
 from ..core.bbox import parse_bbox
 from ..core.config import (
     Config, default_projects_dir, default_queries, project_name_error,
@@ -349,7 +349,7 @@ class PbfProbeWorker(QThread):
 class DemAvailabilityWorker(QThread):
     """Проверка покрытия источников рельефа для выбранного охвата."""
 
-    result = pyqtSignal(int, object)
+    result = pyqtSignal(int, object, object)
     failed = pyqtSignal(int, str)
 
     def __init__(self, bbox, generation, parent=None):
@@ -360,18 +360,37 @@ class DemAvailabilityWorker(QThread):
 
     def run(self):
         try:
+            sonny_cells = set(sonny.catalogue_tiles(sonny.catalogue_dir()))
             availability = dem_sources.check_availability(
-                self.bbox, cancel=self.cancel_event, timeout=10
+                self.bbox, cancel=self.cancel_event, timeout=10,
+                sonny_tiles=sonny_cells,
             )
         except InterruptedError:
             return
         except Exception as exc:  # noqa: BLE001 - сеть не должна ломать панель
             self.failed.emit(self.generation, str(exc))
         else:
-            self.result.emit(self.generation, availability)
+            self.result.emit(self.generation, availability, sonny_cells)
 
     def cancel(self):
         self.cancel_event.set()
+
+
+class SonnyCatalogueWorker(QThread):
+    """Фоновое обновление списка тайлов рельефа Sonny DTM.
+
+    Список покрытия нужен для проверки доступности, но он лежит в сети:
+    обновление идёт в фоне, чтобы панель не подвисала при старте.
+    """
+
+    updated = pyqtSignal(int)
+
+    def run(self):
+        try:
+            sonny.refresh_catalogue(sonny.catalogue_dir())
+        except Exception:  # noqa: BLE001 - сеть не должна ломать запуск
+            return
+        self.updated.emit(len(sonny.catalogue_tiles(sonny.catalogue_dir())))
 
 
 class GeofabrikPlanWorker(QThread):
@@ -449,11 +468,12 @@ class XtopoDockWidget(QDockWidget):
         self.dem_availability_worker = None
         self._dem_availability = {}
         self._dem_bbox = None
-        self._dem_user_source = False
         self._dem_source_syncing = False
+        self._dem_sonny_tiles = set()
         self._dem_check_message = ""
         self._dem_check_detail = ""
         self._dem_availability_generation = 0
+        self.sonny_catalogue_worker = None
         self._dem_check_timer = QTimer(self)
         self._dem_check_timer.setSingleShot(True)
         self._dem_check_timer.timeout.connect(self._start_dem_availability)
@@ -492,6 +512,39 @@ class XtopoDockWidget(QDockWidget):
         if not self._own_project_open:
             # Проекта нет — возвращаем панели, скрытые в прошлой сессии.
             self.restore_panels()
+
+    def refresh_sonny_catalogue(self):
+        """Обновляет список тайлов рельефа Sonny DTM в фоне.
+
+        Список нужен для проверки доступности источников.  Он лежит в
+        сети, поэтому обновление идёт отдельным потоком: панель при
+        этом не подвисает.  Свежий список не трогаем.
+        """
+        age = sonny.catalogue_age_days()
+        if age is not None and age < sonny.CACHE_DAYS:
+            return
+        if self.sonny_catalogue_worker is not None:
+            try:
+                if self.sonny_catalogue_worker.isRunning():
+                    return
+            except RuntimeError:
+                self.sonny_catalogue_worker = None
+        worker = SonnyCatalogueWorker(self)
+        worker.updated.connect(self._sonny_catalogue_updated)
+        worker.finished.connect(lambda: self._sonny_worker_finished(worker))
+        worker.finished.connect(worker.deleteLater)
+        self.sonny_catalogue_worker = worker
+        worker.start()
+
+    def _sonny_worker_finished(self, worker):
+        if self.sonny_catalogue_worker is worker:
+            self.sonny_catalogue_worker = None
+
+    def _sonny_catalogue_updated(self, count):
+        """Список тайлов обновлён — проверку доступности надо повторить."""
+        self._dem_sonny_tiles = set(sonny.catalogue_tiles())
+        if self.bbox.text().strip():
+            self._schedule_dem_availability()
 
     def detach_language_listener(self):
         i18n.remove_listener(self._language_changed)
@@ -1825,8 +1878,6 @@ class XtopoDockWidget(QDockWidget):
         self._update_dem_info()
 
     def _dem_source_changed(self, _index):
-        if not self._dem_source_syncing:
-            self._dem_user_source = True
         self._terrain_changed(self.generate_terrain.isChecked())
         self._update_dem_warning()
 
@@ -1892,7 +1943,8 @@ class XtopoDockWidget(QDockWidget):
         warning = ""
         if key and self._dem_bbox is not None and self._dem_availability:
             warning = dem_sources.source_warning(
-                key, self._dem_bbox, self._dem_availability
+                key, self._dem_bbox, self._dem_availability,
+                self._dem_sonny_tiles,
             )
         self.dem_warning.setText(warning)
         self.dem_warning.setVisible(bool(warning))
@@ -1902,7 +1954,6 @@ class XtopoDockWidget(QDockWidget):
         self._dem_availability_generation += 1
         self._dem_availability = {}
         self._dem_bbox = None
-        self._dem_user_source = False
         if not self.bbox.text().strip():
             self._dem_check_timer.stop()
             self._dem_check_message = "не проверено"
@@ -1959,10 +2010,11 @@ class XtopoDockWidget(QDockWidget):
         if self.dem_availability_worker is worker:
             self.dem_availability_worker = None
 
-    def _dem_availability_ready(self, generation, availability):
+    def _dem_availability_ready(self, generation, availability, sonny_cells):
         if generation != self._dem_availability_generation:
             return
         self._dem_availability = availability
+        self._dem_sonny_tiles = set(sonny_cells)
         self._dem_check_message = ""
         self._dem_check_detail = ""
         self._apply_dem_availability(availability)
@@ -2000,22 +2052,11 @@ class XtopoDockWidget(QDockWidget):
             state = availability.get(current)
             if state is not None and state.checked and not state.available:
                 self._set_dem_source(self._fallback_dem_source(availability))
-        # Для охвата, полностью покрытого 3DEP по суше, выбираем его
-        # автоматически, если пользователь ещё не трогал список.
-        if (
-            not self._dem_user_source
-            and self._dem_bbox is not None
-            and self.dem_source.currentData() != dem_sources.MANUAL_SOURCE
-            and dem_sources.preferred_source(
-                self._dem_bbox, availability
-            ) == "3dep"
-        ):
-            self._set_dem_source("3dep")
 
     def _fallback_dem_source(self, availability):
         for key in (
-            "srtm", "cop30", "nasadem", "alos", "3dep",
-            dem_sources.MANUAL_SOURCE,
+            dem_sources.AUTO_SOURCE, "cop30", "srtm", "nasadem", "alos",
+            "3dep", dem_sources.SONNY_SOURCE, dem_sources.MANUAL_SOURCE,
         ):
             state = availability.get(key)
             if key == dem_sources.MANUAL_SOURCE:

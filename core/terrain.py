@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .bbox import BBox
-from . import dem_sources, terrain_cache
+from . import dem_sources, i18n, sonny, terrain_cache
 
 CHUNK = 256 * 1024
 
@@ -100,10 +100,10 @@ class _Speed:
 
 
 def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
-                  status=None):
+                  status=None, tiles=None):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    tiles = srtm_tile_names(bbox)
+    tiles = list(tiles) if tiles else srtm_tile_names(bbox)
     meter = _Speed()
     pending = []
     for tile in tiles:
@@ -212,11 +212,14 @@ def _cached_cog(cache_dir, source_key, bbox):
 def _cog_sources(source_key, bbox, progress=None, cancel=None):
     """Ссылки на растровые источники набора для области."""
     item = dem_sources.source(source_key)
-    items = dem_sources.stac_items(
-        item.collection,
-        (bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max),
-        timeout=60,
-    )
+    try:
+        items = dem_sources.stac_items(
+            item.collection,
+            (bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max),
+            timeout=60,
+        )
+    except Exception:  # noqa: BLE001 - каталог STAC отвечает медленно
+        items = []
     if source_key == "3dep":
         # В коллекции есть и 1″, и 1/3″; нужен более подробный слой.
         preferred = [entry for entry in items
@@ -226,19 +229,42 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
     if progress:
         progress(f"Найдено тайлов {item.short}: {len(items)}")
     sources = []
+    if source_key == "cop30":
+        # Открытое зеркало в AWS неполное, часть тайлов лежит только в
+        # каталоге STAC: сначала пробуем адрес без подписи, а для
+        # остальных подписываем ссылку из каталога.
+        entries = []
+        for entry in items:
+            tile = dem_sources.item_tile(entry)
+            if tile is None:
+                continue
+            entries.append((tile, dem_sources.item_asset_href(entry)))
+        existing = dem_sources.cop30_existing_tiles(
+            [tile for tile, _href in entries]
+        )
+        for tile, href in entries:
+            if tile in existing:
+                url = dem_sources.aws_tile_url("cop30", *tile)
+            elif href:
+                url = dem_sources.sign_pc(href)
+            else:
+                continue
+            sources.append("/vsicurl/" + url)
+        if not sources:
+            # Каталог STAC недоступен: остаются тайлы открытого зеркала.
+            for tile in dem_sources.cop30_existing_tiles(
+                dem_sources.tiles_for_bbox(bbox)
+            ):
+                url = dem_sources.aws_tile_url("cop30", *tile)
+                sources.append("/vsicurl/" + url)
+        return sources
     for entry in items:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("DEM download cancelled")
         href = dem_sources.item_asset_href(entry)
         if not href:
             continue
-        if source_key == "cop30":
-            tile = dem_sources.item_tile(entry)
-            if tile is None:
-                continue
-            url = dem_sources.aws_tile_url("cop30", *tile)
-        else:
-            url = dem_sources.sign_pc(href)
+        url = dem_sources.sign_pc(href)
         sources.append("/vsicurl/" + url)
     return sources
 
@@ -364,6 +390,359 @@ def download_dem(source_key, bbox, destination, progress=None, cancel=None,
     return download_cog_dem(
         source_key, bbox, destination, progress=progress, cancel=cancel,
         cache_dir=cache_dir, status=status,
+    )
+
+
+# --- Мозаика рельефа ----------------------------------------------------
+
+# Порядок наборов в мозаике: чем позже набор в списке, тем выше его
+# приоритет — данные более приоритетного набора перекрывают остальные.
+AUTO_ORDER = ("srtm", dem_sources.AUTO_BACKGROUND, "sonny", "3dep")
+
+
+def _cells_window(cells):
+    """Прямоугольник, покрывающий тайлы 1°×1°."""
+    if not cells:
+        return None
+    lats = [cell[0] for cell in cells]
+    lons = [cell[1] for cell in cells]
+    return BBox(min(lons), min(lats), max(lons) + 1.0, max(lats) + 1.0)
+
+
+def _mosaic_grid(span_x, span_y, resolutions):
+    """Шаг сетки мозаики: самый подробный, который влезает в бюджет.
+
+    Возвращает тройку ``(шаг, ширина, высота)``.  Если ни один шаг не
+    помещается в предел по числу пикселей, берётся самый грубый и он
+    дополнительно укрупняется.
+    """
+    candidates = sorted({value for value in resolutions if value > 0})
+    if not candidates:
+        candidates = [1.0 / 3600.0]
+    for resolution in candidates:
+        width = max(1, int(math.ceil(span_x / resolution)))
+        height = max(1, int(math.ceil(span_y / resolution)))
+        if width * height <= MAX_DEM_PIXELS:
+            return resolution, width, height
+    resolution = candidates[-1]
+    width = max(1, int(math.ceil(span_x / resolution)))
+    height = max(1, int(math.ceil(span_y / resolution)))
+    factor = math.sqrt(width * height / MAX_DEM_PIXELS)
+    width = max(1, int(width / factor))
+    height = max(1, int(height / factor))
+    return span_x / width, width, height
+
+
+def _layer_options(gdal, bounds, width, height, cancel, status, label):
+    """Параметры приведения растра к общей сетке мозаики."""
+    return gdal.WarpOptions(
+        format="GTiff",
+        dstSRS="EPSG:4326",
+        outputBounds=(bounds.lon_min, bounds.lat_min,
+                      bounds.lon_max, bounds.lat_max),
+        width=width,
+        height=height,
+        resampleAlg="bilinear",
+        outputType=gdal.GDT_Int16,
+        dstNodata=-32768,
+        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES", "TILED=YES"],
+        multithread=True,
+        callback=_warp_callback(cancel, status, label),
+    )
+
+
+def _write_layer(gdal, sources, bounds, width, height, destination, name,
+                 cancel, status, label):
+    """Приводит набор источников к общей сетке и пишет слой мозаики.
+
+    Источники, которые не открылись (отсутствующий тайл набора),
+    пропускаются: в мозаике останется пустое место.
+    """
+    datasets = []
+    for source in sources:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        try:
+            dataset = gdal.Open(source)
+        except Exception:  # noqa: BLE001 - нет данных за набором
+            dataset = None
+        if dataset is not None:
+            datasets.append(dataset)
+    if not datasets:
+        return None
+    target = Path(destination) / name
+    temporary = target.with_name(target.name + ".part")
+    options = _layer_options(gdal, bounds, width, height, cancel, status, label)
+    try:
+        result = gdal.Warp(str(temporary), datasets, options=options)
+    finally:
+        for dataset in datasets:
+            dataset = None
+    if result is None:
+        temporary.unlink(missing_ok=True)
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        raise RuntimeError(f"Не удалось собрать рельеф {label}")
+    result = None
+    temporary.replace(target)
+    return target
+
+
+def _cog_layer(source_key, cells, bounds, width, height, destination,
+                progress=None, cancel=None, status=None):
+    """Слой мозаики из растрового набора (COG читается по HTTP Range)."""
+    gdal, _, _ = _gdal()
+    item = dem_sources.source(source_key)
+    window = _cells_window(cells)
+    sources = _cog_sources(source_key, window, progress=progress, cancel=cancel)
+    if not sources:
+        return None
+    return _write_layer(
+        gdal, sources, bounds, width, height, destination,
+        f"layer_{source_key}.tif", cancel, status, item.short,
+    )
+
+
+def _srtm_layer(cells, bounds, width, height, destination, cache_dir=None,
+                 progress=None, cancel=None, status=None):
+    """Слой мозаики из тайлов SRTM."""
+    gdal, _, _ = _gdal()
+    names = [dem_sources.tile_name(*cell) for cell in sorted(cells)]
+    if not names:
+        return None
+    download_srtm(
+        None, destination, progress=progress, cancel=cancel,
+        cache_dir=cache_dir, status=status, tiles=names,
+    )
+    files = [str(Path(destination) / f"{name}.hgt") for name in names]
+    files = [name for name in files if Path(name).exists()]
+    if not files:
+        return None
+    return _write_layer(
+        gdal, files, bounds, width, height, destination,
+        "layer_srtm.tif", cancel, status, "SRTM v3",
+    )
+
+
+def _sonny_layers(cells, catalogue, tile_dir, bounds, width, height,
+                  destination, progress=None, cancel=None, status=None):
+    """Слои мозаики из наборов Sonny DTM.
+
+    Наборы разной подробности кладутся отдельными слоями: более
+    подробный идёт позже и перекрывает более грубый.
+    """
+    gdal, _, _ = _gdal()
+    assignment = sonny.assign_datasets(catalogue, cells)
+    groups = {}
+    for cell, dataset_key in assignment.items():
+        groups.setdefault(dataset_key, set()).add(cell)
+    layers = []
+    for dataset in sorted(sonny.DATASETS, key=lambda item: -item.rank):
+        dataset_cells = groups.get(dataset.key)
+        if not dataset_cells:
+            continue
+        paths = sonny.tile_paths(
+            catalogue, tile_dir, dataset.key, dataset_cells,
+            progress=progress, cancel=cancel,
+        )
+        files = [str(path) for _cell, path in paths]
+        if not files:
+            continue
+        layer = _write_layer(
+            gdal, files, bounds, width, height, destination,
+            f"layer_sonny_{dataset.key}.tif", cancel, status,
+            i18n.tr(dataset.title),
+        )
+        if layer is not None:
+            layers.append(layer)
+    return layers
+
+
+def _mosaic_resolution(groups):
+    """Шаги сетки наборов, входящих в мозаику."""
+    resolutions = []
+    for key in ("3dep", "cop30", "srtm"):
+        if groups.get(key):
+            resolutions.append(dem_sources.source(key).native_resolution)
+    for dataset_key in groups.get("sonny", ()):
+        dataset = sonny.DATASET_BY_KEY.get(dataset_key)
+        if dataset is not None:
+            resolutions.append(dataset.native_resolution)
+    return resolutions
+
+
+def download_auto_dem(bbox, destination, progress=None, cancel=None,
+                      cache_dir=None, status=None, availability=None,
+                      sonny_catalogue=None, sonny_tiles_dir=None,
+                      priority=None, used=None):
+    """Собирает мозаику рельефа в режиме «Автоматически».
+
+    Для каждого тайла 1°×1° выбирается лучший доступный набор: USGS
+    3DEP, затем Sonny DTM, фон — Copernicus GLO-30, в крайнем случае
+    SRTM.  Наборы кладутся в один растр в порядке приоритета, поэтому
+    данные более приоритетного набора перекрывают менее приоритетный.
+
+    ``priority`` задаёт свой порядок выбора наборов: для набора Sonny
+    DTM это ``(Sonny, Copernicus, SRTM)``.  В ``used`` дописываются
+    ключи наборов, вошедших в мозаику, — для строки атрибуции.
+    """
+    gdal, _, _ = _gdal()
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    layers_dir = destination / "_layers"
+    if layers_dir.exists():
+        shutil.rmtree(layers_dir, ignore_errors=True)
+    layers_dir.mkdir(parents=True, exist_ok=True)
+
+    catalogue = sonny.load_catalogue(sonny_catalogue)
+    sonny_cells = set(sonny.catalogue_tiles(sonny_catalogue))
+    if availability is None:
+        availability = dem_sources.auto_coverage(
+            bbox, sonny_tiles=sonny_cells,
+            keys=priority or dem_sources.AUTO_PRIORITY,
+        )
+    plan = dem_sources.auto_plan(
+        bbox, availability, sonny_cells, priority=priority
+    )
+    if not plan:
+        raise RuntimeError("Нет данных рельефа для выбранного охвата")
+
+    groups = {}
+    for cell, key in plan.items():
+        groups.setdefault(key, set()).add(cell)
+    if progress:
+        parts = []
+        for key in dem_sources.AUTO_PRIORITY:
+            if groups.get(key):
+                parts.append(f"{dem_sources.source(key).short}: "
+                             f"{len(groups[key])}")
+        progress("Мозаика рельефа — " + ", ".join(parts))
+
+    padded = _padded_bbox(bbox)
+    span_x = padded.lon_max - padded.lon_min
+    span_y = padded.lat_max - padded.lat_min
+    sonny_datasets = set()
+    if groups.get("sonny"):
+        sonny_datasets = set(sonny.assign_datasets(catalogue, groups["sonny"]))
+    resolution_groups = dict(groups)
+    resolution_groups["sonny"] = sonny_datasets
+    resolution, width, height = _mosaic_grid(
+        span_x, span_y, _mosaic_resolution(resolution_groups)
+    )
+    if progress:
+        progress(
+            f"Разрешение мозаики: ~{resolution * 111320:.0f} м "
+            f"({width}×{height})"
+        )
+
+    layers = []
+    built = set()
+    for key in AUTO_ORDER:
+        cells = groups.get(key)
+        if not cells:
+            continue
+        if key == "srtm":
+            layer = _srtm_layer(
+                cells, padded, width, height, layers_dir, cache_dir=cache_dir,
+                progress=progress, cancel=cancel, status=status,
+            )
+            made = [layer] if layer else []
+        elif key == "sonny":
+            made = _sonny_layers(
+                cells, catalogue, sonny_tiles_dir, padded, width, height,
+                layers_dir, progress=progress, cancel=cancel, status=status,
+            )
+        else:
+            layer = _cog_layer(
+                key, cells, padded, width, height, layers_dir,
+                progress=progress, cancel=cancel, status=status,
+            )
+            made = [layer] if layer else []
+        if not made:
+            continue
+        layers.extend(made)
+        built.add(key)
+        if used is not None and key not in used:
+            used.append(key)
+
+    # Набор не удалось получить (каталог STAC недоступен, тайла нет в
+    # зеркале): его тайлы добираются SRTM.  Слой ставится в начало —
+    # приоритет у SRTM самый низкий.
+    failed = set(groups) - built
+    if failed and "srtm" not in built:
+        cells = set()
+        for key in failed:
+            cells |= groups[key]
+        layer = _srtm_layer(
+            cells, padded, width, height, layers_dir, cache_dir=cache_dir,
+            progress=progress, cancel=cancel, status=status,
+        )
+        if layer:
+            layers.insert(0, layer)
+            built.add("srtm")
+            if used is not None and "srtm" not in used:
+                used.append("srtm")
+
+    if not layers:
+        raise RuntimeError("Нет данных рельефа для выбранного охвата")
+
+    target = destination / "dem_auto.tif"
+    if len(layers) == 1:
+        # Один набор — слой уже лежит на нужной сетке, склеивать нечего.
+        shutil.move(str(layers[0]), str(target))
+        shutil.rmtree(layers_dir, ignore_errors=True)
+        return target
+    temporary = target.with_name(target.name + ".part")
+    options = _layer_options(gdal, padded, width, height, cancel, status,
+                             "мозаика")
+    result = gdal.Warp(str(temporary), [str(path) for path in layers],
+                       options=options)
+    if result is None:
+        temporary.unlink(missing_ok=True)
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        raise RuntimeError("Не удалось собрать мозаику рельефа")
+    result = None
+    temporary.replace(target)
+    shutil.rmtree(layers_dir, ignore_errors=True)
+    return target
+
+
+def download_sonny_dem(bbox, destination, progress=None, cancel=None,
+                       cache_dir=None, status=None, availability=None,
+                       sonny_catalogue=None, sonny_tiles_dir=None,
+                       used=None):
+    """Скачивает рельеф Sonny DTM, а недостающие тайлы — фоном Copernicus.
+
+    Набор выбран один, но тайлы в нём могут быть разной подробности:
+    0,5″ для Австрии и Швейцарии, 1″ и 3″ для остальной Европы.
+    """
+    return download_auto_dem(
+        bbox, destination, progress=progress, cancel=cancel,
+        cache_dir=cache_dir, status=status, availability=availability,
+        sonny_catalogue=sonny_catalogue, sonny_tiles_dir=sonny_tiles_dir,
+        priority=(dem_sources.SONNY_SOURCE, dem_sources.AUTO_BACKGROUND,
+                  "srtm"),
+        used=used,
+    )
+
+
+def _write_dem_attribution(config, used):
+    """Записывает в проект точную атрибуцию наборов мозаики.
+
+    Проект создаётся до рельефа, поэтому атрибуция сначала общая; после
+    сборки мозаики известно, какие наборы действительно вошли.
+    """
+    from . import project
+
+    attribution = dem_sources.attribution_for_keys(used)
+    if not attribution:
+        return
+    path = project.project_file(config)
+    if not path.exists():
+        return
+    project.rewrite_project_archive(
+        path, path, config.project_name, dem_attribution=attribution
     )
 
 
@@ -1240,15 +1619,43 @@ def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
         copy_dem_tiles(bbox, config.terrain_src_dir, config.terrain_input_dir, progress=progress)
     elif config.download_terrain_tiles:
         _clear_terrain_input(config)
-        download_dem(
-            source_key,
-            bbox,
-            config.terrain_input_dir,
-            progress=progress,
-            cancel=cancel,
-            cache_dir=config.terrain_cache_dir,
-            status=status,
-        )
+        used = []
+        if source_key == dem_sources.AUTO_SOURCE:
+            download_auto_dem(
+                bbox,
+                config.terrain_input_dir,
+                progress=progress,
+                cancel=cancel,
+                cache_dir=config.terrain_cache_dir,
+                status=status,
+                sonny_catalogue=sonny.catalogue_dir(),
+                sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
+                used=used,
+            )
+        elif source_key == dem_sources.SONNY_SOURCE:
+            download_sonny_dem(
+                bbox,
+                config.terrain_input_dir,
+                progress=progress,
+                cancel=cancel,
+                cache_dir=config.terrain_cache_dir,
+                status=status,
+                sonny_catalogue=sonny.catalogue_dir(),
+                sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
+                used=used,
+            )
+        else:
+            download_dem(
+                source_key,
+                bbox,
+                config.terrain_input_dir,
+                progress=progress,
+                cancel=cancel,
+                cache_dir=config.terrain_cache_dir,
+                status=status,
+            )
+        if used:
+            _write_dem_attribution(config, used)
 
     for archive in list(config.terrain_input_dir.glob("*.zip")):
         shutil.unpack_archive(str(archive), str(config.terrain_input_dir))
