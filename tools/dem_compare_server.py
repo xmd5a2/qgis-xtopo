@@ -3,7 +3,7 @@
 
 Отдаёт страницу ``tools/dem_compare.html`` и рендерит тайлы подложки
 (рельеф) из настоящих наборов данных: SRTM v3, Copernicus DEM GLO-30,
-NASADEM, ALOS AW3D30 — все с разрешением 1″ (30 м) или лучше.
+NASADEM, ALOS AW3D30, Sonny DTM — все с разрешением 1″ (30 м) или лучше.
 Исходники тянутся по требованию и кладутся в кэш.
 
 Запуск::
@@ -42,6 +42,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -52,6 +53,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+# Списки тайлов Sonny и загрузка с Google Drive живут в ядре плагина:
+# не дублируем формат архивов, имена файлов и VRT-обёртку для 0,5″.
+if str(ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(ROOT.parent))
+try:
+    from core import sonny
+except Exception:  # noqa: BLE001 - инструмент может работать без QGIS
+    sonny = None
 
 import numpy as np
 from osgeo import gdal, osr
@@ -202,7 +213,6 @@ def _status_leave(key, rendered):
         else:
             STATUS["cached"] += 1
 
-ROOT = Path(__file__).resolve().parent
 HTML_FILE = ROOT / "dem_compare.html"
 
 DEFAULT_CACHE = (
@@ -292,6 +302,21 @@ DATASETS = {
         "src_nodata": None,
         "id_suffix": "-13",
         "resolution_m": 10.0,
+    },
+    "sonny": {
+        "title": "Sonny DTM LiDAR (1″, 0,5″)",
+        "short": "Sonny DTM",
+        "provider": "Sonny / 4lima.de, Google Drive",
+        "source": "sonny",
+        "kind": "bare-earth",
+        "datum": "национальные системы, обычно над уровнем моря",
+        "note": "LiDAR DTM: земная поверхность без растительности и "
+                "построек. 0,5″ — Австрия и Швейцария, 1″ — остальная "
+                "Европа. Тайлы скачиваются с Google Drive.",
+        "attribution": "LiDAR Digital Terrain Models of Europe by Sonny — "
+                       "https://sonny.4lima.de (CC BY 4.0)",
+        "src_nodata": None,
+        "resolution_m": 30.0,
     },
 }
 
@@ -579,6 +604,11 @@ class SourceStore:
         # Код гранулы для каждого удалённого источника: путь → «N43E043».
         # По нему статус страницы пишет, что именно качается из сети.
         self._source_labels = {}
+        # Список тайлов Sonny грузится один раз на процесс: он общий с
+        # плагином, а при первом запуске на машине берётся с Google Drive.
+        self._sonny_catalogue = None
+        self._sonny_lock = threading.Lock()
+        self._sonny_warned = False
 
     def remember_source(self, path, label):
         """Запоминает подпись удалённого источника: «ALOS AW3D30 · N43E043»."""
@@ -743,9 +773,9 @@ class SourceStore:
 
     def _auto_block(self, ds, bbox):
         spec = DATASETS[ds]
-        if spec["source"] in ("skadi", "local"):
-            # SRTM качается целыми градусными тайлами, локальный каталог уже
-            # лежит на диске — промежуточное окно им не нужно.
+        if spec["source"] in ("skadi", "sonny", "local"):
+            # SRTM и Sonny качаются целыми градусными тайлами, локальный
+            # каталог уже лежит на диске — промежуточное окно им не нужно.
             return None
         resolution = spec.get("resolution_m") or 30.0
         block = self.AUTO_BLOCK_PIXELS * resolution / 111320.0
@@ -772,6 +802,8 @@ class SourceStore:
         source = spec["source"]
         if source == "local":
             return self.local_sources(ds, bbox)
+        if source == "sonny":
+            return self._sonny_sources(ds, bbox)
         if source == "skadi":
             paths = []
             for lat, lon in _tiles_for(bbox):
@@ -790,6 +822,80 @@ class SourceStore:
                     path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}")
             return paths
         return self._pc_sources(ds, bbox)
+
+    # ------------------------------------------------------------------
+    # Sonny DTM (Google Drive)
+    # ------------------------------------------------------------------
+
+    def sonny_catalogue(self):
+        """Список тайлов Sonny: ``{набор: {файл: id}}``.
+
+        Кэш общий с плагином. Если его ещё нет (первый запуск на машине),
+        список загружается с Google Drive один раз на процесс.
+        """
+        if sonny is None:
+            return {}
+        with self._sonny_lock:
+            if self._sonny_catalogue is None:
+                catalogue = sonny.load_catalogue()
+                if not any(key in sonny.DATASET_BY_KEY for key in catalogue):
+                    with _net_read(
+                            f"{DATASETS['sonny']['short']} · список файлов"):
+                        catalogue = sonny.refresh_catalogue()
+                self._sonny_catalogue = catalogue
+            return self._sonny_catalogue
+
+    def _sonny_sources(self, ds, bbox):
+        """Локальные файлы Sonny для области: скачивает недостающие тайлы."""
+        if sonny is None:
+            if not self._sonny_warned:
+                self._sonny_warned = True
+                _log("Sonny DTM: нет доступа к ядру плагина (qgis.PyQt)")
+            return []
+        catalogue = self.sonny_catalogue()
+        if not catalogue:
+            return []
+        # Для каждого тайла берётся лучший набор: 0,5″ важнее 1″.
+        groups = {}
+        for cell, dataset_key in sonny.assign_datasets(
+                catalogue, set(_tiles_for(bbox))).items():
+            groups.setdefault(dataset_key, []).append(cell)
+        paths = []
+        for dataset_key in sorted(
+                groups, key=lambda key: sonny.DATASET_BY_KEY[key].rank):
+            dataset = sonny.DATASET_BY_KEY[dataset_key]
+            folder = self.cache_dir / "sonny" / dataset_key
+            for cell, file_id in sonny.tile_sources(
+                    catalogue, dataset_key, groups[dataset_key]):
+                path = self._ensure_sonny_tile(
+                    ds, dataset, file_id, cell, folder)
+                if path is not None:
+                    paths.append(str(path))
+        return paths
+
+    def _ensure_sonny_tile(self, ds, dataset, file_id, cell, folder):
+        """Скачивает один тайл Sonny и возвращает путь для GDAL."""
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{sonny.tile_name(*cell)}.hgt"
+        with self._tile_lock(f"sonny:{dataset.key}:{target.name}"):
+            path = target
+            if not target.exists() or target.stat().st_size == 0:
+                key = f"sonny:{dataset.key}:{target.name}"
+                label = f"{DATASETS[ds]['short']} · {_tile_label(*cell)}"
+                _download_enter(key, label)
+                try:
+                    path = sonny.download_tile(dataset, file_id, folder)
+                except Exception as exc:  # noqa: BLE001 - нет тайла в Drive
+                    _log(f"Sonny DTM {target.name}: не удалось скачать: "
+                         f"{exc}")
+                    return None
+                finally:
+                    _download_leave(key)
+            if (path.suffix.lower() == ".hgt" and
+                    dataset.samples not in sonny.SRTMHGT_SAMPLES):
+                # Драйвер SRTMHGT не читает 7201 точку (0,5″): нужен VRT.
+                path = sonny.hgt_vrt(path, dataset.step, dataset.samples)
+        return path
 
     # ------------------------------------------------------------------
     # Локальные копии исходников
@@ -1017,6 +1123,15 @@ class SourceStore:
         source = spec["source"]
         if source == "local":
             for path in self.local_sources(ds, (lon, lat, lon, lat)):
+                dataset, lock = self.open_source(path)
+                if dataset is not None:
+                    return dataset, lock
+            return None, None
+        if source == "sonny":
+            paths = self._sonny_sources(
+                ds, (math.floor(lon), math.floor(lat),
+                     math.floor(lon) + 1, math.floor(lat) + 1))
+            for path in paths:
                 dataset, lock = self.open_source(path)
                 if dataset is not None:
                     return dataset, lock
@@ -2021,7 +2136,8 @@ def precache(store, tile_cache, points, modes=("hillshade", "elevation",
         moment = time.monotonic()
         error = ""
         try:
-            if spec["source"] == "skadi":
+            if spec["source"] in ("skadi", "sonny"):
+                # Целые градусные тайлы уже локальные: окно не готовим.
                 ok = bool(store.sources(key, bbox))
             else:
                 ok = store.prepare_region(
