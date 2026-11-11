@@ -6,7 +6,8 @@
 
 Порядок:
 
-1. мелкие дыры заливаются, контур упрощается до трети ячейки растра;
+1. у многочастного объекта берётся только самая большая часть; мелкие
+   дыры заливаются, контур упрощается до трети ячейки растра;
 2. строится маска полигона и поле расстояний до краёв;
 3. концы линии — самые удалённые точки контура (у ледников — по
    расстоянию вдоль фигуры, чтобы не упираться в тонкий мыс);
@@ -64,11 +65,12 @@ def label_line_geometry(geometry, main_flow=False):
     return line
 
 
-def label_line(geom, part_fraction=0.2, main_flow=False):
+def label_line(geom, main_flow=False):
     """Точки линии подписи для полигона.
 
-    Берётся самая длинная линия среди достаточно крупных частей: у
-    многочастного объекта подпись ставится на главной части.
+    У многочастного объекта линия строится только для самой большой
+    части: подпись не должна переходить из одного контура в другой
+    через пустое пространство.
     """
     ogr.UseExceptions()
     if geom is None or geom.IsEmpty():
@@ -89,19 +91,12 @@ def label_line(geom, part_fraction=0.2, main_flow=False):
             continue
     if not measured:
         return []
-    biggest = max(area for _part, area in measured)
-    best = []
-    for part, area in measured:
-        if area < part_fraction * biggest:
-            continue
-        try:
-            centre = part.Centroid()
-            line = _axis_of_part(part, grid_size(part, centre.GetY()), main_flow)
-        except Exception:  # noqa: BLE001 - битая геометрия не должна ронять слой
-            continue
-        if _length(line) > _length(best):
-            best = line
-    return best
+    part, _area = max(measured, key=lambda item: item[1])
+    try:
+        centre = part.Centroid()
+        return _axis_of_part(part, grid_size(part, centre.GetY()), main_flow)
+    except Exception:  # noqa: BLE001 - битая геометрия не должна ронять слой
+        return []
 
 
 # ---------------------------------------------------------------- растр

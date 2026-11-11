@@ -47,6 +47,20 @@ def bar_with_arm():
     ])
 
 
+def multipolygon_with_thin_part():
+    """Большой компактный контур и длинная тонкая часть рядом."""
+    square = _ring([
+        (0.0, 0.0), (0.02, 0.0), (0.02, 0.02), (0.0, 0.02),
+    ])
+    thin = _ring([
+        (0.03, 0.005), (0.08, 0.005), (0.08, 0.007), (0.03, 0.007),
+    ])
+    multi = ogr.Geometry(ogr.wkbMultiPolygon)
+    multi.AddGeometry(square)
+    multi.AddGeometry(thin)
+    return multi, square
+
+
 def _dense(line, step=0.0001):
     points = np.asarray(line, dtype="float64")
     result = [points[0]]
@@ -114,6 +128,16 @@ class LabelLineShapeTest(unittest.TestCase):
         self.assertGreaterEqual(len(line), 2)
         # отрог вниз не должен уводить подпись из полосы
         self.assertGreater(min(point[1] for point in line), -0.006)
+
+    def test_multipolygon_uses_the_largest_part(self):
+        geometry, largest = multipolygon_with_thin_part()
+        line = label_line.label_line(geometry)
+        self.assertGreaterEqual(len(line), 2)
+        probe = ogr.Geometry(ogr.wkbPoint)
+        for x, y in line:
+            probe.SetPoint_2D(0, x, y)
+            # тонкая часть лежит правее 0.03: линия туда попадать не должна
+            self.assertLess(largest.Distance(probe), 1e-6)
 
     def test_degenerate_geometry_gives_no_line(self):
         ring = ogr.Geometry(ogr.wkbLinearRing)
