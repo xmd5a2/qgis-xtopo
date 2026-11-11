@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -534,6 +535,32 @@ class LabelAxisTest(unittest.TestCase):
             layer = dataset.GetLayer(0)
             ids = [feature.GetField("id") for feature in layer]
             self.assertEqual(ids, ["relation/1", "relation/3"])
+            dataset = None
+
+    @unittest.skipUnless(
+        os.environ.get("QGIS_XTOPO_TEST_AUTOMAP"),
+        "нужен QGIS_XTOPO_TEST_AUTOMAP с каталогом vector проекта",
+    )
+    def test_real_duplicate_is_skipped(self):
+        from osgeo import ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        source = Path(os.environ["QGIS_XTOPO_TEST_AUTOMAP"]) / "glacier.sqlite"
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            pipeline = Pipeline(
+                config, BBox(7.8, 46.0, 7.95, 46.12), _FakeRunner(None)
+            )
+            output = pipeline._label_axis("glacier", source, True)
+            dataset = ogr.Open(str(output))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(layer.GetFeatureCount(), 190)
+            names = [feature.GetField("name") for feature in layer
+                     if feature.GetField("name") == "Feegletscher"]
+            self.assertEqual(len(names), 1)
             dataset = None
 
 
