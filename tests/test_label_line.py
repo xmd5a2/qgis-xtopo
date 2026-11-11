@@ -527,6 +527,32 @@ class AutomapCasesTest(unittest.TestCase):
         self.assertGreater(float(np.sum(np.hypot(*np.diff(points, axis=0).T))),
                            0.014)
 
+    def test_glacier_de_cheilon_runs_from_head_to_col(self):
+        geometry = self._load("glacier", "relation/103487")
+        line = label_line.label_line(geometry, main_flow=True)
+        self.assertGreaterEqual(len(line), 2)
+
+        dense = _dense(line, step=0.00003)
+        probe = ogr.Geometry(ogr.wkbPoint)
+        outside = 0
+        for x, y in dense:
+            probe.SetPoint_2D(0, x, y)
+            if geometry.Distance(probe) * METRES_PER_DEGREE > 15.0:
+                outside += 1
+        self.assertLess(outside / len(dense), 0.05)
+
+        points = np.asarray(line)
+        # старт — верхний конец главного языка (La René)
+        self.assertGreater(points[0][1], 46.016)
+        self.assertLess(points[0][0], 7.428)
+        # конец — нижний край у Col de la Serpentine
+        self.assertLess(points[-1][1], 45.9955)
+        self.assertGreater(points[-1][0], 7.428)
+        self.assertLess(points[-1][0], 7.433)
+        # линия проходит вдоль главного потока, а не поперёк ледника
+        self.assertGreater(float(np.sum(np.hypot(*np.diff(points, axis=0).T))),
+                           0.024)
+
 
 if __name__ == "__main__":
     unittest.main()

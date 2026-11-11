@@ -800,6 +800,32 @@ def _axis_attempt(part, cells, main_flow=False):
         geodesic = _geodesic_corners(mask)
         if geodesic[0] is not None and geodesic[1] is not None:
             first, second = geodesic
+            # У трёхветвистых фигур (Glacier de Cheilon) диаметр цепляется
+            # за два боковых мыса, а широкий главный язык остаётся без
+            # подписи. Пара «север-юг» выигрывает, только если её путь
+            # проходит через заметно более широкую часть фигуры и не
+            # зажат в узкий перешеек.
+            rows, columns = np.nonzero(mask)
+            north = (int(rows.min()), int(columns[int(np.argmin(rows))]))
+            south = (int(rows.max()), int(columns[int(np.argmax(rows))]))
+            if north != south:
+                def _path_core_width(start, end):
+                    middle = centered_path(mask, distance, start, end)
+                    if len(middle) < 5:
+                        return None
+                    values = [distance[r, c] for r, c in middle]
+                    cut = max(1, int(len(values) * 0.15))
+                    core = values[cut:len(values) - cut]
+                    if not core:
+                        return None
+                    return float(np.mean(core)), float(min(core))
+
+                ns = _path_core_width(north, south)
+                gs = _path_core_width(first, second)
+                if (ns is not None and gs is not None
+                        and ns[1] > gs[1]
+                        and ns[0] >= 1.25 * gs[0]):
+                    first, second = north, south
     elif (first is not None and second is not None
           and _segment_outside(mask, first, second) > 0.15):
         ridge = _ridge_corners(mask, distance)
