@@ -133,6 +133,9 @@ class Config:
 
     generate_terrain: bool = False
     terrain_source: str = ""
+    # Сообщение о замене части тайлов другим набором; заполняется при
+    # обработке рельефа и не сохраняется в config.ini.
+    terrain_fallback: str = ""
     download_terrain_tiles: bool = False
     get_terrain_tiles: bool = False
     terrain_src_dir: str = ""

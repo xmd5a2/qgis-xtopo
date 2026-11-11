@@ -473,6 +473,8 @@ class XtopoDockWidget(QDockWidget):
         self._dem_sonny_tiles = set()
         self._dem_check_message = ""
         self._dem_check_detail = ""
+        # Сообщение о замене тайлов GLO-30 на SRTM после обработки.
+        self._terrain_fallback = ""
         self._dem_availability_generation = 0
         self.sonny_catalogue_worker = None
         self._dem_check_timer = QTimer(self)
@@ -1926,6 +1928,8 @@ class XtopoDockWidget(QDockWidget):
             return False
 
     def _dem_source_changed(self, _index):
+        # Предупреждение о замене тайлов относилось к прежнему источнику.
+        self._terrain_fallback = ""
         self._terrain_changed(self.generate_terrain.isChecked())
         self._update_dem_warning()
 
@@ -1994,6 +1998,8 @@ class XtopoDockWidget(QDockWidget):
                 key, self._dem_bbox, self._dem_availability,
                 self._dem_sonny_tiles,
             )
+        if self._terrain_fallback:
+            warning = f"{warning} {self._terrain_fallback}".strip()
         self.dem_warning.setText(warning)
         # Без обработки рельефа предупреждение о системах высот не нужно:
         # блок затенён целиком.
@@ -2006,6 +2012,8 @@ class XtopoDockWidget(QDockWidget):
         self._dem_availability_generation += 1
         self._dem_availability = {}
         self._dem_bbox = None
+        # Сообщение о прошлой обработке относится к прежнему охвату.
+        self._terrain_fallback = ""
         if not self.bbox.text().strip():
             self._dem_check_timer.stop()
             self._dem_check_message = "не проверено"
@@ -2587,6 +2595,9 @@ class XtopoDockWidget(QDockWidget):
             self.geofabrik_worker.cancel()
             self.geofabrik_worker.wait(1000)
         self._save_settings()
+        # Новая обработка — прошлое сообщение о замене тайлов неактуально.
+        self._terrain_fallback = ""
+        self._update_dem_warning()
         self.log.clear()
         if self.log_window_text is not None:
             self.log_window_text.clear()
@@ -2654,7 +2665,15 @@ class XtopoDockWidget(QDockWidget):
         self.progress.setValue(value)
 
     def _finished(self, path):
+        worker = self.worker
         self.worker = None
+        fallback = (
+            getattr(worker.config, "terrain_fallback", "") if worker else ""
+        )
+        if fallback:
+            self._terrain_fallback = fallback
+            self._append_log(fallback)
+        self._update_dem_warning()
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self._set_running(False)

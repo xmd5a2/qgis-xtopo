@@ -574,7 +574,7 @@ def _mosaic_resolution(groups):
 def download_auto_dem(bbox, destination, progress=None, cancel=None,
                       cache_dir=None, status=None, availability=None,
                       sonny_catalogue=None, sonny_tiles_dir=None,
-                      priority=None, used=None):
+                      priority=None, used=None, counts=None):
     """Собирает мозаику рельефа в режиме «Автоматически».
 
     Для каждого тайла 1°×1° выбирается лучший доступный набор: USGS
@@ -584,7 +584,8 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
 
     ``priority`` задаёт свой порядок выбора наборов: для набора Sonny
     DTM это ``(Sonny, Copernicus, SRTM)``.  В ``used`` дописываются
-    ключи наборов, вошедших в мозаику, — для строки атрибуции.
+    ключи наборов, вошедших в мозаику, — для строки атрибуции; в
+    ``counts`` — число тайлов, доставшихся каждому набору.
     """
     gdal, _, _ = _gdal()
     destination = Path(destination)
@@ -610,6 +611,9 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     groups = {}
     for cell, key in plan.items():
         groups.setdefault(key, set()).add(cell)
+    if counts is not None:
+        counts.clear()
+        counts.update({key: len(value) for key, value in groups.items()})
     if progress:
         parts = []
         for key in dem_sources.AUTO_PRIORITY:
@@ -725,6 +729,50 @@ def download_sonny_dem(bbox, destination, progress=None, cancel=None,
                   "srtm"),
         used=used,
     )
+
+
+def _download_cop30(config, bbox, progress=None, cancel=None, status=None):
+    """GLO-30 с добором недостающих тайлов SRTM v3.
+
+    Если GLO-30 покрывает весь охват, работает обычный путь с кэшем
+    окон.  Иначе тайлы раскладываются по наборам: покрытые берутся из
+    GLO-30, остальные — из SRTM v3; в ``terrain_fallback`` попадает
+    сообщение для панели.
+    """
+    availability = dem_sources.auto_coverage(
+        bbox, keys=("cop30", "srtm")
+    )
+    state = availability.get("cop30")
+    required = set(dem_sources.tiles_for_bbox(bbox))
+    covered = (set(state.covered_tiles)
+               if state is not None and state.checked else set())
+    if required and required <= covered:
+        download_cog_dem(
+            "cop30", bbox, config.terrain_input_dir,
+            progress=progress, cancel=cancel,
+            cache_dir=config.terrain_cache_dir, status=status,
+        )
+        return ["cop30"]
+    used = []
+    counts = {}
+    download_auto_dem(
+        bbox, config.terrain_input_dir,
+        progress=progress, cancel=cancel,
+        cache_dir=config.terrain_cache_dir, status=status,
+        availability=availability, used=used, counts=counts,
+        priority=("cop30", "srtm"),
+    )
+    if "srtm" in used:
+        if "cop30" in used:
+            config.terrain_fallback = i18n.trf(
+                "GLO-30: {} из {} тайлов заменены SRTM v3.",
+                counts.get("srtm", 0), sum(counts.values()),
+            )
+        else:
+            config.terrain_fallback = i18n.tr(
+                "GLO-30 недоступен: использован SRTM v3."
+            )
+    return used
 
 
 def _write_dem_attribution(config, used):
@@ -1609,6 +1657,7 @@ def _generate_glacier_isolines(config, shape_path, progress=None):
 def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
     if not config.generate_terrain:
         return
+    config.terrain_fallback = ""
     config.terrain_input_dir.mkdir(parents=True, exist_ok=True)
     source_key = config.resolved_terrain_source()
     source = dem_sources.source(source_key)
@@ -1643,6 +1692,14 @@ def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
                 sonny_catalogue=sonny.catalogue_dir(),
                 sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
                 used=used,
+            )
+        elif source_key == "cop30":
+            used = _download_cop30(
+                config,
+                bbox,
+                progress=progress,
+                cancel=cancel,
+                status=status,
             )
         else:
             download_dem(

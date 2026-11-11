@@ -223,6 +223,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   есть (HEAD), иначе ссылка из STAC подписывается (`sign_pc`). Если каталог
   STAC не ответил, покрытие Copernicus считается полным, а неоткрывшиеся
   тайлы пропускаются при сборке слоя.
+- **Ручной GLO-30 с нехваткой тайлов**: `terrain._download_cop30` проверяет
+  покрытие (`auto_coverage`); при полном покрытии идёт обычный
+  `download_cog_dem` с кэшем окон, иначе тайлы раскладываются
+  `cop30` → `srtm` и собирается мозаика. Сообщение о замене пишется в
+  рантаймовое `config.terrain_fallback` (в `config.ini` не сохраняется),
+  панель показывает его в `dem_warning`, журнал — отдельной строкой.
 - **3DEP выбирается автоматически**, если покрывает всю сушу охвата
   (`dem_sources.preferred_source`). Суша определяется по Natural Earth из
   ресурсов QGIS (`resources/data/world_map.gpkg`, слой `countries`), а не

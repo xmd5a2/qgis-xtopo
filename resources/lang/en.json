@@ -395,6 +395,8 @@
   "Источник:": "Source:",
   "SRTM v3 (skadi), 30 м": "SRTM v3 (skadi), 30 m",
   "Copernicus GLO-30, 30 м": "Copernicus GLO-30, 30 m",
+  "GLO-30: {} из {} тайлов заменены SRTM v3.": "GLO-30: {} of {} tiles were replaced with SRTM v3.",
+  "GLO-30 недоступен: использован SRTM v3.": "GLO-30 is unavailable: SRTM v3 was used.",
   "NASADEM, 30 м": "NASADEM, 30 m",
   "ALOS AW3D30, 30 м": "ALOS AW3D30, 30 m",
   "USGS 3DEP, 10 м": "USGS 3DEP, 10 m",

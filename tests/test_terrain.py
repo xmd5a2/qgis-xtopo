@@ -1221,6 +1221,109 @@ class SonnyDatasetTest(unittest.TestCase):
         self.assertEqual(array[1, 2], 7201 + 2)
 
 
+class Cop30FallbackTest(unittest.TestCase):
+    def _config(self, directory):
+        from qgis_xtopo.core.config import Config
+
+        return Config(
+            qgis_projects_dir=directory,
+            project_name="demo",
+            generate_terrain=True,
+            terrain_source="cop30",
+            download_terrain_tiles=True,
+        )
+
+    def test_full_coverage_uses_cog_path(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, terrain
+
+        bbox = BBox(7.0, 45.0, 8.0, 46.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        state = dem_sources.Availability(
+            available=True, checked=True,
+            required_tiles=required, covered_tiles=required,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            with mock.patch.object(
+                dem_sources, "auto_coverage",
+                return_value={"cop30": state, "srtm": state},
+            ), mock.patch.object(
+                terrain, "download_cog_dem",
+                return_value=Path(directory) / "dem_cop30.tif",
+            ) as cog, mock.patch.object(
+                terrain, "download_auto_dem",
+            ) as auto:
+                used = terrain._download_cop30(config, bbox)
+        self.assertEqual(used, ["cop30"])
+        self.assertEqual(config.terrain_fallback, "")
+        cog.assert_called_once()
+        auto.assert_not_called()
+
+    def test_partial_coverage_falls_back_to_srtm(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, terrain
+
+        bbox = BBox(7.0, 45.0, 9.0, 46.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        covered = frozenset({(45, 7)})
+        state = dem_sources.Availability(
+            available=True, checked=True,
+            required_tiles=required, covered_tiles=covered,
+            missing_tiles=required - covered,
+        )
+
+        def fake_auto(_bbox, _destination, **kwargs):
+            kwargs["used"].extend(["srtm", "cop30"])
+            kwargs["counts"].update({"srtm": 1, "cop30": 1})
+            return Path(_destination) / "dem_auto.tif"
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            with mock.patch.object(
+                dem_sources, "auto_coverage",
+                return_value={"cop30": state, "srtm": state},
+            ), mock.patch.object(
+                terrain, "download_auto_dem", side_effect=fake_auto,
+            ) as auto:
+                used = terrain._download_cop30(config, bbox)
+        self.assertEqual(used, ["srtm", "cop30"])
+        self.assertIn("1 из 2", config.terrain_fallback)
+        self.assertIn("SRTM v3", config.terrain_fallback)
+        auto.assert_called_once()
+
+    def test_unavailable_cop30_uses_srtm_only(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, terrain
+
+        bbox = BBox(7.0, 45.0, 9.0, 46.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        state = dem_sources.Availability(
+            available=False, checked=True,
+            required_tiles=required,
+        )
+
+        def fake_auto(_bbox, _destination, **kwargs):
+            kwargs["used"].append("srtm")
+            kwargs["counts"].update({"srtm": 2})
+            return Path(_destination) / "dem_auto.tif"
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            with mock.patch.object(
+                dem_sources, "auto_coverage",
+                return_value={"cop30": state, "srtm": state},
+            ), mock.patch.object(
+                terrain, "download_auto_dem", side_effect=fake_auto,
+            ):
+                terrain._download_cop30(config, bbox)
+        self.assertIn("недоступен", config.terrain_fallback)
+        self.assertIn("SRTM v3", config.terrain_fallback)
+
+
 class AutoMosaicTest(unittest.TestCase):
     def test_mosaic_grid_prefers_finest_that_fits(self):
         from qgis_xtopo.core import terrain

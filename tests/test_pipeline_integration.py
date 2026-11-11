@@ -1359,6 +1359,24 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_terrain_fallback_is_shown_in_warning(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock._dem_check_timer.stop()
+            dock.generate_terrain.setChecked(True)
+            dock._terrain_fallback = (
+                "GLO-30: 1 из 2 тайлов заменены SRTM v3."
+            )
+            dock._update_dem_warning()
+            self.assertIn("SRTM v3", dock.dem_warning.text())
+            # Смена источника снимает сообщение прошлой обработки.
+            dock._dem_source_changed(0)
+            self.assertEqual(dock._terrain_fallback, "")
+        finally:
+            dock.deleteLater()
+
     def test_dem_refresh_button_rechecks(self):
         from unittest import mock
 
