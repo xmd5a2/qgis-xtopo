@@ -1336,6 +1336,32 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_dem_refresh_button_rechecks(self):
+        from unittest import mock
+
+        from qgis_xtopo.gui import dockwidget
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock._dem_check_timer.stop()
+            dock.bbox.setText("7.0,45.9,8.0,46.9")
+            with mock.patch.object(
+                dockwidget.sonny, "catalogue_tiles", return_value={}
+            ), mock.patch.object(
+                dock, "refresh_sonny_catalogue"
+            ) as refresh, mock.patch.object(
+                dock, "_start_dem_availability"
+            ) as start:
+                dock.dem_refresh.click()
+            # Пустой список тайлов Sonny — повод обновить его в фоне.
+            refresh.assert_called_once_with(force=True)
+            # Проверка запускается сразу, минуя таймер ожидания ввода.
+            start.assert_called_once_with(force=True)
+            self.assertIn("проверка", dock.dem_info.text().lower())
+        finally:
+            dock.deleteLater()
+
     def test_dock_project_name(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 

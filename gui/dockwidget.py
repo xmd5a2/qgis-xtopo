@@ -352,18 +352,19 @@ class DemAvailabilityWorker(QThread):
     result = pyqtSignal(int, object, object)
     failed = pyqtSignal(int, str)
 
-    def __init__(self, bbox, generation, parent=None):
+    def __init__(self, bbox, generation, force=False, parent=None):
         super().__init__(parent)
         self.bbox = bbox
         self.generation = generation
+        self.force = force
         self.cancel_event = threading.Event()
 
     def run(self):
         try:
             sonny_cells = set(sonny.catalogue_tiles(sonny.catalogue_dir()))
             availability = dem_sources.check_availability(
-                self.bbox, cancel=self.cancel_event, timeout=10,
-                sonny_tiles=sonny_cells,
+                self.bbox, cancel=self.cancel_event, timeout=8,
+                sonny_tiles=sonny_cells, force=self.force,
             )
         except InterruptedError:
             return
@@ -513,15 +514,16 @@ class XtopoDockWidget(QDockWidget):
             # Проекта нет — возвращаем панели, скрытые в прошлой сессии.
             self.restore_panels()
 
-    def refresh_sonny_catalogue(self):
+    def refresh_sonny_catalogue(self, force=False):
         """Обновляет список тайлов рельефа Sonny DTM в фоне.
 
         Список нужен для проверки доступности источников.  Он лежит в
         сети, поэтому обновление идёт отдельным потоком: панель при
-        этом не подвисает.  Свежий список не трогаем.
+        этом не подвисает.  Свежий список не трогаем, если не просят
+        принудительно.
         """
         age = sonny.catalogue_age_days()
-        if age is not None and age < sonny.CACHE_DAYS:
+        if not force and age is not None and age < sonny.CACHE_DAYS:
             return
         if self.sonny_catalogue_worker is not None:
             try:
@@ -796,7 +798,24 @@ class XtopoDockWidget(QDockWidget):
         for item in dem_sources.SOURCES:
             self.dem_source.addItem(i18n.tr(item.title), item.key)
         self.dem_source.currentIndexChanged.connect(self._dem_source_changed)
-        terrain_form.addRow("Источник:", self.dem_source)
+        self.dem_refresh = QToolButton()
+        self.dem_refresh.setIcon(
+            QgsApplication.getThemeIcon("mActionReload.svg")
+        )
+        self.dem_refresh.setAutoRaise(True)
+        self.dem_refresh.setFixedSize(QSize(18, 18))
+        self.dem_refresh.setIconSize(QSize(14, 14))
+        self.dem_refresh.setToolTip(
+            i18n.tr("Проверить доступность заново")
+        )
+        self.dem_refresh.clicked.connect(self._refresh_dem_availability)
+        self.dem_source_row = QWidget()
+        source_row = QHBoxLayout(self.dem_source_row)
+        source_row.setContentsMargins(0, 0, 0, 0)
+        source_row.setSpacing(4)
+        source_row.addWidget(self.dem_source, 1)
+        source_row.addWidget(self.dem_refresh)
+        terrain_form.addRow("Источник:", self.dem_source_row)
         self.dem_info = WrappedLabel()
         self.dem_info.setWordWrap(True)
         try:
@@ -1969,7 +1988,23 @@ class XtopoDockWidget(QDockWidget):
         self._update_dem_warning()
         self._dem_check_timer.start(600)
 
-    def _start_dem_availability(self):
+    def _refresh_dem_availability(self):
+        """Ручная повторная проверка доступности источников."""
+        self._dem_check_timer.stop()
+        self._dem_availability_generation += 1
+        self._dem_availability = {}
+        self._dem_bbox = None
+        self._dem_check_message = "проверка…"
+        self._dem_check_detail = "Проверка доступности…"
+        if not sonny.catalogue_tiles(sonny.catalogue_dir()):
+            # Список Sonny лежит в сети: если его ещё нет, пробуем
+            # загрузить — после обновления проверка повторится сама.
+            self.refresh_sonny_catalogue(force=True)
+        self._update_dem_info()
+        self._update_dem_warning()
+        self._start_dem_availability(force=True)
+
+    def _start_dem_availability(self, force=False):
         self._dem_check_timer.stop()
         if self.iface is None:
             self._dem_bbox = None
@@ -1998,17 +2033,19 @@ class XtopoDockWidget(QDockWidget):
             if running:
                 self.dem_availability_worker.cancel()
         generation = self._dem_availability_generation
-        worker = DemAvailabilityWorker(bbox, generation, self)
+        worker = DemAvailabilityWorker(bbox, generation, force, self)
         worker.result.connect(self._dem_availability_ready)
         worker.failed.connect(self._dem_availability_failed)
         worker.finished.connect(lambda: self._dem_worker_finished(worker))
         worker.finished.connect(worker.deleteLater)
         self.dem_availability_worker = worker
+        self.dem_refresh.setEnabled(False)
         worker.start()
 
     def _dem_worker_finished(self, worker):
         if self.dem_availability_worker is worker:
             self.dem_availability_worker = None
+            self.dem_refresh.setEnabled(True)
 
     def _dem_availability_ready(self, generation, availability, sonny_cells):
         if generation != self._dem_availability_generation:
@@ -2025,9 +2062,10 @@ class XtopoDockWidget(QDockWidget):
         if generation != self._dem_availability_generation:
             return
         self._dem_availability = {}
-        self._dem_check_message = "ошибка проверки"
+        self._dem_check_message = "не удалось проверить"
         self._dem_check_detail = (
-            f"Не удалось проверить доступность: {message}"
+            f"Не удалось проверить доступность: {message}. "
+            "Повторите проверку кнопкой обновления."
         )
         self._update_dem_info()
         self._update_dem_warning()

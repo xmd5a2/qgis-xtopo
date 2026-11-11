@@ -970,9 +970,12 @@ class DemSourceTest(unittest.TestCase):
         state = dem_sources.sonny_availability(bbox, ((46, 7),))
         self.assertTrue(state.available)
         self.assertFalse(state.partial)
-        self.assertFalse(
-            dem_sources.sonny_availability(bbox, ()).available
-        )
+        # Пустой список — это «ещё не загружен», а не «нет данных»:
+        # набор остаётся доступным для выбора.
+        empty = dem_sources.sonny_availability(bbox, ())
+        self.assertTrue(empty.available)
+        self.assertFalse(empty.checked)
+        self.assertIn("не загружен", empty.message)
 
     def test_attribution_lists_mosaic_members(self):
         from qgis_xtopo.core import dem_sources
@@ -1006,6 +1009,118 @@ class DemSourceTest(unittest.TestCase):
         self.assertTrue(availability[dem_sources.AUTO_SOURCE].available)
         # 3DEP имеет приоритет над остальными наборами.
         self.assertIn("3DEP", availability[dem_sources.AUTO_SOURCE].message)
+
+    def test_failed_check_keeps_source_selectable(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        with mock.patch.object(
+            dem_sources, "_stac_availability",
+            side_effect=OSError("network is unreachable"),
+        ):
+            state = dem_sources._check_one(
+                dem_sources.source("3dep"), bbox, timeout=1, force=True
+            )
+        # Ошибка сети — не повод отключать набор: он может скачаться,
+        # когда сеть заработает.
+        self.assertTrue(state.available)
+        self.assertFalse(state.checked)
+        self.assertIn("не удалось проверить", state.message)
+        self.assertIn("кнопкой обновления", state.detail)
+
+    def test_cop30_check_falls_back_to_direct_files(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        fallback = dem_sources.Availability(
+            available=True, checked=True, message="по файлам",
+            required_tiles=frozenset({(46, 7)}),
+            covered_tiles=frozenset({(46, 7)}),
+        )
+        with mock.patch.object(
+            dem_sources, "_stac_availability", side_effect=OSError("down"),
+        ), mock.patch.object(
+            dem_sources, "_cop30_file_availability", return_value=fallback,
+        ):
+            state = dem_sources._check_one(
+                dem_sources.source("cop30"), bbox, timeout=1, force=True
+            )
+        self.assertIs(state, fallback)
+
+    def test_availability_results_are_cached(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        full = dem_sources.Availability(
+            available=True, checked=True,
+            required_tiles=required, covered_tiles=required,
+        )
+
+        def fake_stac(item, bbox, timeout=30, retries=2):
+            return full
+
+        dem_sources.clear_check_cache()
+        self.addCleanup(dem_sources.clear_check_cache)
+        with mock.patch.object(
+            dem_sources, "_stac_availability", side_effect=fake_stac
+        ) as stac:
+            dem_sources.check_availability(bbox, timeout=1)
+            first = stac.call_count
+            self.assertGreater(first, 0)
+            dem_sources.check_availability(bbox, timeout=1)
+            self.assertEqual(stac.call_count, first)
+            dem_sources.check_availability(bbox, timeout=1, force=True)
+            self.assertGreater(stac.call_count, first)
+
+    def test_availability_checks_run_in_parallel(self):
+        import time
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+
+        def slow_check(item, bbox, timeout, sonny_tiles=(), force=False):
+            time.sleep(0.2)
+            return dem_sources.Availability(available=True, checked=True)
+
+        dem_sources.clear_check_cache()
+        self.addCleanup(dem_sources.clear_check_cache)
+        with mock.patch.object(dem_sources, "_check_one", slow_check):
+            started = time.monotonic()
+            dem_sources.check_availability(bbox, timeout=1)
+            elapsed = time.monotonic() - started
+        # Последовательная проверка семи источников заняла бы 1,4 с.
+        self.assertLess(elapsed, 0.8)
+
+    def test_dns_answer_parser(self):
+        import struct
+
+        from qgis_xtopo.core import dem_sources
+
+        query_id = 0x1234
+        header = struct.pack("!HHHHHH", query_id, 0x8180, 1, 1, 0, 0)
+        question = b"\x07example\x03com\x00" + struct.pack("!HH", 1, 1)
+        answer = (
+            b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4)
+            + bytes([1, 2, 3, 4])
+        )
+        addresses = dem_sources._parse_dns_a(
+            header + question + answer, query_id
+        )
+        self.assertEqual(addresses, ["1.2.3.4"])
+        # Чужой идентификатор — ответ не наш.
+        self.assertEqual(
+            dem_sources._parse_dns_a(header + question + answer, 0x4321),
+            [],
+        )
 
 
 class SonnyDatasetTest(unittest.TestCase):

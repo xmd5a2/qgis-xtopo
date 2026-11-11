@@ -18,8 +18,12 @@ Sonny DTM, а фоном идёт Copernicus GLO-30.  Логика прежне�
 """
 
 import calendar
+import http.client
 import json
 import math
+import random
+import socket
+import struct
 import threading
 import time
 import urllib.error
@@ -63,6 +67,216 @@ _SIGN_LOCK = threading.Lock()
 _SIGN_CACHE = {}
 _SIGN_LAST = [0.0]
 _SIGN_INTERVAL = 0.3
+
+# Результаты сетевых проверок кэшируются: смена охвата и обновление
+# списка тайлов Sonny не должны каждый раз ждать STAC.  Успешная
+# проверка живёт дольше, ошибка — меньше, чтобы сетевой сбой не
+# «залипал» до перезапуска QGIS.
+_CHECK_CACHE = {}
+_CHECK_LOCK = threading.Lock()
+CHECK_SUCCESS_TTL = 30 * 60
+CHECK_FAILURE_TTL = 2 * 60
+
+# Запасные DNS-серверы и DoH: системный резолвер иногда возвращает
+# единственный адрес Azure Front Door, у которого закрыт порт 443.
+_DNS_SERVERS = ("9.9.9.9", "1.1.1.1", "8.8.8.8")
+_DOH_SERVERS = (
+    "https://dns.quad9.net/dns-query",
+    "https://dns.google/dns-query",
+)
+_FALLBACK_CACHE = {}
+_GOOD_ADDRESS = {}
+_FALLBACK_LOCK = threading.Lock()
+FALLBACK_TTL = 10 * 60
+
+
+def _dns_packet(host, query_id):
+    """DNS-запрос A-записи в бинарном виде."""
+    labels = b"".join(
+        bytes([len(label)]) + label.encode("ascii")
+        for label in host.rstrip(".").split(".")
+    )
+    return (
+        struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
+        + labels + b"\x00"
+        + struct.pack("!HH", 1, 1)  # A, IN
+    )
+
+
+def _skip_dns_name(data, offset):
+    while offset < len(data):
+        length = data[offset]
+        if length == 0:
+            return offset + 1
+        if length & 0xC0 == 0xC0:
+            return offset + 2
+        offset += 1 + length
+    return offset
+
+
+def _parse_dns_a(data, query_id):
+    """A-записи из ответа DNS (пустой список — ответ не разобран)."""
+    if len(data) < 12:
+        return []
+    identifier, flags, questions, answers, _auth, _extra = struct.unpack(
+        "!HHHHHH", data[:12]
+    )
+    if identifier != query_id or flags & 0x000F:
+        return []
+    offset = 12
+    for _ in range(questions):
+        offset = _skip_dns_name(data, offset) + 4
+    addresses = []
+    for _ in range(answers):
+        offset = _skip_dns_name(data, offset)
+        if offset + 10 > len(data):
+            break
+        rtype, rclass, _ttl, length = struct.unpack(
+            "!HHIH", data[offset:offset + 10]
+        )
+        offset += 10
+        if rtype == 1 and rclass == 1 and length == 4:
+            addresses.append(socket.inet_ntoa(data[offset:offset + 4]))
+        offset += length
+    return addresses
+
+
+def _dns_udp(host, server, timeout=2.0):
+    query_id = random.randrange(0x10000)
+    packet = _dns_packet(host, query_id)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        sock.sendto(packet, (server, 53))
+        data, _address = sock.recvfrom(4096)
+    return _parse_dns_a(data, query_id)
+
+
+def _dns_doh(host, url, timeout=3.0):
+    query_id = random.randrange(0x10000)
+    request = urllib.request.Request(
+        url,
+        data=_dns_packet(host, query_id),
+        method="POST",
+        headers={
+            "Content-Type": "application/dns-message",
+            "Accept": "application/dns-message",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = response.read()
+    return _parse_dns_a(data, query_id)
+
+
+def _fallback_addresses(host):
+    """Адреса хоста от публичных резолверов (кэш на время сеанса)."""
+    now = time.time()
+    with _FALLBACK_LOCK:
+        cached = _FALLBACK_CACHE.get(host)
+        if cached and now - cached[0] < FALLBACK_TTL:
+            return cached[1]
+    addresses = []
+    for server in _DNS_SERVERS:
+        try:
+            found = _dns_udp(host, server)
+        except OSError:
+            continue
+        for address in found:
+            if address not in addresses:
+                addresses.append(address)
+    if not addresses:
+        for url in _DOH_SERVERS:
+            try:
+                found = _dns_doh(host, url)
+            except Exception:  # noqa: BLE001 - DoH не должен ломать запрос
+                continue
+            for address in found:
+                if address not in addresses:
+                    addresses.append(address)
+    if addresses:
+        with _FALLBACK_LOCK:
+            _FALLBACK_CACHE[host] = (now, tuple(addresses))
+    return tuple(addresses)
+
+
+class _MultiAddressHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS-соединение, перебирающее все адреса из ответа DNS.
+
+    Домен STAC отдаёт несколько A-записей, и часть адресов может не
+    отвечать (порт 443 закрыт у отдельного узла Azure Front Door).
+    Штатный ``socket.create_connection`` получает адреса из одного ответа
+    DNS и иногда попадает на нерабочий, ожидая полный таймаут.  Здесь
+    адреса перебираются подряд, а на соединение даётся короткий таймаут.
+    Если системный резолвер вернул только нерабочий адрес, ответы
+    запрашиваются у публичных DNS.
+    """
+
+    CONNECT_TIMEOUT = 2.0
+
+    def connect(self):
+        if self._tunnel_host:
+            return super().connect()
+        try:
+            addresses = socket.getaddrinfo(
+                self.host, self.port, 0, socket.SOCK_STREAM
+            )
+        except OSError:
+            addresses = []
+        known = _GOOD_ADDRESS.get(self.host)
+        if known:
+            addresses = [entry for entry in addresses
+                         if entry[4] != known[3]]
+            addresses.insert(0, (
+                known[0], known[1], known[2], "", known[3],
+            ))
+        error = self._connect_any(addresses)
+        if error is None:
+            return
+        # Системный DNS дал только нерабочий адрес: пробуем ответы
+        # публичных резолверов (у них другой узел Azure Front Door).
+        fallback = [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "",
+             (address, self.port))
+            for address in _fallback_addresses(self.host)
+        ]
+        error = self._connect_any(fallback)
+        if error is not None:
+            raise error
+
+    def _connect_any(self, addresses):
+        last = None
+        for family, socktype, proto, _canon, address in addresses:
+            sock = socket.socket(family, socktype, proto)
+            if self.timeout:
+                sock.settimeout(min(self.timeout, self.CONNECT_TIMEOUT))
+            try:
+                sock.connect(address)
+            except OSError as exc:
+                last = exc
+                sock.close()
+                continue
+            if self.timeout:
+                sock.settimeout(self.timeout)
+            try:
+                self.sock = self._context.wrap_socket(
+                    sock, server_hostname=self.host
+                )
+            except OSError:
+                sock.close()
+                raise
+            _GOOD_ADDRESS[self.host] = (family, socktype, proto, address)
+            return None
+        return last
+
+
+class _MultiAddressHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(
+            _MultiAddressHTTPSConnection, request, context=self._context
+        )
+
+
+_OPENER = urllib.request.build_opener(_MultiAddressHTTPSHandler())
 
 
 @dataclass(frozen=True)
@@ -320,7 +534,7 @@ def _http_json(url, timeout=30, retries=4, delay=2.0):
     )
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _OPENER.open(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             if exc.code not in (429, 500, 502, 503, 504) or attempt == retries - 1:
@@ -334,8 +548,13 @@ def _http_json(url, timeout=30, retries=4, delay=2.0):
 
 
 def stac_items(collection, bbox, timeout=30, limit=STAC_LIMIT,
-               retries=4, delay=2.0):
-    """Объекты STAC коллекции, пересекающие область."""
+               retries=4, delay=2.0, stop_when=None):
+    """Объекты STAC коллекции, пересекающие область.
+
+    ``stop_when`` получает уже собранные объекты и может остановить
+    постраничный обход: для проверки покрытия достаточно первого
+    ответа, в котором есть все нужные тайлы.
+    """
     query = urllib.parse.urlencode({
         "collections": collection,
         "bbox": ",".join(str(value) for value in bbox),
@@ -348,6 +567,8 @@ def stac_items(collection, bbox, timeout=30, limit=STAC_LIMIT,
         features = data.get("features") or []
         items.extend(features)
         if not features:
+            break
+        if stop_when is not None and stop_when(items):
             break
         url = next(
             (link.get("href") for link in data.get("links", [])
@@ -476,11 +697,12 @@ def _stac_availability(item, bbox, timeout=30, retries=2):
             ),
         )
     clipped_bbox = BBox(*clipped)
+    required = set(tiles_for_bbox(clipped_bbox))
     items = stac_items(
         item.collection, clipped, timeout=timeout, retries=retries,
         delay=1.0,
+        stop_when=lambda found: required <= _covered_tiles(found),
     )
-    required = set(tiles_for_bbox(clipped_bbox))
     covered = required & _covered_tiles(items)
     outside = clipped != _bbox_tuple(bbox)
     if not covered:
@@ -551,61 +773,124 @@ def cop30_existing_tiles(tiles, timeout=15, workers=8):
     return {tile for tile, ok in zip(tiles, found) if ok}
 
 
-def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=("3dep", "cop30")):
+def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=("3dep", "cop30"),
+                  force=False):
     """Покрытие наборов, из которых складывается мозаика «Автоматически».
 
     Проверяются только нужные наборы: 3DEP и Copernicus GLO-30 (Sonny и
     SRTM считаются по локальным данным).  Остальные наборы в мозаику не
-    входят, поэтому их покрытие не запрашивается.
+    входят, поэтому их покрытие не запрашивается.  Результаты берутся из
+    того же кэша, что и у проверки в панели.
     """
     results = {}
     stac_keys = [key for key in keys if key in ("3dep", "cop30")]
 
-    def check(key):
-        try:
-            return _stac_availability(
-                source(key), bbox, timeout=timeout, retries=1
-            )
-        except Exception as exc:  # noqa: BLE001 - сеть не должна ломать сборку
-            return Availability(
-                available=True, checked=False,
-                message=i18n.tr("ошибка проверки"),
-                detail=i18n.tr(
-                    "Не удалось проверить доступность: {}"
-                ).replace("{}", str(exc)),
-            )
-
     if stac_keys:
         with ThreadPoolExecutor(max_workers=len(stac_keys)) as pool:
             futures = {
-                pool.submit(check, key): key for key in stac_keys
+                pool.submit(
+                    _check_one, source(key), bbox, timeout, sonny_tiles, force
+                ): key
+                for key in stac_keys
             }
             for future, key in futures.items():
                 results[key] = future.result()
 
-    if "cop30" in stac_keys and not results["cop30"].checked:
-        # Каталог STAC не ответил.  Адреса тайлов известны точно, а
-        # отсутствующие файлы просто пропускаются при сборке мозаики,
-        # поэтому покрытие считается полным.
-        required = set(tiles_for_bbox(bbox))
-        covered = set(required)
-        results["cop30"] = Availability(
-            available=True, checked=True, partial=False,
-            message=i18n.trf("тайлов: {}", len(covered)),
-            detail=i18n.tr(
-                "Каталог STAC недоступен, покрытие проверено по файлам."
-            ),
-            total=len(required),
-            required_tiles=frozenset(required),
-            covered_tiles=frozenset(covered),
-            missing_tiles=frozenset(),
-        )
     results["srtm"] = _range_availability(source("srtm"), bbox)
     results[SONNY_SOURCE] = sonny_availability(bbox, sonny_tiles)
     return results
 
 
-def _check_one(item, bbox, timeout, sonny_tiles=()):
+def _bbox_cache_key(bbox):
+    return (
+        round(bbox.lon_min, 6), round(bbox.lat_min, 6),
+        round(bbox.lon_max, 6), round(bbox.lat_max, 6),
+    )
+
+
+def _cache_lookup(key, bbox, force=False):
+    """Сохранённый результат проверки или None, если его нет/устарел."""
+    if force:
+        return None
+    cache_key = (key, _bbox_cache_key(bbox))
+    entry = _CHECK_CACHE.get(cache_key)
+    if entry is None:
+        return None
+    stored, ttl, state = entry
+    if time.time() - stored > ttl:
+        with _CHECK_LOCK:
+            _CHECK_CACHE.pop(cache_key, None)
+        return None
+    return state
+
+
+def _cache_store(key, bbox, state):
+    ttl = CHECK_SUCCESS_TTL if state.checked else CHECK_FAILURE_TTL
+    with _CHECK_LOCK:
+        if len(_CHECK_CACHE) >= 256:
+            _CHECK_CACHE.clear()
+        _CHECK_CACHE[(key, _bbox_cache_key(bbox))] = (
+            time.time(), ttl, state
+        )
+
+
+def clear_check_cache():
+    """Сбрасывает кэш проверок (например, перед ручной проверкой)."""
+    with _CHECK_LOCK:
+        _CHECK_CACHE.clear()
+
+
+def _cop30_file_availability(bbox, timeout=10):
+    """Покрытие Copernicus по прямым адресам, когда STAC недоступен.
+
+    Возвращает None, если не нашёлся ни один файл: значит, сеть не
+    работает, и судить о покрытии нельзя.
+    """
+    required = set(tiles_for_bbox(bbox))
+    # Для больших охватов проверять каждый тайл слишком долго: тогда
+    # честнее сказать «не удалось проверить», а мозаика возьмёт SRTM.
+    if len(required) > 16:
+        return None
+    covered = cop30_existing_tiles(required, timeout=min(timeout, 6))
+    if not covered:
+        return None
+    missing = required - covered
+    if missing:
+        message = i18n.trf("{} из {} тайлов", len(covered), len(required))
+        detail = i18n.trf(
+            "Каталог STAC недоступен; по прямым адресам найдено "
+            "{} из {} тайлов.",
+            len(covered), len(required),
+        )
+    else:
+        message = i18n.trf("весь охват, тайлов: {}", len(required))
+        detail = i18n.tr(
+            "Каталог STAC недоступен; по прямым адресам есть все тайлы."
+        )
+    return Availability(
+        available=True, checked=True, partial=bool(missing),
+        message=message, detail=detail,
+        missing=len(missing), total=len(required),
+        required_tiles=frozenset(required),
+        covered_tiles=frozenset(covered),
+        missing_tiles=frozenset(missing),
+    )
+
+
+def _check_failed(exc):
+    """Состояние «проверить не удалось»: источник остаётся доступным."""
+    return Availability(
+        available=True, checked=False,
+        message=i18n.tr("не удалось проверить"),
+        detail=i18n.trf(
+            "Не удалось проверить доступность: {}. "
+            "Повторите проверку кнопкой обновления.",
+            str(exc),
+        ),
+    )
+
+
+def _check_one(item, bbox, timeout, sonny_tiles=(), force=False):
     if item.manual:
         return Availability(
             available=True, checked=True,
@@ -615,35 +900,42 @@ def _check_one(item, bbox, timeout, sonny_tiles=()):
         return sonny_availability(bbox, sonny_tiles)
     if not item.collection:
         return _range_availability(item, bbox)
+    cached = _cache_lookup(item.key, bbox, force)
+    if cached is not None:
+        return cached
     try:
-        return _stac_availability(item, bbox, timeout=timeout)
+        state = _stac_availability(item, bbox, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - проверка не должна ломать UI
-        return Availability(
-            available=True, checked=False,
-            message=i18n.tr("ошибка проверки"),
-            detail=i18n.tr(
-                "Не удалось проверить доступность: {}"
-            ).replace("{}", str(exc)),
-        )
+        state = _check_failed(exc)
+        if item.key == "cop30":
+            fallback = _cop30_file_availability(bbox, timeout=timeout)
+            if fallback is not None:
+                state = fallback
+    _cache_store(item.key, bbox, state)
+    return state
 
 
-def check_availability(bbox, cancel=None, timeout=30, sonny_tiles=()):
+def check_availability(bbox, cancel=None, timeout=30, sonny_tiles=(),
+                       force=False):
     """Проверяет все источники для охвата.
 
     Возвращает словарь ``ключ → Availability``.  Сетевые проверки идут
-    параллельно; ошибка одного набора не мешает остальным.
+    параллельно; ошибка одного набора не мешает остальным.  Результаты
+    кэшируются: ``force`` заставляет проверить сеть заново.
     """
     results = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    items = [item for item in SOURCES if item.key != AUTO_SOURCE]
+    # Все источники проверяются одновременно: медленный STAC одного
+    # набора не задерживает остальные.
+    with ThreadPoolExecutor(max_workers=len(items)) as pool:
         futures = {}
-        for item in SOURCES:
-            if item.key == AUTO_SOURCE:
-                # Режим подбора разбирается после остальных наборов.
-                continue
+        for item in items:
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("DEM availability check cancelled")
             futures[
-                pool.submit(_check_one, item, bbox, timeout, sonny_tiles)
+                pool.submit(
+                    _check_one, item, bbox, timeout, sonny_tiles, force
+                )
             ] = item
         for future, item in futures.items():
             if cancel is not None and cancel.is_set():
@@ -828,6 +1120,23 @@ def auto_availability(bbox, availability, sonny_tiles=()):
     for key in plan.values():
         counts[key] = counts.get(key, 0) + 1
     if not plan:
+        unchecked = [
+            source(key).short for key in AUTO_PRIORITY
+            if availability.get(key) is not None
+            and not availability[key].checked
+        ]
+        if unchecked:
+            return Availability(
+                available=True, checked=False,
+                message=i18n.tr("не удалось проверить"),
+                detail=i18n.trf(
+                    "Покрытие не удалось проверить: {}. "
+                    "Повторите проверку кнопкой обновления.",
+                    ", ".join(unchecked),
+                ),
+                total=len(tiles),
+                required_tiles=frozenset(tiles),
+            )
         return Availability(
             available=False, checked=True,
             message=i18n.tr("нет данных"),
@@ -861,10 +1170,23 @@ def auto_availability(bbox, availability, sonny_tiles=()):
 def sonny_availability(bbox, sonny_tiles):
     """Доступность набора Sonny DTM по локальному каталогу тайлов."""
     tiles = set(tiles_for_bbox(bbox))
+    if not sonny_tiles:
+        # Список тайлов ещё не загружен (он лежит в Google Drive) —
+        # это не «нет данных», а «неизвестно».
+        return Availability(
+            available=True, checked=False,
+            message=i18n.tr("список тайлов не загружен"),
+            detail=i18n.tr(
+                "Список тайлов Sonny DTM ещё не загружен. "
+                "Повторите проверку позже."
+            ),
+            total=len(tiles),
+            required_tiles=frozenset(tiles),
+        )
     covered = tiles & set(sonny_tiles)
     if not covered:
         return Availability(
-            available=False, checked=bool(sonny_tiles),
+            available=False, checked=True,
             message=i18n.tr("нет данных"),
             detail=i18n.tr(
                 "Набор Sonny DTM не покрывает выбранный охват."
