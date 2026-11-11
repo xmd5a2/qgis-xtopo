@@ -500,6 +500,42 @@ class LabelAxisTest(unittest.TestCase):
             )
             dataset = None
 
+    def test_skips_duplicate_name_and_outline(self):
+        from osgeo import ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "glacier.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("glacier", None, ogr.wkbPolygon)
+            layer.CreateField(ogr.FieldDefn("id", ogr.OFTString))
+            layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+            corners = ((0.0, 0.0), (0.02, 0.0), (0.02, 0.006), (0.0, 0.006))
+            for index, shift in enumerate((0.0, 1e-9, 0.05)):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetField("id", f"relation/{index + 1}")
+                feature.SetField("name", "Ледник")
+                ring = ogr.Geometry(ogr.wkbLinearRing)
+                for x, y in corners + corners[:1]:
+                    ring.AddPoint_2D(x + shift, y)
+                polygon = ogr.Geometry(ogr.wkbPolygon)
+                polygon.AddGeometry(ring)
+                feature.SetGeometry(polygon)
+                layer.CreateFeature(feature)
+            dataset = None
+
+            pipeline = Pipeline(config, BBox(0, 0, 0.07, 0.006), _FakeRunner(None))
+            output = pipeline._label_axis("glacier", source, False)
+            dataset = ogr.Open(str(output))
+            layer = dataset.GetLayer(0)
+            ids = [feature.GetField("id") for feature in layer]
+            self.assertEqual(ids, ["relation/1", "relation/3"])
+            dataset = None
+
 
 class DissolveFieldsTest(unittest.TestCase):
     """Растворение по пустому или отсутствующему полю не сливает слой."""

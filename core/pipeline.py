@@ -384,6 +384,28 @@ def _recipe_dependencies(name, producers):
     return dependencies
 
 
+def _label_name(feature):
+    """Название объекта для поиска дубликатов подписи."""
+    for field in ("name", "name:ru", "name:en"):
+        index = feature.GetFieldIndex(field)
+        if index >= 0:
+            value = feature.GetField(index)
+            if value:
+                return value
+    return None
+
+
+def _same_outline(first, second, tolerance=1e-5, area_share=0.95):
+    """Похожи ли контуры: дубликаты OSM расходятся на доли метра."""
+    first_envelope, first_area = first
+    second_envelope, second_area = second
+    if any(abs(a - b) > tolerance
+           for a, b in zip(first_envelope, second_envelope)):
+        return False
+    return (min(first_area, second_area)
+            / max(first_area, second_area, 1e-12) >= area_share)
+
+
 class _GpkgWriter:
     """Потоковая запись в GeoPackage одной транзакцией."""
 
@@ -889,14 +911,31 @@ class Pipeline:
             geometry_type=ogr.wkbMultiLineString,
         )
         built = 0
+        # Одинаковые названия у разных relation — дубликаты OSM. Второй
+        # контур с тем же именем и почти той же геометрией пропускаем,
+        # иначе на карте появляются две подписи друг над другом.
+        seen = {}
         try:
             for feature in layer:
                 geometry = feature.GetGeometryRef()
                 if geometry is None or geometry.IsEmpty():
                     continue
+                label_name = _label_name(feature)
+                outline = None
+                if label_name:
+                    try:
+                        outline = (geometry.GetEnvelope(), geometry.GetArea())
+                    except Exception:  # noqa: BLE001 - битая геометрия не дубликат
+                        outline = None
+                    if outline is not None and any(
+                            _same_outline(outline, other)
+                            for other in seen.get(label_name, ())):
+                        continue
                 line = label_line_geometry(geometry, main_flow=main_flow)
                 if line is None:
                     continue
+                if outline is not None:
+                    seen.setdefault(label_name, []).append(outline)
                 # Шаблон проекта ждёт мультилинию, как у прежнего скелета.
                 multi = ogr.Geometry(ogr.wkbMultiLineString)
                 multi.AddGeometry(line)
