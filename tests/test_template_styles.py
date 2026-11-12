@@ -252,6 +252,119 @@ class TrackScaleTest(unittest.TestCase):
                 )
 
 
+class ServiceRoadLodTest(unittest.TestCase):
+    """Сервисные дороги на 1:100000+ скрываются по уровню детализации."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {}
+        for layer in _template_root().iter("maplayer"):
+            name = layer.findtext("layername") or ""
+            if cls._service_rule(layer) is not None:
+                cls.layers[name] = layer
+        cls.expected = {
+            "highway main", "highway main layer >=1",
+            "highway main layer <=-1", "highway main bridge",
+            "highway main tunnel",
+        }
+
+    @staticmethod
+    def _service_rule(layer):
+        renderer = layer.find("renderer-v2")
+        if renderer is None:
+            return None
+        inner = renderer.find("renderer-v2")
+        target = inner if inner is not None else renderer
+        rules = target.find("rules")
+        if rules is None:
+            return None
+
+        def walk(rule):
+            if rule.get("filter") == "highway = 'service'":
+                return rule
+            for child in rule.findall("rule"):
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+
+        return walk(rules)
+
+    @classmethod
+    def _leaves(cls, rule):
+        result = []
+        for child in rule.findall("rule"):
+            if child.findall("rule"):
+                result.extend(cls._leaves(child))
+            else:
+                result.append(child)
+        return result
+
+    def test_expected_layers_have_service_style(self):
+        self.assertTrue(self.expected.issubset(self.layers), self.layers)
+
+    def test_service_is_absent_at_300k_and_hidden_at_default_lod(self):
+        for name, layer in self.layers.items():
+            service = self._service_rule(layer)
+            for leaf in self._leaves(service):
+                scale_min = int(leaf.get("scalemindenom") or 0)
+                scale_max = int(leaf.get("scalemaxdenom") or 0)
+                if scale_min < 100000:
+                    continue
+                self.assertLess(
+                    scale_min, 300000,
+                    f"{name}: сервисная дорога осталась на 300k+",
+                )
+                expected_max = 200000 if scale_min == 100000 else 300000
+                self.assertEqual(
+                    scale_max, expected_max,
+                    f"{name}: диапазон 100000–300000 не разделён по LOD",
+                )
+                expected = (
+                    "@level_of_detail >= 5" if scale_max == 200000
+                    else "@level_of_detail >= 6"
+                )
+                self.assertIn(
+                    expected, leaf.get("filter", ""),
+                    f"{name}: {leaf.get('label')} должен требовать {expected}",
+                )
+
+
+class AerialwayContrastTest(unittest.TestCase):
+    """Серые линии подъёмников на 1:100000+ остаются различимыми."""
+
+    def test_grey_symbols_are_slightly_darker(self):
+        root = _template_root()
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in root.iter("maplayer")
+        }
+        for name in ("aerialway cable car, gondola", "aerialway chair lift"):
+            layer = layers[name]
+            renderer = layer.find("renderer-v2")
+            inner = renderer.find("renderer-v2")
+            target = inner if inner is not None else renderer
+            symbols = target.find("symbols")
+            for symbol in symbols.findall("symbol"):
+                if symbol.get("name") not in ("2", "3"):
+                    continue
+                colors = {
+                    option.get("value")
+                    for option in symbol.iter("Option")
+                    if option.get("name") in (
+                        "line_color", "color", "outline_color",
+                    )
+                }
+                self.assertIn(
+                    "85,85,85,255,rgb:0.33333333,0.33333333,0.33333333,1",
+                    colors, f"{name}, символ {symbol.get('name')}",
+                )
+                self.assertIn(
+                    "105,105,105,255,rgb:0.41176471,0.41176471,0.41176471,1",
+                    colors, f"{name}, символ {symbol.get('name')}",
+                )
+
+
 class IntermittentWaterStyleTest(unittest.TestCase):
     """Пересыхающая вода нарисована горизонтальной штриховкой без обводки."""
 
