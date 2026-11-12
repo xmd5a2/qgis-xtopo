@@ -1304,6 +1304,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     _clean_temp(config)
     timings.add_stage("создание проекта", time.monotonic() - started)
     prepared = None
+    terrain_thread = None
     try:
         if config.array_queries:
             report("Подготовка источника OSM")
@@ -1331,6 +1332,32 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             prepared = sources.SourceResult()
         for warning in prepared.warnings:
             report(f"WARNING: {warning}")
+        # Скачивание тайлов и сборка растра рельефа не зависят от слоёв
+        # проекта, поэтому идут в отдельном потоке параллельно обработке
+        # слоёв. Изолинии зависят (режутся по воде и ледникам) — их
+        # pipeline догоняет после pipeline.run (см. ниже).
+        terrain_error = []
+        terrain_keys = {}
+        terrain_started = time.monotonic()
+        if config.generate_terrain:
+            def _terrain_worker():
+                try:
+                    gdal_log.LOG.install()
+                    try:
+                        terrain_keys["dem"] = terrain.prepare_terrain_raster(
+                            config, bbox, progress=report, cancel=cancel,
+                            status=tracker.status,
+                        )
+                    finally:
+                        gdal_log.LOG.restore()
+                except InterruptedError:
+                    pass  # отмену проверяет основной поток после join
+                except Exception as exc:  # noqa: BLE001 - всплывёт после join
+                    terrain_error.append(exc)
+            terrain_thread = threading.Thread(
+                target=_terrain_worker, name="xtopo-terrain", daemon=True,
+            )
+            terrain_thread.start()
         report("Обработка слоёв")
         runner = ProcessingRunner(
             progress=report, cancel=cancel, fraction=tracker.fraction
@@ -1342,6 +1369,22 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         started = time.monotonic()
         pipeline.run(prepared, config.array_queries)
         timings.add_stage("обработка слоёв", time.monotonic() - started)
+        if terrain_thread is not None:
+            terrain_thread.join()
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            if terrain_error:
+                raise terrain_error[0]
+            timings.add_stage("рельеф", time.monotonic() - terrain_started)
+            report("Обработка рельефа")
+            gdal_log.LOG.install()
+            try:
+                terrain.prepare_terrain_isolines(
+                    config, bbox, terrain_keys.get("dem"),
+                    progress=report, cancel=cancel,
+                )
+            finally:
+                gdal_log.LOG.restore()
         if "coastline" in config.array_queries:
             report("Обработка береговой линии")
             started = time.monotonic()
@@ -1353,18 +1396,6 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("береговая линия", time.monotonic() - started)
-        if config.generate_terrain:
-            report("Обработка рельефа")
-            started = time.monotonic()
-            gdal_log.LOG.install()
-            try:
-                terrain.prepare_terrain(
-                    config, bbox, progress=report, cancel=cancel,
-                    status=tracker.status,
-                )
-            finally:
-                gdal_log.LOG.restore()
-            timings.add_stage("рельеф", time.monotonic() - started)
         if "peak" in config.array_queries:
             report("Проверка пиков")
             started = time.monotonic()
@@ -1411,6 +1442,10 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             report(line)
         tracker.finish()
     finally:
+        if terrain_thread is not None and terrain_thread.is_alive():
+            # Отмена или ошибка до join: поток рельефа дорабатывает
+            # (функции рельефа сами реагируют на cancel).
+            terrain_thread.join()
         if prepared is not None and prepared.dataset is not None:
             prepared.dataset.close()
         _clean_temp(config)

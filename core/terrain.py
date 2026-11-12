@@ -1660,9 +1660,16 @@ def _generate_glacier_isolines(config, shape_path, progress=None):
     return _split_isolines_by_glaciers(config, shape_path, progress)
 
 
-def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
+def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
+                           status=None):
+    """Скачивание тайлов, сборка DEM и затенение (без изолиний).
+
+    Не зависит от слоёв проекта, поэтому в pipeline эта стадия работает
+    параллельно обработке слоёв.  Возвращает ключ кэша DEM — его ждёт
+    :func:`prepare_terrain_isolines`.
+    """
     if not config.generate_terrain:
-        return
+        return None
     config.terrain_fallback = ""
     config.terrain_input_dir.mkdir(parents=True, exist_ok=True)
     source_key = config.resolved_terrain_source()
@@ -1749,15 +1756,38 @@ def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
         if config.generate_terrain_hillshade_slope:
             generate_hillshade_slope(config, bbox, progress=progress, cancel=cancel)
         terrain_cache.store_dem(config, dem_key)
-    if config.generate_terrain_isolines:
-        isolines_key = terrain_cache.isolines_signature(config, bbox, dem_key)
-        if terrain_cache.restore_isolines(config, isolines_key):
-            if progress:
-                progress("Использован кэш изолиний: повторная обработка не требуется")
-        else:
-            generate_isolines(config, bbox, progress=progress, cancel=cancel)
-            terrain_cache.store_isolines(config, isolines_key)
     if config.download_terrain_tiles:
         for path in config.terrain_input_dir.iterdir():
             if path.is_file():
                 path.unlink(missing_ok=True)
+    return dem_key
+
+
+def prepare_terrain_isolines(config, bbox, dem_key, progress=None,
+                             cancel=None):
+    """Изолинии по готовому растру.
+
+    Контуры режутся по воде и ледникам — слоям проекта, поэтому стадия
+    идёт после обработки слоёв (см. core.pipeline).
+    """
+    if not config.generate_terrain or not config.generate_terrain_isolines:
+        return
+    if dem_key is None:
+        return
+    isolines_key = terrain_cache.isolines_signature(config, bbox, dem_key)
+    if terrain_cache.restore_isolines(config, isolines_key):
+        if progress:
+            progress("Использован кэш изолиний: повторная обработка не требуется")
+    else:
+        generate_isolines(config, bbox, progress=progress, cancel=cancel)
+        terrain_cache.store_isolines(config, isolines_key)
+
+
+def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
+    """Последовательный вариант: растр, затем изолинии."""
+    dem_key = prepare_terrain_raster(
+        config, bbox, progress=progress, cancel=cancel, status=status,
+    )
+    prepare_terrain_isolines(
+        config, bbox, dem_key, progress=progress, cancel=cancel,
+    )

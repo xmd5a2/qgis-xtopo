@@ -1241,6 +1241,106 @@ class SonnyDatasetTest(unittest.TestCase):
         self.assertEqual(array[1, 2], 7201 + 2)
 
 
+class PrepareTerrainSplitTest(unittest.TestCase):
+    def _config(self, directory):
+        from osgeo import gdal, osr
+
+        from qgis_xtopo.core.config import Config
+
+        config = Config(qgis_projects_dir=directory)
+        config.ensure_directories()
+        config.generate_terrain = True
+        config.generate_terrain_hillshade_slope = False
+        config.generate_terrain_isolines = True
+        config.isolines_step = 50
+        config.terrain_source = "manual"
+        config.terrain_src_dir = Path(directory) / "dem_src"
+        config.terrain_src_dir.mkdir()
+        tile = config.terrain_src_dir / "N42E044.tif"
+        dataset = gdal.GetDriverByName("GTiff").Create(
+            str(tile), 40, 40, 1, gdal.GDT_Float32
+        )
+        dataset.SetGeoTransform((44.7, 0.001, 0, 42.8, 0, -0.001))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        dataset.SetProjection(srs.ExportToWkt())
+        # Наклонная плоскость: у горизонталей 50 м есть что провести.
+        import array
+
+        rows = array.array(
+            "f",
+            [
+                100.0 + row * 0.4 + column * 0.01
+                for row in range(40)
+                for column in range(40)
+            ],
+        )
+        dataset.GetRasterBand(1).WriteRaster(
+            0, 0, 40, 40, rows.tobytes()
+        )
+        dataset = None
+        config.project_dir.joinpath("crop.geojson").write_text(
+            '{"type":"FeatureCollection","features":[{"type":"Feature",'
+            '"properties":{},"geometry":{"type":"Polygon","coordinates":'
+            '[[[44.7,42.78],[44.72,42.78],[44.72,42.8],'
+            '[44.7,42.8],[44.7,42.78]]]}}]}',
+            encoding="utf-8",
+        )
+        return config
+
+    def test_raster_then_isolines_and_cache(self):
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(44.7, 42.78, 44.72, 42.8)
+            messages = []
+            dem_key = terrain.prepare_terrain_raster(
+                config, bbox, messages.append
+            )
+            self.assertIsNotNone(dem_key)
+            self.assertTrue(
+                (config.raster_dir / "merged_dem.tif").exists()
+            )
+            terrain.prepare_terrain_isolines(
+                config, bbox, dem_key, messages.append
+            )
+            self.assertTrue(
+                (config.vector_dir / "isolines_regular.sqlite").exists()
+            )
+            # Повторный прогон берёт оба кэша и ничего не считает.
+            messages.clear()
+            dem_key2 = terrain.prepare_terrain_raster(
+                config, bbox, messages.append
+            )
+            self.assertEqual(dem_key2, dem_key)
+            self.assertIn(
+                "Использован кэш рельефа: повторная обработка не требуется",
+                messages,
+            )
+            terrain.prepare_terrain_isolines(
+                config, bbox, dem_key2, messages.append
+            )
+            self.assertIn(
+                "Использован кэш изолиний: повторная обработка не требуется",
+                messages,
+            )
+
+    def test_wrapper_matches_split(self):
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(44.7, 42.78, 44.72, 42.8)
+            terrain.prepare_terrain(config, bbox, lambda message: None)
+            self.assertTrue(
+                (config.raster_dir / "merged_dem.tif").exists()
+            )
+            self.assertTrue(
+                (config.vector_dir / "isolines_regular.sqlite").exists()
+            )
+
+
 class Cop30FallbackTest(unittest.TestCase):
     def _config(self, directory):
         from qgis_xtopo.core.config import Config
