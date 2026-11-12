@@ -19,7 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QStyleOptionViewItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core import dem_sources, geofabrik, i18n, sonny
+from ..core import dem_sources, geofabrik, i18n, proxy, sonny
 from ..core.bbox import parse_bbox
 from ..core.config import (
     Config, default_projects_dir, default_queries, project_name_error,
@@ -34,12 +34,15 @@ from ..core.project import (
     fit_project_extent, open_project, project_file, project_file_path,
     set_canvas_magnification,
 )
-from ..core.resources import query_names, read_query
+from ..core.resources import (
+    plugin_build_date, plugin_version, query_names, read_query,
+)
 from ..core.transliteration import functions_available, patch_project_labeling
 from ..core.ui import PLUGIN_DOCK_NAME, hide_docks, show_docks
 from .extentdialog import ExtentDialog
 from .projecticons import panels_icon
 from .projectpanel import ProjectPanel
+from .proxy_dialog import ProxyDialog
 from .translation import translate_tree
 
 MODE_EXAMPLES = {
@@ -460,7 +463,11 @@ class WrappedLabel(QLabel):
 
 class XtopoDockWidget(QDockWidget):
     def __init__(self, iface, parent=None):
-        super().__init__("QGIS-xtopo", parent)
+        details = " ".join(
+            part for part in (plugin_version(), plugin_build_date()) if part
+        )
+        title = f"QGIS-xtopo {details}".strip()
+        super().__init__(title, parent)
         self.iface = iface
         self.worker = None
         self.server_workers = []
@@ -504,6 +511,7 @@ class XtopoDockWidget(QDockWidget):
         self._project_timer.setInterval(0)
         self._project_timer.timeout.connect(self._refresh_project_state)
         self.settings = QSettings("qgis-xtopo", "qgis-xtopo")
+        proxy.apply()
         i18n.add_listener(self._language_changed)
         self.destroyed.connect(self.detach_language_listener)
         self.setObjectName("QgisXtopoDockWidget")
@@ -621,7 +629,19 @@ class XtopoDockWidget(QDockWidget):
         self.language_button.setStyleSheet(LANGUAGE_BUTTON_STYLE)
         self.language_button.setToolTip("Язык интерфейса")
         self.language_button.clicked.connect(self._switch_language)
-        self.tabs.setCornerWidget(self.language_button, _top_right_corner())
+        self.proxy_button = QToolButton()
+        self.proxy_button.setAutoRaise(True)
+        self.proxy_button.setIcon(
+            self.style().standardIcon(QStyle.SP_DriveNetIcon))
+        self.proxy_button.clicked.connect(self._open_proxy_dialog)
+        corner = QWidget(self.tabs)
+        corner_layout = QHBoxLayout(corner)
+        corner_layout.setContentsMargins(0, 0, 0, 0)
+        corner_layout.setSpacing(2)
+        corner_layout.addWidget(self.proxy_button)
+        corner_layout.addWidget(self.language_button)
+        self.tabs.setCornerWidget(corner, _top_right_corner())
+        self._update_proxy_tooltip()
         self._fit_language_button()
 
         data_tab = QWidget()
@@ -2443,6 +2463,24 @@ class XtopoDockWidget(QDockWidget):
     def _switch_language(self):
         i18n.cycle_language()
 
+    def _open_proxy_dialog(self):
+        dialog = ProxyDialog(self)
+        if dialog.exec_() != ProxyDialog.Accepted:
+            return
+        config = dialog.config()
+        proxy.save(config)
+        proxy.apply(config)
+        self._update_proxy_tooltip()
+
+    def _update_proxy_tooltip(self):
+        config = proxy.load()
+        if config.enabled:
+            text = i18n.trf("Прокси: {} {}", config.ptype.upper(),
+                            config.address())
+        else:
+            text = i18n.tr("Прокси не настроен")
+        self.proxy_button.setToolTip(text)
+
     def _language_changed(self, _code=None):
         self.retranslate()
 
@@ -2451,6 +2489,7 @@ class XtopoDockWidget(QDockWidget):
         translate_tree(self)
         self.language_button.setText(i18n.language().upper())
         self.language_button.setToolTip(i18n.tr("Язык интерфейса"))
+        self._update_proxy_tooltip()
         self._fit_language_button()
         self._retranslate_dynamic()
         self.project_panel.retranslate()

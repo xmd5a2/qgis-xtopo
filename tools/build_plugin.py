@@ -11,6 +11,7 @@ QGIS каталог называется `qgis_xtopo`, поэтому в арх�
 """
 
 import argparse
+import datetime
 import shutil
 import sys
 import tempfile
@@ -104,6 +105,10 @@ def stage(target):
     destination = package / "resources" / TEMPLATE.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(TEMPLATE, destination)
+    stamp = package / "resources" / "build.txt"
+    stamp.write_text(
+        datetime.datetime.now().strftime("%Y-%m-%d"), encoding="utf-8"
+    )
     return package
 
 
