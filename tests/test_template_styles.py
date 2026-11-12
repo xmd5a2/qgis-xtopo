@@ -930,5 +930,34 @@ class PoiSuppressionExpressionTest(unittest.TestCase):
         self.assertTrue(visible["far"])
 
 
+class MountainPassTemplateTest(unittest.TestCase):
+    """Подписи перевалов получают признак местных названий из шаблона."""
+
+    def test_pass_calls_receive_name_local(self):
+        with zipfile.ZipFile(template_path()) as archive:
+            text = archive.read("automap.qgs").decode("utf-8")
+        needle = "compose_mountain_pass_name("
+        calls = []
+        index = 0
+        while True:
+            start = text.find(needle, index)
+            if start < 0:
+                break
+            pos = start + len(needle)
+            depth = 1
+            while depth:
+                char = text[pos]
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                pos += 1
+            calls.append(text[start:pos])
+            index = pos
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIn("@name_local", call)
+
+
 if __name__ == "__main__":
     unittest.main()

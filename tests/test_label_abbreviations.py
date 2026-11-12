@@ -198,6 +198,93 @@ class LabelAbbreviationTests(unittest.TestCase):
         self.assertEqual(self.water("река Адегой"), "р. Адегой")
         self.assertEqual(self.water("ручей Свинячий"), "руч. Свинячий")
 
+    def pass_label(self, name, rtsa="н/к", ele=2800, scale=50000,
+                   pref="ru", local="0", with_local=True):
+        """Подпись перевала с заданными языком карты и названием."""
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
+            QgsProject,
+        )
+
+        project = QgsProject.instance()
+        scope = QgsExpressionContextUtils.projectScope(project)
+        keys = ("name_pref_suf_lang", "name_local")
+        previous = {key: scope.variable(key) for key in keys}
+
+        def restore():
+            for key, value in previous.items():
+                if value is None:
+                    QgsExpressionContextUtils.removeProjectVariable(
+                        project, key
+                    )
+                else:
+                    QgsExpressionContextUtils.setProjectVariable(
+                        project, key, value
+                    )
+
+        self.addCleanup(restore)
+        QgsExpressionContextUtils.setProjectVariable(
+            project, "name_pref_suf_lang", pref
+        )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, "name_local", local
+        )
+        context = QgsExpressionContext()
+        context.appendScope(
+            QgsExpressionContextUtils.projectScope(project)
+        )
+        tail = ", @name_local" if with_local else ""
+        expression = QgsExpression(
+            "compose_mountain_pass_name('%s', %s, '%s', %s, "
+            "@name_pref_suf_lang%s)"
+            % (name.replace("'", "''"), ele, rtsa, scale, tail)
+        )
+        expression.prepare(context)
+        return expression.evaluate(context)
+
+    def test_pass_category_is_hidden_for_non_cyrillic_name(self):
+        """«н/к» и категория не приписываются имени не кириллицей."""
+        self.assertEqual(
+            self.pass_label("Col de la Croix", pref="en"),
+            "Col de la Croix\n2800 m",
+        )
+        self.assertNotIn(
+            "1А", self.pass_label("Col de la Croix", rtsa="1А", pref="en")
+        )
+
+    def test_pass_category_stays_on_russian_map(self):
+        """На русской карте старое поведение: категория у имени."""
+        self.assertEqual(
+            self.pass_label("Col de la Croix", pref="ru", local="0"),
+            "Col de la Croix\nн/к 2800 м",
+        )
+
+    def test_pass_category_is_hidden_for_local_names(self):
+        """«Местные названия» — не русская карта, категория снимается."""
+        self.assertEqual(
+            self.pass_label("Col de la Croix", pref="ru", local="1"),
+            "Col de la Croix\n2800 м",
+        )
+
+    def test_pass_category_stays_for_cyrillic_name(self):
+        """Кириллическое имя сохраняет категорию при любом языке."""
+        text = self.pass_label("Перевал Кату-Ярык", pref="en")
+        self.assertIn("н/к", text)
+        self.assertIn("Перевал Кату-Ярык", text)
+
+    def test_pass_category_stays_without_name(self):
+        """Без названия категория остаётся: это не имя не кириллицей."""
+        self.assertEqual(self.pass_label("", pref="en"), "н/к 2800 m")
+
+    def test_pass_old_project_expression_still_works(self):
+        """Проект со старым шаблоном передаёт пять аргументов."""
+        self.assertEqual(
+            self.pass_label(
+                "Col de la Croix", pref="ru", local="1", with_local=False,
+            ),
+            "Col de la Croix\n2800 м",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
