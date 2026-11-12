@@ -78,6 +78,69 @@ class TemplateLayoutTest(unittest.TestCase):
             self.assertTrue(packaged.exists())
 
 
+class TunnelLayerOrderTest(unittest.TestCase):
+    """Туннели — под линейными слоями, над площадными.
+
+    Туннель проходит сквозь рельеф: изолинии и прочие линии рисуются
+    поверх него, а площадные заливки (карьер, ледник, лес) — под ним.
+    """
+
+    TUNNELS = (
+        "rail tunnel", "highway main tunnel",
+        "river tunnel", "stream tunnel", "canal tunnel",
+    )
+    LINEAR_ABOVE = (
+        "[TERRAIN] isolines regular", "[TERRAIN] isolines glacier",
+        "highway main", "railway all", "path", "track",
+        "river", "stream", "cliff", "ridge, arete",
+    )
+    POLYGON_BELOW = (
+        "quarry", "glacier", "wood", "farmland", "scree", "bare rock",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.order = [
+            item.get("name")
+            for item in cls._template_root().iter("layer-tree-layer")
+        ]
+
+    @staticmethod
+    def _template_root():
+        return _template_root()
+
+    def test_tunnels_sit_below_isolines(self):
+        for tunnel in self.TUNNELS:
+            for linear in ("[TERRAIN] isolines regular", "[TERRAIN] isolines glacier"):
+                self.assertLess(
+                    self.order.index(linear), self.order.index(tunnel),
+                    f"{tunnel} должен быть под {linear}",
+                )
+
+    def test_tunnels_sit_below_all_linear(self):
+        for tunnel in self.TUNNELS:
+            for linear in self.LINEAR_ABOVE:
+                self.assertLess(
+                    self.order.index(linear), self.order.index(tunnel),
+                    f"{tunnel} должен быть под {linear}",
+                )
+
+    def test_tunnels_sit_above_polygon_fills(self):
+        for tunnel in self.TUNNELS:
+            for polygon in self.POLYGON_BELOW:
+                self.assertLess(
+                    self.order.index(tunnel), self.order.index(polygon),
+                    f"{tunnel} должен быть над {polygon}",
+                )
+
+    def test_tunnel_group_is_contiguous(self):
+        positions = [self.order.index(tunnel) for tunnel in self.TUNNELS]
+        self.assertEqual(
+            max(positions) - min(positions), len(positions) - 1,
+            "туннельные слои должны идти подряд",
+        )
+
+
 class IsolinesHachureTest(unittest.TestCase):
     """Сдвиг фазы штрихов задан в шаблоне для всех изолиний."""
 

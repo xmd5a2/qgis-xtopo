@@ -135,6 +135,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 
 ## Шаблон и стили
 
+- **Порядок туннелей**: слои `rail tunnel`, `highway main tunnel`,
+  `river tunnel`, `stream tunnel`, `canal tunnel` идут подряд сразу под
+  `[TERRAIN] isolines glacier` — под всеми линейными слоями (включая
+  изолинии), над фоновыми площадными (карьер, ледник, лес). Проверка —
+  `TunnelLayerOrderTest` в `tests/test_template_styles.py`. Площадные слои
+  середины стека (вода, болото) остаются над туннелями, как и раньше.
 - **Варианты крутых склонов**: `[TERRAIN] slope (steep) var1/var2/var3` на
   общей подложке `slope_upscaled.tif`, показывается один. Привязка строго по
   полному имени (`STEEP_VARIANTS`, `LAYER_NAMES` в `gui/projectpanel.py`);
