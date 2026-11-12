@@ -262,7 +262,11 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   200–300k — `>= 4`, на 300k+ правила нет). Дороги с `service=*`
   скрываются раньше: 50–100k — `>= 4`, на 100k+ правил нет; ветка
   `service driveway` (driveway/parking_aisle/alley) имеет те же сроки.
-  Проверка — `ServiceRoadLodTest`.
+  Это действует и для мостов (`bridge=yes`), и для туннелей
+  (`tunnel=yes`). Где у 100k–300k один и тот же символ (туннели, зимние
+  дороги), диапазон не делят на два правила: QGIS теряет символ у
+  второго, поэтому LOD проверяется через `@map_scale` внутри одного
+  фильтра. Проверка — `ServiceRoadLodTest`.
 
 ## Источники рельефа
 

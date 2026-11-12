@@ -333,15 +333,24 @@ class ServiceRoadLodTest(unittest.TestCase):
                 ">= 4", leaves[50000].get("filter", ""),
                 f"{name}: 50–100k должен требовать LOD 4 для service=*",
             )
-            for scale, lod in ((100000, 3), (200000, 4)):
-                self.assertIn(
-                    "service IS NULL", leaves[scale].get("filter", ""),
-                    f"{name}: service=* должен быть скрыт с {scale}",
-                )
-                self.assertIn(
-                    f">= {lod}", leaves[scale].get("filter", ""),
-                    f"{name}: {scale} должен требовать LOD {lod}",
-                )
+            first = leaves[100000]
+            if int(first.get("scalemaxdenom") or 0) == 300000:
+                # Туннели и исходный слой: один диапазон с проверкой
+                # масштаба внутри фильтра, иначе QGIS теряет символ.
+                self.assertIn("service IS NULL", first.get("filter", ""), name)
+                self.assertIn("@map_scale", first.get("filter", ""), name)
+                self.assertIn(">= 3", first.get("filter", ""), name)
+                self.assertIn(">= 4", first.get("filter", ""), name)
+            else:
+                for scale, lod in ((100000, 3), (200000, 4)):
+                    self.assertIn(
+                        "service IS NULL", leaves[scale].get("filter", ""),
+                        f"{name}: service=* должен быть скрыт с {scale}",
+                    )
+                    self.assertIn(
+                        f">= {lod}", leaves[scale].get("filter", ""),
+                        f"{name}: {scale} должен требовать LOD {lod}",
+                    )
             self.assertNotIn(
                 300000, leaves,
                 f"{name}: обычный service должен исчезать с 300k",
