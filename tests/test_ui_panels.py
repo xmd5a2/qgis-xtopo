@@ -228,5 +228,48 @@ class ProxyIconTest(unittest.TestCase):
             self.assertEqual(pixmap.pixelColor(0, 15).alpha(), 0)
 
 
+class LogScrollTest(unittest.TestCase):
+    """Новая строка журнала должна быть видна, масштаб текста — сохранён."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_new_line_scrolls_into_view_and_keeps_zoom(self):
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+
+        class Iface:
+            def mainWindow(self):
+                return window
+
+        dock = XtopoDockWidget(Iface())
+        self.addCleanup(dock.deleteLater)
+        dock._open_log_window()
+        view = dock.log_window_text
+        self.assertIsNotNone(view)
+        for index in range(200):
+            view.appendPlainText(f"строка {index} " + "x" * 60)
+        self.app.processEvents()
+        view.zoomIn(2)
+        zoom = view.font().pointSizeF()
+        view.verticalScrollBar().setValue(0)
+
+        dock._append_log("новая строка")
+        self.app.processEvents()
+
+        bar = view.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)
+        # Последняя строка у нижнего края, а не курсор где-то выше.
+        self.assertEqual(bar.value(), bar.maximum())
+        self.assertEqual(view.font().pointSizeF(), zoom)
+
+
 if __name__ == "__main__":
     unittest.main()

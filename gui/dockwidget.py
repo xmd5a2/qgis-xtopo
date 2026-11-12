@@ -2832,8 +2832,17 @@ class XtopoDockWidget(QDockWidget):
             window_layout.addWidget(self.log_window_text)
             translate_tree(self.log_window)
         self.log_window.show()
+        self._scroll_log_to_end(self.log_window_text)
         self.log_window.raise_()
         self.log_window.activateWindow()
+
+    @staticmethod
+    def _scroll_log_to_end(view):
+        """Показывает последнюю строку, не меняя масштаб текста."""
+        if view is None:
+            return
+        bar = view.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _append_log(self, message):
         if message.lstrip().casefold().startswith(("результаты", "results")):
@@ -2844,9 +2853,11 @@ class XtopoDockWidget(QDockWidget):
         self.log.appendPlainText(line)
         if self.log_window_text is not None:
             self.log_window_text.appendPlainText(line)
-            self.log_window_text.ensureCursorVisible()
+        # Прокрутка к последней строке: ensureCursorVisible() при заполненном
+        # лимите блоков оставляет новую строку за нижним краем.
+        self._scroll_log_to_end(self.log)
+        self._scroll_log_to_end(self.log_window_text)
         self._set_status(message)
-        self.log.ensureCursorVisible()
 
     def _pipeline_percent(self, value):
         self.progress.setRange(0, 100)
