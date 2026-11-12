@@ -1,13 +1,15 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
-    Pipeline, PipelineError, _ProgressTracker, _clean_layers, progress_stages,
+    Pipeline, PipelineError, _ProgressTracker, _clean_layers,
+    _report_terrain_stage, progress_stages,
 )
 from qgis_xtopo.core.query_recipes import RECIPES
 from qgis_xtopo.core.resources import query_names
@@ -306,6 +308,38 @@ class ProgressTrackerTest(unittest.TestCase):
         tracker.fraction(0.5)
         self.assertGreater(values[-1], low)
         self.assertLess(values[-1], high)
+
+
+class TerrainStageMessageTest(unittest.TestCase):
+    """Пока рельеф догружается, журнал должен говорить об этом."""
+
+    def test_waiting_line_while_terrain_runs(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def worker():
+            started.set()
+            release.wait(5)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(5))
+            messages = []
+            _report_terrain_stage(thread, messages.append)
+            self.assertEqual(messages[0], "Обработка рельефа")
+            self.assertIn("продолжается", messages[1])
+        finally:
+            release.set()
+            thread.join(5)
+
+    def test_no_waiting_line_when_terrain_done(self):
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        thread.join(5)
+        messages = []
+        _report_terrain_stage(thread, messages.append)
+        self.assertEqual(messages, ["Обработка рельефа"])
 
 
 class AreaRoadTest(unittest.TestCase):

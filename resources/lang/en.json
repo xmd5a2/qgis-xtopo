@@ -529,5 +529,6 @@
   "Хост": "Host",
   "Порт": "Port",
   "Логин": "Login",
-  "Пароль": "Password"
+  "Пароль": "Password",
+  "Рельеф: продолжается загрузка тайлов и сборка DEM": "Terrain: still downloading tiles and building the DEM"
 }

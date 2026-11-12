@@ -92,14 +92,28 @@ def progress_stages(config):
     if config.array_queries:
         stages.append(("Подготовка источника OSM", 30))
     stages.append(("Обработка слоёв", 45))
-    if "coastline" in config.array_queries:
-        stages.append(("Обработка береговой линии", 4))
+    # Порядок стадий совпадает с ходом run_project: сначала догоняется
+    # рельеф, потом береговая линия, пики и очистка.
     if config.generate_terrain:
         stages.append(("Обработка рельефа", 14))
+    if "coastline" in config.array_queries:
+        stages.append(("Обработка береговой линии", 4))
     if "peak" in config.array_queries:
         stages.append(("Проверка пиков", 3))
     stages.append(("Удаление пустых слоёв", 2))
     return stages
+
+
+def _report_terrain_stage(thread, report):
+    """Объявляет стадию рельефа до ожидания потока.
+
+    Рельеф качается параллельно слоям, и к моменту их окончания загрузка
+    может быть ещё далека от завершения. Без этой строки в журнале остаётся
+    последнее сообщение про слои, и непонятно, что работа ещё идёт.
+    """
+    report("Обработка рельефа")
+    if thread.is_alive():
+        report("Рельеф: продолжается загрузка тайлов и сборка DEM")
 
 
 def _source_timings(elapsed, download):
@@ -1392,13 +1406,13 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         pipeline.run(prepared, config.array_queries)
         timings.add_stage("обработка слоёв", time.monotonic() - started)
         if terrain_thread is not None:
+            _report_terrain_stage(terrain_thread, report)
             terrain_thread.join()
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Preparation cancelled")
             if terrain_error:
                 raise terrain_error[0]
             timings.add_stage("рельеф", time.monotonic() - terrain_started)
-            report("Обработка рельефа")
             gdal_log.LOG.install()
             try:
                 terrain.prepare_terrain_isolines(
