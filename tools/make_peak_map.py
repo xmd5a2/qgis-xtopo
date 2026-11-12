@@ -52,7 +52,7 @@ TRANSPARENT_GIF = (
 
 
 def fetch(url, destination, proxy, timeout=30):
-    """Скачивает файл через прокси; True при успехе."""
+    """Скачивает файл (через прокси, если задан); True при успехе."""
     destination = Path(destination)
     if destination.exists() and destination.stat().st_size > 0:
         return True
@@ -411,8 +411,9 @@ def main(argv=None):
     )
     parser.add_argument("--out", required=True, help="каталог для карты")
     parser.add_argument(
-        "--proxy", default="socks5://127.0.0.1:1122",
-        help="SOCKS5-прокси для загрузки тайлов (пусто — без прокси)",
+        "--proxy", default="",
+        help="SOCKS5-прокси для загрузки тайлов, например socks5://host:port "
+             "(по умолчанию — без прокси)",
     )
     parser.add_argument("--port", type=int, default=8765, help="порт локального сервера")
     parser.add_argument(

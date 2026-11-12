@@ -413,7 +413,7 @@ OpenTopoMap: тайлы запрашиваются локальным серве
 
 ```sh
 python3 tools/make_peak_map.py --csv /tmp/peaks/peaks.csv \
-    --out /tmp/peaks/map --serve --proxy socks5://127.0.0.1:1122
+    --out /tmp/peaks/map --serve --proxy socks5://host:port
 ```
 
 Недостающие тайлы SRTM скрипты докачивают в тот же кэш, что и плагин

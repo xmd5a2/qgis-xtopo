@@ -50,6 +50,12 @@ def _gdal():
 
     gdal.UseExceptions()
     ogr.UseExceptions()
+    # Растры читаются по HTTP Range (/vsicurl): без коротких таймаутов
+    # при недоступной сети GDAL ждёт ответа очень долго.
+    gdal.SetConfigOption("CPL_VSIL_CURL_CONNECTTIMEOUT", "5")
+    gdal.SetConfigOption("CPL_VSIL_CURL_TIMEOUT", "15")
+    gdal.SetConfigOption("GDAL_HTTP_CONNECTTIMEOUT", "5")
+    gdal.SetConfigOption("GDAL_HTTP_TIMEOUT", "15")
     return gdal, ogr, osr
 
 

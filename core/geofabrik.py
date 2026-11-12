@@ -644,9 +644,13 @@ def ensure_maps(config, maps, statuses=None, progress=None, percent=None,
         destination = local_path(config, item)
         local_size = destination.stat().st_size if destination.exists() else 0
         valid_local = local_size > 0 and _looks_like_pbf(destination)
-        if valid_local and (not status or not status.available or not status.size or local_size == status.size):
+        if valid_local:
+            # Карта из кэша используется как есть: выгрузки Geofabrik
+            # обновляются ежедневно, и перекачивать сотни мегабайт
+            # ради свежего среза каждое утро не нужно. Повторная
+            # загрузка — только если файл испорчен или удалён.
             continue
-        if status is not None and not status.available and not valid_local:
+        if status is not None and not status.available:
             unavailable.append(item.id)
             continue
         pending.append((item, status))

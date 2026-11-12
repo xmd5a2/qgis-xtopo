@@ -261,6 +261,28 @@ class GeofabrikDownloadTest(unittest.TestCase):
             )
         self.assertEqual(paths, [path])
 
+    def test_ensure_maps_skips_local_file_with_changed_size(self):
+        """Свежий срез на сервере не причина перекачивать кэш.
+
+        Выгрузки Geofabrik обновляются ежедневно, поэтому размер на
+        сервере почти всегда отличается от скачанного вчера файла.
+        Карта из кэша должна использоваться как есть — иначе каждое
+        утро перекачиваются сотни мегабайт, а журнал пишет объём для
+        всех карт, хотя реально качается лишь часть.
+        """
+        path = geofabrik.local_path(self.config, self.first)
+        _dummy_pbf(path)
+        status = geofabrik.MapStatus(
+            map=self.first, available=True, size=path.stat().st_size + 1024
+        )
+        with mock.patch.object(
+            geofabrik, "_download_one", side_effect=AssertionError("downloaded")
+        ):
+            paths = geofabrik.ensure_maps(
+                self.config, [self.first], statuses=[status]
+            )
+        self.assertEqual(paths, [path])
+
     def test_ensure_maps_rejects_unavailable_map(self):
         status = geofabrik.MapStatus(map=self.first, available=False, error="404")
         with self.assertRaises(geofabrik.GeofabrikError):

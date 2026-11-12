@@ -523,11 +523,11 @@
   "Каталог STAC недоступен; по прямым адресам есть все тайлы.": "The STAC catalogue is unavailable; all tiles are present at direct links.",
   "Прокси": "Proxy",
   "Прокси не настроен": "No proxy",
+  "Прокси: {} — {}": "Proxy: {} — {}",
   "Использовать прокси": "Use proxy",
   "Тип": "Type",
   "Хост": "Host",
   "Порт": "Port",
   "Логин": "Login",
-  "Пароль": "Password",
-  "Прокси: {} {}": "Proxy: {} {}"
+  "Пароль": "Password"
 }

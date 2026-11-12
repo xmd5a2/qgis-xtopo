@@ -8,7 +8,7 @@ from qgis.PyQt.QtCore import (
     QSettings, QSize, QThread, QTime, QTimer, QUrl, pyqtSignal, Qt,
 )
 from qgis.PyQt.QtGui import (
-    QBrush, QDesktopServices, QColor, QFontMetrics,
+    QBrush, QDesktopServices, QColor, QFontMetrics, QIcon, QPainter, QPixmap,
 )
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
@@ -49,6 +49,30 @@ MODE_EXAMPLES = {
     "local": "/usr/bin/osm3s_query --db-dir=/path/to/overpass_db",
     "ssh": 'ssh user@server "/usr/bin/osm3s_query --db-dir=/path/to/overpass_db"',
 }
+
+
+def _enum(owner, group, name):
+    try:
+        return getattr(getattr(owner, group), name)
+    except AttributeError:
+        return getattr(owner, name)
+
+
+def _tinted_icon(icon, color, size=16):
+    """Одноцветная копия иконки (для значка состояния прокси)."""
+    pixmap = icon.pixmap(QSize(size, size))
+    if pixmap.isNull():
+        return icon
+    tinted = QPixmap(pixmap.size())
+    tinted.fill(_enum(Qt, "GlobalColor", "transparent"))
+    painter = QPainter(tinted)
+    painter.drawPixmap(0, 0, pixmap)
+    painter.setCompositionMode(
+        _enum(QPainter, "CompositionMode", "CompositionMode_SourceIn")
+    )
+    painter.fillRect(tinted.rect(), color)
+    painter.end()
+    return QIcon(tinted)
 
 
 def _log_expand_icon(style):
@@ -397,6 +421,20 @@ class SonnyCatalogueWorker(QThread):
         self.updated.emit(len(sonny.catalogue_tiles(sonny.catalogue_dir())))
 
 
+class ProxyCheckWorker(QThread):
+    """Проверка доступности прокси без блокировки панели."""
+
+    checked = pyqtSignal(int, bool)
+
+    def __init__(self, config, generation, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.generation = generation
+
+    def run(self):
+        self.checked.emit(self.generation, proxy.probe(self.config))
+
+
 class GeofabrikPlanWorker(QThread):
     result = pyqtSignal(object)
     failed = pyqtSignal(str)
@@ -510,6 +548,15 @@ class XtopoDockWidget(QDockWidget):
         self._project_timer.setSingleShot(True)
         self._project_timer.setInterval(0)
         self._project_timer.timeout.connect(self._refresh_project_state)
+        self.proxy_check = None
+        self._proxy_generation = 0
+        self._proxy_ok = False
+        self._proxy_known = False
+        self._proxy_recheck = False
+        self._proxy_icon_key = ""
+        self._proxy_timer = QTimer(self)
+        self._proxy_timer.setInterval(30_000)
+        self._proxy_timer.timeout.connect(self._check_proxy)
         self.settings = QSettings("qgis-xtopo", "qgis-xtopo")
         proxy.apply()
         i18n.add_listener(self._language_changed)
@@ -558,7 +605,23 @@ class XtopoDockWidget(QDockWidget):
         if self.bbox.text().strip():
             self._schedule_dem_availability()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Пока панель скрыта, статус прокси не проверяем: без настроенного
+        # прокси это бесполезно, а с недоступным — лишние сетевые попытки.
+        self._check_proxy()
+        self._proxy_timer.start()
+
+    def hideEvent(self, event):
+        self._proxy_timer.stop()
+        super().hideEvent(event)
+
     def detach_language_listener(self):
+        self._proxy_timer.stop()
+        if self.proxy_check is not None and self.proxy_check.isRunning():
+            # Проверка короткая (таймаут 2 с): дожидаемся, чтобы поток
+            # не остался висеть после выгрузки плагина.
+            self.proxy_check.wait(2500)
         i18n.remove_listener(self._language_changed)
 
     def _fit_language_button(self):
@@ -631,8 +694,16 @@ class XtopoDockWidget(QDockWidget):
         self.language_button.clicked.connect(self._switch_language)
         self.proxy_button = QToolButton()
         self.proxy_button.setAutoRaise(True)
-        self.proxy_button.setIcon(
-            self.style().standardIcon(QStyle.SP_DriveNetIcon))
+        base_icon = self.style().standardIcon(QStyle.SP_DriveNetIcon)
+        if base_icon.isNull():
+            base_icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
+        off_color = self.palette().color(self.foregroundRole())
+        self._proxy_icons = {
+            "off": _tinted_icon(base_icon, off_color),
+            "ok": _tinted_icon(base_icon, QColor("#2e9e4f")),
+            "bad": _tinted_icon(base_icon, QColor("#c0392b")),
+        }
+        self.proxy_button.setIcon(self._proxy_icons["off"])
         self.proxy_button.clicked.connect(self._open_proxy_dialog)
         corner = QWidget(self.tabs)
         corner_layout = QHBoxLayout(corner)
@@ -2470,16 +2541,68 @@ class XtopoDockWidget(QDockWidget):
         config = dialog.config()
         proxy.save(config)
         proxy.apply(config)
+        # Прошлый результат проверки относился к прежней конфигурации.
+        self._proxy_generation += 1
+        self._proxy_known = False
+        self._proxy_ok = False
         self._update_proxy_tooltip()
+        self._check_proxy()
+
+    def _check_proxy(self):
+        """Запускает фоновую проверку доступности прокси."""
+        config = proxy.load()
+        if not config.enabled:
+            self._proxy_known = True
+            self._proxy_ok = False
+            self._update_proxy_tooltip()
+            return
+        if self.proxy_check is not None and self.proxy_check.isRunning():
+            # Проверка уже идёт; когда закончит — запустим заново с
+            # актуальной конфигурацией.
+            self._proxy_recheck = True
+            return
+        worker = ProxyCheckWorker(config, self._proxy_generation, self)
+        worker.checked.connect(self._proxy_checked)
+        worker.finished.connect(lambda w=worker: self._proxy_check_done(w))
+        worker.finished.connect(worker.deleteLater)
+        self.proxy_check = worker
+        worker.start()
+
+    def _proxy_checked(self, generation, ok):
+        if generation != self._proxy_generation:
+            return
+        self._proxy_ok = bool(ok)
+        self._proxy_known = True
+        self._update_proxy_tooltip()
+
+    def _proxy_check_done(self, worker):
+        if worker is self.proxy_check:
+            self.proxy_check = None
+        if self._proxy_recheck:
+            self._proxy_recheck = False
+            self._check_proxy()
 
     def _update_proxy_tooltip(self):
         config = proxy.load()
         if config.enabled:
-            text = i18n.trf("Прокси: {} {}", config.ptype.upper(),
-                            config.address())
+            address = f"{config.ptype.upper()} {config.address()}"
+            if not self._proxy_known:
+                state = i18n.tr("проверка…")
+                icon_key = "off"
+            elif self._proxy_ok:
+                state = i18n.tr("доступен")
+                icon_key = "ok"
+            else:
+                state = i18n.tr("недоступен")
+                icon_key = "bad"
+            text = i18n.trf("Прокси: {} — {}", address, state)
         else:
             text = i18n.tr("Прокси не настроен")
+            icon_key = "off"
         self.proxy_button.setToolTip(text)
+        if icon_key != self._proxy_icon_key:
+            self._proxy_icon_key = icon_key
+            self.proxy_button.setIcon(self._proxy_icons[icon_key])
 
     def _language_changed(self, _code=None):
         self.retranslate()

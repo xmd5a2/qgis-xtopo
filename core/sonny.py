@@ -255,7 +255,9 @@ def refresh_catalogue(directory=None, progress=None):
                 )
             )
         try:
-            html = _http_bytes(listing_url(dataset), timeout=120)
+            html = _http_bytes(
+                listing_url(dataset), timeout=20, retries=2
+            )
         except Exception:  # noqa: BLE001 - сеть не должна ломать запуск
             continue
         listing = parse_listing(html.decode("utf-8", "replace"))

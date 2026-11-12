@@ -1,8 +1,8 @@
 """Прокси: конфигурация и SOCKS5-рукопожатие.
 
 SOCKS5 проверяется на локальном фейковом сервере в потоке — внешняя
-сеть не нужна. Живой прокси (например socks5 127.0.0.1:1122) можно
-проверить переменной QGIS_XTOPO_TEST_PROXY, без неё тест пропускается.
+сеть не нужна. Живой прокси можно проверить переменной
+QGIS_XTOPO_TEST_PROXY, без неё тест пропускается.
 """
 
 import os
@@ -68,6 +68,14 @@ class _FakeSocks5Server:
 
     def __exit__(self, *args):
         self._stop.set()
+        try:
+            # accept не разблокируется сам от закрытия сокета: будим его
+            # коротким соединением, чтобы поток завершился без ожидания.
+            with socket.create_connection(("127.0.0.1", self.port),
+                                          timeout=1):
+                pass
+        except OSError:
+            pass
         try:
             self.sock.close()
         except OSError:
@@ -181,6 +189,52 @@ class ProxyConfigTest(unittest.TestCase):
         self.assertEqual(loaded.ptype, "socks5")
 
 
+class ProxyProbeTest(unittest.TestCase):
+    def test_disabled_config_is_not_reachable(self):
+        self.assertFalse(proxy.probe(proxy.ProxyConfig(enabled=False)))
+
+    def test_socks5_without_auth(self):
+        config = proxy.ProxyConfig(enabled=True, ptype="socks5",
+                                   host="127.0.0.1", port=0)
+        with _FakeSocks5Server() as socks:
+            config.port = socks.port
+            self.assertTrue(proxy.probe(config))
+
+    def test_socks5_with_auth(self):
+        config = proxy.ProxyConfig(enabled=True, ptype="socks5",
+                                   host="127.0.0.1", port=0,
+                                   login="user", password="secret")
+        with _FakeSocks5Server(require_auth=("user", "secret")) as socks:
+            config.port = socks.port
+            self.assertTrue(proxy.probe(config))
+        with _FakeSocks5Server(require_auth=("user", "wrong")) as socks:
+            config.port = socks.port
+            self.assertFalse(proxy.probe(config))
+
+    def test_socks5_rejects_non_socks_service(self):
+        config = proxy.ProxyConfig(enabled=True, ptype="socks5",
+                                   host="127.0.0.1", port=0)
+        with _TargetHTTPServer() as target:
+            config.port = target.port
+            self.assertFalse(proxy.probe(config))
+
+    def test_http_probe_is_tcp_connect(self):
+        config = proxy.ProxyConfig(enabled=True, ptype="http",
+                                   host="127.0.0.1", port=0)
+        with _TargetHTTPServer() as target:
+            config.port = target.port
+            self.assertTrue(proxy.probe(config))
+
+    def test_closed_port_is_not_reachable(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        config = proxy.ProxyConfig(enabled=True, ptype="socks5",
+                                   host="127.0.0.1", port=port)
+        self.assertFalse(proxy.probe(config))
+
+
 class Socks5Test(unittest.TestCase):
     def test_urlopen_through_socks5(self):
         config = proxy.ProxyConfig(enabled=True, ptype="socks5",
@@ -216,7 +270,7 @@ class Socks5Test(unittest.TestCase):
 
 @unittest.skipUnless(
     os.environ.get("QGIS_XTOPO_TEST_PROXY"),
-    "нужен QGIS_XTOPO_TEST_PROXY, например socks5://127.0.0.1:1122",
+    "нужен QGIS_XTOPO_TEST_PROXY, например socks5://host:port",
 )
 class LiveProxyTest(unittest.TestCase):
     def test_real_proxy(self):

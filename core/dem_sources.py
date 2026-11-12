@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
-from . import i18n
+from . import i18n, net
 from .bbox import BBox
 
 USER_AGENT = "qgis-xtopo/1.0"
@@ -281,7 +281,9 @@ class _MultiAddressHTTPSHandler(urllib.request.HTTPSHandler):
         )
 
 
-_OPENER = urllib.request.build_opener(_MultiAddressHTTPSHandler())
+_OPENER = net.guard(
+    urllib.request.build_opener(_MultiAddressHTTPSHandler())
+)
 
 
 @dataclass(frozen=True)
@@ -685,7 +687,7 @@ def _range_availability(item, bbox):
         if len(tiles) <= SRTM_HEAD_LIMIT:
             try:
                 urls = [aws_tile_url("srtm", lat, lon) for lat, lon in tiles]
-                size_bytes, complete = _head_sizes(urls, timeout=15)
+                size_bytes, complete = _head_sizes(urls, timeout=5)
                 if not complete:
                     size_bytes = len(tiles) * SRTM_AVERAGE_BYTES
                     size_estimated = True
@@ -1008,6 +1010,10 @@ def check_availability(bbox, cancel=None, timeout=30, sonny_tiles=(),
     кэшируются: ``force`` заставляет проверить сеть заново.
     """
     results = {}
+    if force:
+        # Кнопка обновления должна попробовать сеть заново, даже если
+        # прошлая проверка только что завершилась ошибкой.
+        net.reset()
     items = [item for item in SOURCES if item.key != AUTO_SOURCE]
     # Все источники проверяются одновременно: медленный STAC одного
     # набора не задерживает остальные.

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import QSettings
 
+from . import net
+
 TYPES = ("socks5", "http")
 
 
@@ -86,10 +88,11 @@ def _recvn(sock, count):
 
 def _socks5_connect(config, dest_host, dest_port, timeout):
     """TCP-сокет до dest через SOCKS5-рукопожатие (RFC 1928)."""
+    timeout = timeout or net.DEFAULT_TIMEOUT
     sock = socket.create_connection((config.host, config.port),
-                                    timeout=timeout or None)
+                                    timeout=timeout)
     try:
-        sock.settimeout(timeout or None)
+        sock.settimeout(timeout)
         methods = [0x00]
         if config.login:
             methods.append(0x02)
@@ -126,6 +129,52 @@ def _socks5_connect(config, dest_host, dest_port, timeout):
     except Exception:
         sock.close()
         raise
+
+
+def probe(config, timeout=2.0):
+    """Проверяет, что прокси принимает соединения.
+
+    Для HTTP достаточно TCP: ответ прокси на запрос зависит от внешней
+    сети, а значок должен показывать доступность самого прокси.  Для
+    SOCKS5 выполняется приветствие (и авторизация), чтобы открытый порт
+    другого сервиса не считался рабочим прокси.
+    """
+    if not config.enabled or not config.host:
+        return False
+    try:
+        sock = socket.create_connection(
+            (config.host, int(config.port)), timeout=timeout
+        )
+    except (OSError, ValueError):
+        return False
+    try:
+        if config.ptype != "socks5":
+            return True
+        sock.settimeout(timeout)
+        methods = [0x00]
+        if config.login:
+            methods.append(0x02)
+        sock.sendall(b"\x05" + bytes([len(methods)]) + bytes(methods))
+        version, method = _recvn(sock, 2)
+        if version != 0x05:
+            return False
+        if method == 0xFF:
+            return False
+        if method == 0x02:
+            user = config.login.encode("utf-8")
+            password = config.password.encode("utf-8")
+            if len(user) > 255 or len(password) > 255:
+                return False
+            sock.sendall(b"\x01" + bytes([len(user)]) + user
+                         + bytes([len(password)]) + password)
+            if _recvn(sock, 2)[1] != 0x00:
+                return False
+            return True
+        return method == 0x00
+    except (OSError, ProxyError, UnicodeError):
+        return False
+    finally:
+        sock.close()
 
 
 class _SocksHTTPConnection(http.client.HTTPConnection):
@@ -208,14 +257,16 @@ def apply(config=None):
     if config is None:
         config = load()
     handlers = _handlers(config)
-    urllib.request.install_opener(urllib.request.build_opener(*handlers))
+    net.install(urllib.request.build_opener(*handlers))
     # dem_sources держит собственный opener (мультиадресный HTTPS).
     try:
         from . import dem_sources
-        dem_sources._OPENER = urllib.request.build_opener(
-            dem_sources._MultiAddressHTTPSHandler(), *handlers)
+        dem_sources._OPENER = net.guard(urllib.request.build_opener(
+            dem_sources._MultiAddressHTTPSHandler(), *handlers))
     except Exception:  # noqa: BLE001 - без QGIS/Qt модуля не будет
         pass
+    # Смена прокси — повод попробовать сеть заново.
+    net.reset()
     try:
         _apply_qt_proxy(config)
     except Exception:  # noqa: BLE001 - Qt-сокеты необязательны для тестов
