@@ -253,7 +253,7 @@ class TrackScaleTest(unittest.TestCase):
 
 
 class ServiceRoadLodTest(unittest.TestCase):
-    """Сервисные дороги на 1:100000+ скрываются по уровню детализации."""
+    """Два уровня service: без service=* до 300k, с service=* до 100k."""
 
     @classmethod
     def setUpClass(cls):
@@ -290,6 +290,19 @@ class ServiceRoadLodTest(unittest.TestCase):
 
         return walk(rules)
 
+    @staticmethod
+    def _branch(service, label):
+        def walk(rule):
+            if rule.get("label") == label:
+                return rule
+            for child in rule.findall("rule"):
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+
+        return walk(service)
+
     @classmethod
     def _leaves(cls, rule):
         result = []
@@ -303,30 +316,53 @@ class ServiceRoadLodTest(unittest.TestCase):
     def test_expected_layers_have_service_style(self):
         self.assertTrue(self.expected.issubset(self.layers), self.layers)
 
-    def test_service_is_absent_at_300k_and_hidden_at_default_lod(self):
+    def test_plain_service_lasts_until_300k(self):
         for name, layer in self.layers.items():
             service = self._service_rule(layer)
-            for leaf in self._leaves(service):
-                scale_min = int(leaf.get("scalemindenom") or 0)
-                scale_max = int(leaf.get("scalemaxdenom") or 0)
-                if scale_min < 100000:
-                    continue
-                self.assertLess(
-                    scale_min, 300000,
-                    f"{name}: сервисная дорога осталась на 300k+",
-                )
-                expected_max = 200000 if scale_min == 100000 else 300000
-                self.assertEqual(
-                    scale_max, expected_max,
-                    f"{name}: диапазон 100000–300000 не разделён по LOD",
-                )
-                expected = (
-                    "@level_of_detail >= 5" if scale_max == 200000
-                    else "@level_of_detail >= 6"
+            plain = self._branch(service, "else")
+            self.assertIsNotNone(plain, name)
+            leaves = {
+                int(leaf.get("scalemindenom") or 0): leaf
+                for leaf in self._leaves(plain)
+            }
+            self.assertIn(
+                "service IS NULL", leaves[50000].get("filter", ""),
+                f"{name}: 50–100k должен различать service=*",
+            )
+            self.assertIn(
+                ">= 4", leaves[50000].get("filter", ""),
+                f"{name}: 50–100k должен требовать LOD 4 для service=*",
+            )
+            for scale, lod in ((100000, 3), (200000, 4)):
+                self.assertIn(
+                    "service IS NULL", leaves[scale].get("filter", ""),
+                    f"{name}: service=* должен быть скрыт с {scale}",
                 )
                 self.assertIn(
-                    expected, leaf.get("filter", ""),
-                    f"{name}: {leaf.get('label')} должен требовать {expected}",
+                    f">= {lod}", leaves[scale].get("filter", ""),
+                    f"{name}: {scale} должен требовать LOD {lod}",
+                )
+            self.assertNotIn(
+                300000, leaves,
+                f"{name}: обычный service должен исчезать с 300k",
+            )
+
+    def test_tagged_service_hides_from_100k(self):
+        for name, layer in self.layers.items():
+            service = self._service_rule(layer)
+            driveway = self._branch(service, "service driveway")
+            self.assertIsNotNone(driveway, name)
+            self.assertIn("@map_scale < 100000", driveway.get("filter", ""), name)
+            leaves = self._leaves(driveway)
+            self.assertTrue(leaves, name)
+            self.assertIn(
+                50000, {int(leaf.get("scalemindenom") or 0) for leaf in leaves},
+                f"{name}: нет правила 50–100k",
+            )
+            for leaf in leaves:
+                self.assertLess(
+                    int(leaf.get("scalemindenom") or 0), 100000,
+                    f"{name}: service=* остался на 100k+",
                 )
 
 
