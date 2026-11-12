@@ -686,6 +686,14 @@ class GeometryRepairRecipeTest(unittest.TestCase):
             steps = [operation for operation, _ in recipe_for(name).steps]
             self.assertEqual(steps[0], "fix", name)
 
+    def test_admin_boundaries_are_repaired_before_polygonstolines(self):
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        for name in ("admin_level_2", "admin_level_4"):
+            steps = [operation for operation, _ in recipe_for(name).steps]
+            self.assertEqual(steps[0], "fix", name)
+            self.assertEqual(steps[1], "polygonstolines", name)
+
 
 class DissolveFieldsTest(unittest.TestCase):
     """Растворение по пустому или отсутствующему полю не сливает слой."""

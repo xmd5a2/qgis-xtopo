@@ -127,11 +127,13 @@ RECIPES = {
         load("stream"), merge(["stream_intermittent"]), save("_merged"),
     ]),
     "admin_level_2": Recipe([
-        polygonstolines(), dissolve(), singleparts(), save("_dissolved"),
+        # Сырые границы из OSM бывают с самопересечениями, а
+        # native:polygonstolines отказывается их обрабатывать.
+        fix(), polygonstolines(), dissolve(), singleparts(), save("_dissolved"),
     ]),
     "admin_level_4": Recipe([
-        polygonstolines(), difference("admin_level_2_dissolved"), dissolve(), singleparts(),
-        save("_proc"),
+        fix(), polygonstolines(), difference("admin_level_2_dissolved"),
+        dissolve(), singleparts(), save("_proc"),
     ]),
     "railway_all": Recipe([
         save(), explode(), reproject(), save("_exploded"),
