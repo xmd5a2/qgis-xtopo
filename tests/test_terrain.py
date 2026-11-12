@@ -965,7 +965,7 @@ class DemSourceTest(unittest.TestCase):
     def test_auto_plan_keeps_copernicus_on_plains(self):
         from qgis_xtopo.core import dem_sources
 
-        bbox = BBox(9.0, 56.0, 10.0, 57.0)  # Дания
+        bbox = BBox(70.0, 48.0, 71.0, 49.0)  # степь Казахстана, вне Sonny
         required = frozenset(dem_sources.tiles_for_bbox(bbox))
         availability = {
             key: dem_sources.Availability(
@@ -975,8 +975,23 @@ class DemSourceTest(unittest.TestCase):
             for key in ("alos", "cop30")
         }
         plan = dem_sources.auto_plan(bbox, availability, ())
-        self.assertEqual(plan, {(56, 9): "cop30"})
+        self.assertEqual(plan, {(48, 70): "cop30"})
         self.assertNotIn("alos", dem_sources.auto_priority(bbox))
+
+    def test_sonny_wins_on_plains_too(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(9.0, 56.0, 10.0, 57.0)  # Дания, равнина
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("sonny", "alos", "cop30")
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ((56, 9),))
+        self.assertEqual(plan, {(56, 9): "sonny"})
 
     def test_auto_plan_keeps_3dep_and_sonny_above_alos(self):
         from qgis_xtopo.core import dem_sources

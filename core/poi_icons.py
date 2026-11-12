@@ -47,6 +47,13 @@ overlay_nearest считает расстояния в градусах.  Сло
 широты, а QGIS сравнивает расстояния плоско в единицах слоя.  Слои в
 другой проекции не поддерживаются — расстояния перестанут совпадать с
 max_distance.
+
+В служебный слой попадают и значки, нарисованные на объектах линий и
+полигонов: MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).
+Фильтр правила скрыл бы весь объект вместе со значком, поэтому такие
+значки не вытесняются сами, а участвуют как препятствия с рангом выше
+любого POI.  На объект нужна одна точка — центр линии или площадки,
+так что ни подготовка, ни отрисовка не замедляются.
 """
 
 import math
@@ -72,6 +79,10 @@ LOD_LEVELS = (3, 4, 5, 6)
 # точек, скрытых текущим уровнем детализации.
 NEVER_RANK = 99999
 
+# Ранг значка-препятствия на линии/полигоне. Меньше 1 — выше любого POI;
+# шаг делает ранги уникальными для _prune_band.
+OBSTACLE_RANK_STEP = 0.01
+
 
 @dataclass
 class PoiRule:
@@ -94,13 +105,16 @@ class PoiLayer:
     """Слой со значками: ранг по дереву, источник данных, правила."""
 
     name: str
-    rank: int = 0
+    rank: float = 0
     source: str = ""
     crs: str = "EPSG:4326"
     root: PoiRule = field(default_factory=PoiRule)
     minimum: float = 0.0  # границы знаменателя по видимости слоя
     maximum: float = 0.0
     labels: list = field(default_factory=list)
+    # Point — обычный слой значков; Line/Polygon — значок рисуется
+    # на объекте линии или полигона (мост, кладбище).
+    geometry: str = "Point"
 
     @property
     def icon_size(self):
@@ -123,10 +137,12 @@ class PoiLabelRule:
 class _Point:
     """Точка служебного слоя: координаты, ранг и диапазоны видимости."""
 
-    rank: int
+    rank: float
     lon: float
     lat: float
     bands: dict = field(default_factory=dict)  # диапазон -> минимальный LOD
+    # диапазон -> размер значка в мм (радиус, в котором он вытесняет)
+    sizes: dict = field(default_factory=dict)
 
 
 def _scale_bounds(element):
@@ -344,6 +360,7 @@ def read_template_poi(path=None):
     Порядок рангов — порядок следования слоёв в дереве проекта: чем выше
     слой в списке, тем он приоритетнее.  В список попадают только слои,
     которые действительно рисуют значки (маркер с ненулевым размером).
+    Значки на линиях и полигонах читает :func:`read_template_obstacles`.
     """
     path = Path(path or template_path())
     with zipfile.ZipFile(path) as archive:
@@ -410,6 +427,158 @@ def _has_icon(tree):
     if tree.size > 0:
         return True
     return any(_has_icon(child) for child in tree.children)
+
+
+def _nested_marker_size(symbol_element):
+    """Размер значка внутри MarkerLine или CentroidFill.
+
+    ``_marker_size`` смотрит только на непосредственные слои символа: у
+    линии значок вложен в MarkerLine, у полигона — в CentroidFill.
+    Берём самый крупный значок, чтобы препятствие не оказалось меньше
+    нарисованного.
+    """
+    if symbol_element is None:
+        return 0.0
+    best = 0.0
+    for layer in symbol_element.iter("layer"):
+        if layer.get("class") not in ("SimpleMarker", "SvgMarker"):
+            continue
+        options = {
+            option.get("name"): option.get("value")
+            for option in layer.findall("Option/Option")
+        }
+        try:
+            size = float(options.get("size") or 0)
+        except ValueError:
+            continue
+        if layer.get("class") == "SvgMarker":
+            size *= _svg_content_scale(options.get("name") or "")
+        best = max(best, size)
+    return best
+
+
+def _obstacle_symbol_sizes(renderer):
+    """Размеры вложенных значков символов правил по именам."""
+    sizes = {}
+    symbols = renderer.find("symbols")
+    if symbols is None:
+        return sizes
+    for symbol in symbols.findall("symbol"):
+        sizes[symbol.get("name")] = _nested_marker_size(symbol)
+    return sizes
+
+
+def _marker_placements(element):
+    """Значения placements у слоёв MarkerLine."""
+    placements = []
+    for layer in element.iter("layer"):
+        if layer.get("class") != "MarkerLine":
+            continue
+        for option in layer.findall("Option/Option"):
+            if option.get("name") == "placements":
+                placements.append(option.get("value") or "")
+    return placements
+
+
+def _obstacle_geometry(element):
+    """Тип значка-препятствия: Line, Polygon или None.
+
+    Берём только значки, которые рисуются в одной точке объекта:
+    MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).  Ленты
+    стрелок вдоль рек и линии электропередачи не обрабатываются: у них
+    значков вдоль линии много, и одна точка в середине соврала бы.
+    """
+    geometry = element.get("geometry") or ""
+    if geometry == "Line":
+        return "Line" if "CentralPoint" in _marker_placements(element) else None
+    if geometry == "Polygon":
+        return (
+            "Polygon"
+            if element.find(".//layer[@class='CentroidFill']") is not None
+            else None
+        )
+    return None
+
+
+def read_template_obstacles(path=None):
+    """Значки на линиях и полигонах: мосты, кладбища.
+
+    QGIS не умеет скрыть отдельный маркер MarkerLine/CentroidFill:
+    фильтр правила действует на объект целиком, и вместе со значком
+    пропала бы вся линия или полигон.  Поэтому такие значки не
+    вытесняются сами, а участвуют как препятствия: центр линии или
+    площадки добавляется в служебный слой с рангом выше любого POI, и
+    обычные значки рядом с ними скрываются.  На объект нужна одна
+    точка, поэтому это не замедляет ни подготовку, ни отрисовку.
+    """
+    path = Path(path or template_path())
+    with zipfile.ZipFile(path) as archive:
+        name = next(n for n in archive.namelist() if n.endswith(".qgs"))
+        root = ElementTree.fromstring(archive.read(name))
+
+    obstacles = []
+    for element in root.iter("maplayer"):
+        name = element.findtext("layername")
+        if not name or name.startswith(AUX_LAYER_NAME):
+            continue
+        kind = _obstacle_geometry(element)
+        if kind is None:
+            continue
+        renderer = _renderer_element(element)
+        if renderer is None:
+            continue
+        sizes = _obstacle_symbol_sizes(renderer)
+        rules_element = renderer.find("rules")
+        minimum = maximum = 0.0
+        if element.get("hasScaleBasedVisibilityFlag") == "1":
+            maximum = float(element.get("minScale") or 0)
+            minimum = float(element.get("maxScale") or 0)
+            if minimum <= 1.0:
+                minimum = 0.0
+        if rules_element is not None:
+            tree = _parse_rules(rules_element, sizes, minimum, maximum)
+        else:
+            symbol = renderer.find("symbol")
+            if symbol is None:
+                symbol = renderer.find("symbols/symbol")
+            size = _nested_marker_size(symbol)
+            if size <= 0:
+                continue
+            leaf = PoiRule(size=size, minimum=minimum, maximum=maximum)
+            tree = PoiRule(
+                minimum=minimum, maximum=maximum, children=[leaf],
+            )
+        if not _has_icon(tree):
+            continue
+        obstacles.append(PoiLayer(
+            name=name,
+            source=element.findtext("datasource") or "",
+            crs=_layer_crs(element),
+            root=tree,
+            minimum=minimum,
+            maximum=maximum,
+            geometry=kind,
+        ))
+    # Ранг меньше 1: препятствие вытесняет любой POI, но остаются
+    # уникальными, чтобы _prune_band не путал их с точками того же слоя.
+    for index, layer in enumerate(obstacles, start=1):
+        layer.rank = index * OBSTACLE_RANK_STEP
+    return obstacles
+
+
+def _icon_anchor(geometry, kind):
+    """Точка, где нарисован значок линии или полигона."""
+    if geometry is None or geometry.isEmpty():
+        return None
+    if kind == "Line":
+        point = geometry.interpolate(geometry.length() / 2.0)
+    elif kind == "Polygon":
+        point = geometry.pointOnSurface()
+    else:
+        point = geometry
+    if point is None or point.isEmpty():
+        return None
+    return point.asPoint()
 
 
 def leaves(tree):
@@ -822,6 +991,20 @@ def _visible_bands(evaluator, tree, feature, bands, detailed):
     return result
 
 
+def _band_icon_size(layer, index, bands):
+    """Размер значка слоя в представительном масштабе диапазона."""
+    scale = _band_scale(bands[index])
+    sizes = []
+    for leaf in leaves(layer.root):
+        if leaf.minimum and scale < leaf.minimum:
+            continue
+        if leaf.maximum and scale >= leaf.maximum:
+            continue
+        if leaf.size > 0:
+            sizes.append(leaf.size)
+    return max(sizes) if sizes else 0.0
+
+
 def _collect_points(config, layers, bands, cancel=None):
     """Точки POI-слоёв с диапазонами, в которых они видны.
 
@@ -852,17 +1035,28 @@ def _collect_points(config, layers, bands, cancel=None):
             )
             if not visible:
                 continue
-            geometry = feature.geometry().asPoint()
+            if info.geometry == "Point":
+                point = feature.geometry().asPoint()
+                lon, lat = point.x(), point.y()
+            else:
+                anchor = _icon_anchor(feature.geometry(), info.geometry)
+                if anchor is None:
+                    continue
+                lon, lat = anchor.x(), anchor.y()
             points.append(_Point(
                 rank=info.rank,
-                lon=geometry.x(),
-                lat=geometry.y(),
+                lon=lon,
+                lat=lat,
                 bands={index: level for index, level in visible},
+                sizes={
+                    index: _band_icon_size(info, index, bands)
+                    for index, _level in visible
+                },
             ))
     return points
 
 
-def _prune_band(points, index, distance_meters, latitude_max):
+def _prune_band(points, index, scale, latitude_max):
     """Оставляет точки, которые могут подавить кого-то в диапазоне.
 
     Точка без соседей рядом подавлять нечего: в служебном слое она
@@ -871,18 +1065,31 @@ def _prune_band(points, index, distance_meters, latitude_max):
     «позже» по координатам: фильтр шаблона сравнивает геометрию
     кандидата с геометрией родителя, поэтому выигрывает тот, кто есть
     в служебном слое.
+
+    ``scale`` — верхняя граница знаменателя диапазона (0 — без
+    ограничения).  Радиус берётся по размеру значка того объекта,
+    который будет скрыт: в выражении шаблона расстояние сравнивается
+    именно с ``size`` его правила.  Прежний общий максимум оставлял в
+    слое точки, которые никого не могли подавить.
     """
     entries = [point for point in points if index in point.bands]
     if not entries:
         return []
-    if not distance_meters:
+    if not scale:
         # Диапазон без верхней границы: расстояние не ограничено.
         return entries
-    limit = distance_meters
+
+    def limit(point):
+        size = point.sizes.get(index, 0.0) if point.sizes else 0.0
+        return size * scale / 1000.0
+
+    max_limit = max((limit(point) for point in entries), default=0.0)
+    if max_limit <= 0:
+        return []
     # Ячейка сетки должна покрывать весь радиус поиска: градус долготы
     # короче градуса широты, и в метрах радиус больше.
     worst = math.cos(math.radians(latitude_max))
-    cell = max(limit / (111320.0 * max(worst, 0.01)), 1e-6)
+    cell = max(max_limit / (111320.0 * max(worst, 0.01)), 1e-6)
     grid = {}
     for position, point in enumerate(entries):
         key = (int(point.lon // cell), int(point.lat // cell))
@@ -905,7 +1112,7 @@ def _prune_band(points, index, distance_meters, latitude_max):
                         neighbour.lon - point.lon,
                         neighbour.lat - point.lat,
                     ) * 111320.0
-                    if distance > limit:
+                    if distance > limit(neighbour):
                         continue
                     if neighbour.rank > point.rank:
                         # Более низкий приоритет соседа: эта точка
@@ -950,7 +1157,7 @@ def _write_aux(config, records, crs, file_name):
             layer = dataset.CreateLayer(
                 aux_table_name(index), target, ogr.wkbPoint)
             for name, kind in (
-                ("rank", ogr.OFTInteger), ("lod", ogr.OFTInteger),
+                ("rank", ogr.OFTReal), ("lod", ogr.OFTInteger),
                 ("layer", ogr.OFTString),
             ):
                 layer.CreateField(ogr.FieldDefn(name, kind))
@@ -981,23 +1188,21 @@ def build_poi_icons(config, progress=None, cancel=None):
     layers = read_template_poi()
     if not layers:
         return 0
+    obstacles = read_template_obstacles()
+    all_layers = layers + obstacles
     bands = canonical_bands(layers)
     restore_base_filters(layers, bands)
-    points = _collect_points(config, layers, bands, cancel=cancel)
+    points = _collect_points(config, all_layers, bands, cancel=cancel)
     if not points:
         for file_name in (AUX_FILE_NAME, LEGACY_AUX_FILE_NAME_3857):
             (Path(config.vector_dir) / file_name).unlink(missing_ok=True)
         return 0
     latitude_max = max(abs(point.lat) for point in points)
-    max_size = max(
-        (layer.icon_size for layer in layers), default=0.0,
-    )
     records = {}
     total = 0
     for index, band in enumerate(bands):
         _lower, upper = band
-        distance = max_size * upper / 1000 if upper else 0.0
-        kept = _prune_band(points, index, distance, latitude_max)
+        kept = _prune_band(points, index, upper, latitude_max)
         if not kept:
             continue
         for point in kept:
@@ -1007,6 +1212,6 @@ def build_poi_icons(config, progress=None, cancel=None):
     (Path(config.vector_dir) / LEGACY_AUX_FILE_NAME_3857).unlink(missing_ok=True)
     report(
         f"POI: служебные слои значков, {total} записей "
-        f"для {len(layers)} слоёв"
+        f"для {len(layers)} слоёв и {len(obstacles)} препятствий"
     )
     return total

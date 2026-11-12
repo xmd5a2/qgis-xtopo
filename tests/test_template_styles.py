@@ -788,12 +788,13 @@ class PoiPruneTest(unittest.TestCase):
             lon=lon,
             lat=lat,
             bands={band: 3},
+            sizes={band: 2.8},
         )
 
-    def _kept(self, points, distance=500.0):
+    def _kept(self, points, scale=178571.0):
         from qgis_xtopo.core.poi_icons import _prune_band
 
-        return _prune_band(points, 0, distance, 46.0)
+        return _prune_band(points, 0, scale, 46.0)
 
     def test_same_layer_cluster_keeps_winner(self):
         west = self._point(6.9, 46.05, rank=5)
@@ -822,6 +823,63 @@ class PoiPruneTest(unittest.TestCase):
         # подавлять им некого.
         self.assertIn(top, kept)
         self.assertNotIn(low, kept)
+
+    def test_obstacle_suppresses_nearby_point(self):
+        bridge = self._point(6.9, 46.05, rank=0.02)
+        shelter = self._point(6.9002, 46.05, rank=8)
+        kept = self._kept([bridge, shelter])
+        self.assertIn(bridge, kept)
+        self.assertNotIn(shelter, kept)
+
+    def test_obstacle_without_points_is_dropped(self):
+        bridge = self._point(6.9, 46.05, rank=0.02)
+        far = self._point(6.94, 46.05, rank=8)
+        self.assertEqual(self._kept([bridge, far]), [])
+
+
+class PoiObstacleTest(unittest.TestCase):
+    """Значки мостов и кладбищ участвуют в вытеснении как препятствия."""
+
+    def test_bridge_and_cemetery_layers(self):
+        obstacles = poi_icons.read_template_obstacles()
+        by_name = {layer.name: layer for layer in obstacles}
+        for name in ("highway main bridge", "path bridge",
+                     "railway bridge", "track bridge", "cemetery"):
+            self.assertIn(name, by_name)
+            layer = by_name[name]
+            # Выше любого POI (у них ранги с 1) и уникальны.
+            self.assertLess(layer.rank, 1.0)
+            self.assertGreater(layer.icon_size, 0.0)
+            self.assertEqual(layer.crs, "EPSG:4326")
+        self.assertEqual(by_name["cemetery"].geometry, "Polygon")
+        self.assertEqual(by_name["path bridge"].geometry, "Line")
+        self.assertEqual(
+            len({layer.rank for layer in obstacles}), len(obstacles),
+        )
+
+    def test_anchor_of_line_is_middle(self):
+        from qgis.core import QgsGeometry, QgsPointXY
+
+        line = QgsGeometry.fromPolylineXY(
+            [QgsPointXY(0, 0), QgsPointXY(2, 0)]
+        )
+        anchor = poi_icons._icon_anchor(line, "Line")
+        self.assertIsNotNone(anchor)
+        self.assertAlmostEqual(anchor.x(), 1.0)
+        self.assertAlmostEqual(anchor.y(), 0.0)
+
+    def test_anchor_of_polygon_is_inside(self):
+        from qgis.core import QgsGeometry, QgsPointXY
+
+        polygon = QgsGeometry.fromPolygonXY([[
+            QgsPointXY(0, 0), QgsPointXY(2, 0), QgsPointXY(2, 2),
+            QgsPointXY(0, 2), QgsPointXY(0, 0),
+        ]])
+        anchor = poi_icons._icon_anchor(polygon, "Polygon")
+        self.assertIsNotNone(anchor)
+        self.assertTrue(polygon.contains(
+            QgsGeometry.fromPointXY(anchor)
+        ))
 
 
 
