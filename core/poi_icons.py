@@ -13,8 +13,11 @@ QGIS не разводит значки разных слоёв: кластер�
 POI-точки собираются в служебные слои ``poi icons`` с полем ``rank``
 (1 — самый приоритетный).  Правило слоя с рангом R скрывает точку,
 когда рядом есть точка с меньшим рангом или с рангом R, но с
-координатами меньшими, чем у текущей (фильтр сравнивает геометрию
-кандидата с ``geometry(@parent)``).
+координатами меньшими, чем у текущей.  ``overlay_nearest`` не даёт
+доступа к геометрии текущего объекта (``geometry(@parent)`` в его
+аргументах — NULL), поэтому родитель передаётся через
+``with_variable('pg', $geometry, ...)``, а кандидаты возвращаются
+массивами координат и ранга.
 
 Сосед должен быть виден в текущем масштабе и уровне детализации, иначе
 значок исчезал бы из-за объекта, который не рисуется.  Видимость
@@ -53,13 +56,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree
 
-from .resources import template_path
+from .resources import RESOURCES_DIR, template_path
 
 AUX_LAYER_NAME = "poi icons"
 AUX_FILE_NAME = "poi_icons.gpkg"
 # Служебный файл прежней схемы с двумя системами координат; удаляется
 # при сборке, чтобы не оставался в каталоге проекта.
 LEGACY_AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
+
+# Видимая часть холста SVG по имени файла: считается один раз за сеанс.
+_SVG_SCALE_CACHE = {}
 
 LOD_LEVELS = (3, 4, 5, 6)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
@@ -138,8 +144,83 @@ def _scale_bounds(element):
     return lower, upper
 
 
+def _svg_content_scale(name):
+    """Доля холста SVG, занятая видимым рисунком (1.0 — на весь холст).
+
+    QGIS рисует SVG в квадрате размера символа, но у части значков
+    вокруг фигуры прозрачные поля: треугольник пика занимает ~72 %
+    холста, кружок станции ~78 %.  Вытеснение должно опираться на
+    видимую часть, иначе значок «занимает» пустые углы и скрывает
+    соседей, которым там хватает места.
+    """
+    key = Path(name or "").name
+    cached = _SVG_SCALE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    scale = 1.0
+    path = RESOURCES_DIR / "icons" / key
+    if key and path.exists():
+        rendered = _rendered_content_scale(path)
+        if rendered:
+            scale = rendered
+    _SVG_SCALE_CACHE[key] = scale
+    return scale
+
+
+def _rendered_content_scale(path, side=64):
+    """Отношение непрозрачного bbox к холсту после рендера SVG."""
+    try:
+        from qgis.PyQt.QtGui import QImage, QPainter
+        from qgis.PyQt.QtSvg import QSvgRenderer
+    except ImportError:
+        return None
+    image = QImage(side, side, QImage.Format_ARGB32)
+    image.fill(0)
+    renderer = QSvgRenderer(str(path))
+    painter = QPainter(image)
+    renderer.render(painter)
+    painter.end()
+    bounds = _alpha_bounds(image)
+    if bounds is None:
+        return None
+    width, height = bounds
+    return max(width, height) / side
+
+
+def _alpha_bounds(image):
+    """Габариты непрозрачных пикселей картинки: (ширина, высота)."""
+    width, height = image.width(), image.height()
+    stride = image.bytesPerLine()
+    try:
+        bits = image.constBits()
+        bits.setsize(image.byteCount())
+        raw = bytes(bits)
+    except Exception:  # noqa: BLE001 - другая версия PyQt
+        raw = None
+    min_x, min_y, max_x, max_y = width, height, -1, -1
+    for y in range(height):
+        for x in range(width):
+            if raw is not None:
+                alpha = raw[y * stride + x * 4 + 3]
+            else:
+                alpha = image.pixelColor(x, y).alpha()
+            if alpha <= 16:
+                continue
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
+    if max_x < 0:
+        return None
+    return max_x - min_x + 1, max_y - min_y + 1
+
+
 def _marker_size(symbol_element):
-    """Размер значка в миллиметрах из элемента symbol шаблона."""
+    """Размер значка в миллиметрах из элемента symbol шаблона.
+
+    Для SVG учитывается только видимая часть холста: прозрачные поля
+    вокруг рисунка не должны участвовать в вытеснении соседей.
+    """
     if symbol_element is None:
         return 0.0
     for layer in symbol_element.findall("layer"):
@@ -150,9 +231,12 @@ def _marker_size(symbol_element):
             for option in layer.findall("Option/Option")
         }
         try:
-            return float(options.get("size") or 0)
+            size = float(options.get("size") or 0)
         except ValueError:
             return 0.0
+        if layer.get("class") == "SvgMarker":
+            size *= _svg_content_scale(options.get("name") or "")
+        return size
     return 0.0
 
 
@@ -389,18 +473,6 @@ def aux_table_name(index):
     return f"band{index}"
 
 
-def _distance_expression(size):
-    """Порог подавления в градусах: размер значка в мм -> единицы слоя.
-
-    Размер значка на карте в миллиметрах пересчитывается в наземные
-    метры через @map_scale, а затем в градусы.  Деление на cos(широты)
-    делает порог консервативным по долготе: плоское расстояние в
-    градусах не изотропно.
-    """
-    ground = f"{size:g} * @map_scale / 1000"
-    return f"{ground} / 111320 / cos(radians(y($geometry)))"
-
-
 def suppression_expression(layer, leaf, bands):
     """Условие «рядом есть более приоритетный видимый значок».
 
@@ -426,8 +498,7 @@ def suppression_expression(layer, leaf, bands):
             scale.append(f"@map_scale >= {lower:g}")
         if upper:
             scale.append(f"@map_scale < {upper:g}")
-        nearest = _nearest_expression(leaf.size, index, rank)
-        term = f"try(coalesce(array_min({nearest}), {rank}) < {rank}, false)"
+        term = _nearest_expression(leaf.size, index, rank)
         if scale:
             term = "(" + " AND ".join(scale) + f") AND {term}"
         terms.append(term)
@@ -437,28 +508,45 @@ def suppression_expression(layer, leaf, bands):
 
 
 def _nearest_expression(size, index, rank):
-    """Выборка соседей из служебного слоя диапазона масштаба.
+    """Есть ли рядом видимый значок, который эту точку вытесняет.
 
-    В выборку попадают более приоритетные объекты (их немного, и
-    проверка идёт по одному значению вместо перебора всех точек в
-    радиусе) и точки того же слоя, стоящие «раньше» по координатам:
-    без этого значки одного слоя (например, населённых пунктов)
-    накладывались бы друг на друга — равный ранг никого не подавлял.
-    Сравнение по x($geometry)/y($geometry) против geometry(@parent)
-    не требует поля id в данных слоя: свой собственный значок
-    совпадает с родителем по обеим координатам и себя не скрывает.
+    overlay_nearest не даёт доступа к геометрии текущего объекта:
+    ``geometry(@parent)`` внутри его аргументов равно NULL.  Поэтому
+    родительская точка передаётся через ``with_variable('pg', ...)``,
+    а кандидаты возвращаются массивами координат и ранга.  Правило
+    приоритета и точное расстояние в метрах считаются снаружи вызова,
+    где ``@pg`` и ``@element`` доступны.
+
+    В выборку попадают более приоритетные объекты (меньший ранг) и
+    точки того же слоя, стоящие «раньше» по координатам — иначе значки
+    одного слоя (населённые пункты, хижины) накладывались бы друг на
+    друга.  Расстояние сравнивается с размером видимой части значка:
+    max_distance у overlay_nearest — только градусный конверт для
+    пространственного индекса, метрическая проверка отсекает пустые
+    углы конверта.
     """
-    parent = "geometry(@parent)"
-    tie = (
-        f'(x($geometry) < x({parent}) OR '
-        f'(x($geometry) = x({parent}) AND y($geometry) < y({parent})))'
+    envelope = (
+        f"{size:g} * @map_scale / 1000 / 111320 / "
+        f"cos(radians(y($geometry)))"
+    )
+    metric = (
+        f"sqrt(((@element[0] - x(@pg)) * 111320 * "
+        f"cos(radians(y(@pg)))) ^ 2 + "
+        f"((@element[1] - y(@pg)) * 111320) ^ 2)"
+    )
+    ahead = (
+        f"(@element[2] < {rank} OR (@element[2] = {rank} AND "
+        f"(@element[0] < x(@pg) OR "
+        f"(@element[0] = x(@pg) AND @element[1] < y(@pg)))))"
     )
     return (
+        f"with_variable('pg', $geometry, try(array_length(array_filter("
         f"overlay_nearest('{aux_layer_name(index)}', "
-        f"expression:=if(\"lod\" <= @level_of_detail, \"rank\", {NEVER_RANK}), "
-        f"filter:=\"rank\" < {rank} OR (\"rank\" = {rank} AND {tie}), "
-        f"limit:=-1, "
-        f"max_distance:={_distance_expression(size)})"
+        f"expression:=array(x($geometry), y($geometry), "
+        f"if(\"lod\" <= @level_of_detail, \"rank\", {NEVER_RANK})), "
+        f"limit:=-1, max_distance:={envelope}), "
+        f"{ahead} AND {metric} < {size:g} * @map_scale / 1000 "
+        f"AND {metric} > 0.001)) > 0, false))"
     )
 
 

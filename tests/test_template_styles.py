@@ -488,7 +488,7 @@ class PoiSuppressionTest(unittest.TestCase):
                     "overlay_nearest(", leaf.filter,
                     f"у слоя {layer.name} нет подавления значков",
                 )
-                self.assertIn('"rank" <', leaf.filter)
+                self.assertIn("@element[2] <", leaf.filter)
                 self.assertIn("@level_of_detail", leaf.filter)
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет правил значков POI")
@@ -506,8 +506,8 @@ class PoiSuppressionTest(unittest.TestCase):
                     leaf.minimum, leaf.maximum, self.bands,
                 ):
                     continue
-                self.assertIn('OR ("rank" =', leaf.filter)
-                self.assertIn("geometry(@parent)", leaf.filter)
+                self.assertIn('@element[2] =', leaf.filter)
+                self.assertIn("with_variable('pg'", leaf.filter)
                 checked += 1
         self.assertTrue(checked)
 
@@ -593,6 +593,112 @@ class PoiPruneTest(unittest.TestCase):
         # подавлять им некого.
         self.assertIn(top, kept)
         self.assertNotIn(low, kept)
+
+
+
+
+class PoiSuppressionExpressionTest(unittest.TestCase):
+    """Выражение подавления вытесняет значки и внутри слоя.
+
+    Прежняя схема ссылалась на geometry(@parent) внутри overlay_nearest,
+    но @parent в его аргументах недоступен (NULL): значки одного слоя не
+    вытесняли друг друга.  Теперь родительская точка передаётся через
+    with_variable, кандидаты возвращаются массивами, а расстояние
+    считается в метрах.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+        layers = poi_icons.read_template_poi()
+        cls.bands = poi_icons.canonical_bands(layers)
+        cls.layer = next(layer for layer in layers if layer.name == "places main")
+        cls.leaf = next(
+            leaf for leaf in poi_icons.leaves(cls.layer.root)
+            if leaf.minimum == 0 and leaf.maximum == 100000
+        )
+        cls.expression = poi_icons.extend_filter(
+            "", cls.layer, cls.leaf, cls.bands,
+        )
+
+    def _feature(self, layer, lon, lat, values):
+        from qgis.core import QgsFeature, QgsGeometry, QgsPointXY
+
+        feature = QgsFeature(layer.fields())
+        feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(lon, lat)))
+        for name, value in values.items():
+            feature[name] = value
+        return feature
+
+    def _visible(self, aux_points, parent_points, scale=10000.0):
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext, QgsExpressionContextScope,
+            QgsExpressionContextUtils, QgsField, QgsProject, QgsVectorLayer,
+        )
+        from qgis.PyQt.QtCore import QVariant
+
+        project = QgsProject.instance()
+        project.clear()
+        project.setCustomVariables({"level_of_detail": "4"})
+        aux = QgsVectorLayer("Point?crs=EPSG:4326", "poi icons 0", "memory")
+        aux.dataProvider().addAttributes([
+            QgsField("rank", QVariant.Int),
+            QgsField("lod", QVariant.Int),
+        ])
+        aux.updateFields()
+        aux.dataProvider().addFeatures([
+            self._feature(aux, lon, lat, {"rank": rank, "lod": 3})
+            for lon, lat, rank in aux_points
+        ])
+        parent = QgsVectorLayer("Point?crs=EPSG:4326", "places main", "memory")
+        parent.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+        parent.updateFields()
+        parent.dataProvider().addFeatures([
+            self._feature(parent, lon, lat, {"name": name})
+            for lon, lat, name in parent_points
+        ])
+        project.addMapLayer(aux)
+        project.addMapLayer(parent)
+        scope = QgsExpressionContextScope("map")
+        scope.setVariable("map_scale", scale)
+        context = QgsExpressionContext()
+        context.appendScope(QgsExpressionContextUtils.globalScope())
+        context.appendScope(QgsExpressionContextUtils.projectScope(project))
+        context.appendScope(QgsExpressionContextUtils.layerScope(parent))
+        context.appendScope(scope)
+        expression = QgsExpression(self.expression)
+        self.assertFalse(expression.hasParserError(), expression.parserErrorString())
+        result = {}
+        for feature in parent.getFeatures():
+            context.setFeature(feature)
+            result[feature["name"]] = bool(expression.evaluate(context))
+        self.assertFalse(expression.evalErrorString())
+        return result
+
+    def test_same_layer_tie_break_prefers_western_icon(self):
+        visible = self._visible(
+            [(6.9000, 46.05, 6), (6.9001, 46.05, 6)],
+            [(6.9000, 46.05, "west"), (6.9001, 46.05, "east")],
+        )
+        self.assertTrue(visible["west"])
+        self.assertFalse(visible["east"])
+
+    def test_higher_priority_icon_hides_both(self):
+        visible = self._visible(
+            [(6.90003, 46.05, 3)],
+            [(6.9000, 46.05, "west"), (6.9001, 46.05, "east")],
+        )
+        self.assertFalse(visible["west"])
+        self.assertFalse(visible["east"])
+
+    def test_lonely_icon_stays_visible(self):
+        visible = self._visible(
+            [(6.9000, 46.05, 6)],
+            [(6.9200, 46.05, "far")],
+        )
+        self.assertTrue(visible["far"])
 
 
 if __name__ == "__main__":
