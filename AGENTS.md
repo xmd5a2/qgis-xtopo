@@ -303,7 +303,15 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   рабочий адрес запоминается на сеанс.
 - **Режим «Автоматически» (`AUTO_SOURCE`) — это не набор, а подбор по
   тайлам 1°×1°.** Приоритет `AUTO_PRIORITY`: `3dep` → `sonny` → `cop30`
-  (фон) → `srtm` (`dem_sources.auto_plan`). Принудительного автовыбора
+  (фон) → `srtm` (`dem_sources.auto_plan`). В горных регионах между Sonny
+  и Copernicus встаёт `alos` (`MOUNTAIN_PRIORITY`): 3DEP и Sonny остаются
+  выше него. Горность определяется `core/relief.py` по встроенной сетке
+  `resources/data/relief_grid.npz` (1°, минимум и максимум высоты из
+  ETOPO5, ~194 КБ; ~0.02 мс на охват, без сети). Охват горный, если
+  перепад высот ≥ 800 м хотя бы у 25 % тайлов суши; так Дания и Польша
+  остаются на Copernicus, а Турция, Непал, Кавказ и Швейцария — на
+  ALOS (Швейцария — на Sonny). Сетка пересобирается
+  `tools/build_relief_grid.py`. Принудительного автовыбора
   3DEP больше нет: прежняя логика `preferred_source` осталась только для
   предупреждения `source_warning`, когда пользователь выбрал набор вручную.
 - Мозаика собирается `terrain.download_auto_dem`: сначала каждый набор

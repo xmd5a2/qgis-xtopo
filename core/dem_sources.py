@@ -10,8 +10,8 @@
 Кроме обычных наборов есть режим «Автоматически» (``AUTO_SOURCE``):
 это не отдельный набор, а способ выбрать набор по тайлам.  Для каждого
 тайла охвата подбирается лучший доступный набор — сначала 3DEP, потом
-Sonny DTM, а фоном идёт Copernicus GLO-30.  Логика прежнего принудительного
-выбора 3DEP переехала именно сюда.
+Sonny DTM; в горных регионах дальше идёт ALOS, фоном — Copernicus GLO-30.
+Логика прежнего принудительного выбора 3DEP переехала именно сюда.
 
 Модуль не скачивает сами тайлы — только описания и проверку доступности.
 Загрузка лежит в :mod:`core.terrain`.
@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
-from . import i18n, net
+from . import i18n, net, relief
 from .bbox import BBox
 
 USER_AGENT = "qgis-xtopo/1.0"
@@ -840,17 +840,21 @@ def cop30_existing_tiles(tiles, timeout=15, workers=8):
     return {tile for tile, ok in zip(tiles, found) if ok}
 
 
-def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=("3dep", "cop30"),
+def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=None,
                   force=False):
     """Покрытие наборов, из которых складывается мозаика «Автоматически».
 
-    Проверяются только нужные наборы: 3DEP и Copernicus GLO-30 (Sonny и
-    SRTM считаются по локальным данным).  Остальные наборы в мозаику не
-    входят, поэтому их покрытие не запрашивается.  Результаты берутся из
-    того же кэша, что и у проверки в панели.
+    Проверяются только нужные наборы: 3DEP, Copernicus GLO-30 и ALOS (для
+    горных регионов); Sonny и SRTM считаются по локальным данным.
+    Остальные наборы в мозаику не входят, поэтому их покрытие не
+    запрашивается. Результаты берутся из того же кэша, что и у проверки
+    в панели.
     """
+    keys = tuple(keys) if keys else MOUNTAIN_PRIORITY
     results = {}
-    stac_keys = [key for key in keys if key in ("3dep", "cop30")]
+    stac_keys = [
+        key for key in keys if key in ("3dep", "alos", "cop30")
+    ]
 
     if stac_keys:
         with ThreadPoolExecutor(max_workers=len(stac_keys)) as pool:
@@ -1161,6 +1165,18 @@ def preferred_source(bbox, availability):
 # Порядок — приоритет: первый подходящий набор выигрывает тайл.
 AUTO_PRIORITY = ("3dep", "sonny", "cop30", "srtm")
 
+# В горах ALOS AW3D30 передаёт крутые склоны подробнее Copernicus, но
+# 3DEP и Sonny DTM остаются выше него: у них приоритет всегда.
+MOUNTAIN_PRIORITY = ("3dep", "sonny", "alos", "cop30", "srtm")
+
+
+def auto_priority(bbox):
+    """Порядок наборов авторежима; в горных регионах ALOS раньше Copernicus."""
+    if bbox is not None and relief.is_mountainous(bbox):
+        return MOUNTAIN_PRIORITY
+    return AUTO_PRIORITY
+
+
 # Наборы с собственным набором тайлов: покрытие берётся из локального
 # каталога, а не из STAC.
 LOCAL_SOURCES = (SONNY_SOURCE,)
@@ -1180,11 +1196,12 @@ def auto_plan(bbox, availability, sonny_tiles=(), priority=None):
     """Раскладка тайлов охвата по наборам для режима «Автоматически».
 
     Для каждого тайла 1°×1° выбирается первый набор из ``priority``
-    (по умолчанию :data:`AUTO_PRIORITY`), который этот тайл покрывает.
-    Тайлы, которых не покрывает ни один набор, остаются без данных.
+    (по умолчанию :func:`auto_priority` — в горах с ALOS), который этот
+    тайл покрывает. Тайлы, которых не покрывает ни один набор, остаются
+    без данных.
     """
     tiles = set(tiles_for_bbox(bbox))
-    order = tuple(priority) if priority else AUTO_PRIORITY
+    order = tuple(priority) if priority else auto_priority(bbox)
     coverage = {
         key: _coverage(availability, key, sonny_tiles)
         for key in order
@@ -1205,11 +1222,14 @@ def auto_availability(bbox, availability, sonny_tiles=()):
     каждому.
     """
     tiles = set(tiles_for_bbox(bbox))
+    order = auto_priority(bbox)
     plan = auto_plan(bbox, availability, sonny_tiles)
     counts = {}
     for key in plan.values():
         counts[key] = counts.get(key, 0) + 1
     if not plan:
+        # ALOS не входит в обязательные: если его покрытие не проверилось,
+        # авторежим продолжит работать на Copernicus или SRTM.
         unchecked = [
             source(key).short for key in AUTO_PRIORITY
             if availability.get(key) is not None
@@ -1238,7 +1258,7 @@ def auto_availability(bbox, availability, sonny_tiles=()):
             missing_tiles=frozenset(tiles),
         )
     parts = []
-    for key in AUTO_PRIORITY:
+    for key in order:
         if counts.get(key):
             parts.append(f"{source(key).short}: {counts[key]}")
     message = i18n.trf("тайлов: {}", ", ".join(parts))

@@ -438,7 +438,7 @@ def download_dem(source_key, bbox, destination, progress=None, cancel=None,
 
 # Порядок наборов в мозаике: чем позже набор в списке, тем выше его
 # приоритет — данные более приоритетного набора перекрывают остальные.
-AUTO_ORDER = ("srtm", dem_sources.AUTO_BACKGROUND, "sonny", "3dep")
+AUTO_ORDER = ("srtm", dem_sources.AUTO_BACKGROUND, "alos", "sonny", "3dep")
 
 
 def _cells_window(cells):
@@ -602,7 +602,7 @@ def _sonny_layers(cells, catalogue, tile_dir, bounds, width, height,
 def _mosaic_resolution(groups):
     """Шаги сетки наборов, входящих в мозаику."""
     resolutions = []
-    for key in ("3dep", "cop30", "srtm"):
+    for key in ("3dep", "cop30", "alos", "srtm"):
         if groups.get(key):
             resolutions.append(dem_sources.source(key).native_resolution)
     for dataset_key in groups.get("sonny", ()):
@@ -619,9 +619,10 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     """Собирает мозаику рельефа в режиме «Автоматически».
 
     Для каждого тайла 1°×1° выбирается лучший доступный набор: USGS
-    3DEP, затем Sonny DTM, фон — Copernicus GLO-30, в крайнем случае
-    SRTM.  Наборы кладутся в один растр в порядке приоритета, поэтому
-    данные более приоритетного набора перекрывают менее приоритетный.
+    3DEP, затем Sonny DTM, в горах — ALOS AW3D30, фон — Copernicus
+    GLO-30, в крайнем случае SRTM.  Наборы кладутся в один растр в
+    порядке приоритета, поэтому данные более приоритетного набора
+    перекрывают менее приоритетный.
 
     ``priority`` задаёт свой порядок выбора наборов: для набора Sonny
     DTM это ``(Sonny, Copernicus, SRTM)``.  В ``used`` дописываются
@@ -638,13 +639,13 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
 
     catalogue = sonny.load_catalogue(sonny_catalogue)
     sonny_cells = set(sonny.catalogue_tiles(sonny_catalogue))
+    order = tuple(priority) if priority else dem_sources.auto_priority(bbox)
     if availability is None:
         availability = dem_sources.auto_coverage(
-            bbox, sonny_tiles=sonny_cells,
-            keys=priority or dem_sources.AUTO_PRIORITY,
+            bbox, sonny_tiles=sonny_cells, keys=order,
         )
     plan = dem_sources.auto_plan(
-        bbox, availability, sonny_cells, priority=priority
+        bbox, availability, sonny_cells, priority=order
     )
     if not plan:
         raise RuntimeError("Нет данных рельефа для выбранного охвата")
@@ -657,7 +658,7 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
         counts.update({key: len(value) for key, value in groups.items()})
     if progress:
         parts = []
-        for key in dem_sources.AUTO_PRIORITY:
+        for key in order:
             if groups.get(key):
                 parts.append(f"{dem_sources.source(key).short}: "
                              f"{len(groups[key])}")

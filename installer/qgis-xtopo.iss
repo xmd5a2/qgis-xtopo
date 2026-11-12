@@ -11,7 +11,7 @@
 ;   * создаёт ярлык «QGIS-xtopo» на рабочем столе и в меню «Пуск».
 
 #define MyAppName "QGIS-xtopo"
-#define MyAppVersion "0.13.11"
+#define MyAppVersion "0.13.12"
 #define MyAppPublisher "Leonid Barsukov"
 #define MyAppURL "https://github.com/xmd5a2/qgis-xtopo"
 #define MyAppExeName "qgis-xtopo.cmd"

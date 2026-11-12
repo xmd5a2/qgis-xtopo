@@ -946,6 +946,76 @@ class DemSourceTest(unittest.TestCase):
         )
         self.assertEqual(plan, {(46, 7): "sonny"})
 
+    def test_auto_plan_prefers_alos_in_mountains(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(85.0, 28.0, 86.0, 29.0)  # Непал
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("alos", "cop30")
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ())
+        self.assertEqual(plan, {(28, 85): "alos"})
+        self.assertIn("alos", dem_sources.auto_priority(bbox))
+
+    def test_auto_plan_keeps_copernicus_on_plains(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(9.0, 56.0, 10.0, 57.0)  # Дания
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("alos", "cop30")
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ())
+        self.assertEqual(plan, {(56, 9): "cop30"})
+        self.assertNotIn("alos", dem_sources.auto_priority(bbox))
+
+    def test_auto_plan_keeps_3dep_and_sonny_above_alos(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)  # Швейцария, горы
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("3dep", "alos", "cop30")
+        }
+        self.assertEqual(
+            dem_sources.auto_plan(bbox, availability, ()),
+            {(46, 7): "3dep"},
+        )
+        availability.pop("3dep")
+        self.assertEqual(
+            dem_sources.auto_plan(bbox, availability, ((46, 7),)),
+            {(46, 7): "sonny"},
+        )
+
+    def test_auto_availability_counts_alos(self):
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(85.0, 28.0, 86.0, 29.0)
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("alos", "cop30")
+        }
+        state = dem_sources.auto_availability(bbox, availability, ())
+        self.assertIn("ALOS", state.message)
+        self.assertNotIn("Copernicus", state.message)
+
     def test_auto_availability_counts_datasets(self):
         from qgis_xtopo.core import dem_sources
 
@@ -1141,6 +1211,36 @@ class DemSourceTest(unittest.TestCase):
             dem_sources._parse_dns_a(header + question + answer, 0x4321),
             [],
         )
+
+
+class ReliefTypeTest(unittest.TestCase):
+    """Встроенная сетка 1° определяет горные регионы для приоритета ALOS."""
+
+    def test_himalaya_is_mountainous(self):
+        from qgis_xtopo.core import relief
+
+        self.assertTrue(relief.is_mountainous(BBox(85.0, 28.0, 86.0, 29.0)))
+
+    def test_denmark_is_plain(self):
+        from qgis_xtopo.core import relief
+
+        self.assertFalse(relief.is_mountainous(BBox(9.0, 56.0, 10.0, 57.0)))
+
+    def test_country_shares(self):
+        from qgis_xtopo.core import relief
+
+        # Турция, Кавказ и Швейцария — горные; Польша — нет.
+        self.assertTrue(relief.is_mountainous(BBox(26.0, 36.0, 45.0, 42.0)))
+        self.assertTrue(relief.is_mountainous(BBox(38.0, 40.0, 50.0, 44.0)))
+        self.assertTrue(relief.is_mountainous(BBox(5.9, 45.8, 10.5, 47.8)))
+        self.assertFalse(relief.is_mountainous(BBox(14.0, 49.0, 24.2, 54.9)))
+
+    def test_tile_relief(self):
+        from qgis_xtopo.core import relief
+
+        self.assertGreater(relief.tile_relief(28, 85), relief.MOUNTAIN_RELIEF)
+        self.assertLess(relief.tile_relief(56, 9), relief.MOUNTAIN_RELIEF)
+        self.assertIsNone(relief.tile_relief(0, -140))  # Тихий океан
 
 
 class SonnyDatasetTest(unittest.TestCase):
