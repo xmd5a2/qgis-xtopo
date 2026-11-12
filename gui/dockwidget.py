@@ -5,10 +5,12 @@ from pathlib import Path
 
 from qgis.core import QgsApplication, QgsProject
 from qgis.PyQt.QtCore import (
-    QSettings, QSize, QThread, QTime, QTimer, QUrl, pyqtSignal, Qt,
+    QPointF, QRectF, QSettings, QSize, QThread, QTime, QTimer, QUrl,
+    pyqtSignal, Qt,
 )
 from qgis.PyQt.QtGui import (
-    QBrush, QDesktopServices, QColor, QFontMetrics, QIcon, QPainter, QPixmap,
+    QBrush, QDesktopServices, QColor, QFontMetrics, QIcon, QPainter, QPen,
+    QPixmap,
 )
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
@@ -58,21 +60,45 @@ def _enum(owner, group, name):
         return getattr(owner, name)
 
 
-def _tinted_icon(icon, color, size=16):
-    """Одноцветная копия иконки (для значка состояния прокси)."""
-    pixmap = icon.pixmap(QSize(size, size))
-    if pixmap.isNull():
-        return icon
-    tinted = QPixmap(pixmap.size())
-    tinted.fill(_enum(Qt, "GlobalColor", "transparent"))
-    painter = QPainter(tinted)
-    painter.drawPixmap(0, 0, pixmap)
-    painter.setCompositionMode(
-        _enum(QPainter, "CompositionMode", "CompositionMode_SourceIn")
-    )
-    painter.fillRect(tinted.rect(), color)
+def _proxy_state_icon(color, halo, state=None, size=16, ratio=1.0):
+    """Значок прокси: контур глобуса и цветная точка состояния.
+
+    Заливка стандартной иконки сети цветом состояния в некоторых стилях
+    давала сплошное пятно: там глиф — плотная фигура, и после SourceIn
+    от него оставался только цветной силуэт без деталей.  Поэтому контур
+    рисуется сам цветом текста, а доступность прокси показывает
+    маленькая точка в правом нижнем углу (``halo`` — цвет фона, чтобы
+    точка не сливалась с контуром).
+    """
+    side = max(1, int(round(size * ratio)))
+    pixmap = QPixmap(side, side)
+    pixmap.fill(_enum(Qt, "GlobalColor", "transparent"))
+    pixmap.setDevicePixelRatio(ratio)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(_enum(QPainter, "RenderHint", "Antialiasing"))
+    painter.scale(ratio, ratio)
+    pen = QPen(color)
+    pen.setWidthF(1.3)
+    painter.setPen(pen)
+    painter.setBrush(_enum(Qt, "BrushStyle", "NoBrush"))
+    margin = 1.0
+    painter.drawEllipse(QRectF(
+        margin, margin, size - 2 * margin, size - 2 * margin,
+    ))
+    painter.drawEllipse(QRectF(
+        size * 0.33, margin, size * 0.34, size - 2 * margin,
+    ))
+    painter.drawLine(QPointF(margin, size / 2), QPointF(size - margin, size / 2))
+    if state in ("ok", "bad"):
+        badge = QColor("#2e9e4f") if state == "ok" else QColor("#c0392b")
+        center = QPointF(size - 3.9, size - 3.9)
+        painter.setPen(_enum(Qt, "PenStyle", "NoPen"))
+        painter.setBrush(halo)
+        painter.drawEllipse(center, 3.4, 3.4)
+        painter.setBrush(badge)
+        painter.drawEllipse(center, 2.4, 2.4)
     painter.end()
-    return QIcon(tinted)
+    return QIcon(pixmap)
 
 
 def _log_expand_icon(style):
@@ -694,15 +720,15 @@ class XtopoDockWidget(QDockWidget):
         self.language_button.clicked.connect(self._switch_language)
         self.proxy_button = QToolButton()
         self.proxy_button.setAutoRaise(True)
-        base_icon = self.style().standardIcon(QStyle.SP_DriveNetIcon)
-        if base_icon.isNull():
-            base_icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
         off_color = self.palette().color(self.foregroundRole())
+        halo = self.palette().window().color()
+        ratio = self.devicePixelRatioF()
         self._proxy_icons = {
-            "off": _tinted_icon(base_icon, off_color),
-            "ok": _tinted_icon(base_icon, QColor("#2e9e4f")),
-            "bad": _tinted_icon(base_icon, QColor("#c0392b")),
+            "off": _proxy_state_icon(off_color, halo, ratio=ratio),
+            "ok": _proxy_state_icon(off_color, halo, "ok", ratio=ratio),
+            "bad": _proxy_state_icon(off_color, halo, "bad", ratio=ratio),
         }
+        self.proxy_button.setIconSize(QSize(16, 16))
         self.proxy_button.setIcon(self._proxy_icons["off"])
         self.proxy_button.clicked.connect(self._open_proxy_dialog)
         corner = QWidget(self.tabs)

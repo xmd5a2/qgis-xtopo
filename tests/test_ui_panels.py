@@ -193,5 +193,40 @@ class PanelVisibilityTest(unittest.TestCase):
             plugin.unload()
 
 
+class ProxyIconTest(unittest.TestCase):
+    """Значок прокси: глиф с точкой состояния, а не залитый силуэт."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_state_dot_only_when_enabled(self):
+        from qgis.PyQt.QtCore import QSize
+        from qgis.PyQt.QtGui import QColor
+
+        from qgis_xtopo.gui.dockwidget import _proxy_state_icon
+
+        def image(state=None):
+            icon = _proxy_state_icon(
+                QColor("#222222"), QColor("#ffffff"), state,
+            )
+            return icon.pixmap(QSize(16, 16)).toImage()
+
+        off = image()
+        ok = image("ok")
+        bad = image("bad")
+        # Состояние видно по точке; без прокси точка не рисуется.
+        self.assertNotEqual(off, ok)
+        self.assertNotEqual(ok, bad)
+        # Перекрашивалась вся иконка целиком — получалось сплошное пятно.
+        # Контур глобуса не доходит до углов, они обязаны быть прозрачны.
+        for pixmap in (off, ok, bad):
+            self.assertEqual(pixmap.pixelColor(0, 0).alpha(), 0)
+            self.assertEqual(pixmap.pixelColor(15, 0).alpha(), 0)
+            self.assertEqual(pixmap.pixelColor(0, 15).alpha(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
