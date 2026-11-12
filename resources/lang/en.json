@@ -504,7 +504,7 @@
   "Набор Sonny DTM не покрывает выбранный охват.": "The Sonny DTM dataset does not cover the selected extent.",
   "В мозаике наборы с разными системами высот ({}): на границах тайлов возможны ступеньки.": "The mosaic mixes datasets with different height systems ({}): steps are possible at tile borders.",
   "Обновление списка тайлов: {}": "Updating the tile list: {}",
-  "Загрузка тайла рельефа: {}": "Downloading a terrain tile: {}",
+  "Загрузка тайла рельефа: {} ({})": "Downloading a terrain tile: {} ({})",
   "Мозаика рельефа — {}": "Terrain mosaic — {}",
   "Разрешение мозаики: ~{} м ({}×{})": "Mosaic resolution: ~{} m ({}×{})",
   "Нет данных рельефа для выбранного охвата": "No terrain data for the selected extent",

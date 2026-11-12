@@ -428,18 +428,21 @@ def _extract(zip_path, destination):
     return Path(destination) / os.path.basename(names[0])
 
 
-def download_tile(dataset, file_id, destination, progress=None):
+def download_tile(dataset, file_id, name, destination, progress=None):
     """Скачивает один тайл и возвращает путь к файлу для чтения GDAL.
 
     Для 1″ драйвер SRTMHGT читает ``.hgt`` сам, для 0,5″ возвращается
-    VRT-обёртка.
+    VRT-обёртка.  ``name`` — имя скачиваемого файла для журнала.
     """
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     url = DOWNLOAD.format(file_id=file_id)
     if progress:
         progress(
-            i18n.trf("Загрузка тайла рельефа: {}", i18n.tr(dataset.title))
+            i18n.trf(
+                "Загрузка тайла рельефа: {} ({})",
+                name, i18n.tr(dataset.title),
+            )
         )
     data = _http_bytes(url, timeout=300, retries=3)
     if not data.startswith(b"PK"):
@@ -474,7 +477,10 @@ def tile_paths(catalogue, tile_dir, dataset_key, tiles, progress=None,
         if target.exists():
             path = target
         else:
-            path = download_tile(dataset, file_id, folder, progress=progress)
+            path = download_tile(
+                dataset, file_id, f"{tile_name(*tile)}.zip",
+                folder, progress=progress,
+            )
         if path.suffix.lower() == ".hgt" and dataset.samples not in (
             SRTMHGT_SAMPLES
         ):

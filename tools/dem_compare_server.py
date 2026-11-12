@@ -1139,7 +1139,9 @@ class SourceStore:
                 label = f"{DATASETS[ds]['short']} · {_tile_label(*cell)}"
                 _download_enter(key, label)
                 try:
-                    path = sonny.download_tile(dataset, file_id, folder)
+                    path = sonny.download_tile(
+                        dataset, file_id, f"{target.stem}.zip", folder
+                    )
                 except Exception as exc:  # noqa: BLE001 - нет тайла в Drive
                     _log(f"Sonny DTM {target.name}: не удалось скачать: "
                          f"{exc}")
