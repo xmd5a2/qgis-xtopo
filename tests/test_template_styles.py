@@ -79,6 +79,48 @@ class TemplateLayoutTest(unittest.TestCase):
             self.assertTrue(packaged.exists())
 
 
+class TemplateFilterExpressionTest(unittest.TestCase):
+    """Фильтры шаблона — валидные выражения QGIS.
+
+    При запекании фильтров подавления в шаблон HTML-сущности однажды
+    экранировали дважды: в XML осталось ``&amp;lt;``, QGIS читал
+    ``&lt;``, и правило с таким фильтром не срабатывало.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+        cls.root = _template_root()
+
+    def _expressions(self):
+        for element in self.root.iter():
+            for attribute, value in element.attrib.items():
+                if attribute == "filter" and value:
+                    yield element, attribute, value
+
+    def test_no_html_entities_in_expressions(self):
+        broken = [
+            (element.tag, attribute, value[:120])
+            for element, attribute, value in self._expressions()
+            if any(entity in value for entity in ("&lt;", "&gt;", "&quot;"))
+        ]
+        self.assertEqual(broken, [])
+
+    def test_expressions_parse(self):
+        from qgis.core import QgsExpression
+
+        broken = []
+        for element, attribute, value in self._expressions():
+            if value.strip().upper() == "ELSE":
+                continue
+            expression = QgsExpression(value)
+            if expression.hasParserError():
+                broken.append((element.tag, attribute, value[:120]))
+        self.assertEqual(broken, [])
+
+
 class TunnelLayerOrderTest(unittest.TestCase):
     """Туннели — под линейными слоями, над площадными.
 
@@ -400,13 +442,15 @@ class AerialwayContrastTest(unittest.TestCase):
                         "line_color", "color", "outline_color",
                     )
                 }
-                self.assertIn(
-                    "85,85,85,255,rgb:0.33333333,0.33333333,0.33333333,1",
-                    colors, f"{name}, символ {symbol.get('name')}",
+                # QGIS может сохранять дробную часть rgb с разным
+                # числом знаков — сравниваем устойчивый RGB-префикс.
+                self.assertTrue(
+                    any(color.startswith("85,85,85,255") for color in colors),
+                    f"{name}, символ {symbol.get('name')}",
                 )
-                self.assertIn(
-                    "105,105,105,255,rgb:0.41176471,0.41176471,0.41176471,1",
-                    colors, f"{name}, символ {symbol.get('name')}",
+                self.assertTrue(
+                    any(color.startswith("105,105,105,255") for color in colors),
+                    f"{name}, символ {symbol.get('name')}",
                 )
 
 
@@ -561,6 +605,11 @@ class PoiSuppressionTest(unittest.TestCase):
     проекта, а правила ссылаются на них по имени.
     """
 
+    # У places main десятки листовых правил: overlay_nearest в каждом
+    # замедлял отрисовку настолько, что значки не появлялись.  Поэтому
+    # у этого слоя подавление отключено, у остальных работает.
+    NO_SUPPRESSION_LAYERS = {"places main"}
+
     @classmethod
     def setUpClass(cls):
         cls.root = _template_root()
@@ -636,6 +685,8 @@ class PoiSuppressionTest(unittest.TestCase):
     def test_icon_rules_suppress_overlaps(self):
         checked = 0
         for layer in self.layers:
+            if layer.name in self.NO_SUPPRESSION_LAYERS:
+                continue
             for leaf in poi_icons.leaves(layer.root):
                 if not poi_icons.band_indexes(
                     leaf.minimum, leaf.maximum, self.bands,
@@ -659,6 +710,8 @@ class PoiSuppressionTest(unittest.TestCase):
         """
         checked = 0
         for layer in self.layers:
+            if layer.name in self.NO_SUPPRESSION_LAYERS:
+                continue
             for leaf in poi_icons.leaves(layer.root):
                 if not poi_icons.band_indexes(
                     leaf.minimum, leaf.maximum, self.bands,
@@ -678,6 +731,8 @@ class PoiSuppressionTest(unittest.TestCase):
         диапазона.
         """
         for layer in self.layers:
+            if layer.name in self.NO_SUPPRESSION_LAYERS:
+                continue
             for leaf in poi_icons.leaves(layer.root):
                 if not poi_icons.band_indexes(
                     leaf.minimum, leaf.maximum, self.bands,
@@ -687,9 +742,25 @@ class PoiSuppressionTest(unittest.TestCase):
                 inside = leaf.filter.split("overlay_nearest", 1)[1]
                 self.assertIn("'poi icons ", inside)
 
+    def test_places_main_suppression_is_disabled(self):
+        """places main рисуется без overlay_nearest в правилах.
+
+        Десятки листовых правил с overlay_nearest замедляли отрисовку
+        слоя настолько, что значки не появлялись.  Остальные слои
+        по-прежнему подавляют перекрытия.
+        """
+        layer = next(
+            element for element in self.root.iter("maplayer")
+            if element.findtext("layername") == "places main"
+        )
+        text = ElementTree.tostring(layer, encoding="unicode")
+        self.assertNotIn("overlay_nearest(", text)
+
     def test_label_rules_suppress_overlaps(self):
         checked = 0
         for layer in self.layers:
+            if layer.name in self.NO_SUPPRESSION_LAYERS:
+                continue
             for rule in layer.labels:
                 expected = poi_icons.layer_suppression_expression(
                     layer, self.bands, rule.minimum, rule.maximum,
