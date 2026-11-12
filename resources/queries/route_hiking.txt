@@ -1,5 +1,0 @@
-(
-relation["route"="hiking"];
-relation["route"="foot"];
-relation["route"="walking"];
-);

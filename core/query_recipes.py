@@ -140,9 +140,6 @@ RECIPES = {
         save(), explode(), reproject(), save("_exploded"),
         simplify(0.0007), smooth(10), dissolve("name"), save("_simpl_smoothed"),
     ]),
-    "route_hiking": Recipe([
-        save(), explode(), save("_exploded"),
-    ]),
     "power_line": Recipe([
         dissolve(), singleparts(), save("_dissolved"),
     ]),

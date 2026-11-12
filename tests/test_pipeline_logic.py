@@ -5,10 +5,12 @@ import unittest
 from pathlib import Path
 
 from qgis_xtopo.core.bbox import BBox
-from qgis_xtopo.core.config import Config
+from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
     Pipeline, PipelineError, _ProgressTracker, _clean_layers, progress_stages,
 )
+from qgis_xtopo.core.query_recipes import RECIPES
+from qgis_xtopo.core.resources import query_names
 
 
 class _FakeRunner:
@@ -975,6 +977,14 @@ class PoiRecipeCrsTest(unittest.TestCase):
         ]
         self.assertTrue(saves)
         self.assertEqual(saves[-1].get("suffix"), "")
+
+
+class RouteHikingTest(unittest.TestCase):
+    def test_not_prepared(self):
+        """route_hiking не готовится: ни запроса, ни рецепта, ни в умолчаниях."""
+        self.assertNotIn("route_hiking", query_names())
+        self.assertNotIn("route_hiking", RECIPES)
+        self.assertNotIn("route_hiking", default_queries())
 
 
 if __name__ == "__main__":
