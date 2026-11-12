@@ -453,8 +453,6 @@ class AreaRoadTest(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class LabelAxisTest(unittest.TestCase):
@@ -871,3 +869,40 @@ class PeakFilterTest(unittest.TestCase):
                 self.assertTrue((window == 500.0).all())
             finally:
                 dem.close()
+
+
+class PoiRecipeCrsTest(unittest.TestCase):
+    """Слои со значками POI остаются в EPSG:4326.
+
+    Расстояние подавления значков задано в градусах.  Рецепт, который
+    перепроецирует слой в EPSG:3857, ломает сравнение: overlay_nearest
+    начнёт мерить метры, и соседи не находятся.
+    """
+
+    ICON_RECIPES = (
+        "mountain_pass",
+        "railway_station_icons",
+        "railway_halt_icons",
+        "aerialway_station",
+    )
+
+    def test_icon_recipes_do_not_reproject(self):
+        from qgis_xtopo.core.query_recipes import RECIPES
+
+        for name in self.ICON_RECIPES:
+            operations = [operation for operation, _params in RECIPES[name].steps]
+            self.assertNotIn("reproject", operations, name)
+
+    def test_mountain_pass_file_keeps_plain_name(self):
+        from qgis_xtopo.core.query_recipes import RECIPES
+
+        saves = [
+            params for operation, params in RECIPES["mountain_pass"].steps
+            if operation == "save"
+        ]
+        self.assertTrue(saves)
+        self.assertEqual(saves[-1].get("suffix"), "")
+
+
+if __name__ == "__main__":
+    unittest.main()

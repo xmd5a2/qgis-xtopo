@@ -6,6 +6,7 @@
 нарисована не так, как задумано.
 """
 
+import re
 import unittest
 import zipfile
 from xml.etree import ElementTree
@@ -432,6 +433,39 @@ class PoiSuppressionTest(unittest.TestCase):
             list(range(1, len(self.layers) + 1)),
         )
 
+    def test_all_icon_layers_use_one_crs(self):
+        """Все слои со значками — в EPSG:4326.
+
+        Расстояние подавления задано в градусах; слой в метрах
+        (EPSG:3857) сравнивал бы его с метрами и не находил соседей.
+        """
+        for layer in self.layers:
+            self.assertEqual(layer.crs, "EPSG:4326", layer.name)
+
+    def test_service_layer_names_are_unique_and_referenced(self):
+        """Имена служебных слоёв уникальны и существуют в шаблоне.
+
+        Два слоя с одинаковым именем (4326 и 3857) делали выбор
+        overlay_nearest неоднозначной: первым находился слой не той
+        системы координат, и вытеснение не работало.
+        """
+        names = [
+            layer.findtext("layername") or ""
+            for layer in self.root.iter("maplayer")
+        ]
+        service = [name for name in names if name.startswith("poi icons")]
+        self.assertEqual(len(service), len(set(service)), service)
+        known = set(names)
+        referenced = set()
+        for layer in self.root.iter("maplayer"):
+            text = ElementTree.tostring(layer, encoding="unicode")
+            referenced.update(re.findall(
+                r"overlay_nearest\(\s*'(poi icons[^']*)'", text,
+            ))
+        self.assertTrue(referenced, "в шаблоне нет ссылок на служебные слои")
+        for name in referenced:
+            self.assertIn(name, known)
+
     def test_service_layers_have_spatial_index(self):
         """Служебный слой лежит в GeoPackage: у SQLite нет индекса."""
         for layer in self.root.iter("maplayer"):
@@ -521,9 +555,7 @@ class PoiPruneTest(unittest.TestCase):
         from qgis_xtopo.core.poi_icons import _Point
 
         return _Point(
-            wkt=f"POINT ({lon} {lat})",
             rank=rank,
-            crs="EPSG:4326",
             lon=lon,
             lat=lat,
             bands={band: 3},

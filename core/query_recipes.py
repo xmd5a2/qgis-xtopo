@@ -153,7 +153,10 @@ RECIPES = {
         load("weir"), centroid(), save("_centroids"),
     ]),
     "mountain_pass": Recipe([
-        reproject(), save("_reproj"),
+        # Слой остаётся в EPSG:4326: значки всех POI считаются в одной
+        # системе координат, иначе расстояния вытеснения не совпадают с
+        # max_distance в градусах.
+        save(),
     ]),
     "building_train_station": Recipe([
         fix(), centroid(), reproject(), save("_reproj"),
@@ -228,7 +231,7 @@ RECIPES = {
         dissolve("name"), centroid(), reproject(), save("_buffered_dissolved_centroids"),
     ]),
     "railway_station_icons": Recipe([
-        buffer(0.004), dissolve("name"), centroid(), reproject(),
+        buffer(0.004), dissolve("name"), centroid(),
         save("_buffered_dissolved_centroids"),
     ]),
     "barrier": Recipe([
@@ -238,7 +241,7 @@ RECIPES = {
         save(), polygonstolines(), save("_lines"),
     ]),
     "railway_halt_icons": Recipe([
-        buffer(0.004), dissolve("name"), centroid(), reproject(),
+        buffer(0.004), dissolve("name"), centroid(),
         save("_buffered_dissolved_centroids"),
     ]),
     # Площадные дороги (highway=* с area=yes или area:highway=*) OSM рисует
@@ -251,7 +254,7 @@ RECIPES = {
         linestopolygons(), save(),
     ]),
     "aerialway_station": Recipe([
-        buffer(0.004), dissolve("name"), centroid(), reproject(),
+        buffer(0.004), dissolve("name"), centroid(),
         save("_buffered_dissolved_centroids"),
     ]),
 }

@@ -228,6 +228,19 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   при перегенерации кавычки в XML экранировать (`&quot;`), иначе файл
   ломается. Проверка — `test_icon_rules_break_ties_within_a_layer` и
   `PoiPruneTest` в `tests/test_template_styles.py`.
+- **Все слои со значками — только EPSG:4326, имена служебных слоёв не
+  повторяются.** Расстояние подавления задано в градусах; слой в
+  EPSG:3857 мерил бы метры и не находил соседей. Поэтому рецепты
+  `mountain_pass`, `railway_station_icons`, `railway_halt_icons`,
+  `aerialway_station` не должны заканчиваться `reproject()` (проверка —
+  `PoiRecipeCrsTest` в `tests/test_pipeline_logic.py`). Служебных
+  файлов один — `poi_icons.gpkg`; прежний `poi_icons_3857.gpkg`
+  удаляется при сборке. Два слоя с одинаковым именем «poi icons N»
+  (было: 4326 и 3857) делали выбор `overlay_nearest` неоднозначной —
+  первым находился слой не той системы координат, и вытеснение не
+  работало вовсе. Проверка —
+  `test_service_layer_names_are_unique_and_referenced` и
+  `test_all_icon_layers_use_one_crs` в `tests/test_template_styles.py`.
 - **Линии подъёмников на масштабах 1:100000+ серые.** В слоях
   `aerialway cable car, gondola` и `aerialway chair lift` символы 2
   (100000–300000) и 3 (300000+) рисуют штриховую линию серым

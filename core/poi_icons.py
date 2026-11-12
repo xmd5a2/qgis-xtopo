@@ -22,10 +22,10 @@ POI-точки собираются в служебные слои ``poi icons``
 диапазона масштаба: у диапазона свой набор видимых точек, и правило
 ссылается на слой своего диапазона.
 
-Служебных слоёв два — по одной системе координат: overlay_nearest
-пере проецирует цель в CRS источника, но кэш пространственного
-индекса CRS не учитывает, и один слой из разных систем дал бы неверные
-расстояния.
+Служебный слой один: все POI-слои шаблона — в EPSG:4326, и
+overlay_nearest считает расстояния в градусах.  Слой в другой
+проекции сломал бы сравнение с max_distance (метры против градусов),
+поэтому рецепты не должны перепроецировать слои со значками.
 
 Точки, которые не могут подавить ни одного соседа, в служебный слой не
 попадают: overlay_nearest перебирает весь слой целиком, поэтому размер
@@ -39,10 +39,11 @@ POI-точки собираются в служебные слои ``poi icons``
 не требует пересборки данных.
 
 Расстояние подавления — размер значка правила в миллиметрах, переведённый
-в единицы слоя через @map_scale.  Для слоёв в EPSG:4326 добавлен множитель
-cos(широты): градус долготы короче градуса широты, а QGIS сравнивает
-расстояния плоско в единицах слоя.  Для слоёв в EPSG:3857 широта
-вычисляется из меркаторской координаты y.
+в единицы слоя через @map_scale.  Все POI-слои шаблона — в EPSG:4326:
+добавлен множитель cos(широты), потому что градус долготы короче градуса
+широты, а QGIS сравнивает расстояния плоско в единицах слоя.  Слои в
+другой проекции не поддерживаются — расстояния перестанут совпадать с
+max_distance.
 """
 
 import math
@@ -55,9 +56,10 @@ from xml.etree import ElementTree
 from .resources import template_path
 
 AUX_LAYER_NAME = "poi icons"
-AUX_LAYER_NAME_3857 = "poi icons 3857"
 AUX_FILE_NAME = "poi_icons.gpkg"
-AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
+# Служебный файл прежней схемы с двумя системами координат; удаляется
+# при сборке, чтобы не оставался в каталоге проекта.
+LEGACY_AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
 
 LOD_LEVELS = (3, 4, 5, 6)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
@@ -115,9 +117,7 @@ class PoiLabelRule:
 class _Point:
     """Точка служебного слоя: координаты, ранг и диапазоны видимости."""
 
-    wkt: str
     rank: int
-    crs: str
     lon: float
     lat: float
     bands: dict = field(default_factory=dict)  # диапазон -> минимальный LOD
@@ -379,17 +379,9 @@ def band_indexes(minimum, maximum, bands):
     return indexes
 
 
-def aux_layer_name(layer, index):
-    """Имя служебного слоя диапазона масштаба для слоя-источника."""
-    prefix = AUX_LAYER_NAME_3857 if layer.crs == "EPSG:3857" else AUX_LAYER_NAME
-    return f"{prefix} {index}"
-
-
-def aux_file_name(layer):
-    """Файл служебных слоёв для системы координат слоя-источника."""
-    if layer.crs == "EPSG:3857":
-        return AUX_FILE_NAME_3857
-    return AUX_FILE_NAME
+def aux_layer_name(index):
+    """Имя служебного слоя диапазона масштаба."""
+    return f"{AUX_LAYER_NAME} {index}"
 
 
 def aux_table_name(index):
@@ -397,19 +389,15 @@ def aux_table_name(index):
     return f"band{index}"
 
 
-def _distance_expression(layer, size):
-    """Порог подавления в единицах слоя: размер значка в мм -> единицы.
+def _distance_expression(size):
+    """Порог подавления в градусах: размер значка в мм -> единицы слоя.
 
     Размер значка на карте в миллиметрах пересчитывается в наземные
-    метры через @map_scale, а затем в единицы CRS слоя.  Для EPSG:4326
-    деление на cos(широты) делает порог консервативным по долготе:
-    плоское расстояние в градусах не изотропно.  Для EPSG:3857 широта
-    извлекается из меркаторской координаты y.
+    метры через @map_scale, а затем в градусы.  Деление на cos(широты)
+    делает порог консервативным по долготе: плоское расстояние в
+    градусах не изотропно.
     """
     ground = f"{size:g} * @map_scale / 1000"
-    if layer.crs == "EPSG:3857":
-        latitude = "degrees(2 * atan(exp(y($geometry) / 6378137)) - pi() / 2)"
-        return f"{ground} / cos(radians({latitude}))"
     return f"{ground} / 111320 / cos(radians(y($geometry)))"
 
 
@@ -438,7 +426,7 @@ def suppression_expression(layer, leaf, bands):
             scale.append(f"@map_scale >= {lower:g}")
         if upper:
             scale.append(f"@map_scale < {upper:g}")
-        nearest = _nearest_expression(layer, leaf.size, index, rank)
+        nearest = _nearest_expression(leaf.size, index, rank)
         term = f"try(coalesce(array_min({nearest}), {rank}) < {rank}, false)"
         if scale:
             term = "(" + " AND ".join(scale) + f") AND {term}"
@@ -448,7 +436,7 @@ def suppression_expression(layer, leaf, bands):
     return "(" + " OR ".join(terms) + ")"
 
 
-def _nearest_expression(layer, size, index, rank):
+def _nearest_expression(size, index, rank):
     """Выборка соседей из служебного слоя диапазона масштаба.
 
     В выборку попадают более приоритетные объекты (их немного, и
@@ -466,11 +454,11 @@ def _nearest_expression(layer, size, index, rank):
         f'(x($geometry) = x({parent}) AND y($geometry) < y({parent})))'
     )
     return (
-        f"overlay_nearest('{aux_layer_name(layer, index)}', "
+        f"overlay_nearest('{aux_layer_name(index)}', "
         f"expression:=if(\"lod\" <= @level_of_detail, \"rank\", {NEVER_RANK}), "
         f"filter:=\"rank\" < {rank} OR (\"rank\" = {rank} AND {tie}), "
         f"limit:=-1, "
-        f"max_distance:={_distance_expression(layer, size)})"
+        f"max_distance:={_distance_expression(size)})"
     )
 
 
@@ -777,21 +765,10 @@ def _collect_points(config, layers, bands, cancel=None):
             if not visible:
                 continue
             geometry = feature.geometry().asPoint()
-            if info.crs == "EPSG:3857":
-                lon = math.degrees(geometry.x() / 6378137.0)
-                lat = math.degrees(
-                    2 * math.atan(math.exp(geometry.y() / 6378137.0))
-                    - math.pi / 2
-                )
-            else:
-                lon = geometry.x()
-                lat = geometry.y()
             points.append(_Point(
-                wkt=feature.geometry().asWkt(),
                 rank=info.rank,
-                crs=info.crs,
-                lon=lon,
-                lat=lat,
+                lon=geometry.x(),
+                lat=geometry.y(),
                 bands={index: level for index, level in visible},
             ))
     return points
@@ -896,8 +873,8 @@ def _write_aux(config, records, crs, file_name):
                 feature.SetField("rank", point.rank)
                 feature.SetField("lod", point.bands[index])
                 feature.SetField("layer", str(point.rank))
-                feature.SetGeometry(
-                    ogr.CreateGeometryFromWkt(point.wkt))
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(
+                    f"POINT ({point.lon:.9f} {point.lat:.9f})"))
                 layer.CreateFeature(feature)
                 feature = None
             layer.CommitTransaction()
@@ -920,14 +897,14 @@ def build_poi_icons(config, progress=None, cancel=None):
     restore_base_filters(layers, bands)
     points = _collect_points(config, layers, bands, cancel=cancel)
     if not points:
-        for file_name in (AUX_FILE_NAME, AUX_FILE_NAME_3857):
+        for file_name in (AUX_FILE_NAME, LEGACY_AUX_FILE_NAME_3857):
             (Path(config.vector_dir) / file_name).unlink(missing_ok=True)
         return 0
     latitude_max = max(abs(point.lat) for point in points)
     max_size = max(
         (layer.icon_size for layer in layers), default=0.0,
     )
-    records = {"EPSG:4326": {}, "EPSG:3857": {}}
+    records = {}
     total = 0
     for index, band in enumerate(bands):
         _lower, upper = band
@@ -936,10 +913,10 @@ def build_poi_icons(config, progress=None, cancel=None):
         if not kept:
             continue
         for point in kept:
-            records[point.crs].setdefault(index, []).append(point)
+            records.setdefault(index, []).append(point)
             total += 1
-    _write_aux(config, records["EPSG:4326"], "EPSG:4326", AUX_FILE_NAME)
-    _write_aux(config, records["EPSG:3857"], "EPSG:3857", AUX_FILE_NAME_3857)
+    _write_aux(config, records, "EPSG:4326", AUX_FILE_NAME)
+    (Path(config.vector_dir) / LEGACY_AUX_FILE_NAME_3857).unlink(missing_ok=True)
     report(
         f"POI: служебные слои значков, {total} записей "
         f"для {len(layers)} слоёв"
