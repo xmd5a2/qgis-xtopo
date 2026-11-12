@@ -310,6 +310,9 @@ class PbfProbe:
 class PbfDataset:
     feature_files: dict
     warnings: list = field(default_factory=list)
+    # Ожидаемые особенности режима PBF: это не предупреждения, а пояснения
+    # к журналу (грубый фильтр, объединение выгрузок).
+    notes: list = field(default_factory=list)
     dataset: object = None
     temp_files: list = field(default_factory=list)
 
@@ -969,22 +972,23 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
             del feature_files[name]
 
     warnings = list(index.warnings)
-    warnings.append(
-        "PBF mode reads the extract with a coarse bbox filter: only the objects "
-        "of the area are decoded, the rest of the file is skipped."
-    )
+    notes = [
+        "PBF: чтение идёт с грубым фильтром по области, "
+        "остальные объекты файла пропускаются."
+    ]
     if not _dataset_reading_supported():
         warnings.append(
             "GDAL старше 3.6: чтение идёт опросом слоёв по кругу, "
             "на больших выгрузках часть объектов может потеряться."
         )
     if total_files > 1:
-        warnings.append(f"GeoFabrik: {total_files} карты обработаны как один источник.")
+        notes.append("PBF: выгрузки объединены в один источник.")
     if progress:
         progress(f"PBF: {features_seen} objects, {features_written} feature matches")
     return PbfDataset(
         feature_files=feature_files,
         warnings=warnings,
+        notes=notes,
         temp_files=temp_files,
     )
 

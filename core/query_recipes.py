@@ -85,10 +85,19 @@ def linestopolygons(drop_others=False):
 
 RECIPES = {
     "water": Recipe([
-        fix(), save(), dissolve(), singleparts(), save("_dissolved"),
+        # fix() после singleparts страхует от самопересечений dissolve:
+        # native:difference пропускает такой объект как ошибочный.
+        fix(), save(), dissolve(), singleparts(), fix(), save("_dissolved"),
     ]),
     "water_intermittent": Recipe([
-        fix(), save(), dissolve(), singleparts(), save("_dissolved"),
+        fix(), save(), dissolve(), singleparts(), fix(), save("_dissolved"),
+    ]),
+    "bare_rock": Recipe([
+        # В OSM встречаются самопересекающиеся мультиполигоны.
+        fix(), save(),
+    ]),
+    "scree": Recipe([
+        fix(), save(),
     ]),
     "allotments": Recipe([
         save(), load("allotments"), dissolve(), singleparts(), save("_dissolved"),

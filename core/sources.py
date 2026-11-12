@@ -37,9 +37,17 @@ class SourceResult:
     files: dict = field(default_factory=dict)
     dataset: object = None
     warnings: list = field(default_factory=list)
+    # Информационные заметки: ожидаемые особенности источника, не проблемы.
+    notes: list = field(default_factory=list)
     # Время, потраченное на сеть: скачивание карт, ответы Overpass.
     # Оно показывается в хронометраже отдельно от подготовки источника.
     download_seconds: float = 0.0
+
+
+def _dataset_notes(dataset):
+    """Информационные заметки источника; у старых объектов их может не быть."""
+    notes = getattr(dataset, "notes", None)
+    return list(notes) if isinstance(notes, (list, tuple)) else []
 
 
 class _DownloadTimer:
@@ -236,7 +244,10 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
         if state.warning:
             warnings.append(state.warning)
         return SourceResult(
-            dataset=dataset, warnings=warnings, download_seconds=timer.total
+            dataset=dataset,
+            warnings=warnings,
+            notes=_dataset_notes(dataset),
+            download_seconds=timer.total,
         )
 
     if config.source_mode == "pbf":
@@ -245,7 +256,11 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
             config, bbox, query_names, query_texts=query_texts,
             cancel=cancel, progress=progress,
         )
-        return SourceResult(dataset=dataset, warnings=list(dataset.warnings))
+        return SourceResult(
+            dataset=dataset,
+            warnings=list(dataset.warnings),
+            notes=_dataset_notes(dataset),
+        )
 
     cache = _cache_dir(config, bbox)
     texts = {name: read_query(name) for name in query_names}

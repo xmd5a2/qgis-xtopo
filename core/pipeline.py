@@ -1195,7 +1195,6 @@ def save_vector(source, destination, layer_name, target_crs=None):
     options = [
         "-nln", layer_name,
         "-nlt", _geometry_type(source),
-        "-lco", "COMPRESS_GEOM=YES",
         "-unsetFid",
     ]
     names = _source_fields(source)
@@ -1207,6 +1206,9 @@ def save_vector(source, destination, layer_name, target_crs=None):
         options.extend(["-select", ",".join(keep)])
     creation_options = gdal.GetDriverByName("SQLite").GetMetadataItem("DMD_CREATIONOPTIONLIST") or ""
     if "SPATIALITE" in creation_options:
+        # COMPRESS_GEOM=YES вместе с SPATIALITE=YES меняет топологию:
+        # в воде появляются самопересечения, и difference пропускает
+        # объект. Экономия от сжатия около 3%, поэтому не сжимаем.
         options.extend(["-dsco", "SPATIALITE=YES"])
     if target_crs:
         options.extend(["-t_srs", target_crs])
@@ -1330,6 +1332,8 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             timings.add_stage("источник OSM", prepared_time)
         else:
             prepared = sources.SourceResult()
+        for note in prepared.notes:
+            report(note)
         for warning in prepared.warnings:
             report(f"WARNING: {warning}")
         # Скачивание тайлов и сборка растра рельефа не зависят от слоёв

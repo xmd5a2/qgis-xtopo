@@ -157,6 +157,29 @@ class SaveVectorTest(unittest.TestCase):
                 save_vector(source, config.vector_dir / "water.sqlite", "water")
         self.assertNotIn("-skipfailures", recorded["options"])
 
+    def test_spatialite_write_does_not_compress_geometry(self):
+        """COMPRESS_GEOM вместе с SPATIALITE меняет топологию полигонов."""
+        from unittest import mock
+
+        from osgeo import gdal, ogr
+
+        from qgis_xtopo.core.pipeline import save_vector
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = _feature_collection(config.temp_dir / "source.geojson")
+            recorded = {}
+
+            def fake_translate(destination, src, options=None):
+                recorded["options"] = list(options or [])
+                return object()
+
+            with mock.patch.object(gdal, "VectorTranslate", fake_translate):
+                save_vector(source, config.vector_dir / "water.sqlite", "water")
+        self.assertNotIn("COMPRESS_GEOM=YES", recorded["options"])
+
     def _collection(self, directory, name, geometries):
         path = Path(directory) / name
         path.write_text(
@@ -576,6 +599,26 @@ class LabelAxisRecipeTest(unittest.TestCase):
             axis = steps.index("label_axis")
             self.assertNotIn("buffer", steps[:axis], name)
             self.assertNotIn("simplify", steps[:axis], name)
+
+
+class GeometryRepairRecipeTest(unittest.TestCase):
+    """Растворение воды создаёт самопересечения, ломающие difference."""
+
+    def test_dissolved_water_is_repaired_after_singleparts(self):
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        for name in ("water", "water_intermittent"):
+            steps = [operation for operation, _ in recipe_for(name).steps]
+            after = steps[steps.index("singleparts") + 1:]
+            self.assertIn("fix", after, name)
+            self.assertEqual(steps[-1], "save", name)
+
+    def test_raw_polygon_layers_are_repaired(self):
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        for name in ("bare_rock", "scree"):
+            steps = [operation for operation, _ in recipe_for(name).steps]
+            self.assertEqual(steps[0], "fix", name)
 
 
 class DissolveFieldsTest(unittest.TestCase):

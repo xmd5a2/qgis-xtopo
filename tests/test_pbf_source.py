@@ -481,10 +481,10 @@ class MultiFileDatasetTest(unittest.TestCase):
                 name: path.read_text(encoding="utf-8")
                 for name, path in dataset.feature_files.items()
             }
-            return content, opened
+            return content, opened, dataset
 
     def test_empty_covering_file_keeps_layers_of_previous_file(self):
-        content, opened = self._prepare(
+        content, opened, _dataset = self._prepare(
             {
                 "extract.osm.pbf": [
                     [_FakeFeature(1, {"natural": "peak"}, 44.0, 41.8)],
@@ -502,7 +502,7 @@ class MultiFileDatasetTest(unittest.TestCase):
         self.assertIsNone(covering[0][2].filter)
 
     def test_rollback_of_one_file_keeps_other_files(self):
-        content, _opened = self._prepare(
+        content, _opened, _dataset = self._prepare(
             {
                 "extract.osm.pbf": [
                     [_FakeFeature(1, {"natural": "peak"}, 10.0, 10.0)],
@@ -516,3 +516,22 @@ class MultiFileDatasetTest(unittest.TestCase):
         )
         self.assertIn("peak", content)
         self.assertIn("way/2", content["peak"])
+
+    def test_expected_pbf_behaviour_is_reported_as_notes(self):
+        """Грубый фильтр и объединение выгрузок — заметки, а не предупреждения."""
+        _content, _opened, dataset = self._prepare(
+            {
+                "extract.osm.pbf": [
+                    [_FakeFeature(1, {"natural": "peak"}, 44.0, 41.8)],
+                ],
+                "covering.osm.pbf": [[]],
+            },
+        )
+        self.assertTrue(any("грубым фильтром" in note for note in dataset.notes))
+        self.assertTrue(any("один источник" in note for note in dataset.notes))
+        self.assertFalse(
+            any("грубым фильтром" in warning for warning in dataset.warnings)
+        )
+        self.assertFalse(
+            any("один источник" in warning for warning in dataset.warnings)
+        )
