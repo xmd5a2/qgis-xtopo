@@ -155,10 +155,17 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `properties` блока `data_defined_properties`. Свойство рядом с картой QGIS
   не читает, и штрихи выстраиваются колонками. Проверка —
   `tests/test_template_styles.py`.
-- **Изолинии режутся по воде до деления на ледниковые и обычные**
-  (`terrain.py: generate_isolines`, `_water_mask_paths`): по
-  `water_dissolved` и `water_intermittent_dissolved`, иначе по исходным слоям.
-  Тест — `GlacierIsolinesWaterTest`.
+- **Изолинии режутся по воде и ледникам растровой маской**
+  (`terrain.py: generate_isolines`, `_try_mask_water`, `_try_mask_glaciers`):
+  полигоны воды и ледников записываются в копию DEM значением nodata,
+  `gdal.ContourGenerate` с `useNoData=1` обрывает контуры у границ ещё
+  при генерации. Прежнее векторное срезание (Union всех озёр и
+  `Difference` каждой линии) стоило ~74 с на регионе Женевского озера
+  против ~1 с маски. Ледниковые изолинии — отдельный проход по растру,
+  очищенному от всего, кроме ледников (`keep_only=True`), тоже без
+  векторного деления. Запасной векторный путь (`_subtract_water_from_layer`,
+  `_split_isolines_by_glaciers`) остался для тайловой нарезки и сбоев
+  маски. Расхождение с прежним кроем — до ~2 пикселей DEM у кромки воды.
 - **Треки на 1:50 000+**: в правилах слоя `track` для
   `highway_integrity='3'` должен быть символ в каждом диапазоне масштаба.
   Пропуск этой ветки оставлял треки с таким значением без отрисовки.

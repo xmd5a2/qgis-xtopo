@@ -1033,12 +1033,58 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     return composite_path
 
 
-def _subtract_water_from_layer(layer, water_paths, target_srs):
+class _EnvelopeGrid:
+    """Пространственный индекс по охватам: сетка ячеек → набор значений.
+
+    Достаточно для задачи «найти линии, чей охват пересекает полигон»:
+    геометрическая проверка (GEOS) остаётся только для кандидатов.
+    """
+
+    def __init__(self, envelope, cells=64):
+        self.cell = max(
+            envelope[1] - envelope[0], envelope[3] - envelope[2]
+        ) / cells or 1e-9
+        self.origin = (envelope[0], envelope[2])
+        self.cells = {}
+
+    def keys(self, envelope):
+        x0 = int((envelope[0] - self.origin[0]) // self.cell)
+        x1 = int((envelope[1] - self.origin[0]) // self.cell)
+        y0 = int((envelope[2] - self.origin[1]) // self.cell)
+        y1 = int((envelope[3] - self.origin[1]) // self.cell)
+        for cx in range(x0, x1 + 1):
+            for cy in range(y0, y1 + 1):
+                yield cx, cy
+
+    def add(self, envelope, value):
+        for key in self.keys(envelope):
+            self.cells.setdefault(key, set()).add(value)
+
+    def remove(self, envelope, value):
+        for key in self.keys(envelope):
+            values = self.cells.get(key)
+            if values is not None:
+                values.discard(value)
+
+    def find(self, envelope):
+        found = set()
+        for key in self.keys(envelope):
+            found.update(self.cells.get(key, ()))
+        return found
+
+
+def _collect_water_polygons(water_paths, target_srs):
+    """Полигоны воды в системе координат контуров.
+
+    Полигоны не объединяются в один: Union всех озёр региона стоит
+    полминуты, а бОльшая часть горизонталей воды не касается.
+    """
     _, ogr, osr = _gdal()
     if target_srs is not None:
         target_srs = target_srs.Clone()
         target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    water = None
+    polygons = []
+    envelope = None
     for path in water_paths:
         if not path.exists():
             continue
@@ -1051,18 +1097,48 @@ def _subtract_water_from_layer(layer, water_paths, target_srs):
             if source_srs is not None:
                 source_srs = source_srs.Clone()
                 source_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-            if source_srs is not None and target_srs is not None and not source_srs.IsSame(target_srs):
+            if (source_srs is not None and target_srs is not None
+                    and not source_srs.IsSame(target_srs)):
                 transform = osr.CoordinateTransformation(source_srs, target_srs)
             for feature in water_layer:
                 geometry = feature.GetGeometryRef()
                 if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
                     continue
-                geometry = geometry.Clone()
-                if transform is not None:
-                    geometry.Transform(transform)
-                water = geometry if water is None else water.Union(geometry)
+                flat = ogr.GT_Flatten(geometry.GetGeometryType())
+                parts = (
+                    [geometry.GetGeometryRef(index)
+                     for index in range(geometry.GetGeometryCount())]
+                    if flat == ogr.wkbMultiPolygon else [geometry]
+                )
+                for part in parts:
+                    part = part.Clone()
+                    if transform is not None:
+                        part.Transform(transform)
+                    part_env = part.GetEnvelope()
+                    polygons.append(part)
+                    envelope = (
+                        part_env if envelope is None else (
+                            min(envelope[0], part_env[0]),
+                            max(envelope[1], part_env[1]),
+                            min(envelope[2], part_env[2]),
+                            max(envelope[3], part_env[3]),
+                        )
+                    )
         dataset = None
-    if water is None:
+    return polygons, envelope
+
+
+def _subtract_water_from_layer(layer, water_paths, target_srs):
+    """Режет контуры, заходящие на воду, по полигонам воды.
+
+    Обход перевернут: контуры попадают в сетку по охватам, а для каждого
+    полигона воды геометрические проверки выполняются только с кандидатами
+    из соседних ячеек.  Прямой обход (каждая линия против каждого озера)
+    стоил десятки секунд на регионе вроде Женевского озера.
+    """
+    _, ogr, _ = _gdal()
+    polygons, envelope = _collect_water_polygons(water_paths, target_srs)
+    if not polygons:
         return 0
 
     def line_parts(geometry):
@@ -1073,30 +1149,52 @@ def _subtract_water_from_layer(layer, water_paths, target_srs):
             parts.extend(line_parts(geometry.GetGeometryRef(index)))
         return parts
 
-    changed = 0
-    updates = []
+    index = _EnvelopeGrid(envelope)
+    feature_envelopes = {}
     layer.ResetReading()
     feature = layer.GetNextFeature()
     while feature is not None:
         geometry = feature.GetGeometryRef()
-        if geometry is not None and not geometry.IsEmpty() and geometry.Intersects(water):
-            clipped = geometry.Difference(water)
-            parts = [] if clipped is None or clipped.IsEmpty() else line_parts(clipped)
-            updates.append((feature.GetFID(), parts))
-            changed += 1
+        if geometry is not None and not geometry.IsEmpty():
+            feature_envelopes[feature.GetFID()] = geometry.GetEnvelope()
         feature = layer.GetNextFeature()
-    for fid, parts in updates:
-        feature = layer.GetFeature(fid)
-        if not parts:
-            layer.DeleteFeature(fid)
-            continue
-        feature.SetGeometry(parts[0])
-        layer.SetFeature(feature)
-        for part in parts[1:]:
-            additional = feature.Clone()
-            additional.SetGeometry(part)
-            additional.SetFID(-1)
-            layer.CreateFeature(additional)
+    for fid, feature_envelope in feature_envelopes.items():
+        index.add(feature_envelope, fid)
+
+    changed = 0
+    for polygon in polygons:
+        polygon_envelope = polygon.GetEnvelope()
+        for fid in list(index.find(polygon_envelope)):
+            feature = layer.GetFeature(fid)
+            if feature is None:
+                continue
+            geometry = feature.GetGeometryRef()
+            if (geometry is None or geometry.IsEmpty()
+                    or not polygon.Intersects(geometry)):
+                continue
+            clipped = geometry.Difference(polygon)
+            parts = ([] if clipped is None or clipped.IsEmpty()
+                     else line_parts(clipped))
+            changed += 1
+            index.remove(feature_envelopes.pop(fid), fid)
+            if not parts:
+                layer.DeleteFeature(fid)
+                feature = None
+                continue
+            feature.SetGeometry(parts[0])
+            layer.SetFeature(feature)
+            feature_envelopes[fid] = parts[0].GetEnvelope()
+            index.add(feature_envelopes[fid], fid)
+            for part in parts[1:]:
+                additional = feature.Clone()
+                additional.SetGeometry(part)
+                additional.SetFID(-1)
+                layer.CreateFeature(additional)
+                new_fid = additional.GetFID()
+                if new_fid >= 0:
+                    feature_envelopes[new_fid] = part.GetEnvelope()
+                    index.add(feature_envelopes[new_fid], new_fid)
+            feature = None
     return changed
 
 
@@ -1131,6 +1229,202 @@ def _contour_workers(tiles):
     available = os.cpu_count() or 2
     limit = max(1, int(available * CONTOUR_TILE_WORKERS_RATIO))
     return max(1, min(tiles, limit))
+
+
+def _try_mask_glaciers(raster, config, keep_only=False):
+    """Записывает полигоны ледников в растр DEM значением nodata.
+
+    С ``keep_only=False`` (основные изолинии) ледники вырезаются из
+    растра вместе с водой, и контуры обрываются у их границ при
+    генерации.  С ``keep_only=True`` (ледниковые изолинии) значения
+    остаются только внутри ледников — отдельный проход даёт синие
+    контуры без векторного деления на GEOS.  False — ледников нет или
+    маску применить не удалось, тогда работает запасной векторный путь.
+    """
+    gdal, ogr, osr = _gdal()
+    numpy = _numpy()
+    path = config.vector_dir / "glacier.sqlite"
+    if not path.exists():
+        return False
+    projection = raster.GetProjection()
+    if not projection:
+        return False
+    raster_srs = osr.SpatialReference()
+    raster_srs.ImportFromWkt(projection)
+    raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    try:
+        dataset = ogr.Open(str(path))
+        if dataset is None:
+            return False
+        geometries = []
+        try:
+            for layer in dataset:
+                layer_srs = layer.GetSpatialRef()
+                if layer_srs is None:
+                    return False
+                layer_srs = layer_srs.Clone()
+                layer_srs.SetAxisMappingStrategy(
+                    osr.OAMS_TRADITIONAL_GIS_ORDER
+                )
+                if not layer_srs.IsSame(raster_srs):
+                    return False
+                for feature in layer:
+                    geometry = feature.GetGeometryRef()
+                    if (geometry is None or geometry.IsEmpty()
+                            or geometry.GetDimension() != 2):
+                        continue
+                    flat = ogr.GT_Flatten(geometry.GetGeometryType())
+                    if flat == ogr.wkbMultiPolygon:
+                        for index in range(geometry.GetGeometryCount()):
+                            part = geometry.GetGeometryRef(index)
+                            if part is not None and not part.IsEmpty():
+                                geometries.append(part.Clone())
+                    else:
+                        geometries.append(geometry.Clone())
+        finally:
+            dataset = None
+        if not geometries:
+            return False
+        band = raster.GetRasterBand(1)
+        nodata = band.GetNoDataValue()
+        if nodata is None:
+            nodata = -32768.0
+            band.SetNoDataValue(nodata)
+        # В этой сборке GDAL RasterizeGeometries в Python не прибит —
+        # кладём полигоны во временный слой и растеризуем его.
+        holder = ogr.GetDriverByName("Memory").CreateDataSource("glaciers")
+        holder_layer = holder.CreateLayer("glaciers", raster_srs, ogr.wkbUnknown)
+        definition = holder_layer.GetLayerDefn()
+        for geometry in geometries:
+            feature = ogr.Feature(definition)
+            feature.SetGeometry(geometry)
+            holder_layer.CreateFeature(feature)
+            feature = None
+        if keep_only:
+            mask = gdal.GetDriverByName("MEM").Create(
+                "", raster.RasterXSize, raster.RasterYSize, 1, gdal.GDT_Byte,
+            )
+            mask.SetGeoTransform(raster.GetGeoTransform())
+            mask.SetProjection(projection)
+            gdal.RasterizeLayer(mask, [1], holder_layer, burn_values=[1])
+            array = band.ReadAsArray()
+            array[mask.GetRasterBand(1).ReadAsArray() != 1] = nodata
+            band.WriteArray(array)
+            mask = None
+        else:
+            gdal.RasterizeLayer(
+                raster, [1], holder_layer, burn_values=[nodata],
+                options=["ALL_TOUCHED=TRUE"],
+            )
+        holder = None
+    except Exception:  # noqa: BLE001 - запасной путь ниже
+        return False
+    return True
+
+
+def _generate_masked_glacier_isolines(config, source, water_paths,
+                                      progress=None):
+    """Изолинии внутри ледников по растру, очищенному от всего, кроме них.
+
+    Возвращает путь к isolines_glacier.sqlite; None — ледников нет или
+    маску применить не удалось.
+    """
+    gdal, ogr, osr = _gdal()
+    memory = gdal.Translate("", str(source), format="MEM")
+    if not _try_mask_glaciers(memory, config, keep_only=True):
+        return None
+    # Вода режет ледниковые изолинии так же, как обычные.
+    _try_mask_water(memory, water_paths)
+    shape_path = config.temp_dir / "isolines_glacier.shp"
+    driver = ogr.GetDriverByName("ESRI Shapefile")
+    shape_path.unlink(missing_ok=True)
+    dataset = driver.CreateDataSource(str(shape_path))
+    spatial_ref = osr.SpatialReference()
+    spatial_ref.ImportFromWkt(memory.GetProjection())
+    layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
+    layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+    layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+    band = memory.GetRasterBand(1)
+    nodata = band.GetNoDataValue()
+    if nodata is not None:
+        gdal.ContourGenerate(
+            band, float(config.isolines_step), 0.0, [], 1, nodata,
+            layer, 0, 1,
+        )
+    else:
+        gdal.ContourGenerate(
+            band, float(config.isolines_step), 0.0, [], 0, 0.0,
+            layer, 0, 1,
+        )
+    layer.SyncToDisk()
+    count = layer.GetFeatureCount()
+    dataset = None
+    memory = None
+    destination = config.vector_dir / "isolines_glacier.sqlite"
+    destination.unlink(missing_ok=True)
+    result = gdal.VectorTranslate(
+        str(destination), str(shape_path),
+        options=["-nln", "isolines", "-dsco", "SPATIALITE=YES",
+                 "-lco", "COMPRESS_GEOM=YES"],
+    )
+    shape_path.unlink(missing_ok=True)
+    for suffix in (".shx", ".dbf", ".prj"):
+        shape_path.with_suffix(suffix).unlink(missing_ok=True)
+    if result is None:
+        destination.unlink(missing_ok=True)
+        return None
+    result = None
+    if progress:
+        progress(f"Glacier contour lines ready: {count}")
+    return destination
+
+
+def _try_mask_water(raster, water_paths):
+    """Записывает полигоны воды в растр DEM значением nodata.
+
+    Контуры, посчитанные gdal.ContourGenerate по такому растру, обрываются
+    у берега сами — векторное срезание линий по большим озёрам (десятки
+    секунд на GEOS) не нужно.  False — маску применить не удалось и нужен
+    запасной векторный путь.  Каждый вызывающий поток открывает файлы
+    воды самостоятельно.
+    """
+    gdal, ogr, osr = _gdal()
+    band = raster.GetRasterBand(1)
+    nodata = band.GetNoDataValue()
+    if nodata is None:
+        nodata = -32768.0
+        band.SetNoDataValue(nodata)
+    projection = raster.GetProjection()
+    if not projection:
+        return False
+    raster_srs = osr.SpatialReference()
+    raster_srs.ImportFromWkt(projection)
+    raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    try:
+        for path in water_paths:
+            dataset = ogr.Open(str(path))
+            if dataset is None:
+                return False
+            try:
+                for layer in dataset:
+                    layer_srs = layer.GetSpatialRef()
+                    if layer_srs is None:
+                        return False
+                    layer_srs = layer_srs.Clone()
+                    layer_srs.SetAxisMappingStrategy(
+                        osr.OAMS_TRADITIONAL_GIS_ORDER
+                    )
+                    if not layer_srs.IsSame(raster_srs):
+                        return False
+                    gdal.RasterizeLayer(
+                        raster, [1], layer, burn_values=[nodata],
+                        options=["ALL_TOUCHED=TRUE"],
+                    )
+            finally:
+                dataset = None
+    except Exception:  # noqa: BLE001 - запасной путь ниже
+        return False
+    return True
 
 
 def _contour_tile_side(pixels):
@@ -1236,7 +1530,7 @@ def _contour_tile(task):
     Возвращает слой с отрезками: файл на тайл не пишется — создание
     GeoPackage обходится дороже самой генерации.
     """
-    source_path, tile, step = task
+    source_path, tile, step, water_paths = task
     gdal, ogr, osr = _gdal()
     raster = gdal.Open(source_path)
     if raster is None:
@@ -1245,7 +1539,8 @@ def _contour_tile(task):
     transform = raster.GetGeoTransform()
     xoff, yoff, xsize, ysize = tile["window"]
     # Окно читается прямо в память: копия массива в памяти обошлась бы
-    # вдвое дороже по месту.
+    # вдвое дороже по месту.  Вода записывается в окно значением nodata:
+    # тогда контуры обрываются у берега ещё при генерации.
     memory = gdal.Translate(
         "", source_path, format="MEM",
         srcWin=[xoff, yoff, xsize, ysize],
@@ -1253,6 +1548,7 @@ def _contour_tile(task):
     memory_band = memory.GetRasterBand(1)
     if band.GetNoDataValue() is not None:
         memory_band.SetNoDataValue(band.GetNoDataValue())
+    masked = _try_mask_water(memory, water_paths)
     spatial_ref = osr.SpatialReference()
     spatial_ref.ImportFromWkt(raster.GetProjection())
 
@@ -1263,8 +1559,17 @@ def _contour_tile(task):
     # «Invalid index».
     contour_layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
     contour_layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
-    gdal.ContourGenerate(
-        memory_band, float(step), 0.0, [], 0, 0.0, contour_layer, 0, 1)
+    # useNoData: у растра есть nodata (дырки покрытия и вода, записанная
+    # маской) — через такие пиксели контуры не проводятся.
+    nodata = memory_band.GetNoDataValue()
+    if nodata is not None:
+        gdal.ContourGenerate(
+            memory_band, float(step), 0.0, [], 1, nodata,
+            contour_layer, 0, 1)
+    else:
+        gdal.ContourGenerate(
+            memory_band, float(step), 0.0, [], 0, 0.0,
+            contour_layer, 0, 1)
 
     box = _core_box(transform, tile["core"])
     result = ogr.GetDriverByName("Memory").CreateDataSource("tile")
@@ -1287,7 +1592,7 @@ def _contour_tile(task):
             written += 1
     memory = None
     raster = None
-    return result, written
+    return result, written, masked
 
 
 def _merge_contour_tiles(target, tiles):
@@ -1332,27 +1637,55 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     raster = gdal.Open(str(source))
     pixels = raster.RasterXSize * raster.RasterYSize
     side = _contour_tile_side(pixels)
+    water_paths = _water_mask_paths(config)
+    masked = False
+    glacier_masked = False
     if side <= 1:
-        band = raster.GetRasterBand(1)
-        gdal.ContourGenerate(
-            band,
-            float(config.isolines_step),
-            0.0,
-            [],
-            0,
-            0.0,
-            layer,
-            0,
-            1,
-        )
+        # Вода записывается в копию растра значением nodata: контуры
+        # обрываются у берега при генерации (см. _try_mask_water).
+        # Ледники вырезаются той же маской: тогда обычные изолинии не
+        # заходят на ледники, а ледниковые считаются отдельным проходом
+        # по растру, очищенному от всего, кроме ледников.
+        memory = gdal.Translate("", str(source), format="MEM")
+        memory_band = memory.GetRasterBand(1)
+        if _try_mask_water(memory, water_paths):
+            masked = True
+        glacier_masked = _try_mask_glaciers(memory, config)
+        nodata = memory_band.GetNoDataValue()
+        if nodata is not None:
+            gdal.ContourGenerate(
+                memory_band,
+                float(config.isolines_step),
+                0.0,
+                [],
+                1,
+                nodata,
+                layer,
+                0,
+                1,
+            )
+        else:
+            gdal.ContourGenerate(
+                memory_band,
+                float(config.isolines_step),
+                0.0,
+                [],
+                0,
+                0.0,
+                layer,
+                0,
+                1,
+            )
+        memory = None
         raster = None
     else:
         # DEM режется на тайлы с запасом, контуры считаются параллельно,
         # в результат попадает только середина тайла.
         tiles = _contour_tiles(raster, side, CONTOUR_HALO)
         raster = None
+        masked = True
         tasks = [
-            (str(source), tile, config.isolines_step)
+            (str(source), tile, config.isolines_step, water_paths)
             for tile in tiles
         ]
         workers = _contour_workers(len(tasks))
@@ -1364,7 +1697,11 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
             }
             done = 0
             for future in as_completed(futures):
-                results.append((futures[future], *future.result()))
+                index, result, written, tile_masked = (
+                    futures[future], *future.result()
+                )
+                masked = masked and tile_masked
+                results.append((index, result, written))
                 done += 1
                 if progress:
                     progress(f"Contour lines: tile {done} of {len(tasks)}")
@@ -1382,20 +1719,60 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     layer = dataset.GetLayer(0)
     # Вода режет контуры до того, как они делятся на ледниковые и обычные,
     # поэтому обе группы не заходят на воду — в том числе ледниковые.
-    changed = _subtract_water_from_layer(
-        layer, _water_mask_paths(config), spatial_ref
-    )
-    if progress and changed:
-        progress(f"Contour lines cut by water: {changed}")
+    # Обычно вода уже записана в растр nodata и контуры оборвались у
+    # берега при генерации; векторное срезание — запасной путь.
+    if not masked:
+        changed = _subtract_water_from_layer(
+            layer, _water_mask_paths(config), spatial_ref
+        )
+        if progress and changed:
+            progress(f"Contour lines cut by water: {changed}")
+    elif progress and water_paths:
+        progress("Contour lines cut by water")
     layer.SyncToDisk()
     dataset = None
 
-    destination = config.vector_dir / "isolines_full.sqlite"
     options = [
         "-nln", "isolines",
         "-dsco", "SPATIALITE=YES",
         "-lco", "COMPRESS_GEOM=YES",
     ]
+    if side <= 1 and glacier_masked:
+        # Обычные изолинии — главный контур (ледники уже вырезаны маской);
+        # ледниковые — отдельный проход по очищенному растру.
+        glacier_destination = _generate_masked_glacier_isolines(
+            config, source, water_paths, progress,
+        )
+        if glacier_destination is None:
+            glacier_masked = False
+    if side <= 1 and glacier_masked:
+        regular_destination = config.vector_dir / "isolines_regular.sqlite"
+        regular_destination.unlink(missing_ok=True)
+        result = gdal.VectorTranslate(
+            str(regular_destination), str(shape_path), options=options,
+        )
+        if result is None:
+            raise RuntimeError("Failed to write contour lines")
+        result = None
+        destination = config.vector_dir / "isolines_full.sqlite"
+        destination.unlink(missing_ok=True)
+        result = gdal.VectorTranslate(
+            str(destination), str(shape_path), options=options,
+        )
+        if result is None:
+            raise RuntimeError("Failed to write contour lines")
+        result = gdal.VectorTranslate(
+            str(destination), str(glacier_destination),
+            options=options + ["-append"],
+        )
+        if result is None:
+            raise RuntimeError("Failed to merge glacier contour lines")
+        result = None
+        for suffix in (".shp", ".shx", ".dbf", ".prj"):
+            (config.temp_dir / f"isolines_full{suffix}").unlink(missing_ok=True)
+        return destination
+
+    destination = config.vector_dir / "isolines_full.sqlite"
     try:
         result = gdal.VectorTranslate(str(destination), str(shape_path), options=options)
     except Exception:

@@ -1647,8 +1647,8 @@ class ContourTilingTest(unittest.TestCase):
         levels = set()
         length = 0.0
         for index, tile in enumerate(tiles):
-            dataset, _count = terrain._contour_tile(
-                (str(self.source), tile, 50))
+            dataset, _count, _masked = terrain._contour_tile(
+                (str(self.source), tile, 50, []))
             layer = dataset.GetLayer(0)
             for feature in layer:
                 levels.add(round(feature.GetField("ELEV"), 6))
@@ -1667,7 +1667,11 @@ class ContourTilingTest(unittest.TestCase):
         layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
         layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
         layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
-        gdal.ContourGenerate(band, 50.0, 0.0, [], 0, 0.0, layer, 0, 1)
+        nodata = band.GetNoDataValue()
+        if nodata is not None:
+            gdal.ContourGenerate(band, 50.0, 0.0, [], 1, nodata, layer, 0, 1)
+        else:
+            gdal.ContourGenerate(band, 50.0, 0.0, [], 0, 0.0, layer, 0, 1)
         levels = set()
         length = 0.0
         for feature in layer:
