@@ -132,6 +132,9 @@ def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
     if not pending:
         return tiles
 
+    workers = min(DEM_DOWNLOAD_WORKERS, len(pending))
+    source_title = i18n.tr(dem_sources.source("srtm").title)
+
     def fetch(item):
         tile, target, cached = item
         url = (
@@ -139,7 +142,12 @@ def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
             f"{_tile_directory(tile)}/{tile}.hgt.gz"
         )
         if progress:
-            progress(f"Downloading {tile}")
+            progress(
+                i18n.trf(
+                    "Загрузка тайла рельефа: {} ({})",
+                    f"{tile}.hgt.gz", source_title,
+                )
+            )
         temporary = destination / f"{tile}.hgt.gz"
         try:
             with urllib.request.urlopen(url, timeout=60) as response, temporary.open("wb") as handle:
@@ -215,6 +223,12 @@ def _cached_cog(cache_dir, source_key, bbox):
     return folder / name
 
 
+def _remote_file_name(url):
+    """Имя скачиваемого файла из URL для журнала (без query-строки)."""
+    path = url.split("?", 1)[0]
+    return path.rstrip("/").rsplit("/", 1)[-1]
+
+
 def _cog_sources(source_key, bbox, progress=None, cancel=None):
     """Ссылки на растровые источники набора для области."""
     item = dem_sources.source(source_key)
@@ -256,6 +270,13 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
             else:
                 continue
             sources.append("/vsicurl/" + url)
+            if progress:
+                progress(
+                    i18n.trf(
+                        "Загрузка тайла рельефа: {} ({})",
+                        _remote_file_name(url), item.short,
+                    )
+                )
         if not sources:
             # Каталог STAC недоступен: остаются тайлы открытого зеркала.
             for tile in dem_sources.cop30_existing_tiles(
@@ -263,6 +284,13 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
             ):
                 url = dem_sources.aws_tile_url("cop30", *tile)
                 sources.append("/vsicurl/" + url)
+                if progress:
+                    progress(
+                        i18n.trf(
+                            "Загрузка тайла рельефа: {} ({})",
+                            _remote_file_name(url), item.short,
+                        )
+                    )
         return sources
     for entry in items:
         if cancel is not None and cancel.is_set():
@@ -272,6 +300,13 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
             continue
         url = dem_sources.sign_pc(href)
         sources.append("/vsicurl/" + url)
+        if progress:
+            progress(
+                i18n.trf(
+                    "Загрузка тайла рельефа: {} ({})",
+                    _remote_file_name(url), item.short,
+                )
+            )
     return sources
 
 
