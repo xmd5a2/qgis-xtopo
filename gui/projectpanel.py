@@ -56,7 +56,7 @@ try:
 except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
-from ..core import i18n, map_language
+from ..core import i18n, map_language, slope_style
 from ..core.project import fit_project_extent
 from ..core.resources import template_path
 from .atlas import (
@@ -2179,6 +2179,9 @@ class ProjectPanel(QWidget):
         self._update_tool_actions(own)
         if not own:
             self._style_layer = None
+            # Закрытый проект: при следующем открытии вариант уклонов снова
+            # подбирается по рельефу (данные могли переподготовить).
+            self._baseline_project = None
             return
         file_name = QgsProject.instance().fileName()
         if file_name != self._baseline_project:
@@ -2187,6 +2190,10 @@ class ProjectPanel(QWidget):
             self._hillshade_baseline = {}
             self._isoline_color = None
             self._isoline_baseline = {}
+            # Раскраску уклонов ставим по типу рельефа нового проекта;
+            # ручной выбор пользователя в этом же проекте не трогаем.
+            self._steep_variant_name = None
+            self._auto_steep_variant(file_name)
             self._capture_hillshade_baseline()
         self._connect_style_layer()
         self._rebuild_rules()
@@ -2997,6 +3004,21 @@ class ProjectPanel(QWidget):
         if self._steep_variant_name in names:
             return self._steep_variant_name
         return names[0]
+
+    def _auto_steep_variant(self, project_file):
+        """Ставит вариант уклонов по типу рельефа, не меняя саму опцию.
+
+        Видимость слоёв не трогаем: в подготовленном проекте все варианты
+        скрыты, а выбор применяется, когда пользователь включает раскраску.
+        """
+        variant = slope_style.choose_variant(
+            slope_style.project_raster(project_file)
+        )
+        if variant is None:
+            return
+        name = STEEP_VARIANTS[variant - 1][0]
+        if name in self._steep_variant_names():
+            self._steep_variant_name = name
 
     def _update_steep_variants(self):
         """Приводит список вариантов уклонов в соответствие с проектом."""

@@ -407,5 +407,98 @@ class IsolineResetTemplateTest(unittest.TestCase):
         self.assertEqual(pp.isoline_reset_styles(layer, captured), captured)
 
 
+class SlopeVariantChoiceTest(unittest.TestCase):
+    """Вариант раскраски уклонов выбирается по крутизне рельефа."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def _raster(self, values, nodata=None):
+        from osgeo import gdal
+        import numpy as np
+
+        path = Path(self.directory.name) / "slope_upscaled.tif"
+        rows, cols = values.shape
+        dataset = gdal.GetDriverByName("GTiff").Create(
+            str(path), cols, rows, 1, gdal.GDT_Float32,
+        )
+        dataset.SetGeoTransform((0, 0.001, 0, 0, 0, -0.001))
+        band = dataset.GetRasterBand(1)
+        band.WriteArray(np.asarray(values, dtype="float32"))
+        if nodata is not None:
+            band.SetNoDataValue(nodata)
+        dataset = None
+        return path
+
+    def test_terrain_types(self):
+        import numpy as np
+        from qgis_xtopo.core import slope_style
+
+        mountains = self._raster(np.full((50, 50), 45.0))
+        self.assertEqual(slope_style.choose_variant(mountains),
+                         slope_style.MOUNTAINS)
+
+        foothills = self._raster(np.full((50, 50), 20.0))
+        self.assertEqual(slope_style.choose_variant(foothills),
+                         slope_style.FOOTHILLS)
+
+        plains = self._raster(np.full((50, 50), 3.0))
+        self.assertEqual(slope_style.choose_variant(plains),
+                         slope_style.PLAINS)
+
+    def test_foothill_bounds(self):
+        import numpy as np
+        from qgis_xtopo.core import slope_style
+
+        # Нижняя граница предгорий и верхняя, после которой начинаются горы.
+        lower = self._raster(np.full((50, 50), slope_style.FOOTHILL_P90))
+        self.assertEqual(slope_style.choose_variant(lower),
+                         slope_style.FOOTHILLS)
+        upper = self._raster(
+            np.full((50, 50), slope_style.MOUNTAIN_P90 - 0.1)
+        )
+        self.assertEqual(slope_style.choose_variant(upper),
+                         slope_style.FOOTHILLS)
+        below = self._raster(
+            np.full((50, 50), slope_style.FOOTHILL_P90 - 0.1)
+        )
+        self.assertEqual(slope_style.choose_variant(below),
+                         slope_style.PLAINS)
+        above = self._raster(np.full((50, 50), slope_style.MOUNTAIN_P90))
+        self.assertEqual(slope_style.choose_variant(above),
+                         slope_style.MOUNTAINS)
+
+    def test_nodata_is_ignored(self):
+        import numpy as np
+        from qgis_xtopo.core import slope_style
+
+        values = np.full((50, 50), -9999.0)
+        values[:25, :] = 45.0
+        path = self._raster(values, nodata=-9999.0)
+        self.assertEqual(slope_style.choose_variant(path),
+                         slope_style.MOUNTAINS)
+
+    def test_missing_raster_keeps_manual_choice(self):
+        from qgis_xtopo.core import slope_style
+
+        self.assertIsNone(slope_style.choose_variant(None))
+        self.assertIsNone(
+            slope_style.choose_variant(Path(self.directory.name) / "none.tif")
+        )
+
+    def test_project_raster_path(self):
+        from qgis_xtopo.core import slope_style
+
+        root = Path(self.directory.name)
+        (root / "raster").mkdir()
+        raster = root / "raster" / "slope_upscaled.tif"
+        raster.touch()
+        self.assertEqual(
+            slope_style.project_raster(str(root / "map.qgz")), raster,
+        )
+        self.assertIsNone(slope_style.project_raster(""))
+
+
 if __name__ == "__main__":
     unittest.main()
