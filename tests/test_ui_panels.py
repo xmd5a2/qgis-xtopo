@@ -228,6 +228,40 @@ class ProxyIconTest(unittest.TestCase):
             self.assertEqual(pixmap.pixelColor(0, 15).alpha(), 0)
 
 
+class TabCornerButtonsTest(unittest.TestCase):
+    """Кнопки прокси и языка не должны быть выше полосы вкладок."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_corner_buttons_fit_tab_bar(self):
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+
+        class Iface:
+            def mainWindow(self):
+                return window
+
+        dock = XtopoDockWidget(Iface())
+        self.addCleanup(dock.deleteLater)
+        dock._fit_language_button()
+
+        limit = dock.tabs.tabBar().sizeHint().height()
+        self.assertLessEqual(dock.proxy_button.height(), limit)
+        self.assertLessEqual(dock.language_button.height(), limit)
+        corner = dock.tabs.cornerWidget()
+        self.assertIsNotNone(corner)
+        margins = corner.layout().contentsMargins()
+        self.assertGreater(margins.right(), 0)
+
+
 class LogScrollTest(unittest.TestCase):
     """Новая строка журнала должна быть видна, масштаб текста — сохранён."""
 

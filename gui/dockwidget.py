@@ -651,23 +651,27 @@ class XtopoDockWidget(QDockWidget):
         i18n.remove_listener(self._language_changed)
 
     def _fit_language_button(self):
-        """Высота кнопки языка — как у строки заголовков вкладок.
+        """Высота угловых кнопок — по строке заголовков вкладок.
 
-        Угловая кнопка ставится с отступом сверху (его задаёт стиль),
-        поэтому доступная высота — высота строки вкладок минус отступ.
+        Угловой виджет стоит внутри полосы вкладок. Если кнопки выше неё,
+        они выходят за рамку вкладок, поэтому обе получают одинаковую
+        высоту с небольшим отступом сверху и снизу.
         """
         bar = self.tabs.tabBar()
         height = bar.sizeHint().height()
         if height <= 0:
             height = bar.height()
-        inset = self.language_button.y() - bar.y()
-        if inset > 0:
-            height -= inset
+        height = max(16, height - 8)
         metrics = QFontMetrics(self.language_button.font())
         width = max(30, metrics.horizontalAdvance("RU") + 16)
-        self.language_button.setFixedSize(
-            QSize(width, max(16, height - 2))
-        )
+        self.language_button.setFixedSize(QSize(width, height))
+        if hasattr(self, "proxy_button"):
+            self.proxy_button.setFixedSize(QSize(height, height))
+        corner = self.tabs.cornerWidget(_top_right_corner())
+        if corner is not None:
+            # Полоса вкладок прижимает угол к низу, поэтому снизу оставляем
+            # поле в раскладке, а не в высоте виджета.
+            corner.setFixedHeight(height + 4)
 
     def _narrow_minimum_width(self):
         """Минимальная ширина панели на 15% меньше естественной."""
@@ -733,7 +737,7 @@ class XtopoDockWidget(QDockWidget):
         self.proxy_button.clicked.connect(self._open_proxy_dialog)
         corner = QWidget(self.tabs)
         corner_layout = QHBoxLayout(corner)
-        corner_layout.setContentsMargins(0, 0, 0, 0)
+        corner_layout.setContentsMargins(0, 0, 4, 4)
         corner_layout.setSpacing(2)
         corner_layout.addWidget(self.proxy_button)
         corner_layout.addWidget(self.language_button)
