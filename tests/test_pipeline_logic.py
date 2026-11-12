@@ -601,6 +601,36 @@ class LabelAxisRecipeTest(unittest.TestCase):
             self.assertNotIn("simplify", steps[:axis], name)
 
 
+class ProcessingImportTest(unittest.TestCase):
+    def test_empty_local_processing_dir_does_not_shadow_qgis(self):
+        """Пустой processing/ в корне не должен подменять пакет QGIS."""
+        import sys
+
+        from tests import qgis_app
+
+        qgis_app()
+        from qgis_xtopo.core import pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "processing").mkdir()
+            saved = {
+                name: module for name, module in sys.modules.items()
+                if name == "processing" or name.startswith("processing.")
+            }
+            for name in saved:
+                del sys.modules[name]
+            sys.path.insert(0, directory)
+            try:
+                module, _Processing = pipeline._load_processing()
+                self.assertTrue(hasattr(module, "core"))
+            finally:
+                sys.path.remove(directory)
+                for name in list(sys.modules):
+                    if name == "processing" or name.startswith("processing."):
+                        del sys.modules[name]
+                sys.modules.update(saved)
+
+
 class GeometryRepairRecipeTest(unittest.TestCase):
     """Растворение воды создаёт самопересечения, ломающие difference."""
 

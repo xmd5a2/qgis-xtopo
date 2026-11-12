@@ -463,6 +463,11 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 ## Проверка в реальном QGIS
 
 - Offscreen-тесты не покрывают регистрацию плагина и раскладку окон.
+- **Пустой `processing/` в корне репозитория** (его создаёт QGIS)
+  Python принимает за namespace-пакет: `import processing` проходит, а
+  `processing.core` — нет. `pipeline._load_processing()` ставит путь QGIS
+  в начало `sys.path` и сбрасывает уже импортированный пустой пакет.
+  Каталог в `.gitignore`, удалять его не обязательно.
 - Не трогать работающий QGIS (`pgrep -x qgis.bin`); запускать с временным
   профилем: `qgis --profiles-path /tmp/... --code script.py`.
 - Панель открывается при `QGIS_XTOPO_OPEN=1`; показ — по

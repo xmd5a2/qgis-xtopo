@@ -268,26 +268,44 @@ class Feedback:
         return getattr(self.instance, item)
 
 
+def _load_processing():
+    """Импортирует QGIS Processing, не полагаясь на текущий каталог.
+
+    QGIS при запуске из корня репозитория создаёт пустой каталог
+    ``processing/`` (models, outputs, scripts). Python принимает его за
+    namespace-пакет: ``import processing`` проходит, а
+    ``processing.core`` — нет. Поэтому путь QGIS ставится в начало
+    sys.path, а уже импортированный пустой пакет убирается из
+    sys.modules.
+    """
+    import sys
+
+    from qgis.core import QgsApplication
+
+    prefix = QgsApplication.prefixPath()
+    paths = ["/usr/share/qgis/python/plugins"]
+    if prefix:
+        paths.insert(0, os.path.join(prefix, "python", "plugins"))
+    for path in reversed(paths):
+        if path in sys.path:
+            sys.path.remove(path)
+        sys.path.insert(0, path)
+    try:
+        import processing
+        from processing.core.Processing import Processing
+        return processing, Processing
+    except ImportError:
+        for name in list(sys.modules):
+            if name == "processing" or name.startswith("processing."):
+                del sys.modules[name]
+        import processing
+        from processing.core.Processing import Processing
+        return processing, Processing
+
+
 class ProcessingRunner:
     def __init__(self, progress=None, cancel=None, fraction=None):
-        import os
-        import sys
-
-        try:
-            import processing
-        except ImportError:
-            from qgis.core import QgsApplication
-
-            prefix = QgsApplication.prefixPath()
-            for path in (
-                os.path.join(prefix, "python", "plugins"),
-                "/usr/share/qgis/python/plugins",
-            ):
-                if path not in sys.path:
-                    sys.path.append(path)
-            import processing
-        from processing.core.Processing import Processing
-
+        processing, Processing = _load_processing()
         Processing.initialize()
         self.processing = processing
         self.progress = progress
