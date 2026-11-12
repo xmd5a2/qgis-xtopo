@@ -459,6 +459,24 @@ class PoiSuppressionTest(unittest.TestCase):
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет правил значков POI")
 
+    def test_icon_rules_break_ties_within_a_layer(self):
+        """Равный ранг не вытеснял: значки одного слоя накладывались.
+
+        Фильтр должен скрывать точку, если рядом стоит точка того же
+        слоя (тот же ранг) с меньшими координатами — она побеждает.
+        """
+        checked = 0
+        for layer in self.layers:
+            for leaf in poi_icons.leaves(layer.root):
+                if not poi_icons.band_indexes(
+                    leaf.minimum, leaf.maximum, self.bands,
+                ):
+                    continue
+                self.assertIn('OR ("rank" =', leaf.filter)
+                self.assertIn("geometry(@parent)", leaf.filter)
+                checked += 1
+        self.assertTrue(checked)
+
     def test_icon_rules_pick_scale_outside_overlay(self):
         """Текущий диапазон выбирается снаружи overlay_nearest.
 
@@ -494,6 +512,55 @@ class PoiSuppressionTest(unittest.TestCase):
                 )
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет подписей POI")
+
+
+class PoiPruneTest(unittest.TestCase):
+    """Служебный слой хранит победителя кластера того же слоя."""
+
+    def _point(self, lon, lat, rank, band=0):
+        from qgis_xtopo.core.poi_icons import _Point
+
+        return _Point(
+            wkt=f"POINT ({lon} {lat})",
+            rank=rank,
+            crs="EPSG:4326",
+            lon=lon,
+            lat=lat,
+            bands={band: 3},
+        )
+
+    def _kept(self, points, distance=500.0):
+        from qgis_xtopo.core.poi_icons import _prune_band
+
+        return _prune_band(points, 0, distance, 46.0)
+
+    def test_same_layer_cluster_keeps_winner(self):
+        west = self._point(6.9, 46.05, rank=5)
+        east = self._point(6.9005, 46.05, rank=5)
+        kept = self._kept([west, east])
+        self.assertIn(west, kept)
+        self.assertNotIn(east, kept)
+
+    def test_same_layer_tie_breaks_by_latitude(self):
+        south = self._point(6.9, 46.05, rank=5)
+        north = self._point(6.9, 46.0505, rank=5)
+        kept = self._kept([north, south])
+        self.assertIn(south, kept)
+        self.assertNotIn(north, kept)
+
+    def test_far_apart_same_layer_dropped(self):
+        west = self._point(6.9, 46.05, rank=5)
+        east = self._point(6.94, 46.05, rank=5)
+        self.assertEqual(self._kept([west, east]), [])
+
+    def test_lower_priority_still_suppresses(self):
+        top = self._point(6.9, 46.05, rank=3)
+        low = self._point(6.9005, 46.05, rank=9)
+        kept = self._kept([top, low])
+        # Победитель хранится, проигравший в служебном слое не нужен:
+        # подавлять им некого.
+        self.assertIn(top, kept)
+        self.assertNotIn(low, kept)
 
 
 if __name__ == "__main__":

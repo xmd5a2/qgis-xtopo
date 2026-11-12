@@ -209,6 +209,19 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   (`island polygon`, `island point names`) `priority=7`, у пиков — `6`.
   Иначе пик занимает место, и имя острова не размещается. Проверка —
   `tests/test_template_styles.py`.
+- **Вытеснение значков POI действует и внутри слоя.** Фильтр подавления
+  скрывает значок, если рядом есть точка с меньшим рангом **или с тем же
+  рангом, но меньшими координатами** (tie-break по `x($geometry)`/
+  `y($geometry)` против `geometry(@parent)` — id в данных не нужен). Без
+  второго условия значки одного слоя (населённые пункты, хижины) на
+  мелких масштабах накладывались друг на друга. Победитель кластера
+  остаётся в служебном слое (`_prune_band` в `core/poi_icons.py` хранит
+  точку, у которой есть сосед с бо́льшим рангом или восточнее/севернее
+  того же ранга). Фильтры запечены в шаблон как `filter:="rank" < N OR
+  ("rank" = N AND (x($geometry) < x(geometry(@parent)) OR ...))`;
+  при перегенерации кавычки в XML экранировать (`&quot;`), иначе файл
+  ломается. Проверка — `test_icon_rules_break_ties_within_a_layer` и
+  `PoiPruneTest` в `tests/test_template_styles.py`.
 
 ## Источники рельефа
 
