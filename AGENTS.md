@@ -231,6 +231,11 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   кириллическому названию (`_has_cyrillic` в `resources/expressions/
   format_*.py`). Название из одного слова типа не дополняется префиксом.
   Списки типовых слов у водной и населённой групп должны совпадать.
+- **«(неж.)» у населённых пунктов** скрывается по тем же условиям, что
+  категория сложности перевала: пометка не приписывается имени не
+  кириллицей на нерусской карте, включая «Местные названия»; на русской
+  карте и для кириллических имён она остаётся. Проверка — тесты
+  `uninhabited_place` в `tests/test_label_abbreviations.py`.
 - Выражения (`readable_name`, `format_place_name`, `pick_name_part`, ...)
   регистрируются `core/expressions.py: load_expressions()`. Если функции нет,
   QGIS не рисует подписи. Доступные функции — `registered_functions()` через

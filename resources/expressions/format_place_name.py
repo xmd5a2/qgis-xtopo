@@ -2,6 +2,38 @@ from qgis.core import *
 from qgis.gui import *
 import re
 
+# Переменная проекта: 1 для «Местных названий», 0 для русского языка.
+LOCAL_VARIABLE = "name_local"
+
+
+def _has_cyrillic(text):
+    """Есть ли в названии кириллические буквы."""
+    return bool(re.search(r"[А-Яа-яЁё]", text or ""))
+
+
+def _project_variable(name):
+    try:
+        scope = QgsExpressionContextUtils.projectScope(QgsProject.instance())
+        return scope.variable(name)
+    except Exception:
+        return None
+
+
+def _map_language_is_ru(name_pref_suf_lang, name_local=None):
+    """Язык карты именно русский, а не «Местные названия».
+
+    ``@name_pref_suf_lang`` равен ``ru`` и для местных названий: типовые
+    слова сокращаются по-русски всегда. Отличить русскую карту от местной
+    позволяет переменная ``@name_local``.
+    """
+    if str(name_pref_suf_lang or "").strip().lower() != "ru":
+        return False
+    if name_local is None:
+        name_local = _project_variable(LOCAL_VARIABLE)
+    local = str(name_local).strip().lower()
+    return local not in ("1", "true")
+
+
 # Типовые слова в названиях населённых пунктов и их сокращения.
 # Правила применяются по очереди, каждое — только к границам слова,
 # поэтому «Островского» не превращается в «о.ского».
@@ -177,6 +209,13 @@ def format_place_name(name, population, name_pref_suf_lang, feature, parent):
 
     if "перевал " in n.lower(): n = re.sub("перевал ","пер. ", n, flags=re.IGNORECASE)
 
-    if population == "0" and name_pref_suf_lang == "ru": n = n + "\n(неж.)"
+    # «(неж.)» — русская пометка, как и категория перевала: имени не
+    # кириллицей на нерусской карте (включая «Местные названия») она не
+    # приписывается. На русской карте и для кириллических имён остаётся.
+    if population == "0" and (
+            not (name or "").strip()
+            or _has_cyrillic(name)
+            or _map_language_is_ru(name_pref_suf_lang)):
+        n = n + "\n(неж.)"
 
     return " ".join(n.split())

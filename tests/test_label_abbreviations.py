@@ -35,6 +35,22 @@ class LabelAbbreviationTests(unittest.TestCase):
     def place(self, name):
         return self._evaluate("format_place_name('%s', 999, 'ru')" % name)
 
+    def uninhabited_place(self, name, pref="ru", local="0"):
+        """Подпись населённого пункта с population=0."""
+        from qgis.core import QgsProject
+
+        project = QgsProject.instance()
+        old = project.customVariables()
+        project.setCustomVariables(dict(old, name_pref_suf_lang=pref,
+                                        name_local=local))
+        try:
+            return self._evaluate(
+                "format_place_name('%s', '0', '%s')"
+                % (name.replace("'", "''"), pref)
+            )
+        finally:
+            project.setCustomVariables(old)
+
     def peak(self, name):
         return self._evaluate("format_peak_pass_name('%s')" % name)
 
@@ -81,6 +97,27 @@ class LabelAbbreviationTests(unittest.TestCase):
         self.assertEqual(self.place("Преображенская"), "Преображенская")
         self.assertEqual(self.place("Дагомыс"), "Дагомыс")
         self.assertEqual(self.place("Остров"), "Остров")
+
+    def test_uninhabited_mark_is_hidden_for_non_cyrillic_local_names(self):
+        """На «Местных названиях» латинское имя не получает «(неж.)»."""
+        self.assertEqual(self.uninhabited_place("Nadăș", local="1"), "Nadăș")
+
+    def test_uninhabited_mark_is_hidden_for_non_russian_map(self):
+        """На нерусской карте латинское имя не получает «(неж.)»."""
+        self.assertEqual(
+            self.uninhabited_place("Nadăș", pref="en", local="0"), "Nadăș")
+
+    def test_uninhabited_mark_stays_on_russian_map(self):
+        """На русской карте пометка остаётся даже у латинского имени."""
+        self.assertEqual(
+            self.uninhabited_place("Nadăș"), "Nadăș (неж.)")
+
+    def test_uninhabited_mark_stays_for_cyrillic_name(self):
+        """Кириллическое имя сохраняет «(неж.)» при любом языке."""
+        self.assertEqual(
+            self.uninhabited_place("Ивановка", pref="en"),
+            "Ивановка (неж.)",
+        )
 
     def test_peak_and_pass_names_lose_extra_spaces(self):
         """«Перевал» убирается вместе с пробелом."""
