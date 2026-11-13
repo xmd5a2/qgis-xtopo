@@ -74,12 +74,6 @@ def resolve_polygon_overlaps(config, progress=None, cancel=None):
         ]
         if not available:
             continue
-        notify(
-            i18n.trf(
-                "Вырезание пересечений: {} / {}",
-                upper, ", ".join(lower for lower, _, _ in available),
-            )
-        )
         try:
             changed = _cut_layer(
                 upper_path, available, cancel,
@@ -95,15 +89,30 @@ def resolve_polygon_overlaps(config, progress=None, cancel=None):
             )
             continue
         for lower, _, _ in available:
-            count = changed.get(lower, 0)
-            results.append((upper, lower, count))
-            notify(
-                i18n.trf(
-                    "Вырезание пересечений: {} / {} — изменено {} объектов",
-                    upper, lower, count,
-                )
-            )
+            results.append((upper, lower, changed.get(lower, 0)))
+    _report_summary(results, notify)
     return results
+
+
+def _report_summary(results, notify):
+    """Пишет одну итоговую строку вместо строки на каждую пару слоёв."""
+    if not results:
+        return
+    changed = sum(count for _, _, count in results)
+    if not changed:
+        notify(i18n.tr("Вырезание пересечений: изменений нет"))
+        return
+    details = ", ".join(
+        f"{upper}/{lower} — {count}"
+        for upper, lower, count in results
+        if count
+    )
+    notify(
+        i18n.trf(
+            "Вырезание пересечений: изменено {} объектов ({})",
+            changed, details,
+        )
+    )
 
 
 def _layer_path(config, name):

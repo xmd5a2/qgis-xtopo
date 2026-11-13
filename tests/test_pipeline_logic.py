@@ -1140,6 +1140,48 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertAlmostEqual(geometry.Area(), 100.0, places=6)
         self.assertEqual(_interior_rings(geometry), 0)
 
+    def test_progress_is_one_compact_line(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "farmland.sqlite",
+                "farmland",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            messages = []
+            resolve_polygon_overlaps(config, progress=messages.append)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("изменено 1 объектов", messages[0])
+        self.assertIn("farmland/grass — 1", messages[0])
+
+    def test_progress_reports_nothing_changed(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "farmland.sqlite",
+                "farmland",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((0 0,0 20,20 20,20 0,0 0))"],
+            )
+            messages = []
+            resolve_polygon_overlaps(config, progress=messages.append)
+        self.assertEqual(
+            messages, ["Вырезание пересечений: изменений нет"],
+        )
+
     def test_larger_lower_polygon_is_not_cut(self):
         from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
 
