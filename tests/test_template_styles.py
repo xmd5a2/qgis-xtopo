@@ -184,6 +184,47 @@ class TunnelLayerOrderTest(unittest.TestCase):
         )
 
 
+class AdminBoundaryOrderTest(unittest.TestCase):
+    """Границы admin_level и их подписи выше воды.
+
+    Иначе вода закрывает линии границ, а подписи QGIS всё равно рисует
+    поверх — они остаются без линии и выглядят висящими в воздухе.
+    """
+
+    ADMIN = (
+        "admin level 2 (country borders)",
+        "admin level 2 (country names)",
+        "admin level 4 (regions)",
+        "admin level 4 (region names)",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        root = _template_root()
+        cls.order = [
+            item.get("name")
+            for item in root.iter("layer-tree-layer")
+        ]
+        cls.water = []
+        for group in root.iter("layer-tree-group"):
+            if group.get("name") != "water":
+                continue
+            cls.water = [
+                item.get("name")
+                for item in group.iter("layer-tree-layer")
+            ]
+            break
+
+    def test_admin_boundaries_are_above_water(self):
+        self.assertTrue(self.water, "в шаблоне нет группы water")
+        for admin in self.ADMIN:
+            for water in self.water:
+                self.assertLess(
+                    self.order.index(admin), self.order.index(water),
+                    f"{admin} должен быть выше {water}",
+                )
+
+
 class LandcoverLayerOrderTest(unittest.TestCase):
     """Порядок площадных слоёв: Topo и видимость прибрежных болот."""
 
