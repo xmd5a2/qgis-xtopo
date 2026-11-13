@@ -83,6 +83,12 @@ NEVER_RANK = 99999
 # шаг делает ранги уникальными для _prune_band.
 OBSTACLE_RANK_STEP = 0.01
 
+# Слои, у которых значок моста рисуется на линии и вытесняется внутри
+# своего слоя через поле icon_hide.
+BRIDGE_ICON_LAYERS = (
+    "highway main bridge", "track bridge", "path bridge", "railway bridge",
+)
+
 
 @dataclass
 class PoiRule:
@@ -140,6 +146,10 @@ class _Point:
     rank: float
     lon: float
     lat: float
+    name: str = ""
+    fid: int = -1
+    geometry: str = "Point"
+    hidden: set = field(default_factory=set)
     bands: dict = field(default_factory=dict)  # диапазон -> минимальный LOD
     # диапазон -> размер значка в мм (радиус, в котором он вытесняет)
     sizes: dict = field(default_factory=dict)
@@ -719,6 +729,23 @@ def _nearest_expression(size, index, rank):
     )
 
 
+def icon_enabled_expression(index):
+    """Видимость значка моста в одном диапазоне масштаба.
+
+    Значок рисуется MarkerLine в середине линии, поэтому фильтр правила
+    скрыл бы весь мост.  Поле ``icon_hide`` заполняется при подготовке
+    данных: в нём перечислены диапазоны масштаба, где у объекта есть
+    сосед того же слоя с меньшими координатами.  Правило значка своё
+    для каждого диапазона, поэтому ``@map_scale`` (в data-defined
+    свойствах символа он недоступен) не нужен.  Свойство ``enabled`` у
+    MarkerLine отключает только значок, линии остаются.
+    """
+    return (
+        "if(coalesce(array_contains(string_to_array("
+        f"\"icon_hide\", ';'), '{index}'), false), false, true)"
+    )
+
+
 def extend_filter(filter_text, layer, leaf, bands):
     """Добавляет к фильтру правила подавление значка."""
     suppression = suppression_expression(layer, leaf, bands)
@@ -923,11 +950,16 @@ class _RuleEvaluator:
 
     def visible(self, tree, feature, level, scale):
         """Видна ли точка при текущем уровне детализации и масштабе."""
-        return self._descend(tree, feature, level, scale)
+        return self.icon_size(tree, feature, level, scale) > 0
+
+    def icon_size(self, tree, feature, level, scale):
+        """Размер значка подходящего листа (0 — правило не рисуется)."""
+        return self._descend(tree, feature, level, scale) or 0.0
 
     def _descend(self, rule, feature, level, scale):
         if rule.children:
             matched = False
+            best = 0.0
             for child in rule.children:
                 if child.filter.strip().upper() == "ELSE":
                     allowed = not matched
@@ -935,17 +967,19 @@ class _RuleEvaluator:
                     allowed = self._matches(child, feature, level)
                     if allowed:
                         matched = True
-                if allowed and self._descend(child, feature, level, scale):
-                    return True
-            return False
+                if allowed:
+                    size = self._descend(child, feature, level, scale)
+                    if size > best:
+                        best = size
+            return best
         if rule.size <= 0:
-            return False
+            return 0.0
         # Диапазон масштаба листа уже включает ограничения веток и слоя.
         if rule.minimum and scale < rule.minimum:
-            return False
+            return 0.0
         if rule.maximum and scale > rule.maximum:
-            return False
-        return True
+            return 0.0
+        return rule.size
 
 
 def _band_scale(band):
@@ -968,9 +1002,9 @@ def _uses_detail_level(tree):
 
 
 def _visible_bands(evaluator, tree, feature, bands, detailed):
-    """Диапазоны, в которых точка видна, и минимальный уровень детализации.
+    """Диапазоны, в которых точка видна, её LOD и размер значка.
 
-    Возвращает список (индекс диапазона, минимальный LOD).
+    Возвращает список (индекс диапазона, минимальный LOD, размер значка).
     """
     result = []
     for index, band in enumerate(bands):
@@ -978,31 +1012,17 @@ def _visible_bands(evaluator, tree, feature, bands, detailed):
         if detailed:
             level = None
             for candidate in LOD_LEVELS:
-                if evaluator.visible(tree, feature, candidate, scale):
+                size = evaluator.icon_size(tree, feature, candidate, scale)
+                if size > 0:
                     level = candidate
                     break
         else:
             # Без зависимости от детализации достаточно одного уровня.
-            level = LOD_LEVELS[0] if evaluator.visible(
-                tree, feature, LOD_LEVELS[0], scale,
-            ) else None
+            size = evaluator.icon_size(tree, feature, LOD_LEVELS[0], scale)
+            level = LOD_LEVELS[0] if size > 0 else None
         if level is not None:
-            result.append((index, level))
+            result.append((index, level, size))
     return result
-
-
-def _band_icon_size(layer, index, bands):
-    """Размер значка слоя в представительном масштабе диапазона."""
-    scale = _band_scale(bands[index])
-    sizes = []
-    for leaf in leaves(layer.root):
-        if leaf.minimum and scale < leaf.minimum:
-            continue
-        if leaf.maximum and scale >= leaf.maximum:
-            continue
-        if leaf.size > 0:
-            sizes.append(leaf.size)
-    return max(sizes) if sizes else 0.0
 
 
 def _collect_points(config, layers, bands, cancel=None):
@@ -1047,11 +1067,11 @@ def _collect_points(config, layers, bands, cancel=None):
                 rank=info.rank,
                 lon=lon,
                 lat=lat,
-                bands={index: level for index, level in visible},
-                sizes={
-                    index: _band_icon_size(info, index, bands)
-                    for index, _level in visible
-                },
+                name=info.name,
+                fid=feature.id(),
+                geometry=info.geometry,
+                bands={index: level for index, level, _size in visible},
+                sizes={index: size for index, _level, size in visible},
             ))
     return points
 
@@ -1072,7 +1092,10 @@ def _prune_band(points, index, scale, latitude_max):
     именно с ``size`` его правила.  Прежний общий максимум оставлял в
     слое точки, которые никого не могли подавить.
     """
-    entries = [point for point in points if index in point.bands]
+    entries = [
+        point for point in points
+        if index in point.bands and index not in point.hidden
+    ]
     if not entries:
         return []
     if not scale:
@@ -1136,6 +1159,121 @@ def _prune_band(points, index, scale, latitude_max):
     return keep
 
 
+def _hidden_bridge_bands(points, bands):
+    """Диапазоны, где значок моста проигрывает соседу того же слоя.
+
+    Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
+    Побеждает объект с меньшими координатами, как у точечных POI; радиус
+    сравнения — размер значка скрываемого объекта.  Соседи ищутся по
+    сетке, чтобы не перебирать все пары на больших выгрузках.
+    """
+    result = {}
+    for index, band in enumerate(bands):
+        entries = [
+            point for point in points
+            if index in point.bands
+            and point.name in BRIDGE_ICON_LAYERS
+            and point.geometry == "Line"
+            and point.fid >= 0
+        ]
+        if len(entries) < 2:
+            continue
+        lower, upper = band
+        scale = upper if upper else _band_scale(band)
+
+        def limit(point):
+            return point.sizes.get(index, 0.0) * scale / 1000.0
+
+        max_limit = max((limit(point) for point in entries), default=0.0)
+        if max_limit <= 0:
+            continue
+        latitude_max = max(abs(point.lat) for point in entries)
+        worst = math.cos(math.radians(latitude_max))
+        cell = max(max_limit / (111320.0 * max(worst, 0.01)), 1e-6)
+        grid = {}
+        for position, point in enumerate(entries):
+            grid.setdefault(
+                (int(point.lon // cell), int(point.lat // cell)), []
+            ).append(position)
+        for position, point in enumerate(entries):
+            gx = int(point.lon // cell)
+            gy = int(point.lat // cell)
+            found = False
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for other in grid.get((gx + dx, gy + dy), ()):
+                        if other == position:
+                            continue
+                        neighbour = entries[other]
+                        if neighbour.name != point.name:
+                            continue
+                        if (neighbour.lon, neighbour.lat) >= (
+                                point.lon, point.lat):
+                            continue
+                        distance = math.hypot(
+                            (neighbour.lon - point.lon)
+                            * math.cos(math.radians(point.lat)),
+                            neighbour.lat - point.lat,
+                        ) * 111320.0
+                        if distance <= limit(point):
+                            result.setdefault(
+                                (point.name, point.fid), set()
+                            ).add(index)
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+    return result
+
+
+def _write_icon_hide(config, layers, points, bands):
+    """Пишет поле icon_hide в слои мостов.
+
+    Поле хранит через точку с запятой индексы диапазонов, где значок
+    скрыт.  Выражение шаблона выбирает нужный индекс по @map_scale.
+    """
+    hidden = _hidden_bridge_bands(points, bands)
+    from osgeo import ogr
+
+    updates = {}
+    for (name, fid), indexes in hidden.items():
+        updates.setdefault(name, []).append(
+            (fid, ";".join(str(index) for index in sorted(indexes)))
+        )
+    for info in layers:
+        if info.name not in BRIDGE_ICON_LAYERS or info.geometry != "Line":
+            continue
+        path = _source_path(config, info.source)
+        if path is None:
+            continue
+        dataset = ogr.Open(str(path), 1)
+        if dataset is None:
+            continue
+        try:
+            layer = dataset.GetLayer(0)
+            if layer is None:
+                continue
+            if layer.GetLayerDefn().GetFieldIndex("icon_hide") < 0:
+                layer.CreateField(ogr.FieldDefn("icon_hide", ogr.OFTString))
+            else:
+                result = dataset.ExecuteSQL(
+                    f'UPDATE "{layer.GetName()}" SET "icon_hide" = NULL')
+                if result is not None:
+                    dataset.ReleaseResultSet(result)
+            for fid, value in updates.get(info.name, ()):
+                feature = layer.GetFeature(fid)
+                if feature is None:
+                    continue
+                feature.SetField("icon_hide", value)
+                layer.SetFeature(feature)
+                feature = None
+        finally:
+            dataset = None
+    return hidden
+
+
 def _write_aux(config, records, crs, file_name):
     """Записывает служебные слои по диапазонам в GeoPackage.
 
@@ -1197,6 +1335,9 @@ def build_poi_icons(config, progress=None, cancel=None):
         for file_name in (AUX_FILE_NAME, LEGACY_AUX_FILE_NAME_3857):
             (Path(config.vector_dir) / file_name).unlink(missing_ok=True)
         return 0
+    hidden = _write_icon_hide(config, obstacles, points, bands)
+    for point in points:
+        point.hidden = hidden.get((point.name, point.fid), set())
     latitude_max = max(abs(point.lat) for point in points)
     records = {}
     total = 0

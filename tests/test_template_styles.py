@@ -1086,6 +1086,282 @@ class PoiObstacleTest(unittest.TestCase):
 
 
 
+class BridgeIconSuppressionTest(unittest.TestCase):
+    """Значки мостов одного слоя вытесняют друг друга.
+
+    Значок рисуется MarkerLine в середине линии, поэтому фильтр правила
+    скрыл бы весь мост.  Вместо фильтра вложенному маркеру задан
+    data-defined размер: поле icon_hide перечисляет диапазоны, где рядом
+    есть мост того же слоя с меньшими координатами.
+    """
+
+    LAYERS = ("highway main bridge", "track bridge",
+              "path bridge", "railway bridge")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    @staticmethod
+    def _find(node, path):
+        for rule in node.findall("rule"):
+            title = rule.get("description") or rule.get("label")
+            if title == path[0]:
+                if len(path) == 1:
+                    return rule
+                return BridgeIconSuppressionTest._find(rule, path[1:])
+        return None
+
+    @staticmethod
+    def _active_symbols(layer):
+        renderer = layer.find("renderer-v2")
+        symbols = {
+            symbol.get("name"): symbol
+            for symbol in renderer.findall("symbols/symbol")
+        }
+        usage = {}
+
+        def walk(node, inherited_min, inherited_max):
+            lower = float(node.get("scalemindenom") or 0)
+            upper = float(node.get("scalemaxdenom") or 0)
+            if lower <= 1.0:
+                lower = 0.0
+            effective_min = max(inherited_min, lower)
+            if inherited_max and upper:
+                effective_max = min(inherited_max, upper)
+            else:
+                effective_max = inherited_max or upper
+            children = node.findall("rule")
+            if not children:
+                symbol_name = node.get("symbol")
+                if symbol_name:
+                    usage.setdefault(symbol_name, []).append(
+                        (effective_min, effective_max))
+            for child in children:
+                if child.get("checkstate") == "0":
+                    continue
+                walk(child, effective_min, effective_max)
+
+        for node in renderer.find("rules").findall("rule"):
+            if node.get("checkstate") == "0":
+                continue
+            walk(node, 0.0, 0.0)
+        return symbols, usage
+
+    def test_bridge_markers_have_same_layer_suppression(self):
+        checked = 0
+        for name in self.LAYERS:
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            symbols, usage = self._active_symbols(layer)
+            for symbol_name in usage:
+                symbol = symbols.get(symbol_name)
+                if symbol is None:
+                    continue
+                markers = []
+                has_line = False
+                for marker in symbol.iter("layer"):
+                    if marker.get("class") == "SimpleLine":
+                        has_line = True
+                    if marker.get("class") != "SvgMarker":
+                        continue
+                    options = {
+                        option.get("name"): option.get("value")
+                        for option in marker.findall("Option/Option")
+                    }
+                    if "bridge" in (options.get("name") or ""):
+                        markers.append((marker, options))
+                if has_line:
+                    # Значок должен быть в отдельном правиле: иначе его
+                    # нельзя отключить, не скрыв линию моста.
+                    self.assertNotIn(
+                        "bridge.svg",
+                        ElementTree.tostring(symbol, encoding="unicode"),
+                        f"{name}/{symbol_name}",
+                    )
+                for marker, _options in markers:
+                    marker_line = next(
+                        candidate for candidate in symbol.iter("layer")
+                        if candidate.get("class") == "MarkerLine"
+                        and marker in candidate.iter("layer")
+                    )
+                    with self.subTest(layer=name, symbol=symbol_name):
+                        properties = marker_line.find(
+                            'data_defined_properties/Option/'
+                            'Option[@name="properties"]'
+                        )
+                        self.assertIsNotNone(properties)
+                        enabled = properties.find('Option[@name="enabled"]')
+                        self.assertIsNotNone(enabled)
+                        active = enabled.find('Option[@name="active"]')
+                        self.assertEqual(active.get("value"), "true")
+                        expression = enabled.find(
+                            'Option[@name="expression"]'
+                        ).get("value")
+                        self.assertIn(
+                            'string_to_array("icon_hide", \';\')', expression
+                        )
+                        self.assertIn("false, true", expression)
+                        self.assertNotIn("overlay_nearest", expression)
+                        self.assertNotIn("@map_scale", expression)
+                        index = re.search(r"'(\d+)'\), false", expression)
+                        self.assertIsNotNone(index)
+                        self.assertEqual(
+                            expression,
+                            poi_icons.icon_enabled_expression(
+                                int(index.group(1))),
+                        )
+                        checked += 1
+        self.assertTrue(checked)
+
+    def test_service_bridge_icon_stops_at_200k(self):
+        layer = self.layers["highway main bridge"]
+        leaf = self._find(
+            layer.find("renderer-v2/rules"),
+            ["service", "else", "200000 - 300000"],
+        )
+        self.assertIsNotNone(leaf)
+        symbol = next(
+            symbol for symbol in layer.findall("renderer-v2/symbols/symbol")
+            if symbol.get("name") == leaf.get("symbol")
+        )
+        self.assertNotIn("bridge.svg",
+                         ElementTree.tostring(symbol, encoding="unicode"))
+        self.assertGreaterEqual(len(symbol.findall("layer")), 2)
+        self.assertTrue(all(
+            item.get("class") == "SimpleLine"
+            for item in symbol.findall("layer")
+        ))
+
+    def test_service_bridge_icon_stays_below_200k(self):
+        layer = self.layers["highway main bridge"]
+        service = self._find(
+            layer.find("renderer-v2/rules"), ["service", "else"],
+        )
+        self.assertIsNotNone(service)
+        icon_rules = []
+        for rule in service.findall("rule"):
+            symbol = next(
+                (symbol for symbol in layer.findall(
+                    "renderer-v2/symbols/symbol")
+                 if symbol.get("name") == rule.get("symbol")), None)
+            if symbol is None:
+                continue
+            if "bridge.svg" in ElementTree.tostring(
+                    symbol, encoding="unicode"):
+                icon_rules.append(rule)
+        self.assertTrue(icon_rules, "у service-мостов нет значка ниже 200k")
+        for rule in icon_rules:
+            maximum = rule.get("scalemaxdenom")
+            self.assertTrue(maximum)
+            self.assertLessEqual(int(maximum), 200000)
+        self.assertFalse([
+            rule for rule in icon_rules
+            if int(rule.get("scalemindenom") or 0) >= 200000
+        ])
+
+
+class BridgeIconHideTest(unittest.TestCase):
+    """Поле icon_hide и выражение видимости значка моста."""
+
+    @staticmethod
+    def _point(lon, lat, name="highway main bridge", fid=1):
+        return poi_icons._Point(
+            rank=0.02, lon=lon, lat=lat, name=name, fid=fid,
+            geometry="Line", bands={0: 4}, sizes={0: 2.0},
+        )
+
+    def test_expression_uses_icon_hide(self):
+        expression = poi_icons.icon_enabled_expression(4)
+        self.assertIn('string_to_array("icon_hide", \';\')', expression)
+        self.assertIn("'4'", expression)
+        self.assertIn("coalesce(", expression)
+        self.assertIn("false, true", expression)
+        self.assertNotIn("@map_scale", expression)
+        self.assertNotIn("overlay_nearest", expression)
+
+    def test_same_layer_tie_breaks_by_coordinates(self):
+        west = self._point(6.9000, 46.05, fid=1)
+        east = self._point(6.9006, 46.05, fid=2)
+        hidden = poi_icons._hidden_bridge_bands(
+            [west, east], [(100000.0, 130000.0)],
+        )
+        self.assertNotIn(("highway main bridge", 1), hidden)
+        self.assertIn(("highway main bridge", 2), hidden)
+
+    def test_other_layer_does_not_suppress(self):
+        bridge = self._point(6.9000, 46.05, fid=1)
+        track = self._point(6.9006, 46.05, name="track bridge", fid=2)
+        hidden = poi_icons._hidden_bridge_bands(
+            [bridge, track], [(100000.0, 130000.0)],
+        )
+        self.assertFalse(hidden)
+
+    def test_field_is_written_to_bridge_layer(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from osgeo import ogr, osr
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vector = root / "vector"
+            vector.mkdir()
+            path = vector / "bridges.sqlite"
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(path))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            layer = dataset.CreateLayer("bridges", srs, ogr.wkbLineString)
+            for lon in (6.9000, 6.9006):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(
+                    f"LINESTRING ({lon} 46.05, {lon} 46.0502)"))
+                layer.CreateFeature(feature)
+            dataset = None
+
+            source = poi_icons.PoiLayer(
+                name="highway main bridge",
+                source="./vector/bridges.sqlite",
+                geometry="Line",
+            )
+            config = SimpleNamespace(
+                project_dir=str(root), vector_dir=str(vector))
+            poi_icons._write_icon_hide(
+                config, [source],
+                [self._point(6.9000, 46.05, fid=1),
+                 self._point(6.9006, 46.05, fid=2)],
+                [(100000.0, 130000.0)],
+            )
+            dataset = ogr.Open(str(path))
+            layer = dataset.GetLayer(0)
+            values = {
+                feature.GetFID(): feature.GetField("icon_hide")
+                for feature in layer
+            }
+            dataset = None
+            self.assertIsNone(values[1])
+            self.assertEqual(values[2], "0")
+
+            # Повторная подготовка не оставляет старых значений.
+            poi_icons._write_icon_hide(
+                config, [source], [self._point(6.9000, 46.05, fid=1)],
+                [(100000.0, 130000.0)],
+            )
+            dataset = ogr.Open(str(path))
+            layer = dataset.GetLayer(0)
+            self.assertFalse([
+                value for value in (
+                    feature.GetField("icon_hide") for feature in layer
+                ) if value
+            ])
+            dataset = None
+
+
 class PoiSuppressionExpressionTest(unittest.TestCase):
     """Выражение подавления вытесняет значки и внутри слоя.
 
