@@ -224,13 +224,17 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
                 cancel=cancel, progress=progress, sources=paths,
             )
         except RuntimeError:
-            # Склеенный osmium файл может содержать повторяющиеся id
-            # (пограничные объекты выгрузок выходят с разными версиями),
-            # и на таких файлах драйвер GDAL обрывает чтение.  Тогда карты
-            # читаются по отдельности: объекты с одинаковым id уйдут в один
-            # слой при разборе (см. pbf_source.prepare_dataset).
+            # Склеенный osmium файл может не читаться драйвером GDAL:
+            # пограничные объекты выгрузок имеют разные версии, и после
+            # merge драйвер обрывает чтение.  Тогда карты читаются по
+            # отдельности без предварительной склейки: объекты с
+            # одинаковым id уйдут в один слой при разборе.  Даже если
+            # paths уже отдельные (osmium склеил их внутри себя), повтор
+            # с use_osmium=False обязателен — иначе откат не сработает.
             separate = geofabrik.local_maps(config, maps)
-            if [str(item) for item in separate] == [str(item) for item in paths]:
+            if (not osmium_ready
+                    and [str(item) for item in separate]
+                    == [str(item) for item in paths]):
                 raise
             warnings.append(
                 "Склеенный файл не читается драйвером GDAL, "
@@ -239,6 +243,7 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
             dataset = pbf_source.prepare_dataset(
                 config, bbox, query_names, query_texts=query_texts,
                 cancel=cancel, progress=progress, sources=separate,
+                use_osmium=False,
             )
         warnings.extend(dataset.warnings)
         if state.warning:

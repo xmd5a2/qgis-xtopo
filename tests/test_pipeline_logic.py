@@ -1252,6 +1252,64 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertEqual(name, "field0")
 
 
+class GeofabrikMergedFallbackTest(unittest.TestCase):
+    """Склеенный osmium файл не читается — читаем карты по отдельности."""
+
+    def test_retry_uses_separate_maps_without_osmium(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from qgis_xtopo.core import sources
+        from qgis_xtopo.core.bbox import parse_bbox
+
+        config = Config(
+            project_name="fallback",
+            bbox="41.8,42.9,43.2,43.6",
+            array_queries=["places_main"],
+            source_mode="geofabrik",
+            geofabrik_maps=["georgia", "north-caucasus-fed-district"],
+        )
+        maps = [SimpleNamespace(id="georgia"),
+                SimpleNamespace(id="north-caucasus-fed-district")]
+        state = SimpleNamespace(
+            index=SimpleNamespace(maps=maps), warning="")
+        paths = [Path("/tmp/georgia.osm.pbf"),
+                 Path("/tmp/north-caucasus.osm.pbf")]
+        dataset = SimpleNamespace(warnings=[], notes=[], feature_files={})
+        calls = []
+
+        def prepare(_config, _bbox, _names, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError()
+            return dataset
+
+        with mock.patch.object(
+                sources.geofabrik, "fetch_index", return_value=state,
+        ), mock.patch.object(
+                sources, "_selected_maps", return_value=maps,
+        ), mock.patch.object(
+                sources.osmium_tool, "find_osmium",
+                return_value="/usr/bin/osmium",
+        ), mock.patch.object(
+                sources.geofabrik, "local_ready", return_value=True,
+        ), mock.patch.object(
+                sources.geofabrik, "source_paths", return_value=paths,
+        ), mock.patch.object(
+                sources.geofabrik, "local_maps", return_value=paths,
+        ), mock.patch.object(
+                sources.pbf_source, "prepare_dataset", side_effect=prepare,
+        ):
+            result = sources.prepare_sources(
+                config, parse_bbox(config.bbox), ["places_main"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(calls[1].get("use_osmium", True))
+        self.assertEqual(calls[1]["sources"], paths)
+        self.assertTrue(any("по отдельности" in item
+                            for item in result.warnings))
+
+
 class RouteHikingTest(unittest.TestCase):
     def test_not_prepared(self):
         """route_hiking не готовится: ни запроса, ни рецепта, ни в умолчаниях."""

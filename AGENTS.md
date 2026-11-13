@@ -570,9 +570,13 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   отношений. Поэтому `_apply_spatial_filter` ставит фильтр на все слои, кроме
   `points`; точная отсечка — при разборе. Цена — примерно в 4 раза больше
   времени на чтение PBF.
-- **Склейка osmium даёт повторяющиеся id**: GDAL обрывает чтение.
-  `sources.py: prepare_sources` при ошибке читает карты по отдельности,
-  дубликаты отсекаются по `@id`.
+- **Склейка osmium даёт повторяющиеся id**: GDAL обрывает чтение (иногда
+  пустым `RuntimeError`). `sources.py: prepare_sources` при ошибке читает
+  карты по отдельности, дубликаты отсекаются по `@id`. Если osmium уже
+  вернул отдельные пути, откат всё равно обязан вызвать
+  `prepare_dataset(use_osmium=False)`: иначе он снова склеит файл и упадёт
+  на том же месте. `_iter_features` добавляет в ошибку число объектов и
+  слой, чтобы пустое сообщение GDAL было диагностируемым.
 - **`osmium extract`**: `-b <padded bbox> --strategy=smart -S types=any`;
   запас `padded_bbox` — 0.3° или 15% от области. `smart` не берёт отношения
   вне области, их добирает `tags-filter` по `COVERING_EXPRESSIONS` (горные

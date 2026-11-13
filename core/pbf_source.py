@@ -639,14 +639,26 @@ def _iter_features(dataset, cancel=None):
                 yield feature, layer.GetName()
             if not any_feature:
                 return
+    count = 0
+    last_layer = ""
     while True:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("PBF processing cancelled")
-        result = getter(include_layer=True)
+        try:
+            result = getter(include_layer=True)
+        except Exception as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            where = f" in layer {last_layer}" if last_layer else ""
+            raise PbfError(
+                "GDAL OSM driver failed after "
+                f"{count} objects{where}: {detail}"
+            ) from exc
         feature, layer = result[0], result[1]
         if feature is None:
             return
-        yield feature, layer.GetName() if layer is not None else ""
+        count += 1
+        last_layer = layer.GetName() if layer is not None else ""
+        yield feature, last_layer
 
 
 def _expected_objects(source, bbox):
