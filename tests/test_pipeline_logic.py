@@ -400,6 +400,13 @@ class AreaRoadTest(unittest.TestCase):
         self.assertEqual(steps[0][0], "linestopolygons")
         self.assertTrue(steps[0][1].get("drop_others"))
 
+    def test_water_overlay_for_rivers_is_fixed(self):
+        """Вода для difference рек чинится: иначе слой river пропускается."""
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        steps = [operation for operation, _ in recipe_for("water_without_riverbanks").steps]
+        self.assertEqual(steps, ["fix", "save"])
+
     def test_drop_others_removes_non_polygonal_geometry(self):
         from osgeo import ogr
 

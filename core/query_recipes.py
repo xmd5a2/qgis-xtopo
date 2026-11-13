@@ -104,7 +104,11 @@ RECIPES = {
         load("allotments"), buffer(0.001), dissolve(), singleparts(),
         save("_buffered_dissolved"),
     ]),
-    "water_without_riverbanks": Recipe([save()]),
+    "water_without_riverbanks": Recipe([
+        # В OSM встречаются самопересекающиеся водные полигоны; без fix()
+        # native:difference отбрасывает их и роняет слои river/canal целиком.
+        fix(), save(),
+    ]),
     "river": Recipe([
         difference("water_without_riverbanks"), save(), simplify(0.001), smooth(), save("_smoothed"),
     ]),
