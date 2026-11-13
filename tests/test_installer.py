@@ -82,6 +82,25 @@ class InstallerTest(unittest.TestCase):
         text = _read(INSTALLER / "qgis-xtopo.iss")
         self.assertIn("PrivilegesRequired=lowest", text)
 
+    def test_qgis_install_is_verified_not_trusted(self):
+        # Код возврата скрипта не признак успеха: заглушка powershell.exe
+        # (в wine) выходит с 0, ничего не сделав. Проверяем результат.
+        text = _read(INSTALLER / "qgis-xtopo.iss")
+        self.assertIn("Installed := QgisExe;", text)
+        self.assertIn("FileExists(LogFile)", text)
+
+    def test_qgis_question_is_asked_on_a_visible_page(self):
+        # Вопрос задаётся при нажатии «Далее» на странице выбора каталога:
+        # из CurPageChanged мастер после ответа сразу завершается.
+        text = _read(INSTALLER / "qgis-xtopo.iss")
+        self.assertIn("AskInstallQgis", text)
+        self.assertIn("wpSelectDir", text)
+        self.assertIn("NextButtonClick", text)
+
+    def test_helper_writes_log_at_start(self):
+        text = _read(INSTALLER / "scripts" / "install-qgis.ps1")
+        self.assertIn("Скрипт установки QGIS запущен", text)
+
     def test_install_check_script_exists(self):
         script = INSTALLER / "scripts" / "check-qgis-install.py"
         self.assertTrue(script.exists())

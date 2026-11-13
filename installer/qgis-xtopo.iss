@@ -233,18 +233,33 @@ procedure InstallQgisIfNeeded;
 var
   LogFile: String;
   ResultCode: Integer;
+  Installed: String;
+  Detail: String;
 begin
   if QgisExe <> '' then
     Exit;
   LogFile := ExpandConstant('{tmp}\qgis-install.log');
   WizardForm.StatusLabel.Caption :=
-    'Установка QGIS: скачивание установщика и установка...';  WizardForm.Refresh;
+    'Установка QGIS: скачивание установщика и установка...';
+  WizardForm.Refresh;
   ResultCode := RunPowerShell('-Install -LogFile "' + LogFile + '"');
   WizardForm.StatusLabel.Caption := '';
+  Installed := QgisExe;
+  if Installed <> '' then
+    Exit;
+  { Код возврата скрипта не годится как признак успеха: powershell.exe
+    может оказаться заглушкой (в wine он молча выходит с кодом 0).
+    Проверяем результат — появился ли QGIS. }
   if ResultCode <> 0 then
-    MsgBox('Не удалось установить QGIS автоматически.' + #13#10 +
-      'Установите QGIS вручную: https://qgis.org/download/' + #13#10 +
-      'Журнал: ' + LogFile, mbError, MB_OK);
+    Detail := 'Скрипт установки вернул код ' + IntToStr(ResultCode) + '.'
+  else if not FileExists(LogFile) then
+    Detail := 'Скрипт установки не отработал (журнала нет). Нужен Windows PowerShell.'
+  else
+    Detail := 'После установки QGIS не найден.';
+  MsgBox('Не удалось установить QGIS автоматически.' + #13#10 + #13#10 +
+    Detail + #13#10 + #13#10 +
+    'Установите QGIS вручную: https://qgis.org/download/' + #13#10 +
+    'Журнал: ' + LogFile, mbError, MB_OK);
 end;
 
 { Пишет ярлык запуска: QGIS сразу с открытой панелью плагина. }
@@ -349,14 +364,16 @@ begin
   end;
 end;
 
-function InitializeSetup: Boolean;
+{ Вопрос про установку QGIS. Задаётся не в InitializeSetup, а на странице
+  выбора каталога: к этому моменту окно мастера уже видно, и вопрос не
+  прячется за другими окнами. }
+procedure AskInstallQgis;
 var
   Answer: Integer;
 begin
-  Result := True;
-  InstallQgis := False;
-  QgisPath := QgisExe;
-  if QgisPath <> '' then
+  if InstallQgis then
+    Exit;
+  if QgisExe <> '' then
     Exit;
   if WizardSilent then
   begin
@@ -372,6 +389,28 @@ begin
     'придётся отдельно.',
     mbConfirmation, MB_YESNO);
   InstallQgis := Answer = IDYES;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+  InstallQgis := False;
+  QgisPath := QgisExe;
+  if (QgisPath = '') and WizardSilent then
+    // В молчаливом режиме QGIS не качаем: файл большой, а решение
+    // должен принимать человек.
+    Log('QGIS не найден, автоматическая установка отключена (молчаливый режим)');
+end;
+
+{ Вопрос про установку QGIS задаётся при нажатии «Далее» на странице
+  выбора каталога: окно мастера к этому моменту уже видно, и вопрос не
+  прячется за другими окнами. Из CurPageChanged спрашивать нельзя —
+  после ответа мастер сразу завершается. }
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if CurPageID = wpSelectDir then
+    AskInstallQgis;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
