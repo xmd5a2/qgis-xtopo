@@ -283,6 +283,21 @@ class OsmiumPrefilterTest(unittest.TestCase):
             self.assertIn("100", ids)
             dataset = None
 
+    def test_merge_keeps_one_object_version(self):
+        """Склейка идёт apply-changes, а не merge: GDAL не читает history."""
+        calls = []
+
+        def run(_executable, arguments, cancel=None):
+            calls.append(arguments)
+
+        with mock.patch.object(
+                osmium_prefilter.osmium_tool, "run", side_effect=run):
+            osmium_prefilter._merge_files(
+                "/usr/bin/osmium", ["first.pbf", "second.pbf"], "merged.pbf")
+
+        self.assertEqual(calls[0][0], "apply-changes")
+        self.assertEqual(calls[0][-2:], ["first.pbf", "second.pbf"])
+
     @unittest.skipUnless(OSMIUM, "osmium недоступен")
     def test_single_source_is_not_merged(self):
         with tempfile.TemporaryDirectory() as directory:

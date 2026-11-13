@@ -73,12 +73,22 @@ def _temporary_dir(config):
 
 
 def _merge_files(executable, paths, destination, cancel=None, progress=None):
-    """Склеивает файлы osmium в один."""
+    """Склеивает файлы osmium в один, оставляя по одной версии объекта.
+
+    ``osmium merge`` сохраняет все версии объекта из пересекающихся
+    выгрузок: это поведение history-файла.  Драйвер GDAL OSM читает
+    обычный файл и обрывается на повторяющихся id.  ``apply-changes``
+    применяет выгрузки как изменения и оставляет последнюю версию
+    каждого объекта.
+    """
     if progress:
         progress("Склейка вырезанных областей…")
     osmium_tool.run(
         executable,
-        ["merge", "--overwrite", "-o", str(destination), *[str(item) for item in paths]],
+        [
+            "apply-changes", "--overwrite", "-o", str(destination),
+            *[str(item) for item in paths],
+        ],
         cancel=cancel,
     )
 
