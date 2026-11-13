@@ -1021,6 +1021,27 @@ class PoiRecipeCrsTest(unittest.TestCase):
         self.assertEqual(saves[-1].get("suffix"), "")
 
 
+class RailwayQueryTest(unittest.TestCase):
+    """Фуникулёр и грузовая канатная дорога попадают в запросы подготовки."""
+
+    def test_funicular_bridges_and_tunnels(self):
+        from qgis_xtopo.core.resources import read_query
+
+        for name, tag in (
+            ("rail_bridge", "bridge"), ("rail_tunnel", "tunnel"),
+        ):
+            selector = f'way["railway"="funicular"]["{tag}"="yes"];'
+            self.assertIn(selector, read_query(name), name)
+
+    def test_goods_aerialway_uses_cableway_layer(self):
+        from qgis_xtopo.core.resources import read_query
+
+        self.assertIn(
+            'way["aerialway"="goods"];',
+            read_query("aerialway_cable_car_gondola"),
+        )
+
+
 class RouteHikingTest(unittest.TestCase):
     def test_not_prepared(self):
         """route_hiking не готовится: ни запроса, ни рецепта, ни в умолчаниях."""

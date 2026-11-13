@@ -454,6 +454,44 @@ class AerialwayContrastTest(unittest.TestCase):
                 )
 
 
+class FunicularStyleTest(unittest.TestCase):
+    """Фуникулёр рисуется как железная дорога на всех масштабах."""
+
+    def test_railway_layers_have_funicular_branch(self):
+        root = _template_root()
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in root.iter("maplayer")
+        }
+        for name in ("railway all", "rail tunnel"):
+            renderer = layers[name].find("renderer-v2")
+            branch = next(
+                (
+                    rule for rule in renderer.findall("rules/rule")
+                    if rule.get("filter") == "railway='funicular'"
+                ),
+                None,
+            )
+            self.assertIsNotNone(branch, name)
+            leaves = branch.findall("rule")
+            self.assertEqual(len(leaves), 4, name)
+            self.assertEqual(
+                [
+                    (leaf.get("scalemindenom"), leaf.get("scalemaxdenom"))
+                    for leaf in leaves
+                ],
+                [
+                    (None, "50000"),
+                    ("50000", "100000"),
+                    ("100000", "300000"),
+                    ("300000", None),
+                ],
+                name,
+            )
+            for leaf in leaves:
+                self.assertTrue(leaf.get("symbol"), name)
+
+
 class IntermittentWaterStyleTest(unittest.TestCase):
     """Пересыхающая вода нарисована горизонтальной штриховкой без обводки."""
 

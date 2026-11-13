@@ -1,4 +1,5 @@
 (
 way["railway"="rail"]["bridge"="yes"];
 way["railway"="narrow_gauge"]["bridge"="yes"];
+way["railway"="funicular"]["bridge"="yes"];
 );
