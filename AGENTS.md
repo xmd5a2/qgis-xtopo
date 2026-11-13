@@ -282,6 +282,15 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   (`scalemaxdenom="200000"`, на 300k+ правила нет). Маркеров и стрелок
   у goods нет. Проверка — `AerialwayGoodsStyleTest` в
   `tests/test_template_styles.py`.
+- **Хутора и отдельные дворы видны до 1:200000.** В слое `places main`
+  ветки `hamlet` и `isolated dwelling` (и значки, и подписи) заканчиваются
+  на `scalemaxdenom="200000"`; верхняя граница в QGIS исключающая, поэтому
+  на 1:200000 их уже нет, а на 300k+ правил нет вовсе. Тег `population`
+  ограничение не обходит: в ветке `by population` (рендерер и подписи)
+  стоит `AND NOT (place IN ('hamlet','isolated_dwelling') AND
+  @map_scale >= 200000)`, такие пункты уходят в типовую ветку, где правил
+  на этих масштабах нет. Ниже 200k стиль по населению сохраняется.
+  Проверка — `SettlementScaleTest` в `tests/test_template_styles.py`.
 - **Два уровня сервисных дорог.** Во всех слоях `highway main*`
   (включая bridge/tunnel и копии для `layer`) обычный `highway=service`
   без `service=*` виден до 1:300000 (100–200k — `@level_of_detail >= 3`,

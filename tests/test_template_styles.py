@@ -285,6 +285,70 @@ class LabelPriorityTest(unittest.TestCase):
             self.assertGreater(min(self._priorities(name)), peak)
 
 
+class SettlementScaleTest(unittest.TestCase):
+    """Хутора и отдельные дворы не показываются с 1:200000 и мельче."""
+
+    LIMIT = 200000
+    NAMES = ("hamlet", "isolated dwelling")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layer = next(
+            layer for layer in _template_root().iter("maplayer")
+            if layer.findtext("layername") == "places main"
+        )
+
+    @staticmethod
+    def _find(node, path):
+        for rule in node.findall("rule"):
+            title = rule.get("description") or rule.get("label")
+            if title == path[0]:
+                if len(path) == 1:
+                    return rule
+                return SettlementScaleTest._find(rule, path[1:])
+        return None
+
+    @classmethod
+    def _leaves(cls, node):
+        result = []
+        for rule in node.findall("rule"):
+            if rule.findall("rule"):
+                result.extend(cls._leaves(rule))
+            else:
+                result.append(rule)
+        return result
+
+    def _branch(self, container, path):
+        branch = self._find(self.layer.find(container), path)
+        self.assertIsNotNone(branch, path)
+        return branch
+
+    def test_type_rules_stop_at_200k(self):
+        for container in ("renderer-v2/rules", "labeling/rules"):
+            for name in self.NAMES:
+                with self.subTest(container=container, name=name):
+                    branch = self._branch(
+                        container, ["else", "else", name],
+                    )
+                    for rule in self._leaves(branch):
+                        minimum = float(rule.get("scalemindenom") or 0)
+                        maximum = float(rule.get("scalemaxdenom") or 0)
+                        self.assertGreater(maximum, 0, (minimum, maximum))
+                        self.assertLessEqual(
+                            maximum, self.LIMIT, (minimum, maximum),
+                        )
+                        self.assertLess(minimum, self.LIMIT)
+
+    def test_population_branch_excludes_them_at_200k(self):
+        expected = (
+            "NOT (place IN ('hamlet','isolated_dwelling') "
+            "AND @map_scale >= 200000)"
+        )
+        for container in ("renderer-v2/rules", "labeling/rules"):
+            group = self._branch(container, ["else", "by population"])
+            self.assertIn(expected, group.get("filter") or "", container)
+
+
 class TrackScaleTest(unittest.TestCase):
     """Треки рисуются на 1:50 000+ и зависят от уровня детализации."""
 
