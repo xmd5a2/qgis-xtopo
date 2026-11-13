@@ -96,7 +96,13 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   отменяет и ждёт pipeline, PBF, Geofabrik, DEM, Sonny, прокси и серверы;
   вызывается из `closeEvent` (`final=False`, панель можно открыть снова),
   `unload`, `destroyed` и `aboutToQuit`. Новые фоновые потоки добавлять
-  только с отменой и ожиданием в этом методе.
+  только с отменой и ожиданием в этом методе. **Не объявлять в QThread
+  свой сигнал `finished`** — он перекрывает встроенный, по которому
+  `deleteLater` удаляет поток; удаление до возврата из `run()` даёт то же
+  падение. У `PipelineWorker` сигнал называется `completed`; удаление
+  повешено на встроенный `QThread.finished`. Проверка —
+  `test_pipeline_worker_does_not_shadow_qthread_finished` в
+  `tests/test_ui_panels.py`.
 - `automap.qgz` лежит только в корне; путь в коде — `core/resources.py:
   template_path()`. При сборке копируется в пакет как
   `resources/automap.qgz`. Рядом не оставлять `*.bak*`.

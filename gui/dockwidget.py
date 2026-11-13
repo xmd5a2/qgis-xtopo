@@ -283,7 +283,9 @@ class PipelineWorker(QThread):
     progress = pyqtSignal(str)
     percent = pyqtSignal(int)
     status = pyqtSignal(str)
-    finished = pyqtSignal(str)
+    # Не называть сигнал finished: он перекрывает встроенный
+    # QThread.finished, по которому поток удаляется после возврата из run().
+    completed = pyqtSignal(str)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()
 
@@ -298,7 +300,7 @@ class PipelineWorker(QThread):
                 self.config, self.progress.emit, self.cancel_event,
                 percent=self.percent.emit, status=self.status.emit,
             )
-            self.finished.emit(str(path))
+            self.completed.emit(str(path))
         except InterruptedError:
             self.cancelled.emit()
         except Exception as exc:
@@ -2886,12 +2888,12 @@ class XtopoDockWidget(QDockWidget):
         self.worker.progress.connect(self._append_log)
         self.worker.percent.connect(self._pipeline_percent)
         self.worker.status.connect(self._set_status)
-        self.worker.finished.connect(self._finished)
+        self.worker.completed.connect(self._finished)
         self.worker.failed.connect(self._failed)
         self.worker.cancelled.connect(self._cancelled)
+        # Встроенный finished приходит после возврата из run(); только
+        # по нему можно безопасно удалять QThread.
         self.worker.finished.connect(self.worker.deleteLater)
-        self.worker.failed.connect(self.worker.deleteLater)
-        self.worker.cancelled.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _set_running(self, running):

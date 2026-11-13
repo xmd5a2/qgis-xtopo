@@ -51,6 +51,15 @@ class PanelVisibilityTest(unittest.TestCase):
         self.app.processEvents()
         return window
 
+    def test_pipeline_worker_does_not_shadow_qthread_finished(self):
+        """Удалять PipelineWorker можно только после возврата из run()."""
+        from qgis.PyQt.QtCore import QThread
+
+        from qgis_xtopo.gui.dockwidget import PipelineWorker
+
+        self.assertIs(PipelineWorker.finished, QThread.finished)
+        self.assertTrue(hasattr(PipelineWorker, "completed"))
+
     def test_hide_and_show_docks(self):
         from qgis.PyQt.QtWidgets import QToolBar, QWidget
 
