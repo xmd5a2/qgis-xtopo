@@ -509,6 +509,56 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   Каталог в `.gitignore`, удалять его не обязательно.
 - Не трогать работающий QGIS (`pgrep -x qgis.bin`); запускать с временным
   профилем: `qgis --profiles-path /tmp/... --code script.py`.
+- **Offscreen-рендер карты** для проверки стиля на реальных данных:
+  ```python
+  import sys
+  sys.path.insert(0, '.')
+  import tests
+  from tests import qgis_app
+  app = qgis_app()
+  from qgis.core import (
+      QgsProject, QgsMapSettings, QgsMapRendererCustomPainterJob,
+      QgsRectangle, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
+  )
+  from qgis.PyQt.QtGui import QImage, QPainter, QColor
+  from qgis.PyQt.QtCore import QSize
+  from qgis_xtopo.core.resources import template_path
+
+  project = QgsProject.instance()
+  project.read(str(template_path()))  # только str, не Path
+  layer = next(
+      item for item in project.mapLayers().values()
+      if item.name() == 'railway all'
+  )
+  # В шаблоне путь ./vector/...; подменяем на реальный файл.
+  layer.setDataSource('/path/to/vector/railway_all.sqlite',
+                      layer.name(), 'ogr')
+  layer.reload()
+
+  settings = QgsMapSettings()
+  settings.setLayers([layer])
+  settings.setDestinationCrs(QgsCoordinateReferenceSystem('EPSG:3857'))
+  settings.setExtent(QgsCoordinateTransform(
+      QgsCoordinateReferenceSystem('EPSG:4326'),
+      settings.destinationCrs(), project.transformContext(),
+  ).transformBoundingBox(QgsRectangle(8.3, 46.8, 8.6, 47.0)))
+  settings.setOutputSize(QSize(1000, 700))
+  settings.setBackgroundColor(QColor('white'))
+
+  image = QImage(settings.outputSize(), QImage.Format_ARGB32)
+  image.fill(QColor('white'))
+  painter = QPainter(image)
+  job = QgsMapRendererCustomPainterJob(settings, painter)
+  job.start()
+  job.waitForFinished()
+  painter.end()
+  image.save('/mnt/data/temp/map.png')
+  ```
+  `setExtent` ждёт extent уже в целевой CRS, поэтому пересчитывать его
+  нужно через `QgsCoordinateTransform`. У `QgsRectangle` нет `combine`
+  и `united` — объединять через `combineExtentWith`. Готовый PNG класть
+  в `/mnt/data/temp`, не в репозиторий. Рабочие данные пользователя
+  можно читать, но не изменять.
 - Панель открывается при `QGIS_XTOPO_OPEN=1`; показ — по
   `iface.initializationCompleted`, иначе восстановление окон перезапишет
   `show()`.
