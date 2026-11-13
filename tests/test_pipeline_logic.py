@@ -5,6 +5,8 @@ import threading
 import unittest
 from pathlib import Path
 
+from osgeo import ogr, osr
+
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
@@ -1047,6 +1049,165 @@ class RailwayQueryTest(unittest.TestCase):
             'way["aerialway"="goods"];',
             read_query("aerialway_cable_car_gondola"),
         )
+
+
+def _write_polygon_layer(path, layer_name, geometries, name="upper"):
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+    layer = dataset.CreateLayer(layer_name, srs, ogr.wkbUnknown)
+    layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+    for index, wkt in enumerate(geometries):
+        feature = ogr.Feature(layer.GetLayerDefn())
+        feature.SetField("name", f"{name}{index}")
+        feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+        layer.CreateFeature(feature)
+    dataset = None
+
+
+def _read_geometries(path):
+    dataset = ogr.Open(str(path))
+    layer = dataset.GetLayer(0)
+    result = [feature.GetGeometryRef().Clone() for feature in layer]
+    dataset = None
+    return result
+
+
+def _interior_rings(geometry):
+    if geometry.GetGeometryName() == "MULTIPOLYGON":
+        return sum(
+            max(0, geometry.GetGeometryRef(index).GetGeometryCount() - 1)
+            for index in range(geometry.GetGeometryCount())
+        )
+    return max(0, geometry.GetGeometryCount() - 1)
+
+
+class PolygonOverlapTest(unittest.TestCase):
+    """Меньший полигон вырезается из большего, но не наоборот."""
+
+    def _config(self, directory):
+        config = Config(
+            qgis_projects_dir=directory,
+            project_name="demo",
+            array_queries=["farmland", "grass"],
+        )
+        config.ensure_directories()
+        return config
+
+    def test_smaller_polygon_is_cut_out(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "farmland.sqlite",
+                "farmland",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "farmland.sqlite"
+            )[0]
+        self.assertEqual(results, [("farmland", "grass", 1)])
+        self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 1)
+
+    def test_small_overlap_is_kept(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "farmland.sqlite",
+                "farmland",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((0 0,0 0.00005,0.00005 0.00005,0.00005 0,0 0))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "farmland.sqlite"
+            )[0]
+        self.assertEqual(results, [("farmland", "grass", 0)])
+        self.assertAlmostEqual(geometry.Area(), 100.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 0)
+
+    def test_larger_lower_polygon_is_not_cut(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "farmland.sqlite",
+                "farmland",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((0 0,0 20,20 20,20 0,0 0))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "farmland.sqlite"
+            )[0]
+        self.assertEqual(results, [("farmland", "grass", 0)])
+        self.assertAlmostEqual(geometry.Area(), 4.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 0)
+
+    def test_water_uses_dissolved_layer(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "water_dissolved.sqlite",
+                "water_dissolved",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "island.sqlite",
+                "island",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "water_dissolved.sqlite"
+            )[0]
+        self.assertEqual(results, [("water", "island", 1)])
+        self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 1)
+
+    def test_attributes_are_preserved(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "farmland.sqlite",
+                "farmland",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+                name="field",
+            )
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            resolve_polygon_overlaps(config)
+            dataset = ogr.Open(str(config.vector_dir / "farmland.sqlite"))
+            feature = next(iter(dataset.GetLayer(0)))
+            name = feature.GetField("name")
+            dataset = None
+        self.assertEqual(name, "field0")
 
 
 class RouteHikingTest(unittest.TestCase):

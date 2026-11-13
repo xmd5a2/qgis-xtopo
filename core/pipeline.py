@@ -7,8 +7,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, gdal_log, i18n, osm_convert, peak_filter, poi_icons, project,
-    sources, terrain,
+    coastline, gdal_log, i18n, osm_convert, peak_filter, poi_icons,
+    polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
 from .query_recipes import recipe_for
@@ -100,6 +100,8 @@ def progress_stages(config):
         stages.append(("Обработка береговой линии", 4))
     if "peak" in config.array_queries:
         stages.append(("Проверка пиков", 3))
+    if config.resolve_polygon_overlaps:
+        stages.append(("Пересечения полигонов", 3))
     stages.append(("Удаление пустых слоёв", 2))
     return stages
 
@@ -1448,6 +1450,26 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("проверка пиков", time.monotonic() - started)
+        if config.resolve_polygon_overlaps:
+            report("Пересечения полигонов")
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                polygon_overlaps.resolve_polygon_overlaps(
+                    config, progress=report, cancel=cancel,
+                )
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - карта не должна страдать
+                report(
+                    i18n.trf(
+                        "WARNING: пересечения полигонов: {}; шаг пропущен",
+                        exc,
+                    )
+                )
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage("пересечения полигонов", time.monotonic() - started)
         report("Размещение значков POI")
         started = time.monotonic()
         try:

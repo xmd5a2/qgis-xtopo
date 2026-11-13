@@ -105,6 +105,13 @@ def _as_int(value, default=0):
         return default
 
 
+def _as_float(value, default=0.0):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def default_queries():
     path = Path(resource_path("config.ini"))
     if path.exists():
@@ -145,6 +152,11 @@ class Config:
     isolines_step: int = 10
     smooth_isolines: bool = False
     manual_coastline_processing: bool = False
+
+    # Вырезание меньших полигонов из больших: в OsmAnd при равном order
+    # меньший полигон рисуется выше.
+    resolve_polygon_overlaps: bool = True
+    polygon_overlap_min_area: float = 100.0
 
     # Сколько слоёв обрабатывается одновременно (0 — выбрать автоматически).
     parallel_workers: int = 0
@@ -284,6 +296,12 @@ class Config:
             isolines_step=_as_int(values.get("isolines_step"), 10),
             smooth_isolines=_as_bool(values.get("smooth_isolines")),
             manual_coastline_processing=_as_bool(values.get("manual_coastline_processing")),
+            resolve_polygon_overlaps=_as_bool(
+                values.get("resolve_polygon_overlaps"), True
+            ),
+            polygon_overlap_min_area=_as_float(
+                values.get("polygon_overlap_min_area"), 100.0
+            ),
             parallel_workers=_as_int(values.get("parallel_workers"), 0),
         )
 
@@ -326,6 +344,8 @@ generate_terrain_isolines={str(self.generate_terrain_isolines).lower()}
 isolines_step={self.isolines_step}
 smooth_isolines={str(self.smooth_isolines).lower()}
 manual_coastline_processing={str(self.manual_coastline_processing).lower()}
+resolve_polygon_overlaps={str(self.resolve_polygon_overlaps).lower()}
+polygon_overlap_min_area={self.polygon_overlap_min_area}
 parallel_workers={self.parallel_workers}
 source_version="{self.source_version}"
 """

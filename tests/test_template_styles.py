@@ -184,6 +184,33 @@ class TunnelLayerOrderTest(unittest.TestCase):
         )
 
 
+class LandcoverLayerOrderTest(unittest.TestCase):
+    """Порядок площадных слоёв как в OsmAnd Topo."""
+
+    OPEN_LAND = ("farmland", "grass", "orchard", "vineyard", "farmyard")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.order = [
+            item.get("name")
+            for item in _template_root().iter("layer-tree-layer")
+        ]
+
+    def test_water_is_above_wetland(self):
+        self.assertLess(
+            self.order.index("water"), self.order.index("wetland"),
+            "вода должна быть выше болота (order 9 против 8)",
+        )
+
+    def test_wood_and_scrub_are_above_open_land(self):
+        for forest in ("wood", "scrub"):
+            for open_land in self.OPEN_LAND:
+                self.assertLess(
+                    self.order.index(forest), self.order.index(open_land),
+                    f"{forest} должен быть выше {open_land} (order 7 против 5)",
+                )
+
+
 class IsolinesHachureTest(unittest.TestCase):
     """Сдвиг фазы штрихов задан в шаблоне для всех изолиний."""
 
