@@ -410,6 +410,35 @@ class RectangleMapTool(QgsMapTool):
         self.band.hide()
 
 
+_SEARCH_WORKERS = set()
+_QUIT_HANDLER_INSTALLED = False
+
+
+def shutdown_nominatim_workers():
+    """Дождаться поисковых потоков до завершения QGIS."""
+    for worker in list(_SEARCH_WORKERS):
+        try:
+            if worker.isRunning():
+                if not worker.wait(25000):
+                    worker.terminate()
+                    worker.wait(2000)
+        except RuntimeError:
+            pass
+    _SEARCH_WORKERS.clear()
+
+
+def install_quit_handler():
+    """Подключить ожидание поисковых потоков к завершению QGIS."""
+    global _QUIT_HANDLER_INSTALLED
+    if _QUIT_HANDLER_INSTALLED:
+        return
+    app = QgsApplication.instance()
+    if app is None:
+        return
+    app.aboutToQuit.connect(shutdown_nominatim_workers)
+    _QUIT_HANDLER_INSTALLED = True
+
+
 class NominatimWorker(QThread):
     """Поиск мест по Nominatim в отдельном потоке."""
 
@@ -419,6 +448,11 @@ class NominatimWorker(QThread):
     def __init__(self, query, parent=None):
         super().__init__(parent)
         self.query = query
+        _SEARCH_WORKERS.add(self)
+        self.finished.connect(self._forget)
+
+    def _forget(self):
+        _SEARCH_WORKERS.discard(self)
 
     def run(self):
         try:
@@ -432,6 +466,7 @@ class NominatimWorker(QThread):
 class ExtentDialog(QDialog):
     def __init__(self, bbox_text="", parent=None):
         super().__init__(parent)
+        install_quit_handler()
         self.setWindowTitle("Выбор охвата карты")
         self._fitted_to_screen = False
         self._fit_to_screen()

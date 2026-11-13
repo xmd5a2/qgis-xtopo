@@ -1306,6 +1306,17 @@ class SonnyDatasetTest(unittest.TestCase):
         self.assertIsNotNone(age)
         self.assertLess(age, 1.0)
 
+    def test_refresh_catalogue_honours_cancel(self):
+        import threading
+
+        from qgis_xtopo.core import sonny
+
+        with tempfile.TemporaryDirectory() as directory:
+            cancel = threading.Event()
+            cancel.set()
+            with self.assertRaises(InterruptedError):
+                sonny.refresh_catalogue(directory, cancel=cancel)
+
     def test_hgt_vrt_is_reused_until_hgt_changes(self):
         import os
 

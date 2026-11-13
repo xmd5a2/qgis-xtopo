@@ -88,7 +88,15 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   Shortcut Enter живёт на холсте (`Qt.WidgetShortcut`), иначе он перехватывал
   бы ввод в строке поиска.
 - **Поток поиска — не ребёнок окна**: окно закрывается во время запроса,
-  поток должен доработать и удалиться сам (родитель — `QgsApplication`).
+  поток должен доработать и удалиться сам (родитель — `QgsApplication`);
+  на `aboutToQuit` его ждёт `shutdown_nominatim_workers`.
+- **Перед удалением панели все QThread останавливаются.** QThread нельзя
+  уничтожать, пока он работает, иначе QGIS падает с «QThread: Destroyed
+  while thread is still running». `XtopoDockWidget.shutdown_workers`
+  отменяет и ждёт pipeline, PBF, Geofabrik, DEM, Sonny, прокси и серверы;
+  вызывается из `closeEvent` (`final=False`, панель можно открыть снова),
+  `unload`, `destroyed` и `aboutToQuit`. Новые фоновые потоки добавлять
+  только с отменой и ожиданием в этом методе.
 - `automap.qgz` лежит только в корне; путь в коде — `core/resources.py:
   template_path()`. При сборке копируется в пакет как
   `resources/automap.qgz`. Рядом не оставлять `*.bak*`.

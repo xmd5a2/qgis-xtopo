@@ -439,12 +439,22 @@ class SonnyCatalogueWorker(QThread):
 
     updated = pyqtSignal(int)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.cancel_event = threading.Event()
+
     def run(self):
         try:
-            sonny.refresh_catalogue(sonny.catalogue_dir())
+            sonny.refresh_catalogue(
+                sonny.catalogue_dir(), cancel=self.cancel_event)
+        except InterruptedError:
+            return
         except Exception:  # noqa: BLE001 - сеть не должна ломать запуск
             return
         self.updated.emit(len(sonny.catalogue_tiles(sonny.catalogue_dir())))
+
+    def cancel(self):
+        self.cancel_event.set()
 
 
 class ProxyCheckWorker(QThread):
@@ -579,6 +589,7 @@ class XtopoDockWidget(QDockWidget):
         self._proxy_ok = False
         self._proxy_known = False
         self._proxy_recheck = False
+        self._shutting_down = False
         self._proxy_icon_key = ""
         self._proxy_timer = QTimer(self)
         self._proxy_timer.setInterval(30_000)
@@ -587,6 +598,10 @@ class XtopoDockWidget(QDockWidget):
         proxy.apply()
         i18n.add_listener(self._language_changed)
         self.destroyed.connect(self.detach_language_listener)
+        app = QgsApplication.instance()
+        self._application = app
+        if app is not None:
+            app.aboutToQuit.connect(self.shutdown_workers)
         self.setObjectName("QgisXtopoDockWidget")
         self._build_ui()
         self._restore_settings()
@@ -642,12 +657,80 @@ class XtopoDockWidget(QDockWidget):
         self._proxy_timer.stop()
         super().hideEvent(event)
 
+    def shutdown_workers(self, final=True):
+        """Останавливает фоновые потоки до удаления панели.
+
+        QThread нельзя уничтожать, пока он работает: QGIS падает с
+        «QThread: Destroyed while thread is still running».  Поэтому при
+        закрытии, выгрузке плагина и завершении QGIS сначала отменяем
+        все задачи, затем ждём потоки; не оставшиеся — принудительно
+        завершаем.  ``final=False`` — панель прячется, но может снова
+        открыться и запускать проверки.
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        for timer in (
+                self._pbf_probe_timer, self._geofabrik_timer,
+                self._dem_check_timer, self._project_timer,
+                self._proxy_timer):
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
+        workers = []
+        for name in (
+                "worker", "pbf_probe", "geofabrik_worker",
+                "dem_availability_worker", "sonny_catalogue_worker",
+                "proxy_check"):
+            worker = getattr(self, name, None)
+            if worker is not None:
+                workers.append((name, worker))
+        for worker in list(self.server_workers):
+            workers.append(("server", worker))
+        for _name, worker in workers:
+            try:
+                cancel = getattr(worker, "cancel", None)
+                if callable(cancel) and worker.isRunning():
+                    cancel()
+            except RuntimeError:
+                pass
+        timeouts = {
+            "worker": 30000,
+            "pbf_probe": 10000,
+            "geofabrik_worker": 15000,
+            "dem_availability_worker": 15000,
+            "sonny_catalogue_worker": 30000,
+            "proxy_check": 5000,
+            "server": 15000,
+        }
+        for name, worker in workers:
+            try:
+                if not worker.isRunning():
+                    continue
+                if not worker.wait(timeouts.get(name, 5000)):
+                    worker.terminate()
+                    worker.wait(2000)
+            except RuntimeError:
+                pass
+        self.server_workers = []
+        for name in (
+                "worker", "pbf_probe", "geofabrik_worker",
+                "dem_availability_worker", "sonny_catalogue_worker",
+                "proxy_check"):
+            setattr(self, name, None)
+        if not final:
+            self._shutting_down = False
+
     def detach_language_listener(self):
-        self._proxy_timer.stop()
-        if self.proxy_check is not None and self.proxy_check.isRunning():
-            # Проверка короткая (таймаут 2 с): дожидаемся, чтобы поток
-            # не остался висеть после выгрузки плагина.
-            self.proxy_check.wait(2500)
+        self.shutdown_workers()
+        if self._application is not None:
+            try:
+                self._application.aboutToQuit.disconnect(
+                    self.shutdown_workers)
+            except (TypeError, RuntimeError):
+                pass
+            self._application = None
         i18n.remove_listener(self._language_changed)
 
     def _fit_language_button(self):
@@ -2943,27 +3026,8 @@ class XtopoDockWidget(QDockWidget):
         self._schedule_project_refresh()
 
     def closeEvent(self, event):
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(5000)
-        for worker in list(self.server_workers):
-            worker.cancel()
-            worker.wait(12000)
-        self._pbf_probe_timer.stop()
-        self._geofabrik_timer.stop()
-        self._dem_check_timer.stop()
-        if self.pbf_probe is not None and self.pbf_probe.isRunning():
-            self.pbf_probe.cancel()
-            self.pbf_probe.wait(3000)
-        if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
-            self.geofabrik_worker.cancel()
-            self.geofabrik_worker.wait(12000)
-        if self.dem_availability_worker is not None:
-            try:
-                if self.dem_availability_worker.isRunning():
-                    self.dem_availability_worker.cancel()
-                    self.dem_availability_worker.wait(12000)
-            except RuntimeError:
-                self.dem_availability_worker = None
+        # Панель может быть просто скрыта и открыта снова, поэтому
+        # останавливаем потоки без постоянного запрета на их запуск.
+        self.shutdown_workers(final=False)
         self._save_settings()
         super().closeEvent(event)

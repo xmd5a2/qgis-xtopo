@@ -140,18 +140,22 @@ def parse_listing(html):
     return result
 
 
-def _http_bytes(url, timeout=60, retries=3):
+def _http_bytes(url, timeout=60, retries=3, cancel=None):
     """Загрузка с повторами: Drive иногда отвечает 429."""
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT}
     )
     last = None
     for _attempt in range(retries):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read()
         except (urllib.error.URLError, TimeoutError) as exc:
             last = exc
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError
     raise RuntimeError(f"request failed: {last}")
 
 
@@ -234,7 +238,7 @@ def catalogue_age_days(directory=None):
     return (time.time() - fetched) / 86400.0
 
 
-def refresh_catalogue(directory=None, progress=None):
+def refresh_catalogue(directory=None, progress=None, cancel=None):
     """Обновляет списки тайлов всех наборов.
 
     Вызывается в фоне при старте плагина: сеть не должна блокировать
@@ -248,6 +252,8 @@ def refresh_catalogue(directory=None, progress=None):
     }
     updated = False
     for dataset in DATASETS:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError
         if progress:
             progress(
                 i18n.trf(
@@ -256,10 +262,14 @@ def refresh_catalogue(directory=None, progress=None):
             )
         try:
             html = _http_bytes(
-                listing_url(dataset), timeout=20, retries=2
+                listing_url(dataset), timeout=20, retries=2, cancel=cancel
             )
+        except InterruptedError:
+            raise
         except Exception:  # noqa: BLE001 - сеть не должна ломать запуск
             continue
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError
         listing = parse_listing(html.decode("utf-8", "replace"))
         if listing:
             datasets[dataset.key] = listing
