@@ -185,7 +185,7 @@ class TunnelLayerOrderTest(unittest.TestCase):
 
 
 class LandcoverLayerOrderTest(unittest.TestCase):
-    """Порядок площадных слоёв как в OsmAnd Topo."""
+    """Порядок площадных слоёв: Topo и видимость прибрежных болот."""
 
     OPEN_LAND = ("farmland", "grass", "orchard", "vineyard", "farmyard")
 
@@ -196,10 +196,12 @@ class LandcoverLayerOrderTest(unittest.TestCase):
             for item in _template_root().iter("layer-tree-layer")
         ]
 
-    def test_water_is_above_wetland(self):
+    def test_wetland_stays_above_water(self):
+        # В Topo water=9, wetland=8, но в QGIS болото оставлено выше воды:
+        # иначе прибрежные мелководья и заболоченные участки скрываются.
         self.assertLess(
-            self.order.index("water"), self.order.index("wetland"),
-            "вода должна быть выше болота (order 9 против 8)",
+            self.order.index("wetland"), self.order.index("water"),
+            "болото должно оставаться выше воды",
         )
 
     def test_wood_and_scrub_are_above_open_land(self):
