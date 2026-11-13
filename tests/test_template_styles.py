@@ -454,6 +454,77 @@ class AerialwayContrastTest(unittest.TestCase):
                 )
 
 
+class AerialwayGoodsStyleTest(unittest.TestCase):
+    """Грузовая канатная дорога — сплошная тонкая серая линия до 1:200000."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = _template_root()
+        layer = next(
+            item for item in root.iter("maplayer")
+            if item.findtext("layername") == "aerialway cable car, gondola"
+        )
+        renderer = layer.find("renderer-v2")
+        inner = renderer.find("renderer-v2")
+        cls.renderer = inner if inner is not None else renderer
+
+    def _rules(self):
+        return self.renderer.findall("rules/rule")
+
+    def test_cableway_rules_exclude_goods(self):
+        for rule in self._rules():
+            if rule.get("filter") and "goods" not in rule.get("filter"):
+                self.assertEqual(
+                    rule.get("filter"),
+                    "aerialway IN ('cable_car','gondola')",
+                )
+
+    def test_goods_rules_stop_at_200k(self):
+        goods = [
+            rule for rule in self._rules()
+            if "goods" in (rule.get("filter") or "")
+        ]
+        self.assertEqual(len(goods), 3)
+        self.assertEqual(
+            sorted(int(rule.get("scalemaxdenom") or 0) for rule in goods),
+            [50000, 100000, 200000],
+        )
+        self.assertIn(
+            200000,
+            {int(rule.get("scalemaxdenom") or 0) for rule in goods},
+        )
+        for rule in goods:
+            self.assertLessEqual(
+                int(rule.get("scalemaxdenom") or 0), 200000,
+            )
+            self.assertLess(
+                int(rule.get("scalemindenom") or 0), 200000,
+            )
+
+    def test_goods_symbols_are_solid_and_thin(self):
+        symbols = {
+            symbol.get("name"): symbol
+            for symbol in self.renderer.find("symbols").findall("symbol")
+        }
+        for name in ("4", "5", "6"):
+            symbol = symbols[name]
+            self.assertEqual(
+                [layer.get("class") for layer in symbol.findall("layer")],
+                ["SimpleLine"],
+                name,
+            )
+            options = {
+                option.get("name"): option.get("value")
+                for option in symbol.find("layer").findall("Option/Option")
+            }
+            self.assertTrue(
+                options["line_color"].startswith("105,105,105,255"), name,
+            )
+            self.assertEqual(options["line_style"], "solid", name)
+            self.assertEqual(options["use_custom_dash"], "0", name)
+            self.assertLess(float(options["line_width"]), 0.26, name)
+
+
 class FunicularStyleTest(unittest.TestCase):
     """Фуникулёр рисуется как железная дорога на всех масштабах."""
 

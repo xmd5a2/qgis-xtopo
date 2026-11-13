@@ -275,6 +275,13 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `85,85,85`, а центральную линию и стрелки направления — светлее,
   `105,105,105` (на масштабах крупнее 1:100000 линии остаются
   чёрными/тёмно-серыми, как раньше).
+- **`aerialway=goods` — отдельный тонкий серый стиль.** В слое
+  `aerialway cable car, gondola` правила cable_car/gondola отбирают
+  только эти два типа, а `goods` рисуется сплошной линией
+  `105,105,105` толщиной 0,22/0,20/0,18 мм и только до 1:200000
+  (`scalemaxdenom="200000"`, на 300k+ правила нет). Маркеров и стрелок
+  у goods нет. Проверка — `AerialwayGoodsStyleTest` в
+  `tests/test_template_styles.py`.
 - **Два уровня сервисных дорог.** Во всех слоях `highway main*`
   (включая bridge/tunnel и копии для `layer`) обычный `highway=service`
   без `service=*` виден до 1:300000 (100–200k — `@level_of_detail >= 3`,
