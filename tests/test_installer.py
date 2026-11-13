@@ -55,9 +55,46 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("msiexec.exe", text)
         self.assertIn("qgis-bin.exe", text)
 
+    def test_qgis_is_installed_through_osgeo4w(self):
+        # Сетевой установщик OSGeo4W с фиксированным списком пакетов:
+        # качает только QGIS LTR вместо полного standalone-MSI.
+        text = _read(INSTALLER / "scripts" / "install-qgis.ps1")
+        self.assertIn("osgeo4w-setup.exe", text)
+        self.assertIn("download.osgeo.org/osgeo4w/v2/", text)
+        self.assertIn("qgis-ltr", text)
+        self.assertIn("-P", text)
+        self.assertIn("LOCALAPPDATA", text)
+
+    def test_msi_stays_as_a_fallback(self):
+        text = _read(INSTALLER / "scripts" / "install-qgis.ps1")
+        self.assertIn("Install-Osgeo4W", text)
+        self.assertIn("Install-Msi", text)
+        # Сначала пробуем OSGeo4W, и только потом MSI.
+        self.assertLess(text.index("Install-Osgeo4W)"), text.index("Install-Msi)"))
+
+    def test_both_qgis_layouts_are_supported(self):
+        text = _read(INSTALLER / "qgis-xtopo.iss")
+        self.assertIn("qgis-bin.exe", text)
+        self.assertIn("qgis-ltr-bin.exe", text)
+        self.assertIn("qgis-ltr.bat", text)
+
     def test_installer_works_without_admin_rights(self):
         text = _read(INSTALLER / "qgis-xtopo.iss")
         self.assertIn("PrivilegesRequired=lowest", text)
+
+    def test_install_check_script_exists(self):
+        script = INSTALLER / "scripts" / "check-qgis-install.py"
+        self.assertTrue(script.exists())
+        text = _read(script)
+        self.assertIn("qgis_xtopo", text)
+        self.assertIn("GetDriverByName", text)
+
+    def test_ci_can_verify_the_installation(self):
+        workflow = ROOT / ".github" / "workflows" / "verify-qgis-install.yml"
+        self.assertTrue(workflow.exists())
+        text = _read(workflow)
+        self.assertIn("install-qgis.ps1", text)
+        self.assertIn("check-qgis-install.py", text)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@
 Он:
 
 * проверяет, установлен ли QGIS (реестр, `Program Files`, `OSGeo4W`);
-* если QGIS не найден — предлагает скачать и установить официальный
-  установщик QGIS (standalone MSI) без дополнительных вопросов;
+* если QGIS не найден — предлагает установить QGIS официальным сетевым
+  установщиком OSGeo4W (только QGIS LTR, около 410 МБ вместо 580 МБ у
+  standalone-MSI); если тот не сработал — официальным standalone-MSI;
 * кладёт плагин в профиль QGIS
   (`%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgis_xtopo`);
 * включает плагин в `QGIS3.ini` (секция `[PythonPlugins]`, `qgis_xtopo=true`);
@@ -14,7 +15,7 @@
 * при удалении убирает плагин, ярлыки и запись в `QGIS3.ini`.
 
 Установка не требует прав администратора: всё ставится в профиль
-пользователя.
+пользователя (QGIS — в `%LOCALAPPDATA%\OSGeo4W`).
 
 ## Состав
 
@@ -60,12 +61,22 @@ Inno Setup из Chocolatey), артефакт `qgis-xtopo-setup`.
 Скрипт `scripts/install-qgis.ps1`:
 
 1. ищет QGIS в реестре (`HKLM\SOFTWARE\QGIS\QGIS3`), в `Program Files`,
-   в `OSGeo4W` и в локальных программах;
-2. если QGIS нет и передан ключ `-Install` — берёт страницу
-   <https://qgis.org/download/>, выбирает последний
-   `QGIS-OSGeo4W-<версия>.msi`, скачивает его
-   (`download.qgis.org`, запасной адрес — `dl1.qgis.org`) и ставит
-   через `msiexec /i … /qn /norestart`;
-3. печатает путь к `qgis-bin.exe`.
+   в `OSGeo4W` и в локальных программах; учитывает обе раскладки —
+   standalone (`bin\qgis-bin.exe`) и OSGeo4W (`bin\qgis-ltr-bin.exe`
+   плюс `bin\qgis-ltr.bat`, который задаёт переменные окружения);
+2. если QGIS нет и передан ключ `-Install`, сначала ставит QGIS официальным
+   сетевым установщиком OSGeo4W:
+   * скачивается `osgeo4w-setup.exe`
+     (`download.osgeo.org`, запасной адрес — зеркало `ftp2.osuosl.org`);
+   * запускается молча с фиксированным списком пакетов:
+     `osgeo4w-setup.exe -q -k -A -O -s https://download.osgeo.org/osgeo4w/v2/
+     -R "%LOCALAPPDATA%\OSGeo4W" -P qgis-ltr -d -n`;
+   * пакет `qgis-ltr` тянет GDAL, PROJ, Qt5, Python и numpy — этого
+     хватает плагину; GRASS и SAGA не ставятся;
+3. если OSGeo4W не сработал — запасной путь: страница
+   <https://qgis.org/download/>, последний `QGIS-OSGeo4W-<версия>.msi`,
+   скачивание (`download.qgis.org`, запасной адрес — `dl1.qgis.org`) и
+   установка через `msiexec /i … /qn /norestart`;
+4. печатает путь к исполняемому файлу QGIS.
 
 Журнал установки пишется в файл, переданный ключом `-LogFile`.

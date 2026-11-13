@@ -39,6 +39,17 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   выгрузки Geofabrik в `~/qgis_projects/qgisxtopo-cache/geofabrik`.
 - CI тесты не запускает: workflows собирают только Windows-инсталлятор и
   бинарники osmium.
+- **QGIS для новых пользователей ставится официальным сетевым установщиком
+  OSGeo4W** (`installer/scripts/install-qgis.ps1`): пакет `qgis-ltr` с
+  зависимостями (~410 МБ, против 580 МБ у standalone-MSI) в
+  `%LOCALAPPDATA%\OSGeo4W`; если он не сработал — запасной путь через
+  standalone-MSI. Раскладка OSGeo4W отличается от standalone: приложение —
+  `bin\qgis-ltr-bin.exe` (в standalone — `bin\qgis-bin.exe`), запускать
+  надо через `bin\qgis-ltr.bat` (он задаёт переменные окружения, без них
+  `qgis_app.dll` не грузится), значок — в `apps\qgis-ltr\icons\QGIS.ico`.
+  Проверка установки — `installer/scripts/check-qgis-install.py`, прогон в
+  CI — `.github/workflows/verify-qgis-install.yml` (вручную: качает
+  ~410 МБ).
 
 ## Структура и поток данных
 
@@ -147,6 +158,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   изолинии), над фоновыми площадными (карьер, ледник, лес). Проверка —
   `TunnelLayerOrderTest` в `tests/test_template_styles.py`. Площадные слои
   середины стека (вода, болото) остаются над туннелями, как и раньше.
+- **Границы admin_level выше воды.** Слои `admin level 2 (country
+  borders)` / `country names` и группа `admin level 4` (линии и подписи)
+  идут в дереве выше группы `water`. Иначе вода закрывает линии границ,
+  а подписи QGIS всё равно рисует поверх — они остаются без линии и
+  выглядят висящими в воздухе. Проверка — `AdminBoundaryOrderTest` в
+  `tests/test_template_styles.py`.
 - **Варианты крутых склонов**: `[TERRAIN] slope (steep) var1/var2/var3` на
   общей подложке `slope_upscaled.tif`, показывается один. Привязка строго по
   полному имени (`STEEP_VARIANTS`, `LAYER_NAMES` в `gui/projectpanel.py`);

@@ -1,0 +1,50 @@
+name: verify-qgis-install
+
+# Проверка установки QGIS на Windows: скрипт installer/scripts/install-qgis.ps1
+# ставит QGIS официальным сетевым установщиком OSGeo4W (пакет qgis-ltr) и
+# затем проверяется, что в этой установке работает плагин.
+#
+# Запускается вручную: установка качает около 410 МБ.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: установка QGIS через OSGeo4W
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Установка QGIS и проверка
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'install-qgis.log'
+          $fence = -join (([string][char]96) * 3)
+          try {
+            & ./installer/scripts/install-qgis.ps1 -Install -LogFile $log *>&1 |
+              Tee-Object -FilePath $log -Append
+            if ($LASTEXITCODE -ne 0) { throw "install-qgis.ps1: код $LASTEXITCODE" }
+
+            $root = Join-Path $env:LOCALAPPDATA 'OSGeo4W'
+            $exe = Join-Path $root 'bin\qgis-ltr-bin.exe'
+            if (-not (Test-Path $exe)) { throw "QGIS не установлен: $exe" }
+
+            # Версии: qgis_process и привязки Python. Приложение QGIS
+            # (qgis-ltr-bin.exe) запускается через qgis-ltr.bat — оно
+            # задаёт переменные окружения, без них qgis_app.dll не грузится.
+            & (Join-Path $root 'bin\qgis_process-qgis-ltr.bat') --version
+            if ($LASTEXITCODE -ne 0) { throw "qgis_process не отработал" }
+
+            $check = Join-Path $env:RUNNER_TEMP 'check_qgis.py'
+            Copy-Item ./installer/scripts/check-qgis-install.py $check
+            & (Join-Path $root 'bin\python-qgis-ltr.bat') $check $env:GITHUB_WORKSPACE
+            if ($LASTEXITCODE -ne 0) { throw "Проверка Python в QGIS не прошла" }
+          }
+          catch {
+            $_ | Out-String | Tee-Object -FilePath $log -Append
+            @('### Проверка установки QGIS', $fence, (Get-Content $log -Raw), $fence) |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 1
+          }

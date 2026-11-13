@@ -5,7 +5,9 @@
 ;
 ; Что делает инсталлятор:
 ;   * проверяет, установлен ли QGIS; если нет — предлагает скачать и
-;     установить официальный установщик QGIS;
+;     установить QGIS официальным сетевым установщиком OSGeo4W (только
+;     QGIS LTR, около 410 МБ), а если он не сработал — официальным
+;     standalone-MSI;
 ;   * кладёт плагин в профиль QGIS (%APPDATA%\QGIS\QGIS3\profiles\default);
 ;   * включает плагин в QGIS3.ini (секция [PythonPlugins]);
 ;   * создаёт ярлык «QGIS-xtopo» на рабочем столе и в меню «Пуск».
@@ -85,20 +87,30 @@ begin
   Result := ExpandConstant('{userappdata}\QGIS\QGIS3');
 end;
 
-{ Ищет qgis-bin.exe в каталоге установки: сам каталог или вложенные
-  версионные подкаталоги вида "QGIS 3.44.15". }
+{ Ищет исполняемый файл QGIS в каталоге установки: сам каталог или
+  вложенные версионные подкаталоги вида "QGIS 3.44.15".
+  Две раскладки:
+    * standalone (MSI): <корень>\bin\qgis-bin.exe;
+    * OSGeo4W:           <корень>\bin\qgis-ltr-bin.exe. }
 function FindQgisIn(const Base: String): String;
 var
   Finder: TFindRec;
   Path: String;
+  Names: array[0..1] of String;
+  Index: Integer;
 begin
   Result := '';
   if Base = '' then
     Exit;
-  if FileExists(Base + '\bin\qgis-bin.exe') then
+  Names[0] := 'qgis-bin.exe';
+  Names[1] := 'qgis-ltr-bin.exe';
+  for Index := 0 to 1 do
   begin
-    Result := Base + '\bin\qgis-bin.exe';
-    Exit;
+    if FileExists(Base + '\bin\' + Names[Index]) then
+    begin
+      Result := Base + '\bin\' + Names[Index];
+      Exit;
+    end;
   end;
   if FindFirst(Base + '\QGIS *', Finder) then
   begin
@@ -106,11 +118,14 @@ begin
       repeat
         if DirExists(Base + '\' + Finder.Name) then
         begin
-          Path := Base + '\' + Finder.Name + '\bin\qgis-bin.exe';
-          if FileExists(Path) then
+          for Index := 0 to 1 do
           begin
-            Result := Path;
-            Break;
+            Path := Base + '\' + Finder.Name + '\bin\' + Names[Index];
+            if FileExists(Path) then
+            begin
+              Result := Path;
+              Exit;
+            end;
           end;
         end;
       until not FindNext(Finder);
@@ -153,10 +168,49 @@ begin
   end;
 end;
 
+{ Чем запускать QGIS: у установки OSGeo4W приложение требует переменных
+  окружения из qgis-ltr.bat, поэтому запускаем через него. }
+function QgisLauncher: String;
+var
+  Path: String;
+begin
+  Path := QgisExe;
+  Result := Path;
+  if Path = '' then
+    Exit;
+  if (ExtractFileExt(Path) = '.exe') and
+     (ExtractFileName(Path) = 'qgis-ltr-bin.exe') then
+  begin
+    if FileExists(ExtractFilePath(Path) + '\qgis-ltr.bat') then
+      Result := ExtractFilePath(Path) + '\qgis-ltr.bat';
+  end;
+end;
+
+{ Значок QGIS: у standalone — рядом с exe, у OSGeo4W — в каталоге
+  приложения. }
+function QgisIconFile: String;
+var
+  Path: String;
+begin
+  Path := QgisExe;
+  Result := '';
+  if Path = '' then
+    Exit;
+  if ExtractFileName(Path) = 'qgis-ltr-bin.exe' then
+  begin
+    if FileExists(ExtractFilePath(ExtractFilePath(Path)) + '\apps\qgis-ltr\icons\QGIS.ico') then
+    begin
+      Result := ExtractFilePath(ExtractFilePath(Path)) + '\apps\qgis-ltr\icons\QGIS.ico';
+      Exit;
+    end;
+  end;
+  Result := Path;
+end;
+
 { Иконка ярлыка: значок QGIS, если он найден, иначе — значок плагина. }
 function QgisIcon(Param: String): String;
 begin
-  Result := QgisExe;
+  Result := QgisIconFile;
   if Result = '' then
     Result := ExpandConstant('{app}\logo.ico');
 end;
@@ -184,8 +238,7 @@ begin
     Exit;
   LogFile := ExpandConstant('{tmp}\qgis-install.log');
   WizardForm.StatusLabel.Caption :=
-    'Установка QGIS: скачивание установщика и установка...';
-  WizardForm.Refresh;
+    'Установка QGIS: скачивание установщика и установка...';  WizardForm.Refresh;
   ResultCode := RunPowerShell('-Install -LogFile "' + LogFile + '"');
   WizardForm.StatusLabel.Caption := '';
   if ResultCode <> 0 then
@@ -207,20 +260,24 @@ begin
     Lines.Add('rem Launch QGIS with the QGIS-xtopo panel opened.');
     Lines.Add('setlocal enabledelayedexpansion');
     Lines.Add('set "QGIS_XTOPO_OPEN=1"');
-    Lines.Add('set "QGIS_EXE=' + QgisPath + '"');
+    Lines.Add('set "QGIS_LAUNCHER=' + QgisLauncher + '"');
     Lines.Add('rem If QGIS was installed later, look for it ourselves.');
-    Lines.Add('if not defined QGIS_EXE (');
+    Lines.Add('if not defined QGIS_LAUNCHER (');
     Lines.Add('  for /f "tokens=2,*" %%A in (''reg query "HKLM\SOFTWARE\QGIS\QGIS3" /v InstallPath 2^>nul ^| find "InstallPath"'') do set "QGIS_PATH=%%B"');
-    Lines.Add('  if defined QGIS_PATH if exist "!QGIS_PATH!\bin\qgis-bin.exe" set "QGIS_EXE=!QGIS_PATH!\bin\qgis-bin.exe"');
+    Lines.Add('  if defined QGIS_PATH if exist "!QGIS_PATH!\bin\qgis-bin.exe" set "QGIS_LAUNCHER=!QGIS_PATH!\bin\qgis-bin.exe"');
+    Lines.Add('  if defined QGIS_PATH if exist "!QGIS_PATH!\bin\qgis-ltr.bat" set "QGIS_LAUNCHER=!QGIS_PATH!\bin\qgis-ltr.bat"');
     Lines.Add(')');
-    Lines.Add('if not defined QGIS_EXE if exist "%SystemDrive%\OSGeo4W\bin\qgis-bin.exe" set "QGIS_EXE=%SystemDrive%\OSGeo4W\bin\qgis-bin.exe"');
-    Lines.Add('if not defined QGIS_EXE for /f "delims=" %%D in (''dir /b /ad "%ProgramFiles%\QGIS *" 2^>nul'') do if exist "%ProgramFiles%\%%D\bin\qgis-bin.exe" set "QGIS_EXE=%ProgramFiles%\%%D\bin\qgis-bin.exe"');
-    Lines.Add('if not defined QGIS_EXE (');
+    Lines.Add('if not defined QGIS_LAUNCHER if exist "%SystemDrive%\OSGeo4W\bin\qgis-ltr.bat" set "QGIS_LAUNCHER=%SystemDrive%\OSGeo4W\bin\qgis-ltr.bat"');
+    Lines.Add('if not defined QGIS_LAUNCHER if exist "%SystemDrive%\OSGeo4W\bin\qgis-bin.exe" set "QGIS_LAUNCHER=%SystemDrive%\OSGeo4W\bin\qgis-bin.exe"');
+    Lines.Add('if not defined QGIS_LAUNCHER if exist "%LOCALAPPDATA%\OSGeo4W\bin\qgis-ltr.bat" set "QGIS_LAUNCHER=%LOCALAPPDATA%\OSGeo4W\bin\qgis-ltr.bat"');
+    Lines.Add('if not defined QGIS_LAUNCHER for /f "delims=" %%D in (''dir /b /ad "%ProgramFiles%\QGIS *" 2^>nul'') do if exist "%ProgramFiles%\%%D\bin\qgis-bin.exe" set "QGIS_LAUNCHER=%ProgramFiles%\%%D\bin\qgis-bin.exe"');
+    Lines.Add('if not defined QGIS_LAUNCHER (');
     Lines.Add('  echo QGIS not found. Install QGIS from https://qgis.org/download/');
     Lines.Add('  pause');
     Lines.Add('  exit /b 1');
     Lines.Add(')');
-    Lines.Add('start "" "%QGIS_EXE%" %*');
+    Lines.Add('rem Установка OSGeo4W запускается через qgis-ltr.bat: он задаёт переменные окружения.');
+    Lines.Add('if "%QGIS_LAUNCHER:~-4%"==".bat" (call "%QGIS_LAUNCHER%" %*) else (start "" "%QGIS_LAUNCHER%" %*)');
     Lines.Add('endlocal');
     Lines.SaveToFile(Path);
   finally
@@ -310,7 +367,7 @@ begin
   end;
   Answer := MsgBox('QGIS не найден на этом компьютере.' + #13#10 + #13#10 +
     'Установить QGIS сейчас? Будет скачан официальный установщик ' +
-    '(около 1,5 ГБ) и установлен без дополнительных вопросов.' + #13#10 + #13#10 +
+    '(QGIS LTR, около 410 МБ) и установлен без дополнительных вопросов.' + #13#10 + #13#10 +
     'Если отказаться, плагин всё равно будет установлен — запустить QGIS ' +
     'придётся отдельно.',
     mbConfirmation, MB_YESNO);
