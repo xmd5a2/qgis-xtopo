@@ -322,6 +322,13 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   дороги), диапазон не делят на два правила: QGIS теряет символ у
   второго, поэтому LOD проверяется через `@map_scale` внутри одного
   фильтра. Проверка — `ServiceRoadLodTest`.
+- **Пересыхающие водотоки на 1:100000 и мельче тоньше постоянных.**
+  В слое `stream intermittent` ветка `default` на 100–200k, 200–300k и
+  300–500k имеет ширину 0.12 мм (у `stream` — 0.16). У
+  `river intermittent` и `canal intermittent` на 100–300k ширина
+  0.22 против 0.29, на 300k+ — 0.17 против 0.23. На более крупных
+  масштабах ширины не меняются. Проверка —
+  `IntermittentWaterwayWidthTest` в `tests/test_template_styles.py`.
 
 ## Источники рельефа
 

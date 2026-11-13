@@ -698,6 +698,64 @@ class IntermittentWaterStyleTest(unittest.TestCase):
             self.assertEqual(_option_value(fill, "color"), WATER_COLOR)
 
 
+class IntermittentWaterwayWidthTest(unittest.TestCase):
+    """Пересыхающие водотоки тоньше постоянных на 1:100000 и мельче."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    @staticmethod
+    def _find(node, path):
+        for rule in node.findall("rule"):
+            title = rule.get("label") or rule.get("description")
+            if title == path[0]:
+                if len(path) == 1:
+                    return rule
+                return IntermittentWaterwayWidthTest._find(rule, path[1:])
+        return None
+
+    def _width(self, layer_name, path):
+        layer = self.layers[layer_name]
+        renderer = layer.find("renderer-v2")
+        rule = self._find(renderer.find("rules"), path)
+        self.assertIsNotNone(rule, f"{layer_name}/{'/'.join(path)}")
+        symbol = next(
+            symbol for symbol in renderer.findall("symbols/symbol")
+            if symbol.get("name") == rule.get("symbol")
+        )
+        line = next(
+            item for item in symbol.findall("layer")
+            if item.get("class") == "SimpleLine"
+        )
+        return float(_option_value(line, "line_width"))
+
+    def test_streams_are_thinner_at_100k(self):
+        for label in ("100000 - 200000", "200000 - 300000",
+                      "300000 - 500000"):
+            regular = self._width("stream", ["default", label])
+            intermittent = self._width(
+                "stream intermittent", ["default", label])
+            self.assertLess(intermittent, regular, label)
+            self.assertAlmostEqual(intermittent, 0.12)
+
+    def test_rivers_and_canals_are_thinner_at_100k(self):
+        for label in ("100000 - 300000", "300000 - 0"):
+            for regular_name, intermittent_name in (
+                    ("river", "river intermittent"),
+                    ("canal", "canal intermittent")):
+                regular = self._width(regular_name, [label])
+                intermittent = self._width(intermittent_name, [label])
+                self.assertLess(intermittent, regular, (label, regular_name))
+        self.assertAlmostEqual(
+            self._width("river intermittent", ["100000 - 300000"]), 0.22)
+        self.assertAlmostEqual(
+            self._width("river intermittent", ["300000 - 0"]), 0.17)
+
+
 class HillshadeVariantsTest(unittest.TestCase):
     """Два варианта отмывки: светлый для равнин и текущий для гор."""
 
