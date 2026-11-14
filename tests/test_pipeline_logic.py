@@ -807,6 +807,7 @@ class _PeakConfig:
         self.vector_dir = Path(root) / "vector"
         self.raster_dir = Path(root) / "raster"
         self.terrain_cache_dir = Path(root) / "srtm-cache"
+        self.terrain_result_cache_dir = Path(root) / "terrain-cache"
         self._source = source
 
     def resolved_terrain_source(self):
@@ -906,6 +907,72 @@ class PeakFilterTest(unittest.TestCase):
             import sqlite3
 
             database = sqlite3.connect(root / "vector" / "peak.sqlite")
+            identifiers = {
+                row[0] for row in database.execute('select "@id" from peak')
+            }
+            self.assertEqual(identifiers, {"node/1", "node/3"})
+            ele = database.execute(
+                'select ele from peak where "@id" = ?', ("node/1",)
+            ).fetchone()[0]
+            self.assertEqual(ele, "1000")
+            database.close()
+
+    def test_cached_result_is_reapplied(self):
+        """Повторный прогон с тем же рельефом и пиками не считает метрики."""
+        from unittest import mock
+
+        from qgis_xtopo.core import peak_filter, peak_placement
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            self._write_dem(root / "raster" / "merged_dem.tif")
+            peaks = [
+                {"id": "node/1", "ele": 900, "lon": 30.005, "lat": 35.995},
+                {"id": "node/2", "ele": 1000, "lon": 30.006, "lat": 35.996},
+                {"id": "node/3", "name": "Named", "ele": 500,
+                 "lon": 30.007, "lat": 35.997},
+                {"id": "node/4", "ele": None, "lon": 30.008, "lat": 35.998},
+            ]
+            layer_path = root / "vector" / "peak.sqlite"
+            self._write_layer(layer_path, peaks)
+
+            def fake_measure(_peak, _dem, _radii, _thresholds):
+                return type("Metrics", (), {"dem": 1000.0})()
+
+            def fake_classify(peak, _metrics, _thresholds, neighbour=None):
+                if peak.osm_id in ("node/2", "node/4"):
+                    return "error", [], None
+                return "ok", [], None
+
+            with mock.patch.object(peak_placement, "measure", fake_measure), \
+                    mock.patch.object(peak_placement, "classify", fake_classify):
+                first = peak_filter.filter_peak_layer(
+                    _PeakConfig(root), self.BBOX, dem_key="dem-1"
+                )
+            self.assertEqual(first, {
+                "checked": 3, "removed": 2, "ele_fixed": 1, "no_data": 0,
+            })
+
+            self._write_layer(layer_path, peaks)
+            messages = []
+            with mock.patch.object(
+                    peak_placement, "measure",
+                    side_effect=AssertionError("метрики не должны считаться"),
+            ), mock.patch.object(
+                    peak_placement, "classify",
+                    side_effect=AssertionError("классификация не должна считаться"),
+            ):
+                second = peak_filter.filter_peak_layer(
+                    _PeakConfig(root), self.BBOX, dem_key="dem-1",
+                    progress=messages.append,
+                )
+            self.assertEqual(second, first)
+            self.assertIn(
+                "Пики: проверено 3, удалено 2, исправлено ele 1", messages
+            )
+            import sqlite3
+
+            database = sqlite3.connect(layer_path)
             identifiers = {
                 row[0] for row in database.execute('select "@id" from peak')
             }

@@ -320,6 +320,21 @@ def _load_processing():
         return processing, Processing
 
 
+def _warm_up_style():
+    """Открывает базу стилей в главном потоке.
+
+    ``QgsStyle.defaultStyle()`` создаётся лениво и без блокировки: если
+    это случится сразу в нескольких рабочих потоках, база стилей
+    откроется дважды.  Прогрев в главном потоке снимает гонку.
+    """
+    try:
+        from qgis.core import QgsStyle
+
+        QgsStyle.defaultStyle(True)
+    except Exception:  # noqa: BLE001 - стиль не обязателен
+        pass
+
+
 class ProcessingRunner:
     def __init__(self, progress=None, cancel=None, fraction=None):
         processing, Processing = _load_processing()
@@ -332,6 +347,9 @@ class ProcessingRunner:
             progress=progress, cancel=cancel,
             fraction=lambda value: self.fraction and self.fraction(value),
         ).instance
+        self.context = None
+        self.context_project = None
+        _warm_up_style()
 
     def clone(self):
         other = object.__new__(ProcessingRunner)
@@ -343,7 +361,67 @@ class ProcessingRunner:
             progress=self.progress, cancel=self.cancel,
             fraction=lambda value: other.fraction and other.fraction(value),
         ).instance
+        other.context = None
+        other.context_project = None
         return other
+
+    def release(self):
+        """Освобождает проект потока до его завершения.
+
+        ``QgsProject`` — QObject.  Если Python отпускает его в другом
+        потоке, PyQt откладывает удаление до завершения потока-владельца,
+        а там ``thread_local`` регулярное выражение в
+        ``QgsProject::writeEntry`` уже разрушено — QGIS падает.  Поэтому
+        проект, созданный в рабочем потоке, надо отпускать в нём же.
+        """
+        self.context = None
+        self.context_project = None
+
+    def _processing_context(self):
+        """Свой контекст и проект на поток.
+
+        ``processing.run`` без контекста берёт общий ``QgsProject.instance()``
+        и строит на нём контекст выражений.  Несколько слоёв в разных
+        потоках одновременно обращаются к одному проекту — QGIS падает с
+        segfault.  Свой проект и контекст на каждый поток убирают гонку.
+        """
+        if self.context is not None:
+            return self.context
+        from qgis.core import (
+            QgsExpressionContext, QgsExpressionContextUtils,
+            QgsFeatureRequest, QgsProcessingContext, QgsProcessingUtils,
+            QgsProject, QgsSettings,
+        )
+
+        project = QgsProject()
+        context = QgsProcessingContext()
+        context.setProject(project)
+        context.setFeedback(self.feedback)
+        expression = QgsExpressionContext()
+        expression.appendScope(QgsExpressionContextUtils.globalScope())
+        expression.appendScope(QgsExpressionContextUtils.projectScope(project))
+        context.setExpressionContext(expression)
+        try:
+            from processing.core.ProcessingConfig import ProcessingConfig
+
+            invalid = ProcessingConfig.getSetting(
+                ProcessingConfig.FILTER_INVALID_GEOMETRIES
+            )
+            if invalid is not None:
+                context.setInvalidGeometryCheck(
+                    QgsFeatureRequest.InvalidGeometryCheck(int(invalid))
+                )
+            settings = QgsSettings()
+            context.setDefaultEncoding(
+                QgsProcessingUtils.resolveDefaultEncoding(
+                    settings.value("/Processing/encoding")
+                )
+            )
+        except Exception:  # noqa: BLE001 - настройки не обязательны
+            pass
+        self.context_project = project
+        self.context = context
+        return context
 
     def has_algorithm(self, algorithm):
         QgsApplication, _ = _qgis()
@@ -353,7 +431,10 @@ class ProcessingRunner:
         if not self.has_algorithm(algorithm):
             raise PipelineError(f"QGIS algorithm is not available: {algorithm}")
         try:
-            return self.processing.run(algorithm, _stringify(parameters), feedback=self.feedback)
+            return self.processing.run(
+                algorithm, _stringify(parameters), feedback=self.feedback,
+                context=self._processing_context(),
+            )
         except Exception as exc:
             raise PipelineError(f"{algorithm} failed: {exc}") from exc
 
@@ -555,6 +636,14 @@ class Pipeline:
         finally:
             gdal_log.LOG.restore()
 
+    @staticmethod
+    def _run_parallel_layer(task, name, source, started, total):
+        """Слой в отдельном потоке; проект потока отпускается здесь же."""
+        try:
+            return task._run_layer(name, source, started, total)
+        finally:
+            task.runner.release()
+
     def _run_parallel(self, source, query_names, workers):
         producers = {}
         for name in query_names:
@@ -604,7 +693,10 @@ class Pipeline:
                         progress=report, cancel=self.cancel,
                         fraction=self.fraction, timings=self.timings,
                     )
-                    future = pool.submit(task._run_layer, name, source, started, total)
+                    future = pool.submit(
+                        self._run_parallel_layer, task, name, source,
+                        started, total,
+                    )
                     running[future] = (name, task)
                     if name in serial:
                         serial_busy = True
@@ -1443,6 +1535,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                 peak_filter.filter_peak_layer(
                     config, bbox, progress=report, cancel=cancel,
                     fraction=tracker.fraction,
+                    dem_key=terrain_keys.get("dem"),
                 )
             except InterruptedError:
                 raise

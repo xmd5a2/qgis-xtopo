@@ -84,6 +84,14 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 - **Потоки**: перед удалением панели все QThread останавливаются
   (`shutdown_workers`); свой сигнал `finished` в QThread не объявлять.
   Подробности — `docs/agents/ui.md`.
+- **`ProcessingRunner` даёт каждому рабочему потоку свой
+  `QgsProcessingContext` с отдельным `QgsProject`.** Общий
+  `QgsProject.instance()` нельзя: контекст лениво кэширует область
+  выражений, и параллельные вызовы гоняются за её пересборку (segfault в
+  `createExpressionContextScope`). Проект, созданный в рабочем потоке,
+  освобождается там же (`ProcessingRunner.release`): иначе PyQt отложит
+  удаление до завершения потока, а там `thread_local` регулярное выражение
+  в `QgsProject::writeEntry` уже разрушено — снова segfault.
 - **Сеть**: запросы только через `core/net.py` (предохранитель от обрыва
   связи), прокси — `core/proxy.py`. Подробности — `docs/agents/ui.md`.
 - **Слои обрабатываются параллельно, по умолчанию 3/4 ядер с потолком 8**

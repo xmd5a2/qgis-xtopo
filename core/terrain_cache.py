@@ -133,6 +133,11 @@ def _layer_digest(path):
     return digest.hexdigest()
 
 
+def layer_digest(path):
+    """Публичный отпечаток содержимого слоя для других кэшей."""
+    return _layer_digest(path)
+
+
 def dem_source_digest(config):
     """Хест исходных тайлов DEM.
 

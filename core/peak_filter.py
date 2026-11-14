@@ -11,6 +11,8 @@
 высотой исчезал бы вместо исправления.
 """
 
+import hashlib
+import json
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -20,10 +22,16 @@ from typing import Optional
 
 import numpy as np
 
-from . import i18n, peak_placement
+from . import i18n, peak_placement, terrain_cache
 from .cpu import cpu_workers
 
 TILE_PIXELS = 3601
+
+# Версия правила проверки пиков.  Меняя пороги, признаки или способ
+# классификации, поднимайте число: иначе кэш вернёт старые вердикты.
+PEAK_FILTER_VERSION = 1
+# Сколько результатов проверки хранить.
+PEAK_CACHE_KEEP = 5
 
 
 def tile_name(lat, lon):
@@ -431,7 +439,145 @@ def _apply_changes(layer, fields, removed, updates):
     layer.SyncToDisk()
 
 
-def _filter_layer(layer_path, dem, config, report, cancel, fraction):
+def _peak_dem_key(dem_path, dem_key):
+    if dem_key:
+        return str(dem_key)
+    try:
+        stat = Path(dem_path).stat()
+    except OSError:
+        return "missing"
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _peak_cache_key(config, bbox, layer_path, dem_key):
+    digest = hashlib.sha1()
+    parts = (
+        PEAK_FILTER_VERSION,
+        bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        config.resolved_terrain_source(),
+        dem_key,
+        terrain_cache.layer_digest(layer_path),
+    )
+    for part in parts:
+        digest.update(str(part).encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def _peak_cache_path(config, key):
+    root = getattr(config, "terrain_result_cache_dir", None)
+    if root is None:
+        return None
+    return Path(root) / "peak" / f"{key}.json"
+
+
+def _prune_peak_cache(directory):
+    try:
+        entries = [item for item in directory.iterdir() if item.is_file()]
+    except OSError:
+        return
+    entries.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    for item in entries[PEAK_CACHE_KEEP:]:
+        item.unlink(missing_ok=True)
+
+
+def _write_peak_cache(path, checked, removed, updates, no_data):
+    """Сохраняет вердикты: при том же рельефе и пиках проверка не нужна."""
+    path = Path(path)
+    data = {
+        "checked": int(checked),
+        "removed": [peak.osm_id for peak in removed],
+        "ele": {
+            peak.osm_id: int(round(value))
+            for peak, value in updates
+        },
+        "no_data": int(no_data),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".part")
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+        temporary.replace(path)
+    except OSError:
+        return
+    _prune_peak_cache(path.parent)
+
+
+def _read_peak_cache(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _apply_cached(layer_path, data):
+    """Применяет к слою пиков готовые вердикты из кэша."""
+    from osgeo import ogr
+
+    ogr.UseExceptions()
+    dataset = ogr.Open(str(layer_path), 1)
+    if dataset is None:
+        return None
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return None
+        fields = _field_map(layer)
+        removed = set(data.get("removed") or ())
+        updates = data.get("ele") or {}
+        ele_index = fields.get("ele")
+        definition = layer.GetLayerDefn()
+        field_type = (
+            definition.GetFieldDefn(ele_index).GetType()
+            if ele_index is not None else None
+        )
+        numeric = (ogr.OFTInteger, ogr.OFTReal)
+        integer64 = getattr(ogr, "OFTInteger64", None)
+        if integer64 is not None:
+            numeric = numeric + (integer64,)
+        removed_count = 0
+        updated_count = 0
+        remove_fids = []
+        update_fids = []
+        for feature in layer:
+            peak = _read_peak(feature, fields)
+            if peak is None:
+                continue
+            if peak.osm_id in removed:
+                remove_fids.append(peak.fid)
+            elif peak.osm_id in updates and ele_index is not None:
+                update_fids.append((
+                    peak.fid, int(round(float(updates[peak.osm_id]))),
+                ))
+        for fid in remove_fids:
+            layer.DeleteFeature(fid)
+            removed_count += 1
+        for fid, value in update_fids:
+            feature = layer.GetFeature(fid)
+            if feature is None:
+                continue
+            if field_type in numeric:
+                feature.SetField(ele_index, value)
+            else:
+                feature.SetField(ele_index, str(value))
+            layer.SetFeature(feature)
+            updated_count += 1
+        layer.SyncToDisk()
+        return {
+            "checked": int(data.get("checked") or 0),
+            "removed": removed_count,
+            "ele_fixed": updated_count,
+            "no_data": int(data.get("no_data") or 0),
+        }
+    finally:
+        dataset = None
+
+
+def _filter_layer(layer_path, dem, config, report, cancel, fraction,
+                  cache_path=None):
     from osgeo import ogr
 
     ogr.UseExceptions()
@@ -527,6 +673,8 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction):
                 fraction(0.8 + 0.2 * index / total)
 
         _apply_changes(layer, fields, removed, updates)
+        if cache_path is not None:
+            _write_peak_cache(cache_path, checked, removed, updates, no_data)
         report(i18n.trf(
             "Пики: проверено {}, удалено {}, исправлено ele {}",
             checked, len(removed), len(updates),
@@ -543,11 +691,14 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction):
         dataset = None
 
 
-def filter_peak_layer(config, bbox, progress=None, cancel=None, fraction=None):
+def filter_peak_layer(config, bbox, progress=None, cancel=None, fraction=None,
+                      dem_key=None):
     """Проверяет слой пиков по рельефу проекта.
 
     Возвращает словарь со статистикой или None, если проверка не
     выполнялась (нет слоя, нет рельефа или рельеф не покрывает охват).
+    Готовые вердикты переиспользуются, пока не изменились рельеф, слой
+    пиков или версия правила.
     """
     report = progress or (lambda message: None)
     layer_path = config.vector_dir / "peak.sqlite"
@@ -557,6 +708,22 @@ def filter_peak_layer(config, bbox, progress=None, cancel=None, fraction=None):
     if not dem_path.exists():
         report(i18n.tr("Пики: рельеф не подготовлен, проверка пропущена"))
         return None
+    resolved_key = _peak_dem_key(dem_path, dem_key)
+    cache_path = _peak_cache_path(
+        config, _peak_cache_key(config, bbox, layer_path, resolved_key)
+    )
+    if cache_path is not None:
+        cached = _read_peak_cache(cache_path)
+        if cached is not None:
+            stats = _apply_cached(layer_path, cached)
+            if stats is not None:
+                report(i18n.trf(
+                    "Пики: проверено {}, удалено {}, исправлено ele {}",
+                    stats["checked"], stats["removed"], stats["ele_fixed"],
+                ))
+                if stats["no_data"]:
+                    report(i18n.trf("Пики: без рельефа {}", stats["no_data"]))
+                return stats
     dem = ProjectDem(dem_path)
     source = config.resolved_terrain_source()
     cache_dir = getattr(config, "terrain_cache_dir", None)
@@ -567,7 +734,8 @@ def filter_peak_layer(config, bbox, progress=None, cancel=None, fraction=None):
             report(i18n.tr("Пики: рельеф не покрывает охват, проверка пропущена"))
             return None
         return _filter_layer(
-            layer_path, dem, config, report, cancel, fraction
+            layer_path, dem, config, report, cancel, fraction,
+            cache_path=cache_path,
         )
     finally:
         dem.close()

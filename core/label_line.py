@@ -796,6 +796,7 @@ def _axis_attempt(part, cells, main_flow=False):
     second = _nearest_cell(corners[1], x0, y1, cell_x, cell_y, nx, ny, mask)
     # У крупных изогнутых объектов (ледники, заливы) диаметр по прямой
     # упирается в тонкие мысы: концы берём по расстоянию вдоль фигуры.
+    precomputed_path = None
     if main_flow and cells >= GEODESIC_CELLS:
         geodesic = _geodesic_corners(mask)
         if geodesic[0] is not None and geodesic[1] is not None:
@@ -818,7 +819,7 @@ def _axis_attempt(part, cells, main_flow=False):
                     core = values[cut:len(values) - cut]
                     if not core:
                         return None
-                    return float(np.mean(core)), float(min(core))
+                    return float(np.mean(core)), float(min(core)), middle
 
                 ns = _path_core_width(north, south)
                 gs = _path_core_width(first, second)
@@ -826,6 +827,11 @@ def _axis_attempt(part, cells, main_flow=False):
                         and ns[1] > gs[1]
                         and ns[0] >= 1.25 * gs[0]):
                     first, second = north, south
+                    # Путь уже посчитан для сравнения ширин — не строим
+                    # его заново ниже.
+                    precomputed_path = ns[2]
+                elif gs is not None:
+                    precomputed_path = gs[2]
     elif (first is not None and second is not None
           and _segment_outside(mask, first, second) > 0.15):
         ridge = _ridge_corners(mask, distance)
@@ -836,7 +842,12 @@ def _axis_attempt(part, cells, main_flow=False):
     # начинаем с более широкого конца: подпись идёт из широкой части
     if _local_width(distance, second) > _local_width(distance, first):
         first, second = second, first
-    path = centered_path(mask, distance, first, second)
+        # Прежний код строил путь уже от нового начала; разворот готового
+        # пути даёт другой выбор при равной стоимости. Пересчитываем.
+        precomputed_path = None
+    path = precomputed_path
+    if path is None:
+        path = centered_path(mask, distance, first, second)
     if len(path) < 3:
         return []
     line = np.array([(x0 + (c + 0.5) * cell_x, y1 - (r + 0.5) * cell_y)
