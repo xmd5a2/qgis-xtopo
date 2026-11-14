@@ -28,6 +28,12 @@ DEM_FILES = (
     "hillshade_composite.tif",
 )
 
+# Эти файлы переживают очистку каталога проекта и могут быть перезаписаны
+# на месте: связать их с кэшем жёсткой ссылкой нельзя, запись прошла бы
+# в кэш.  Остальные файлы удаляются перед каждой подготовкой, поэтому
+# ссылка безопасна и копия не нужна.
+COPY_ONLY_FILES = ("merged_dem_3857.tif",)
+
 # Версия расчёта рельефа (формат растров, сборка мозаики, репроекция).
 # Меняя результат, поднимайте число: иначе старый кэш отдаст устаревший
 # рельеф даже после обновления плагина.  Версия плагина сюда намеренно не
@@ -338,10 +344,10 @@ def _restore_item(item, target):
     """Восстанавливает файл кэша без лишнего копирования.
 
     Крупные растры занимают гигабайты, и каждый прогон переписывал их
-    заново.  Если файл уже лежит на месте с тем же размером и временем,
-    копирование не нужно.  Удалённые перед восстановлением растры можно
-    связать жёсткой ссылкой: они только читаются, а при следующей
-    подготовке удаляются до записи новых.
+    заново: восстановление рельефа занимало больше 20 секунд.  Файлы,
+    которые удаляются перед каждой подготовкой, связываются с кэшем
+    жёсткой ссылкой — места на диске не расходуется, а данные те же.
+    Те, что могут быть перезаписаны на месте, копируются.
     """
     if target.exists():
         if _same_file(item, target):
@@ -354,8 +360,7 @@ def _restore_item(item, target):
                 return
         except OSError:
             pass
-    if not target.exists() and target.name in (
-            "slope_upscaled.tif", "hillshade_composite.tif"):
+    if item.name not in COPY_ONLY_FILES:
         try:
             os.link(item, target)
             return
@@ -388,8 +393,19 @@ def _store(config, group, signature, names, source_dir):
         if not item.exists():
             continue
         destination = target / name
-        if not _same_file(item, destination):
+        if _same_file(item, destination):
+            stored = True
+            continue
+        if name in COPY_ONLY_FILES:
             shutil.copy2(item, destination)
+        else:
+            # Ссылка вместо копии: файл только читается, а перед
+            # следующей подготовкой он удаляется из каталога проекта.
+            destination.unlink(missing_ok=True)
+            try:
+                os.link(item, destination)
+            except OSError:
+                shutil.copy2(item, destination)
         stored = True
     if stored:
         _prune(target.parent)

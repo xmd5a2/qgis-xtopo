@@ -100,7 +100,10 @@ RECIPES = {
         fix(), save(),
     ]),
     "allotments": Recipe([
-        save(), load("allotments"), dissolve(), singleparts(), save("_dissolved"),
+        # dissolve собирает площади в один контур и может получить
+        # самопересечения: дальше по слою считают площади.
+        fix(), save(), load("allotments"), dissolve(), singleparts(),
+        save("_dissolved"),
         load("allotments"), buffer(0.001), dissolve(), singleparts(),
         save("_buffered_dissolved"),
     ]),
@@ -151,7 +154,8 @@ RECIPES = {
     ]),
     "highway_main_bridge": Recipe([
         save(), centroid(), save("_centroids"),
-        load("highway_main_bridge"), dissolve("highway"), singleparts(), save("_dissolved"),
+        load("highway_main_bridge"), fix(), dissolve("highway"), singleparts(),
+        fix(), save("_dissolved"),
     ]),
     "highway_main": Recipe([
         split_layer(),
@@ -180,7 +184,9 @@ RECIPES = {
         difference("island"), save(),
     ]),
     "military": Recipe([
-        save(), dissolve(), singleparts(), save("_dissolved"),
+        # dissolve может получить самопересечения — площади military
+        # считаются по слою.
+        fix(), save(), dissolve(), singleparts(), save("_dissolved"),
     ]),
     "mountain_area": Recipe([
         fix(), save(layer_name="mountain_area_fixed"),
@@ -259,11 +265,21 @@ RECIPES = {
     # Площадные дороги (highway=* с area=yes или area:highway=*) OSM рисует
     # замкнутым контуром, но драйвер отдаёт их линиями: слой с заливкой
     # такой контур не рисует. Замкнутые линии превращаем в полигоны.
+    "island": Recipe([
+        # Острова идут накладкой в ocean: битая геометрия роняет
+        # растворение океана.
+        fix(), save(),
+    ]),
+    "place_locality_way": Recipe([
+        # Площадки населённых пунктов вычитаются из точек: битая
+        # геометрия роняет вычитание.
+        fix(), save(),
+    ]),
     "highway_main_area": Recipe([
-        linestopolygons(), save(),
+        linestopolygons(), fix(), save(),
     ]),
     "place_square_highway_area": Recipe([
-        linestopolygons(), save(),
+        linestopolygons(), fix(), save(),
     ]),
     "aerialway_station": Recipe([
         buffer(0.004), dissolve("name"), centroid(),

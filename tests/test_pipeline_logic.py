@@ -780,19 +780,25 @@ class CleanLayersTest(unittest.TestCase):
         self.vector = self.config.vector_dir / "roads.sqlite"
         self.raster = self.config.raster_dir / "hillshade.tif"
         self.dem = self.config.raster_dir / "merged_dem.tif"
+        self.dem3857 = self.config.raster_dir / "merged_dem_3857.tif"
         self.marker = self.config.raster_dir / "merged_dem_3857.tif.sha256"
-        for path in (self.vector, self.raster, self.dem, self.marker):
+        for path in (
+            self.vector, self.raster, self.dem, self.dem3857, self.marker,
+        ):
             path.write_text("data", encoding="utf-8")
 
     def test_layers_are_removed(self):
         removed = _clean_layers(self.config)
-        self.assertEqual(removed, 2)
+        self.assertEqual(removed, 3)
         self.assertFalse(self.vector.exists())
         self.assertFalse(self.raster.exists())
+        # Промежуточный DEM пересчитывается или берётся из кэша.
+        self.assertFalse(self.dem.exists())
 
-    def test_dem_cache_is_kept(self):
+    def test_reprojected_dem_is_kept(self):
+        """Проекция DEM в EPSG:3857 дорогая — её результат переживает очистку."""
         _clean_layers(self.config)
-        self.assertTrue(self.dem.exists())
+        self.assertTrue(self.dem3857.exists())
         self.assertTrue(self.marker.exists())
 
     def test_missing_directories_are_ok(self):
@@ -1433,6 +1439,66 @@ class FlowAccumulationTest(unittest.TestCase):
         expected = self._reference(surface, 43.0)
         actual = peak_placement.flow_accumulation(surface, 43.0)
         self.assertTrue(np.allclose(actual, expected))
+
+
+class IconAngleTest(unittest.TestCase):
+    """Угол поворота значка перевала считается при подготовке."""
+
+    @staticmethod
+    def _write(path, crs, geometry):
+        from osgeo import ogr, osr
+
+        ogr.UseExceptions()
+        path.unlink(missing_ok=True)
+        driver = ogr.GetDriverByName("SQLite")
+        dataset = driver.CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(crs)
+        layer = dataset.CreateLayer("layer", srs, ogr.wkbUnknown)
+        for kind, points in geometry:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            if kind == "point":
+                geometry = ogr.Geometry(ogr.wkbPoint)
+                geometry.AddPoint_2D(*points)
+            else:
+                geometry = ogr.Geometry(ogr.wkbLineString)
+                for x, y in points:
+                    geometry.AddPoint_2D(x, y)
+            feature.SetGeometry(geometry)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    def test_angle_matches_nearest_ridge(self):
+        from qgis_xtopo.core import icon_angles
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            # Гребень идёт по экватору на восток: азимут 90°.
+            self._write(
+                vector / "ridge_exploded.sqlite", 3857,
+                [("line", [(0.0, 0.0), (1000.0, 0.0)])],
+            )
+            self._write(
+                vector / "mountain_pass.sqlite", 4326,
+                [("point", (0.001, 0.0))],
+            )
+
+            class _Config:
+                vector_dir = vector
+
+            done = icon_angles.compute_icon_angles(_Config())
+            self.assertEqual(done, 1)
+
+            from osgeo import ogr
+
+            ogr.UseExceptions()
+            dataset = ogr.Open(str(vector / "mountain_pass.sqlite"))
+            layer = dataset.GetLayer(0)
+            index = layer.FindFieldIndex(icon_angles.FIELD, True)
+            self.assertGreaterEqual(index, 0)
+            feature = layer.GetNextFeature()
+            self.assertEqual(feature.GetField(index), 90)
+            dataset = None
 
 
 class RouteHikingTest(unittest.TestCase):

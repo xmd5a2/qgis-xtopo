@@ -24,6 +24,17 @@ def _write_layer(path, name, points):
     dataset = None
 
 
+def _links_supported(directory):
+    """Умеет ли файловая система жёсткие ссылки."""
+    source = Path(directory) / "link-source"
+    source.write_bytes(b"data")
+    try:
+        os.link(source, Path(directory) / "link-target")
+    except OSError:
+        return False
+    return True
+
+
 class TerrainCacheTest(unittest.TestCase):
     def _config(self, directory):
         config = Config(qgis_projects_dir=directory)
@@ -49,6 +60,37 @@ class TerrainCacheTest(unittest.TestCase):
             self.assertTrue(terrain_cache.restore_dem(config, key))
             for name in names:
                 self.assertTrue((config.raster_dir / name).exists(), name)
+
+    def test_restored_rasters_are_links_not_copies(self):
+        """Крупные растры возвращаются ссылкой: копия гигабайтов стоит
+        больше 20 секунд.
+
+        Файл, который переживает очистку каталога проекта, копируется:
+        ссылка с ним пережила бы перезапись на месте.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            names = list(terrain_cache.DEM_FILES)
+            for name in names:
+                (config.raster_dir / name).write_bytes(b"raster")
+            key = terrain_cache.dem_signature(config, BBox(43.0, 42.0, 43.1, 42.1))
+            terrain_cache.store_dem(config, key)
+            for name in names:
+                (config.raster_dir / name).unlink()
+            self.assertTrue(terrain_cache.restore_dem(config, key))
+            cache_dir = terrain_cache._group_dir(config, "dem", key)
+            for name in names:
+                restored = config.raster_dir / name
+                self.assertTrue(restored.exists(), name)
+                self.assertEqual(restored.read_bytes(), b"raster", name)
+                if name in terrain_cache.COPY_ONLY_FILES:
+                    self.assertFalse(
+                        os.path.samefile(restored, cache_dir / name), name,
+                    )
+                elif _links_supported(directory):
+                    self.assertTrue(
+                        os.path.samefile(restored, cache_dir / name), name,
+                    )
 
     def test_dem_is_not_restored_for_other_parameters(self):
         with tempfile.TemporaryDirectory() as directory:

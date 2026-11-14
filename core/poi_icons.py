@@ -73,6 +73,8 @@ LEGACY_AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
 
 # Видимая часть холста SVG по имени файла: считается один раз за сеанс.
 _SVG_SCALE_CACHE = {}
+# Разобранный шаблон проекта: читается один раз за сеанс.
+_TEMPLATE_ROOTS = {}
 
 LOD_LEVELS = (3, 4, 5, 6)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
@@ -364,6 +366,23 @@ def _label_rules(element):
     return result
 
 
+def _template_root(path=None):
+    """Разобранный шаблон проекта.
+
+    Шаблон разбирается один раз за сеанс: XML в нём на десятки мегабайт,
+    а читать его приходится дважды — для значков и для препятствий.
+    """
+    path = Path(path or template_path())
+    cached = _TEMPLATE_ROOTS.get(path)
+    if cached is not None:
+        return cached
+    with zipfile.ZipFile(path) as archive:
+        name = next(n for n in archive.namelist() if n.endswith(".qgs"))
+        root = ElementTree.fromstring(archive.read(name))
+    _TEMPLATE_ROOTS[path] = root
+    return root
+
+
 def read_template_poi(path=None):
     """Слои шаблона со значками: ранг по дереву, источник, правила.
 
@@ -372,10 +391,7 @@ def read_template_poi(path=None):
     которые действительно рисуют значки (маркер с ненулевым размером).
     Значки на линиях и полигонах читает :func:`read_template_obstacles`.
     """
-    path = Path(path or template_path())
-    with zipfile.ZipFile(path) as archive:
-        name = next(n for n in archive.namelist() if n.endswith(".qgs"))
-        root = ElementTree.fromstring(archive.read(name))
+    root = _template_root(path)
 
     order = [
         element.get("name")
@@ -521,10 +537,7 @@ def read_template_obstacles(path=None):
     обычные значки рядом с ними скрываются.  На объект нужна одна
     точка, поэтому это не замедляет ни подготовку, ни отрисовку.
     """
-    path = Path(path or template_path())
-    with zipfile.ZipFile(path) as archive:
-        name = next(n for n in archive.namelist() if n.endswith(".qgs"))
-        root = ElementTree.fromstring(archive.read(name))
+    root = _template_root(path)
 
     obstacles = []
     for element in root.iter("maplayer"):
@@ -920,6 +933,11 @@ class _RuleEvaluator:
     """
 
     def __init__(self, project, layer):
+        from qgis.core import QgsExpression
+
+        # Класс запоминается один раз: импорт внутри проверки правила
+        # стоил миллионы обращений к загрузчику модулей.
+        self._expression_class = QgsExpression
         self._expressions = {}
         self._contexts = {
             level: _evaluation_context(project, layer, level)
@@ -927,13 +945,11 @@ class _RuleEvaluator:
         }
 
     def _expression(self, text):
-        from qgis.core import QgsExpression
-
         if text not in self._expressions:
             if not text or text.strip().upper() == "ELSE":
                 self._expressions[text] = None
             else:
-                self._expressions[text] = QgsExpression(text)
+                self._expressions[text] = self._expression_class(text)
         return self._expressions[text]
 
     def _matches(self, rule, feature, level):

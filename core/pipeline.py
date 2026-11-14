@@ -7,8 +7,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, gdal_log, i18n, osm_convert, peak_filter, poi_icons,
-    polygon_overlaps, project, sources, terrain,
+    coastline, gdal_log, i18n, icon_angles, osm_convert, peak_filter,
+    poi_icons, polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -333,6 +333,26 @@ def _warm_up_style():
         QgsStyle.defaultStyle(True)
     except Exception:  # noqa: BLE001 - стиль не обязателен
         pass
+
+
+def _source_size(source, name):
+    """Размер исходных данных слоя — грубая оценка трудоёмкости.
+
+    По размеру выгрузки видно, какой слой дольше всего считать:
+    тяжёлые слои стоит запускать первыми, иначе они затягивают конец
+    подготовки.
+    """
+    dataset = getattr(source, "dataset", None)
+    files = getattr(dataset, "feature_files", None)
+    if not files:
+        return 0
+    path = files.get(name)
+    if path is None:
+        return 0
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
 
 
 class ProcessingRunner:
@@ -665,7 +685,10 @@ class Pipeline:
         total = len(query_names)
         started = 0
         completed = set()
-        pending = list(query_names)
+        # Тяжёлые слои идут первыми: по размеру исходных данных видно,
+        # сколько работы ждёт слой.  Иначе лес и ледники (самые долгие)
+        # стартуют последними и затягивают конец подготовки.
+        pending = sorted(query_names, key=lambda name: -_source_size(source, name))
         running = {}
         warnings = []
 
@@ -1367,7 +1390,11 @@ def _clean_temp(config):
 
 # Промежуточные файлы DEM — это кэш, а не слои проекта: их сохраняем,
 # чтобы не пересобирать репроекцию DEM при каждой подготовке.
-_RASTER_CACHE_PREFIX = "merged_dem"
+# Проекция DEM в EPSG:3857 — дорогая операция, её результат переживает
+# очистку каталога проекта (рядом лежит отпечаток, по которому видно,
+# что файл соответствует текущему DEM).  Остальные растры каждый раз
+# считаются заново или восстанавливаются из кэша жёсткой ссылкой.
+_RASTER_CACHE_FILES = ("merged_dem_3857.tif", "merged_dem_3857.tif.sha256")
 
 
 def _clean_layers(config):
@@ -1385,7 +1412,7 @@ def _clean_layers(config):
         for path in sorted(directory.rglob("*")):
             if not path.is_file():
                 continue
-            if keep_cache and path.name.startswith(_RASTER_CACHE_PREFIX):
+            if keep_cache and path.name in _RASTER_CACHE_FILES:
                 continue
             try:
                 path.unlink()
@@ -1469,9 +1496,10 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         # pipeline догоняет после pipeline.run (см. ниже).
         terrain_error = []
         terrain_keys = {}
-        terrain_started = time.monotonic()
+        terrain_seconds = [0.0]
         if config.generate_terrain:
             def _terrain_worker():
+                started_terrain = time.monotonic()
                 try:
                     gdal_log.LOG.install()
                     try:
@@ -1485,6 +1513,10 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                     pass  # отмену проверяет основной поток после join
                 except Exception as exc:  # noqa: BLE001 - всплывёт после join
                     terrain_error.append(exc)
+                finally:
+                    # Время самого рельефа: ожидание слоёв в счёт не
+                    # идёт, рельеф считается параллельно им.
+                    terrain_seconds[0] = time.monotonic() - started_terrain
             terrain_thread = threading.Thread(
                 target=_terrain_worker, name="xtopo-terrain", daemon=True,
             )
@@ -1507,7 +1539,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                 raise InterruptedError("Preparation cancelled")
             if terrain_error:
                 raise terrain_error[0]
-            timings.add_stage("рельеф", time.monotonic() - terrain_started)
+            timings.add_stage("рельеф", terrain_seconds[0])
             gdal_log.LOG.install()
             try:
                 terrain.prepare_terrain_isolines(
@@ -1577,6 +1609,19 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # значки видимыми, поэтому ошибка не отменяет сборку карты.
             report(f"WARNING: POI: {exc}; подавление наложений пропущено")
         timings.add_stage("значки POI", time.monotonic() - started)
+        report("Углы поворота значков")
+        started = time.monotonic()
+        try:
+            icon_angles.compute_icon_angles(
+                config, progress=report, cancel=cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            # Без готового угла значок останется неповёрнутым: карта
+            # собирается, поворот пересчитается при следующей сборке.
+            report(f"WARNING: углы значков: {exc}; поворот пропущен")
+        timings.add_stage("углы значков", time.monotonic() - started)
         report("Удаление пустых слоёв")
         started = time.monotonic()
         project.clean_project_layers(project_path)

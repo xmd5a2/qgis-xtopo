@@ -27,9 +27,18 @@ ISOLINES_GLACIER = "[TERRAIN] isolines glacier"
 DD_PROPERTY = "offsetAlongLine"
 
 
+_TEMPLATE_ROOT = []
+
+
 def _template_root():
-    with zipfile.ZipFile(template_path()) as archive:
-        return ElementTree.fromstring(archive.read("automap.qgs"))
+    """Разобранный шаблон: XML в нём на десятки мегабайт, читать его
+    заново в каждом классе слишком долго."""
+    if not _TEMPLATE_ROOT:
+        with zipfile.ZipFile(template_path()) as archive:
+            _TEMPLATE_ROOT.append(
+                ElementTree.fromstring(archive.read("automap.qgs"))
+            )
+    return _TEMPLATE_ROOT[0]
 
 
 def _find_option(element, name):
@@ -1592,6 +1601,85 @@ class MountainPassTemplateTest(unittest.TestCase):
         self.assertTrue(calls)
         for call in calls:
             self.assertIn("@name_local", call)
+
+
+class IconAngleTest(unittest.TestCase):
+    """Углы поворота значков берутся из готового поля, а не из выражения.
+
+    Раньше угол перевала и станции считался выражением в шаблоне: при
+    каждой отрисовке QGIS строил индекс всего слоя гребней или рельсов.
+    Теперь угол пишется в поле `icon_angle` при подготовке, а в шаблоне
+    остаётся только обращение к полю.
+    """
+
+    LAYERS = ("mountain pass", "railway station icons", "railway halt icons")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _template_root()
+
+    def _layer(self, name):
+        for layer in self.root.iter("maplayer"):
+            if layer.findtext("layername") == name:
+                return layer
+        return None
+
+    def _expressions(self, layer):
+        expressions = []
+        for symbol in layer.iter("symbol"):
+            for option in symbol.iter("Option"):
+                if option.get("name") != "expression":
+                    continue
+                value = option.get("value") or ""
+                if "icon_angle" in value or "icon_building" in value:
+                    expressions.append(value)
+                elif "overlay_nearest" in value:
+                    expressions.append(value)
+        return expressions
+
+    def test_angles_use_ready_field(self):
+        for name in self.LAYERS:
+            layer = self._layer(name)
+            self.assertIsNotNone(layer, name)
+            expressions = self._expressions(layer)
+            self.assertTrue(expressions, name)
+            for expression in expressions:
+                self.assertNotIn("overlay_nearest", expression)
+                self.assertTrue(
+                    "icon_angle" in expression or "icon_building" in expression,
+                    expression,
+                )
+
+    def test_station_icon_uses_ready_flag(self):
+        layer = self._layer("railway station icons")
+        expressions = [
+            expression for expression in self._expressions(layer)
+            if "railway_station_building.svg" in expression
+        ]
+        self.assertTrue(expressions)
+        for expression in expressions:
+            self.assertIn("icon_building", expression)
+
+    def test_pass_keeps_rotation_switch(self):
+        layer = self._layer("mountain pass")
+        expressions = self._expressions(layer)
+        for expression in expressions:
+            if "icon_angle" in expression:
+                self.assertIn("@rotate_mountain_pass", expression)
+
+    def test_pass_field_uses_ready_value(self):
+        layer = self._layer("mountain pass")
+        fields = [
+            field for field in layer.iter("field")
+            if field.get("name") == "rotation"
+        ]
+        self.assertTrue(fields)
+        for field in fields:
+            expression = field.get("expression") or ""
+            if not expression:
+                continue
+            self.assertIn("icon_angle", expression)
+            self.assertNotIn("geomdistance", expression)
 
 
 if __name__ == "__main__":
