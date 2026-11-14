@@ -26,6 +26,11 @@ COG_PADDING = 0.002
 # снижается, а сообщение об этом выводится в журнал.
 MAX_DEM_PIXELS = 120_000_000
 
+# Сколько пикселей одного удалённого тайла разрешено скачать для
+# параллельной подготовки мозаики.  Для 3DEP 10 м тайл 1°×1° — это
+# сотни мегапикселей, такие окна остаются на прямом чтении /vsicurl.
+MAX_COG_PREFETCH_PIXELS = 30_000_000
+
 # Запас вокруг тайла при нарезке DEM на изолинии.  Алгоритм GDAL считает
 # контур по соседним ячейкам, и без запаса линия у края тайла обрывается
 # и загибается.  В результат попадает только ядро тайла, поэтому куски
@@ -229,6 +234,23 @@ def _remote_file_name(url):
     return path.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _item_overlaps(item, bbox):
+    """Пересекается ли объект STAC с областью.
+
+    STAC иногда отдаёт тайлы на градус южнее и западнее запроса.  Они не
+    покрывают область, но их ссылки подписываются и читаются при сборке
+    мозаики, поэтому лишние объекты отбрасываются сразу.
+    """
+    values = item.get("bbox")
+    if not values or len(values) != 4:
+        return True
+    west, south, east, north = values
+    return not (
+        east <= bbox.lon_min or west >= bbox.lon_max
+        or north <= bbox.lat_min or south >= bbox.lat_max
+    )
+
+
 def _cog_sources(source_key, bbox, progress=None, cancel=None):
     """Ссылки на растровые источники набора для области."""
     item = dem_sources.source(source_key)
@@ -240,6 +262,7 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
         )
     except Exception:  # noqa: BLE001 - каталог STAC отвечает медленно
         items = []
+    items = [entry for entry in items if _item_overlaps(entry, bbox)]
     if source_key == "3dep":
         # В коллекции есть и 1″, и 1/3″; нужен более подробный слой.
         preferred = [entry for entry in items
@@ -499,6 +522,29 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
     Источники, которые не открылись (отсутствующий тайл набора),
     пропускаются: в мозаике останется пустое место.
     """
+    # Удалённые COG читаются по HTTP Range, и чтение многих маленьких
+    # блоков через сеть — самая долгая часть.  Окна тайлов скачиваются
+    # параллельно в локальные файлы, а warp идёт уже по ним.
+    parts_dir = None
+    if len(sources) > 1:
+        local = _fetch_cog_windows(
+            gdal, sources, bounds, width, height, destination, name, cancel,
+        )
+        if local is not None:
+            sources = local
+            parts_dir = Path(destination) / f"{name}.parts"
+    try:
+        return _warp_sources(
+            gdal, sources, bounds, width, height, destination, name,
+            cancel, status, label,
+        )
+    finally:
+        if parts_dir is not None:
+            shutil.rmtree(parts_dir, ignore_errors=True)
+
+
+def _warp_sources(gdal, sources, bounds, width, height, destination, name,
+                  cancel, status, label):
     datasets = []
     for source in sources:
         if cancel is not None and cancel.is_set():
@@ -527,6 +573,77 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
     result = None
     temporary.replace(target)
     return target
+
+
+def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
+                       name, cancel):
+    """Готовит удалённые COG локально, параллельно.
+
+    Каждый источник приводится к общей сетке мозаики отдельным warp'ом:
+    области вне тайла получают nodata, поэтому при финальной сборке
+    источники не перекрывают друг друга нулями.  Возвращает список
+    локальных путей или None, если скачивать нечего.
+    """
+    remote = [
+        index for index, source in enumerate(sources)
+        if str(source).startswith("/vsicurl/")
+    ]
+    if len(remote) < 2:
+        return None
+    parts_dir = Path(destination) / f"{name}.parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    local = list(sources)
+    changed = False
+
+    def fetch(index):
+        source = sources[index]
+        if cancel is not None and cancel.is_set():
+            return index, None
+        try:
+            dataset = gdal.Open(source)
+            if dataset is None:
+                return index, None
+            transform = dataset.GetGeoTransform()
+            step = max(abs(transform[1]), abs(transform[5]))
+            span_x = bounds.lon_max - bounds.lon_min
+            span_y = bounds.lat_max - bounds.lat_min
+            if step > 0 and span_x * span_y / (step * step) > (
+                    MAX_COG_PREFETCH_PIXELS):
+                dataset = None
+                return index, None
+            path = parts_dir / f"{index}.tif"
+            options = gdal.WarpOptions(
+                format="GTiff",
+                dstSRS="EPSG:4326",
+                outputBounds=(bounds.lon_min, bounds.lat_min,
+                              bounds.lon_max, bounds.lat_max),
+                width=width,
+                height=height,
+                resampleAlg="bilinear",
+                outputType=gdal.GDT_Int16,
+                dstNodata=-32768,
+                creationOptions=["COMPRESS=LZW", "BIGTIFF=YES", "TILED=YES"],
+            )
+            result = gdal.Warp(str(path), dataset, options=options)
+            dataset = None
+            if result is None:
+                path.unlink(missing_ok=True)
+                return index, None
+            result = None
+            return index, path
+        except Exception:  # noqa: BLE001 - тайл останется удалённым
+            return index, None
+
+    workers = min(6, len(remote))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for index, path in pool.map(fetch, remote):
+            if path is not None:
+                local[index] = path
+                changed = True
+    if not changed:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+        return None
+    return local
 
 
 def _cog_layer(source_key, cells, bounds, width, height, destination,
@@ -2084,9 +2201,23 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     if not config.generate_terrain:
         return None
     config.terrain_fallback = ""
+    # Проверяем кэш до скачивания тайлов: ключ подсказки не требует
+    # содержимого тайлов, поэтому повторная подготовка не ходит в сеть
+    # и не собирает мозаику заново.
+    hint = terrain_cache.dem_hint(config, bbox)
+    cached = terrain_cache.restore_dem_by_hint(config, hint)
+    if cached is not None:
+        used = cached.get("used") or ()
+        if used:
+            _write_dem_attribution(config, used)
+        config.terrain_fallback = str(cached.get("fallback") or "")
+        if progress:
+            progress("Использован кэш рельефа: повторная обработка не требуется")
+        return str(cached.get("signature") or "")
     config.terrain_input_dir.mkdir(parents=True, exist_ok=True)
     source_key = config.resolved_terrain_source()
     source = dem_sources.source(source_key)
+    used = []
     if source.manual:
         if not config.terrain_src_dir:
             raise RuntimeError("terrain_src_dir is required for the manual DEM source")
@@ -2094,7 +2225,6 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
         copy_dem_tiles(bbox, config.terrain_src_dir, config.terrain_input_dir, progress=progress)
     elif config.download_terrain_tiles:
         _clear_terrain_input(config)
-        used = []
         if source_key == dem_sources.AUTO_SOURCE:
             download_auto_dem(
                 bbox,
@@ -2168,7 +2298,11 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
         build_dem(config, bbox, progress=progress, cancel=cancel)
         if config.generate_terrain_hillshade_slope:
             generate_hillshade_slope(config, bbox, progress=progress, cancel=cancel)
-        terrain_cache.store_dem(config, dem_key)
+        if terrain_cache.store_dem(config, dem_key):
+            terrain_cache.store_dem_hint(
+                config, hint, dem_key, used=used,
+                fallback=config.terrain_fallback,
+            )
     if config.download_terrain_tiles:
         for path in config.terrain_input_dir.iterdir():
             if path.is_file():

@@ -48,7 +48,7 @@ class ParallelWorkersTest(unittest.TestCase):
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.config = FakeConfig()
         self.assertGreaterEqual(pipeline._worker_count(100), 1)
-        self.assertLessEqual(pipeline._worker_count(100), 6)
+        self.assertLessEqual(pipeline._worker_count(100), 8)
 
         FakeConfig.parallel_workers = 3
         self.assertEqual(pipeline._worker_count(100), 3)

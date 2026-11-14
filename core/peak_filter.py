@@ -12,6 +12,8 @@
 """
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +81,26 @@ class ProjectDem:
             abs(self.step_x - pixel) <= pixel * 0.01
             and abs(self.step_y - pixel) <= pixel * 0.01
         )
+        self._array = None
+
+    def prepare_shared(self):
+        """Загружает растр в память для параллельных окон.
+
+        Проверка пиков читает тысячи маленьких окон.  Для растра в сетке
+        1″ дешевле один раз прочитать весь массив, чем каждый раз
+        распаковывать полосы TIFF.  Массив только читается, поэтому его
+        можно безопасно делить между потоками.
+        """
+        if not self.direct or self._array is not None:
+            return self._array is not None
+        # Ограничение ~96 МБ: крупные охваты остаются на оконном чтении.
+        if self.width * self.height > 24_000_000:
+            return False
+        array = self.band.ReadAsArray().astype("float32")
+        if self.nodata is not None:
+            array[array == self.nodata] = np.nan
+        self._array = array
+        return True
 
     def covers(self, bbox, margin=0.01):
         """Покрывает ли рельеф текущий охват."""
@@ -90,6 +112,7 @@ class ProjectDem:
         )
 
     def close(self):
+        self._array = None
         self.band = None
         self.dataset = None
 
@@ -117,11 +140,14 @@ class ProjectDem:
         if sx1 <= sx0 or sy1 <= sy0:
             return out
 
-        piece = self.band.ReadAsArray(
-            sx0, sy0, sx1 - sx0, sy1 - sy0
-        ).astype("float32")
-        if self.nodata is not None:
-            piece[piece == self.nodata] = np.nan
+        if self._array is not None:
+            piece = self._array[sy0:sy1, sx0:sx1]
+        else:
+            piece = self.band.ReadAsArray(
+                sx0, sy0, sx1 - sx0, sy1 - sy0
+            ).astype("float32")
+            if self.nodata is not None:
+                piece[piece == self.nodata] = np.nan
         # Строки растра идут с севера на юг, а в окне — с юга на север.
         piece = piece[::-1]
         out_x = sx0 - x0
@@ -428,6 +454,7 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction):
             report(i18n.tr("Пики: нет объектов"))
             return None
 
+        shared = isinstance(dem, ProjectDem) and dem.prepare_shared()
         dem_values = _sample_dem_values(dem, peaks, cancel, fraction)
         neighbours = _neighbour_stats(peaks, dem_values)
         thresholds = peak_placement.thresholds_for_source(
@@ -441,21 +468,53 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction):
         removal_thresholds = dict(thresholds)
         removal_thresholds["ele_diff"] = float("inf")
 
-        checked = 0
-        removed = []
-        updates = []
-        no_data = 0
-        total = len(peaks)
-        for index, peak in enumerate(peaks, 1):
+        work = [
+            peak for peak in peaks
+            if not peak.named and not math.isnan(dem_values[peak.osm_id])
+        ]
+        checked = len(work)
+        no_data = sum(
+            1 for peak in peaks
+            if not peak.named and math.isnan(dem_values[peak.osm_id])
+        )
+        total = len(work)
+        metrics_by_id = {}
+
+        def measure_peak(peak):
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Peak check cancelled")
-            if peak.named:
-                continue
-            if math.isnan(dem_values[peak.osm_id]):
-                no_data += 1
-                continue
-            checked += 1
-            metrics = peak_placement.measure(peak, dem, radii, thresholds)
+            return peak_placement.measure(peak, dem, radii, thresholds)
+
+        # Метрики пиков независимы.  Растр в памяти только читается,
+        # поэтому окна можно считать в нескольких потоках; на общем
+        # растре это даёт заметный выигрыш без изменения результата.
+        workers = max(1, min(4, os.cpu_count() or 2, total)) if total else 1
+        if shared and workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(measure_peak, peak): peak
+                    for peak in work
+                }
+                done = 0
+                for future in as_completed(futures):
+                    peak = futures[future]
+                    metrics_by_id[peak.osm_id] = future.result()
+                    done += 1
+                    if fraction is not None and (
+                            done % 25 == 0 or done == total):
+                        fraction(0.3 + 0.5 * done / total)
+        else:
+            for index, peak in enumerate(work, 1):
+                metrics_by_id[peak.osm_id] = measure_peak(peak)
+                if fraction is not None and (index % 25 == 0 or index == total):
+                    fraction(0.3 + 0.5 * index / total)
+
+        removed = []
+        updates = []
+        for index, peak in enumerate(work, 1):
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Peak check cancelled")
+            metrics = metrics_by_id[peak.osm_id]
             verdict, _flags, _ = peak_placement.classify(
                 peak, metrics, removal_thresholds,
                 neighbours.get(peak.osm_id),
@@ -465,7 +524,7 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction):
             elif _needs_ele_update(peak, metrics, thresholds):
                 updates.append((peak, metrics.dem))
             if fraction is not None and (index % 25 == 0 or index == total):
-                fraction(0.3 + 0.7 * index / total)
+                fraction(0.8 + 0.2 * index / total)
 
         _apply_changes(layer, fields, removed, updates)
         report(i18n.trf(

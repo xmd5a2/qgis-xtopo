@@ -14,6 +14,8 @@
 """
 
 import hashlib
+import json
+import os
 import shutil
 from pathlib import Path
 
@@ -25,6 +27,12 @@ DEM_FILES = (
     "slope_upscaled.tif",
     "hillshade_composite.tif",
 )
+
+# Версия расчёта рельефа (формат растров, сборка мозаики, репроекция).
+# Меняя результат, поднимайте число: иначе старый кэш отдаст устаревший
+# рельеф даже после обновления плагина.  Версия плагина сюда намеренно не
+# входит — обновление интерфейса или стиля не должно пересчитывать DEM.
+DEM_VERSION = 2
 
 # Версия параметров отмывки (core/terrain.py: generate_hillshade_slope).
 # Меняя направление света, преувеличение или подсветку теней, поднимайте
@@ -43,6 +51,9 @@ ISOLINES_FILES = (
 
 # Сколько последних записей кэша оставляем в каждой группе.
 KEEP_ENTRIES = 3
+# Сколько подсказок «эта область уже посчитана» храним.  Подсказка
+# избавляет от скачивания тайлов DEM перед проверкой кэша.
+KEEP_HINTS = 16
 
 _CHUNK = 1024 * 1024
 
@@ -144,11 +155,11 @@ def dem_source_digest(config):
 
 
 def dem_signature(config, bbox, source_digest=None):
-    """Ключ кэша рельефа: версия плагина, область, параметры и тайлы DEM."""
+    """Ключ кэша рельефа: версия формата, область, параметры и тайлы DEM."""
     if source_digest is None:
         source_digest = dem_source_digest(config)
     parts = [
-        plugin_version(),
+        DEM_VERSION,
         bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
         config.resolved_terrain_source(),
         config.terrain_resample_method,
@@ -157,6 +168,119 @@ def dem_signature(config, bbox, source_digest=None):
         source_digest,
     ]
     return _digest(parts)
+
+
+def _stat_digest(directory):
+    """Быстрый отпечаток каталога: имена, размеры и время изменения."""
+    parts = []
+    try:
+        entries = sorted(Path(directory).expanduser().iterdir())
+    except OSError:
+        return _digest(parts)
+    for path in entries:
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        parts.append(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}")
+    return _digest(parts)
+
+
+def dem_hint(config, bbox):
+    """Ключ «эта область уже посчитана» без скачивания тайлов.
+
+    Полный ключ :func:`dem_signature` включает хеш содержимого тайлов DEM,
+    поэтому его нельзя вычислить до загрузки.  Подсказка строится только
+    по настройкам и области: если готовый рельеф уже лежит в кэше, тайлы
+    скачивать незачем.  Для ручного каталога и локальных тайлов в ключ
+    входит отпечаток файлов, чтобы подмена данных не осталась незамеченной.
+    """
+    source = config.resolved_terrain_source()
+    parts = [
+        DEM_VERSION,
+        bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        source,
+        config.terrain_resample_method,
+        config.generate_terrain_hillshade_slope,
+        HILLSHADE_STYLE_VERSION,
+        config.download_terrain_tiles,
+        config.get_terrain_tiles,
+    ]
+    if source == "manual":
+        parts.append(_stat_digest(config.terrain_src_dir))
+    elif not config.download_terrain_tiles:
+        parts.append(_stat_digest(config.terrain_input_dir))
+    return _digest(parts)
+
+
+def _hint_dir(config):
+    return config.terrain_result_cache_dir / "dem-hints"
+
+
+def _hint_path(config, hint):
+    return _hint_dir(config) / f"{hint}.json"
+
+
+def _prune_hints(directory):
+    """Убирает подсказки на уже удалённые записи кэша."""
+    try:
+        entries = [item for item in directory.iterdir() if item.is_file()]
+    except OSError:
+        return
+    entries.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    for item in entries[KEEP_HINTS:]:
+        item.unlink(missing_ok=True)
+    dem_dir = directory.parent / "dem"
+    for item in entries[:KEEP_HINTS]:
+        try:
+            data = json.loads(item.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            item.unlink(missing_ok=True)
+            continue
+        signature = str(data.get("signature") or "")
+        if not signature or not (dem_dir / signature).is_dir():
+            item.unlink(missing_ok=True)
+
+
+def store_dem_hint(config, hint, signature, used=(), fallback=""):
+    """Запоминает, какой полный ключ соответствует области и настройкам."""
+    path = _hint_path(config, hint)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".part")
+    temporary.write_text(
+        json.dumps(
+            {
+                "signature": signature,
+                "used": list(used or ()),
+                "fallback": fallback or "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    _prune_hints(path.parent)
+
+
+def restore_dem_by_hint(config, hint):
+    """Готовый рельеф по подсказке или None.
+
+    Возвращает данные подсказки: полный ключ, наборы мозаики и сообщение
+    о замене тайлов.  Если запись кэша успела удалиться, подсказка тоже
+    убирается.
+    """
+    path = _hint_path(config, hint)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    signature = str(data.get("signature") or "")
+    if not signature or not restore_dem(config, signature):
+        path.unlink(missing_ok=True)
+        return None
+    return data
 
 
 def isolines_signature(config, bbox, dem_key):
@@ -198,6 +322,43 @@ def _prune(directory, keep=KEEP_ENTRIES):
         shutil.rmtree(item, ignore_errors=True)
 
 
+def _same_file(first, second):
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+def _restore_item(item, target):
+    """Восстанавливает файл кэша без лишнего копирования.
+
+    Крупные растры занимают гигабайты, и каждый прогон переписывал их
+    заново.  Если файл уже лежит на месте с тем же размером и временем,
+    копирование не нужно.  Удалённые перед восстановлением растры можно
+    связать жёсткой ссылкой: они только читаются, а при следующей
+    подготовке удаляются до записи новых.
+    """
+    if target.exists():
+        if _same_file(item, target):
+            return
+        try:
+            source_stat = item.stat()
+            target_stat = target.stat()
+            if (source_stat.st_size == target_stat.st_size
+                    and source_stat.st_mtime_ns == target_stat.st_mtime_ns):
+                return
+        except OSError:
+            pass
+    if not target.exists() and target.name in (
+            "slope_upscaled.tif", "hillshade_composite.tif"):
+        try:
+            os.link(item, target)
+            return
+        except OSError:
+            pass
+    shutil.copy2(item, target)
+
+
 def _restore(config, group, signature, names, target_dir, required):
     source = _group_dir(config, group, signature)
     if not source.is_dir():
@@ -209,7 +370,7 @@ def _restore(config, group, signature, names, target_dir, required):
     for name in names:
         item = source / name
         if item.exists():
-            shutil.copy2(item, target_dir / name)
+            _restore_item(item, target_dir / name)
     return True
 
 
@@ -221,7 +382,9 @@ def _store(config, group, signature, names, source_dir):
         item = source_dir / name
         if not item.exists():
             continue
-        shutil.copy2(item, target / name)
+        destination = target / name
+        if not _same_file(item, destination):
+            shutil.copy2(item, destination)
         stored = True
     if stored:
         _prune(target.parent)

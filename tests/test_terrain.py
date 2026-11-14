@@ -17,6 +17,18 @@ class TerrainTest(unittest.TestCase):
         names = srtm_tile_names(BBox(-1.05, -1.05, -1.01, -1.01))
         self.assertEqual(names, ["S02W002"])
 
+    def test_stac_items_outside_window_are_skipped(self):
+        """STAC отдаёт тайлы на градус южнее/западнее — их не подписываем."""
+        from qgis_xtopo.core import terrain
+
+        bbox = BBox(41.0, 42.0, 44.0, 44.0)
+        self.assertTrue(terrain._item_overlaps(
+            {"bbox": [41.0, 42.0, 42.0, 43.0]}, bbox))
+        self.assertFalse(terrain._item_overlaps(
+            {"bbox": [40.0, 41.0, 41.0, 42.0]}, bbox))
+        self.assertFalse(terrain._item_overlaps(
+            {"bbox": [44.0, 44.0, 45.0, 45.0]}, bbox))
+
     def test_single_dem_tile_is_not_merged(self):
         from unittest import mock
 
@@ -1449,6 +1461,32 @@ class PrepareTerrainSplitTest(unittest.TestCase):
             )
             self.assertIn(
                 "Использован кэш изолиний: повторная обработка не требуется",
+                messages,
+            )
+
+    def test_second_run_does_not_touch_source(self):
+        """Подсказка кэша отменяет копирование исходных тайлов."""
+        from unittest import mock
+
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(44.7, 42.78, 44.72, 42.8)
+            key = terrain.prepare_terrain_raster(
+                config, bbox, lambda message: None
+            )
+            with mock.patch.object(
+                terrain, "copy_dem_tiles",
+                side_effect=AssertionError("источник не должен читаться"),
+            ):
+                messages = []
+                second = terrain.prepare_terrain_raster(
+                    config, bbox, messages.append
+                )
+            self.assertEqual(second, key)
+            self.assertIn(
+                "Использован кэш рельефа: повторная обработка не требуется",
                 messages,
             )
 

@@ -1310,6 +1310,64 @@ class GeofabrikMergedFallbackTest(unittest.TestCase):
                             for item in result.warnings))
 
 
+class FlowAccumulationTest(unittest.TestCase):
+    """Новый векторный расчёт водосбора повторяет прежний поячеечный."""
+
+    @staticmethod
+    def _reference(surface, lat):
+        import math
+
+        import numpy as np
+
+        from qgis_xtopo.core import peak_placement
+
+        rows, columns = surface.shape
+        metres_lat = 111320.0 / 3600.0
+        metres_lon = 111320.0 * math.cos(math.radians(lat)) / 3600.0
+        steepest = np.zeros(surface.shape, dtype=np.int8)
+        slope = np.zeros(surface.shape)
+        for index, (dy, dx) in enumerate(peak_placement.FLOW_NEIGHBOURS):
+            distance = math.hypot(dy * metres_lat, dx * metres_lon)
+            neighbour = np.full(surface.shape, np.nan)
+            source_rows = slice(max(0, dy), rows + min(0, dy))
+            source_columns = slice(max(0, dx), columns + min(0, dx))
+            target_rows = slice(max(0, -dy), rows + min(0, -dy))
+            target_columns = slice(max(0, -dx), columns + min(0, -dx))
+            neighbour[target_rows, target_columns] = surface[
+                source_rows, source_columns
+            ]
+            drop = np.nan_to_num((surface - neighbour) / distance, nan=-1e9)
+            better = drop > slope
+            slope = np.where(better, drop, slope)
+            steepest = np.where(better, index, steepest)
+        area = np.ones(surface.shape, dtype=np.float64)
+        order = np.argsort(surface, axis=None)[::-1]
+        flat_steepest = steepest.ravel()
+        flat_area = area.ravel()
+        for cell in order:
+            dy, dx = peak_placement.FLOW_NEIGHBOURS[
+                int(flat_steepest[cell])]
+            row, column = divmod(int(cell), columns)
+            target_row = row + dy
+            target_column = column + dx
+            if 0 <= target_row < rows and 0 <= target_column < columns:
+                flat_area[target_row * columns + target_column] += (
+                    flat_area[cell]
+                )
+        return area
+
+    def test_matches_previous_algorithm(self):
+        import numpy as np
+
+        from qgis_xtopo.core import peak_placement
+
+        generator = np.random.default_rng(7)
+        surface = generator.uniform(100, 300, size=(41, 55))
+        expected = self._reference(surface, 43.0)
+        actual = peak_placement.flow_accumulation(surface, 43.0)
+        self.assertTrue(np.allclose(actual, expected))
+
+
 class RouteHikingTest(unittest.TestCase):
     def test_not_prepared(self):
         """route_hiking не готовится: ни запроса, ни рецепта, ни в умолчаниях."""

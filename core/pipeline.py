@@ -519,8 +519,9 @@ class Pipeline:
         if configured > 0:
             return max(1, min(configured, total))
         cpu = os.cpu_count() or 2
-        # Оставляем пару ядер системе и самому QGIS.
-        return max(1, min(6, cpu - 2, total))
+        # Оставляем пару ядер системе и самому QGIS.  На 16 ядрах
+        # восемь слоёв дают заметно меньшую стену, чем шесть.
+        return max(1, min(8, cpu - 2, total))
 
     def _run_layer(self, name, source, index, total):
         if self.cancel is not None and self.cancel.is_set():

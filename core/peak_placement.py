@@ -540,18 +540,30 @@ def flow_accumulation(surface, lat):
         better = drop > slope
         slope = np.where(better, drop, slope)
         steepest = np.where(better, index, steepest)
-    area = np.ones(surface.shape, dtype=np.float64)
-    order = np.argsort(surface, axis=None)[::-1]
-    flat_steepest = steepest.ravel()
-    flat_area = area.ravel()
+    # Адрес стока каждой ячейки считается один раз векторно: прежний
+    # цикл делал divmod для каждой ячейки и был самой долгой частью
+    # проверки пиков.
+    row_grid, column_grid = np.indices(surface.shape)
+    step_rows = np.array([item[0] for item in FLOW_NEIGHBOURS])
+    step_columns = np.array([item[1] for item in FLOW_NEIGHBOURS])
+    target_rows = row_grid + step_rows[steepest]
+    target_columns = column_grid + step_columns[steepest]
+    valid = (
+        (target_rows >= 0) & (target_rows < rows)
+        & (target_columns >= 0) & (target_columns < columns)
+    )
+    targets = np.where(
+        valid, target_rows * columns + target_columns, -1
+    ).astype(np.int64).ravel()
+    order = np.argsort(surface, axis=None)[::-1].tolist()
+    # Список Python быстрее массива NumPy в этом цикле: обращений
+    # десятки тысяч, и накладные расходы на скаляр NumPy заметны.
+    area = [1.0] * surface.size
     for cell in order:
-        dy, dx = FLOW_NEIGHBOURS[int(flat_steepest[cell])]
-        row, column = divmod(int(cell), columns)
-        target_row = row + dy
-        target_column = column + dx
-        if 0 <= target_row < rows and 0 <= target_column < columns:
-            flat_area[target_row * columns + target_column] += flat_area[cell]
-    return area
+        target = int(targets[cell])
+        if target >= 0:
+            area[target] += area[cell]
+    return np.array(area, dtype=np.float64).reshape(surface.shape)
 
 
 def divide_mask(window, lat, threshold=3, sigma=2.0):

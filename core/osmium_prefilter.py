@@ -17,6 +17,9 @@ GDAL работает с маленьким файлом.
 такое отношение теряет («Relation ... has missing ways»).
 """
 
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import osmium_tool
@@ -115,6 +118,7 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
     covering = []
     result = []
     extracted = []
+    tasks = []
     try:
         for position, source in enumerate(original, 1):
             if cancel is not None and cancel.is_set():
@@ -124,44 +128,89 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                 continue
             stem = Path(source).stem.replace(".", "_")
             extracted_path = directory / f"{stem}_{position}_extract.osm.pbf"
-            if progress:
-                progress(
+            covering_path = directory / f"{stem}_{position}_covering.osm.pbf"
+            tasks.append((position, source, extracted_path, covering_path))
+            temporary.extend((extracted_path, covering_path))
+
+        if tasks:
+            # Вырезка области и поиск горных массивов читают исходную
+            # карту независимо, а разные карты не зависят друг от друга.
+            # Несколько процессов osmium на ядрах заметно быстрее
+            # последовательного прохода, результат тот же.
+            workers = max(1, min(4, len(tasks) * 2, os.cpu_count() or 2))
+            say_lock = threading.Lock()
+
+            def say(message):
+                if progress:
+                    with say_lock:
+                        progress(message)
+
+            def extract(task):
+                position, source, extracted_path, _covering_path = task
+                say(
                     f"osmium: вырезка области из {Path(source).name} "
                     f"({position}/{len(original)})…"
                 )
-            osmium_tool.run(
-                executable,
-                [
-                    "extract",
-                    "-b", _bbox_argument(bbox),
-                    "--strategy=smart",
-                    "-S", "types=any",
-                    "-o", str(extracted_path),
-                    "--overwrite",
-                    source,
-                ],
-                cancel=cancel,
-            )
-            temporary.append(extracted_path)
-            extracted.append(str(extracted_path))
-            covering_path = directory / f"{stem}_{position}_covering.osm.pbf"
-            if progress:
-                progress(
-                    f"osmium: поиск горных массивов в {Path(source).name}…"
+                osmium_tool.run(
+                    executable,
+                    [
+                        "extract",
+                        "-b", _bbox_argument(bbox),
+                        "--strategy=smart",
+                        "-S", "types=any",
+                        "-o", str(extracted_path),
+                        "--overwrite",
+                        source,
+                    ],
+                    cancel=cancel,
                 )
-            osmium_tool.run(
-                executable,
-                [
-                    "tags-filter",
-                    source,
-                    *COVERING_EXPRESSIONS,
-                    "-o", str(covering_path),
-                    "--overwrite",
-                ],
-                cancel=cancel,
-            )
-            temporary.append(covering_path)
-            covering.append(str(covering_path))
+
+            def find_covering(task):
+                position, source, _extracted_path, covering_path = task
+                say(
+                    f"osmium: поиск горных массивов в {Path(source).name} "
+                    f"({position}/{len(original)})…"
+                )
+                osmium_tool.run(
+                    executable,
+                    [
+                        "tags-filter",
+                        source,
+                        *COVERING_EXPRESSIONS,
+                        "-o", str(covering_path),
+                        "--overwrite",
+                    ],
+                    cancel=cancel,
+                )
+
+            failures = []
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = []
+                for task in tasks:
+                    futures.append(pool.submit(extract, task))
+                    futures.append(pool.submit(find_covering, task))
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except InterruptedError:
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - откат ниже
+                        failures.append(exc)
+                        for pending in futures:
+                            pending.cancel()
+            if failures:
+                raise failures[0]
+
+        extracted = [
+            str(task[2]) for task in sorted(tasks)
+            if Path(task[2]).exists()
+        ]
+        covering = [
+            str(task[3]) for task in sorted(tasks)
+            if Path(task[3]).exists()
+        ]
         # Области нескольких карт склеиваются: отношение, разорванное
         # границей стран, в одной выгрузке не собрать, и драйвер его теряет.
         if len(extracted) > 1:

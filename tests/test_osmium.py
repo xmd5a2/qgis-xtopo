@@ -243,6 +243,53 @@ class OsmiumPrefilterTest(unittest.TestCase):
             self.assertEqual(temporary, [])
             self.assertEqual(covering, [])
 
+    def test_extraction_of_several_maps_runs_in_parallel(self):
+        """Вырезка и поиск горных массивов разных карт идут одновременно."""
+        if (os.cpu_count() or 1) < 4:
+            self.skipTest("нужно хотя бы 4 ядра")
+        import threading
+
+        from qgis_xtopo.core.bbox import BBox
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = _config(directory)
+            config.geofabrik_maps = []
+            for name in ("first", "second"):
+                (Path(directory) / f"{name}.osm.pbf").write_bytes(b"pbf")
+            barrier = threading.Barrier(4, timeout=10)
+            threads = set()
+            lock = threading.Lock()
+
+            def fake_run(executable, arguments, cancel=None):
+                with lock:
+                    threads.add(threading.get_ident())
+                if arguments[0] not in ("extract", "tags-filter"):
+                    output = arguments[arguments.index("-o") + 1]
+                    Path(output).write_bytes(b"pbf")
+                    return ""
+                barrier.wait(timeout=10)
+                output = arguments[arguments.index("-o") + 1]
+                Path(output).write_bytes(b"pbf")
+                return ""
+
+            with mock.patch.object(
+                    osmium_prefilter.osmium_tool, "find_osmium",
+                    return_value="/usr/bin/osmium"), mock.patch.object(
+                    osmium_prefilter.osmium_tool, "run",
+                    side_effect=fake_run):
+                paths, temporary, covering = (
+                    osmium_prefilter.prefilter_sources(
+                        [str(Path(directory) / "first.osm.pbf"),
+                         str(Path(directory) / "second.osm.pbf")],
+                        BBox(43.0, 42.0, 43.1, 42.1), config,
+                    )
+                )
+            self.assertGreaterEqual(len(threads), 2, "вырезка шла последовательно")
+            self.assertEqual(len(paths), 2)
+            self.assertEqual(len(covering), 1)
+            for path in temporary:
+                self.assertTrue(Path(path).exists())
+
     def _make_pbf_from(self, directory, name, text):
         source = Path(directory) / f"{name}.osm"
         source.write_text(text, encoding="utf-8")
