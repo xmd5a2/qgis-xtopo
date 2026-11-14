@@ -4,7 +4,6 @@ import os
 import re
 import shutil
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .bbox import parse_bbox
@@ -206,25 +205,16 @@ def _is_empty_datasource(datasource, base_dir):
 def _remove_empty_layers(text, base_dir):
     removed = set()
 
-    # Пустые слои проверяются параллельно: каждый файл открывается
-    # отдельно, и по одному проверка сотни слоёв занимала несколько
-    # секунд.
-    candidates = []
-    for match in MAPLAYER_PATTERN.finditer(text):
+    def scan(match):
         block = match.group(0)
         layer_id = _element(block, "id")
         datasource = _element(block, "datasource")
         if layer_id and datasource is not None:
-            candidates.append((layer_id, html.unescape(datasource)))
-    if candidates:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = pool.map(
-                lambda item: _is_empty_datasource(item[1], base_dir),
-                candidates,
-            )
-        for (layer_id, _datasource), empty in zip(candidates, results):
-            if empty:
+            if _is_empty_datasource(html.unescape(datasource), base_dir):
                 removed.add(layer_id)
+        return block
+
+    MAPLAYER_PATTERN.sub(scan, text)
     if not removed:
         return text, removed
 
