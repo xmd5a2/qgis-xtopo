@@ -1456,54 +1456,69 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     timings = Timings()
     report("Проверка параметров")
     config.validate()
+    # Каталоги нужны и подготовке источника, которая теперь стартует
+    # раньше создания проекта.
+    config.ensure_directories()
     _use_project_temp(config)
     gdal_log.LOG.reset()
     bbox = parse_bbox(config.bbox)
     report("Очистка прежних слоёв")
     _clean_layers(config)
-    report("Создание проекта QGIS")
-    started = time.monotonic()
-    project_path = project.prepare_project(config)
+    # Временный каталог чистим до параллельного запуска: подготовка
+    # источника OSM пишет туда вырезки PBF, и поздняя уборка удалила бы
+    # их прямо во время работы.
     _clean_temp(config)
-    timings.add_stage("создание проекта", time.monotonic() - started)
     prepared = None
+    source_thread = None
+    source_error = []
+    source_result = {}
+    source_seconds = [0.0]
     terrain_thread = None
+    terrain_error = []
+    terrain_keys = {}
+    terrain_seconds = [0.0]
     try:
+        report("Создание проекта QGIS")
+        # Создание проекта и подготовка источника OSM друг от друга не
+        # зависят: первая пишет qgz и служебные файлы, вторая читает
+        # карты.  Параллельный запуск убирает из холодной подготовки
+        # лишнюю очередь из двух долгих стадий.  Сообщение о стадии
+        # источника идёт последним: пока потоки работают, трекер должен
+        # показывать именно её.
         if config.array_queries:
             report("Подготовка источника OSM")
-            started = time.monotonic()
-            # Чтение PBF идёт в главном потоке, поэтому перехватчик ставим
-            # здесь: без него предупреждения драйвера OSM уходят в консоль.
-            gdal_log.LOG.install()
-            try:
-                prepared = sources.prepare_sources(
-                    config, bbox, config.array_queries, cancel=cancel,
-                    progress=report, percent=tracker.download_percent,
-                )
-            finally:
-                gdal_log.LOG.restore()
-            elapsed = time.monotonic() - started
-            # Скачивание карт и ответов Overpass считаем отдельно:
-            # в «источник OSM» остаётся только подготовка данных.
-            download, prepared_time = _source_timings(
-                elapsed, getattr(prepared, "download_seconds", 0.0)
+
+            def _source_worker():
+                started_source = time.monotonic()
+                try:
+                    gdal_log.LOG.install()
+                    try:
+                        source_result["prepared"] = sources.prepare_sources(
+                            config, bbox, config.array_queries, cancel=cancel,
+                            progress=report, percent=tracker.download_percent,
+                        )
+                    finally:
+                        gdal_log.LOG.restore()
+                except InterruptedError:
+                    pass  # отмену проверяет основной поток после join
+                except Exception as exc:  # noqa: BLE001 - всплывёт после join
+                    source_error.append(exc)
+                finally:
+                    source_seconds[0] = time.monotonic() - started_source
+
+            source_thread = threading.Thread(
+                target=_source_worker, name="xtopo-sources", daemon=True,
             )
-            if download >= 0.05:
-                timings.add_stage("скачивание данных", download)
-            timings.add_stage("источник OSM", prepared_time)
-        else:
-            prepared = sources.SourceResult()
-        for note in prepared.notes:
-            report(note)
-        for warning in prepared.warnings:
-            report(f"WARNING: {warning}")
-        # Скачивание тайлов и сборка растра рельефа не зависят от слоёв
-        # проекта, поэтому идут в отдельном потоке параллельно обработке
-        # слоёв. Изолинии зависят (режутся по воде и ледникам) — их
-        # pipeline догоняет после pipeline.run (см. ниже).
-        terrain_error = []
-        terrain_keys = {}
-        terrain_seconds = [0.0]
+            source_thread.start()
+        started = time.monotonic()
+        project_path = project.prepare_project(config)
+        timings.add_stage("создание проекта", time.monotonic() - started)
+        # Скачивание тайлов и сборка растра рельефа не зависят ни от
+        # данных OSM, ни от слоёв проекта.  Поток рельефа запускается
+        # сразу после создания проекта: сеть за тайлами DEM работает,
+        # пока готовится источник OSM.  Изолинии зависят от слоёв
+        # (режутся по воде и ледникам) — их pipeline догоняет после
+        # pipeline.run.
         if config.generate_terrain:
             def _terrain_worker():
                 started_terrain = time.monotonic()
@@ -1528,6 +1543,27 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                 target=_terrain_worker, name="xtopo-terrain", daemon=True,
             )
             terrain_thread.start()
+        if source_thread is not None:
+            source_thread.join()
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            if source_error:
+                raise source_error[0]
+            prepared = source_result["prepared"]
+            # Скачивание карт и ответов Overpass считаем отдельно:
+            # в «источник OSM» остаётся только подготовка данных.
+            download, prepared_time = _source_timings(
+                source_seconds[0], getattr(prepared, "download_seconds", 0.0)
+            )
+            if download >= 0.05:
+                timings.add_stage("скачивание данных", download)
+            timings.add_stage("источник OSM", prepared_time)
+        else:
+            prepared = sources.SourceResult()
+        for note in prepared.notes:
+            report(note)
+        for warning in prepared.warnings:
+            report(f"WARNING: {warning}")
         report("Обработка слоёв")
         runner = ProcessingRunner(
             progress=report, cancel=cancel, fraction=tracker.fraction
@@ -1646,6 +1682,11 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             report(line)
         tracker.finish()
     finally:
+        if source_thread is not None and source_thread.is_alive():
+            # Ошибка или отмена до join: поток источника дорабатывает.
+            # Без ожидания уборка временного каталога оборвала бы его
+            # файлы на полуслове.
+            source_thread.join()
         if terrain_thread is not None and terrain_thread.is_alive():
             # Отмена или ошибка до join: поток рельефа дорабатывает
             # (функции рельефа сами реагируют на cancel).
