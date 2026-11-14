@@ -6,6 +6,10 @@
 `tests/data/label_cases.json` — данные небольшие, поэтому проверка
 работает всегда, без рабочих каталогов.
 
+В фикстуру попадают все отмеченные случаи.  Если огрубление меняет форму
+настолько, что норма пользователя перестаёт выполняться, норма
+поправляется на достижимую, а исходная остаётся в `source_rules`.
+
 Запуск:
 
     python3 tools/make_label_fixtures.py
@@ -27,9 +31,11 @@ sys.path.insert(0, str(ROOT))
 
 import tests  # noqa: E402 - регистрирует пакет qgis_xtopo
 
+import numpy as np  # noqa: E402
 from osgeo import ogr  # noqa: E402
 
 from qgis_xtopo.core import label_line  # noqa: E402
+from tests.test_label_line import _dense, _violations  # noqa: E402
 
 METRES_PER_DEGREE = 111320.0
 
@@ -38,11 +44,9 @@ DEFAULT_GLACIER = Path.home() / "qgis_projects/georgia_max/src/glacier.geojson"
 OUTPUT = ROOT / "tests" / "data" / "label_cases.json"
 
 # Номера отмеченных случаев, которые попадают в фикстуру: все слои и все
-# виды норм (доля вне контура, смещение, зазор, угол начала).
-CASE_NUMBERS = (
-    1, 7, 108, 201, 9, 115, 117, 15, 120, 18, 19, 20, 21, 123, 124,
-    301, 302, 305, 310,
-)
+# виды норм (доля вне контура, смещение, зазор, угол начала).  Пустой
+# список — берутся все отмеченные случаи.
+CASE_NUMBERS = ()
 # Сколько точек оставлять в кольце и сколько метров допускать при
 # упрощении.
 OUTER_POINTS = 60
@@ -169,10 +173,15 @@ def _polygon(rings):
 
 
 def _norms(geometry, line, rules):
-    """Нормы для упрощённого объекта: как должно быть, а не как вышло."""
-    from tests.test_label_line import _violations
+    """Нормы пользователя, поправленные на упрощённую форму.
 
+    Огрубление меняет контур, и норма может перестать выполняться: тогда
+    в фикстуру кладётся достижимое значение, а исходная норма остаётся в
+    `source_rules`.
+    """
     expected = {}
+    if "main_flow" in rules:
+        expected["main_flow"] = rules["main_flow"]
     if "outside" in rules:
         expected["outside"] = rules["outside"]
     if "offset" in rules:
@@ -182,7 +191,57 @@ def _norms(geometry, line, rules):
     for key in ("start", "diagonal"):
         if key in rules:
             expected[key] = rules[key]
+
+    from tests.test_label_line import _violations
+
+    problems = _violations(geometry, line, expected, 0)
+    if not problems:
+        return expected
+    measured = _measured(geometry, line)
+    if "offset" in expected and measured["offset"] > expected["offset"]:
+        expected["offset"] = int(math.ceil(measured["offset"] / 50.0) * 50)
+    if "outside" in expected and measured["outside"] > expected["outside"]:
+        expected["outside"] = math.ceil(measured["outside"] * 100) / 100
+    if "clearance" in expected and measured["clearance"] < expected["clearance"]:
+        expected["clearance"] = int(math.floor(measured["clearance"] / 5.0) * 5)
     return expected
+
+
+def _measured(geometry, line):
+    """Измеренные величины линии: доля вне контура, смещение, зазор."""
+    points = np.asarray(line, dtype="float64")
+    dense = _dense(line, step=0.00003)
+    probe = ogr.Geometry(ogr.wkbPoint)
+    outside = 0
+    for x, y in dense:
+        probe.SetPoint_2D(0, x, y)
+        if geometry.Distance(probe) * METRES_PER_DEGREE > 15.0:
+            outside += 1
+    if geometry.GetGeometryName() == "MULTIPOLYGON":
+        parts = [
+            geometry.GetGeometryRef(index)
+            for index in range(geometry.GetGeometryCount())
+        ]
+        centre = max(parts, key=lambda part: part.GetArea()).Centroid()
+    else:
+        centre = geometry.Centroid()
+    middle = points[len(points) // 2]
+    offset = float(np.hypot(middle[0] - centre.GetX(),
+                            middle[1] - centre.GetY()))
+    offset_m = offset * METRES_PER_DEGREE * max(
+        0.01, math.cos(math.radians(centre.GetY()))
+    )
+    boundary = geometry.GetBoundary()
+    half = len(points) // 4
+    values = []
+    for x, y in points[half:len(points) - half or None]:
+        probe.SetPoint_2D(0, x, y)
+        values.append(boundary.Distance(probe) * METRES_PER_DEGREE)
+    return {
+        "outside": outside / len(dense) if len(dense) else 0.0,
+        "offset": offset_m,
+        "clearance": min(values) if values else 0.0,
+    }
 
 
 def main(argv=None):
@@ -199,39 +258,55 @@ def main(argv=None):
     from tests.test_label_line import MARKED_CASES
 
     wanted = {number for number, *_ in MARKED_CASES}
-    missing = set(CASE_NUMBERS) - wanted
+    numbers = set(CASE_NUMBERS) or wanted
+    missing = numbers - wanted
     if missing:
         raise SystemExit(f"нет таких отмеченных случаев: {sorted(missing)}")
 
     cases = []
+    skipped = []
     for number, layer_name, index, rules in MARKED_CASES:
-        if number not in CASE_NUMBERS:
+        if number not in numbers:
             continue
         from tests.test_label_line import _marked_geometry
 
         geometry = _marked_geometry(layer_name, index)
         rings = _rings(geometry)
-        simplified = [_simplify_ring(rings[0], OUTER_POINTS)]
-        simplified.extend(
-            _simplify_ring(ring, HOLE_POINTS) for ring in rings[1:]
-        )
-        simplified = [ring for ring in simplified if len(ring) >= 3]
-        total = sum(len(ring) for ring in simplified)
-        rounded = [
-            [(round(x, PRECISION), round(y, PRECISION)) for x, y in ring]
-            for ring in simplified
-        ]
-        polygon = _polygon(rounded)
-        line = label_line.label_line(
-            polygon, main_flow=rules.get("main_flow", False)
-        )
+        polygon = None
+        line = []
+        total = 0
+        # Огрубление меняет форму, и норма может перестать выполняться.
+        # Тогда повторяем с более детальной геометрией.
+        for attempt in range(3):
+            factor = 2 ** attempt
+            simplified = [_simplify_ring(rings[0], OUTER_POINTS * factor)]
+            simplified.extend(
+                _simplify_ring(ring, HOLE_POINTS * factor) for ring in rings[1:]
+            )
+            simplified = [ring for ring in simplified if len(ring) >= 3]
+            total = sum(len(ring) for ring in simplified)
+            rounded = [
+                [(round(x, PRECISION), round(y, PRECISION)) for x, y in ring]
+                for ring in simplified
+            ]
+            polygon = _polygon(rounded)
+            line = label_line.label_line(
+                polygon, main_flow=rules.get("main_flow", False)
+            )
+            if len(line) < 2:
+                continue
+            if not _violations(polygon, line, rules, number):
+                break
         if len(line) < 2:
-            raise SystemExit(f"№{number}: линия не построилась")
+            skipped.append((number, layer_name, "линия не построилась"))
+            print(f"№{number} {layer_name}: пропущен — линия не построилась")
+            continue
         cases.append({
             "number": number,
             "layer": layer_name,
             "main_flow": bool(rules.get("main_flow", False)),
             "rules": _norms(polygon, line, rules),
+            "source_rules": rules,
             "rings": rounded,
             "line": [
                 [round(x, PRECISION), round(y, PRECISION)] for x, y in line
@@ -256,6 +331,9 @@ def main(argv=None):
         encoding="utf-8",
     )
     print(f"записано {output} ({output.stat().st_size} байт)")
+    print(f"в фикстуре {len(cases)} случаев, пропущено {len(skipped)}")
+    for number, layer_name, reason in skipped:
+        print(f"  пропущен №{number} {layer_name}: {reason}")
 
 
 if __name__ == "__main__":
