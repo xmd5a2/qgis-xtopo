@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .bbox import BBox
-from .cpu import cpu_workers
 from . import dem_sources, i18n, sonny, terrain_cache
 
 CHUNK = 256 * 1024
@@ -31,6 +30,10 @@ MAX_DEM_PIXELS = 120_000_000
 # параллельной подготовки мозаики.  Для 3DEP 10 м тайл 1°×1° — это
 # сотни мегапикселей, такие окна остаются на прямом чтении /vsicurl.
 MAX_COG_PREFETCH_PIXELS = 30_000_000
+
+# Сколько окон COG качать одновременно.  Это сетевые загрузки, а не
+# расчёт: число не зависит от количества ядер и ограничено каналом.
+COG_PREFETCH_WORKERS = 6
 
 # Запас вокруг тайла при нарезке DEM на изолинии.  Алгоритм GDAL считает
 # контур по соседним ячейкам, и без запаса линия у края тайла обрывается
@@ -635,7 +638,7 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
         except Exception:  # noqa: BLE001 - тайл останется удалённым
             return index, None
 
-    workers = max(1, min(cpu_workers(), len(remote)))
+    workers = max(1, min(COG_PREFETCH_WORKERS, len(remote)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for index, path in pool.map(fetch, remote):
             if path is not None:
