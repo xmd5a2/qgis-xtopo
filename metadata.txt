@@ -2,7 +2,7 @@
 name=QGIS-xtopo
 qgisMinimumVersion=3.28
 description=Topographic rendering style and OSM/DEM data preparation for print-ready maps.
-version=0.13.32
+version=0.13.33
 author=Leonid Barsukov
 email=xmd5a@users.noreply.github.com
 about=QGIS-xtopo prepares OSM and terrain data for the bundled topographic QGIS project. It replaces the old Docker-based pipeline with a native QGIS plugin. The default Geofabrik mode selects the minimal map set for the chosen extent from the online index, downloads maps on demand, and cuts the needed area out of them with the bundled osmium-tool before reading (the tool is shipped with the plugin, nothing has to be installed). Also supports public Overpass API with background server checks, local PBF/OSM extracts with fast sampled estimates, automatic coastline and ocean processing, parallel processing of independent layers, and automatic removal of empty layers from the prepared project. When a prepared project is open, the dock switches to a project tab with canvas tools and layer controls bound to the project layers.

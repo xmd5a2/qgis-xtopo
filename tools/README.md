@@ -12,6 +12,7 @@
 | `check_pbf_coverage.py` | сверяет подготовленную выгрузку с эталоном osmium |
 | `check_peak_placement.py` | проверяет положение пиков OSM по рельефу |
 | `bench_label_line.py` | замер скорости линий подписи и сравнение со старой цепочкой GRASS |
+| `make_label_fixtures.py` | собирает компактные копии отмеченных объектов для тестов линии подписи |
 | `render_peak_review.py` | рисует фрагменты карты с изолиниями по CSV разметки |
 | `make_peak_map.py` | собирает интерактивную карту пиков по CSV |
 | `dem_compare_server.py` + `dem_compare.html` | сравнение наборов DEM между собой |
@@ -35,6 +36,22 @@ python3 tools/bench_label_line.py --vector ... --grass
 `simplify` → `smooth` → `dissolve`) и показывает ускорение; для неё нужен
 установленный GRASS. Рабочие данные только читаются, промежуточные файлы
 GRASS удаляются.
+
+## Компактные фикстуры линий подписи
+
+`tools/make_label_fixtures.py` собирает `tests/data/label_cases.json` —
+упрощённые геометрии отмеченных пользователем объектов и посчитанные по ним
+линии подписи. Файл небольшой, лежит в репозитории, и по нему проверка
+работает без рабочих каталогов.
+
+```sh
+python3 tools/make_label_fixtures.py
+python3 tools/make_label_fixtures.py --vector ~/qgis_projects/bike-marafon/vector \
+    --glacier ~/qgis_projects/georgia_max/src/glacier.geojson
+```
+
+После изменения алгоритма линии подписи файл нужно пересобрать: в фикстуре
+лежит эталон, с которым сравнивается результат.
 
 ## Сравнение DEM-наборов
 
