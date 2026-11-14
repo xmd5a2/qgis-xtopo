@@ -258,54 +258,70 @@ def centered_path(mask, distance, start, end, alpha=20.0):
     остаётся кратчайшим: петель и крюков не бывает.  Горячий цикл работает
     со списками Python — обращение к элементу списка дешевле индексации
     массива.
+
+    Сетка окружена рамкой из пустых ячеек: у соседей нет проверки
+    границ, а индекс считается сложением.  Порядок обхода (цена, номер
+    ячейки) не меняется, поэтому путь остаётся прежним.
     """
     height, width = mask.shape
-    total = height * width
     flat_mask = mask.ravel().tolist()
     flat_distance = np.maximum(distance.ravel(), 0).astype(np.int64).tolist()
     tables = _penalty_tables(alpha)
     top = len(tables[0]) - 1
+    # Рамка: слева, справа, сверху и снизу по одной пустой ячейке.
+    inner = width + 2
+    total = (height + 2) * inner
+    padded_mask = bytearray(total)
+    padded_distance = [0] * total
+    for row in range(height):
+        source = row * width
+        target = (row + 1) * inner + 1
+        padded_mask[target:target + width] = flat_mask[source:source + width]
+        padded_distance[target:target + width] = flat_distance[
+            source:source + width
+        ]
+    neighbours = [
+        (d_row * inner + d_column, table)
+        for (d_row, d_column, _length), table in zip(_STEPS, tables)
+    ]
     best = [-1] * total
     previous = [-1] * total
     closed = bytearray(total)
-    start_index = start[0] * width + start[1]
-    end_index = end[0] * width + end[1]
+    start_index = (start[0] + 1) * inner + start[1] + 1
+    end_index = (end[0] + 1) * inner + end[1] + 1
     best[start_index] = 0
     heap = [(0, start_index)]
+    pop = heapq.heappop
+    push = heapq.heappush
     while heap:
-        cost, node = heapq.heappop(heap)
+        cost, node = pop(heap)
         if closed[node]:
             continue
         closed[node] = 1
         if node == end_index:
             break
-        row = node // width
-        column = node - row * width
-        for direction, (d_row, d_column, _length) in enumerate(_STEPS):
-            n_row = row + d_row
-            n_column = column + d_column
-            if n_row < 0 or n_row >= height or n_column < 0 or n_column >= width:
+        for offset, table in neighbours:
+            n_index = node + offset
+            if not padded_mask[n_index]:
                 continue
-            n_index = n_row * width + n_column
-            if not flat_mask[n_index]:
-                continue
-            clearance = flat_distance[n_index]
+            clearance = padded_distance[n_index]
             if clearance > top:
                 clearance = top
-            new_cost = cost + tables[direction][clearance]
+            new_cost = cost + table[clearance]
             if best[n_index] < 0 or new_cost < best[n_index]:
                 best[n_index] = new_cost
                 previous[n_index] = node
-                heapq.heappush(heap, (new_cost, n_index))
+                push(heap, (new_cost, n_index))
     if best[end_index] < 0:
         return []
     path = []
     node = end_index
     while node >= 0:
-        row = node // width
-        path.append((row, node - row * width))
+        row, column = divmod(node, inner)
+        path.append((row - 1, column - 1))
         node = previous[node]
-    return path[::-1]
+    path.reverse()
+    return path
 
 
 # ---------------------------------------------------------------- концы
