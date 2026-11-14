@@ -968,6 +968,19 @@ def _clear_terrain_input(config):
             path.unlink(missing_ok=True)
 
 
+def _relief_creation_options():
+    """Параметры GTiff для растров рельефа.
+
+    Уклон и отмывка считаются параллельно, поэтому каждой ветке
+    достаётся половина обычного числа потоков: сжатие LZW делит ядра
+    между ветками, а не забирает их все.
+    """
+    from .cpu import cpu_workers
+
+    threads = max(1, cpu_workers() // 2)
+    return ["COMPRESS=LZW", "BIGTIFF=YES", f"NUM_THREADS={threads}"]
+
+
 def _write_raster(path, array, template):
     gdal, _, _ = _gdal()
     driver = gdal.GetDriverByName("GTiff")
@@ -977,7 +990,7 @@ def _write_raster(path, array, template):
         array.shape[0],
         1,
         gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "BIGTIFF=YES"],
+        options=_relief_creation_options(),
     )
     output.SetGeoTransform(template.GetGeoTransform())
     output.SetProjection(template.GetProjection())
@@ -1073,27 +1086,20 @@ def build_dem(config, bbox, progress=None, cancel=None):
     return merged
 
 
-def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
+def _generate_slope(config, merged, dem_width, dem_height, progress=None):
+    """Ветка уклона: растр в шесть раз детальнее исходного DEM."""
     gdal, _, _ = _gdal()
-    numpy = _numpy()
-    merged = config.raster_dir / "merged_dem.tif"
-    if not merged.exists():
-        raise RuntimeError("merged_dem.tif is missing")
-
     if progress:
         progress("Generating slope")
     # Сначала удваиваем разрешение DEM с интерполяцией: уклон получается
     # детальнее, чем при интерполяции уже готового растра уклона.
-    dem_ds = gdal.Open(str(merged))
-    dem_width, dem_height = dem_ds.RasterXSize, dem_ds.RasterYSize
-    dem_ds = None
     dem_x2 = config.raster_dir / "merged_dem_x2.tif"
     options = gdal.WarpOptions(
         width=dem_width * 2,
         height=dem_height * 2,
         resampleAlg=config.terrain_resample_method,
         outputType=gdal.GDT_Float32,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        creationOptions=_relief_creation_options(),
     )
     result = gdal.Warp(str(dem_x2), str(merged), options=options)
     if result is None:
@@ -1104,7 +1110,7 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
         computeEdges=True,
         slopeFormat="degree",
         scale=111120,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        creationOptions=_relief_creation_options(),
     )
     result = gdal.DEMProcessing(str(slope), str(dem_x2), "slope", options=options)
     if result is None:
@@ -1126,7 +1132,7 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
         height=height * 3,
         resampleAlg=config.terrain_resample_method,
         outputType=gdal.GDT_Float32,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        creationOptions=_relief_creation_options(),
     )
     result = gdal.Warp(str(slope_up), str(slope_cut_path), options=options)
     if result is None:
@@ -1135,6 +1141,15 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     slope.unlink(missing_ok=True)
     slope_cut_path.unlink(missing_ok=True)
 
+
+def _generate_hillshade(config, merged, width, height, progress=None):
+    """Ветка отмывки: DEM уменьшается, затем укрупняется и затеняется.
+
+    Мелкие формы рельефа при этом сглаживаются, а на итоговом растре
+    остаются только крупные склоны — так отмывка не рябит.
+    """
+    gdal, _, _ = _gdal()
+    numpy = _numpy()
     if progress:
         progress("Generating hillshade")
     downscaled = config.raster_dir / "merged_dem_downscaled.tif"
@@ -1143,7 +1158,7 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
         height=height // 2,
         resampleAlg=config.terrain_resample_method,
         outputType=gdal.GDT_Float32,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        creationOptions=_relief_creation_options(),
     )
     result = gdal.Warp(str(downscaled), str(merged), options=options)
     if result is None:
@@ -1156,7 +1171,7 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
         height=height * 3,
         resampleAlg=config.terrain_resample_method,
         outputType=gdal.GDT_Float32,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        creationOptions=_relief_creation_options(),
     )
     result = gdal.Warp(str(upscaled), str(downscaled), options=options)
     if result is None:
@@ -1174,7 +1189,7 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
         altitude=45,
         zFactor=1,
         scale=111120,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        creationOptions=_relief_creation_options(),
     )
     result = gdal.DEMProcessing(str(hillshade), str(upscaled), "hillshade", options=options)
     if result is None:
@@ -1187,7 +1202,61 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     composite_path = config.raster_dir / "hillshade_composite.tif"
     _write_raster(composite_path, composite, hillshade_template)
     hillshade.unlink(missing_ok=True)
-    return composite_path
+
+
+def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
+    gdal, _, _ = _gdal()
+    merged = config.raster_dir / "merged_dem.tif"
+    if not merged.exists():
+        raise RuntimeError("merged_dem.tif is missing")
+
+    dem_ds = gdal.Open(str(merged))
+    dem_width, dem_height = dem_ds.RasterXSize, dem_ds.RasterYSize
+    dem_ds = None
+    width, height = dem_width * 2, dem_height * 2
+
+    # Ветки уклона и отмывки независимы: обе читают только merged_dem.tif,
+    # а пишут каждая в свои файлы.  Параллельный запуск сокращает время
+    # рельефа почти вдвое.  Ошибка одной ветки не оставляет вторую
+    # брошенной: выход из пула дожидается обеих.
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import gdal_log
+
+    def guarded(function):
+        # GDAL хранит обработчик ошибок отдельно для каждого потока.
+        def run():
+            gdal_log.LOG.install()
+            try:
+                function()
+            finally:
+                gdal_log.LOG.restore()
+        return run
+
+    with ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="xtopo-relief"
+    ) as pool:
+        futures = [
+            pool.submit(
+                guarded(
+                    lambda: _generate_slope(
+                        config, merged, dem_width, dem_height, progress
+                    )
+                )
+            ),
+            pool.submit(
+                guarded(
+                    lambda: _generate_hillshade(
+                        config, merged, width, height, progress
+                    )
+                )
+            ),
+        ]
+        # Выход из with уже дождался обеих веток, поэтому result() не
+        # блокирует и лишь поднимает исключение первой упавшей ветки.
+        for future in futures:
+            future.result()
+    return config.raster_dir / "hillshade_composite.tif"
 
 
 class _EnvelopeGrid:
