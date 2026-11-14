@@ -75,6 +75,8 @@ LEGACY_AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
 _SVG_SCALE_CACHE = {}
 # Разобранный шаблон проекта: читается один раз за сеанс.
 _TEMPLATE_ROOTS = {}
+# Переменные проекта из шаблона: тоже читаются один раз за сеанс.
+_TEMPLATE_VARIABLES = {}
 
 LOD_LEVELS = (3, 4, 5, 6)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
@@ -225,6 +227,25 @@ def _alpha_bounds(image):
         raw = bytes(bits)
     except Exception:  # noqa: BLE001 - другая версия PyQt
         raw = None
+    if raw is not None:
+        try:
+            import numpy
+        except ImportError:
+            numpy = None
+        if numpy is not None:
+            try:
+                pixels = numpy.frombuffer(raw, dtype="uint8").reshape(height, stride)
+                alpha = pixels[:, : width * 4].reshape(height, width, 4)[:, :, 3]
+            except ValueError:
+                pass
+            else:
+                rows, columns = numpy.nonzero(alpha > 16)
+                if rows.size == 0:
+                    return None
+                return (
+                    int(columns.max() - columns.min() + 1),
+                    int(rows.max() - rows.min() + 1),
+                )
     min_x, min_y, max_x, max_y = width, height, -1, -1
     for y in range(height):
         for x in range(width):
@@ -833,6 +854,9 @@ def restore_base_filters(layers, bands):
 def template_variables(path=None):
     """Переменные проекта из шаблона (place_density и прочие)."""
     path = Path(path or template_path())
+    cached = _TEMPLATE_VARIABLES.get(path)
+    if cached is not None:
+        return dict(cached)
     with zipfile.ZipFile(path) as archive:
         name = next(n for n in archive.namelist() if n.endswith(".qgs"))
         text = archive.read(name).decode("utf-8")
@@ -847,7 +871,8 @@ def template_variables(path=None):
                 variables[key] = int(value)
             except ValueError:
                 variables[key] = value
-    return variables
+    _TEMPLATE_VARIABLES[path] = variables
+    return dict(variables)
 
 
 def _source_path(config, source_text):
@@ -891,11 +916,8 @@ def _overlay_sources(layers):
     }
     if not names:
         return {}
-    with zipfile.ZipFile(template_path()) as archive:
-        xml_name = next(
-            name for name in archive.namelist() if name.endswith(".qgs")
-        )
-        root = ElementTree.fromstring(archive.read(xml_name))
+    # Шаблон уже разобран для значков: второй раз 54 МБ XML не читаем.
+    root = _template_root()
     sources = {}
     for element in root.iter("maplayer"):
         name = element.findtext("layername")
