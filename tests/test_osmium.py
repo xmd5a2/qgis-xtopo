@@ -245,8 +245,11 @@ class OsmiumPrefilterTest(unittest.TestCase):
 
     def test_extraction_of_several_maps_runs_in_parallel(self):
         """Вырезка и поиск горных массивов разных карт идут одновременно."""
-        if (os.cpu_count() or 1) < 4:
-            self.skipTest("нужно хотя бы 4 ядра")
+        from qgis_xtopo.core.cpu import cpu_workers
+
+        workers = min(4, cpu_workers())
+        if workers < 2:
+            self.skipTest("нужно хотя бы 2 воркера")
         import threading
 
         from qgis_xtopo.core.bbox import BBox
@@ -256,7 +259,7 @@ class OsmiumPrefilterTest(unittest.TestCase):
             config.geofabrik_maps = []
             for name in ("first", "second"):
                 (Path(directory) / f"{name}.osm.pbf").write_bytes(b"pbf")
-            barrier = threading.Barrier(4, timeout=10)
+            barrier = threading.Barrier(workers, timeout=10)
             threads = set()
             lock = threading.Lock()
 

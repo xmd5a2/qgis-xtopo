@@ -11,6 +11,7 @@ from . import (
     polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
+from .cpu import cpu_workers
 from .query_recipes import recipe_for
 
 
@@ -518,10 +519,9 @@ class Pipeline:
         configured = int(getattr(self.config, "parallel_workers", 0) or 0)
         if configured > 0:
             return max(1, min(configured, total))
-        cpu = os.cpu_count() or 2
-        # Оставляем пару ядер системе и самому QGIS.  На 16 ядрах
-        # восемь слоёв дают заметно меньшую стену, чем шесть.
-        return max(1, min(8, cpu - 2, total))
+        # 3/4 ядер, но не больше 8: на 16 ядрах 12 слоёв оказались
+        # медленнее восьми из-за конкуренции за диск и память.
+        return max(1, min(cpu_workers(limit=8), total))
 
     def _run_layer(self, name, source, index, total):
         if self.cancel is not None and self.cancel.is_set():

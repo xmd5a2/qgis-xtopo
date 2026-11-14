@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .bbox import BBox
+from .cpu import cpu_workers
 from . import dem_sources, i18n, sonny, terrain_cache
 
 CHUNK = 256 * 1024
@@ -634,7 +635,7 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
         except Exception:  # noqa: BLE001 - тайл останется удалённым
             return index, None
 
-    workers = min(6, len(remote))
+    workers = max(1, min(cpu_workers(), len(remote)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for index, path in pool.map(fetch, remote):
             if path is not None:

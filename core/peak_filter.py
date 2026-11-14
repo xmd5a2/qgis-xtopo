@@ -12,7 +12,6 @@
 """
 
 import math
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +21,7 @@ from typing import Optional
 import numpy as np
 
 from . import i18n, peak_placement
+from .cpu import cpu_workers
 
 TILE_PIXELS = 3601
 
@@ -488,7 +488,7 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction):
         # Метрики пиков независимы.  Растр в памяти только читается,
         # поэтому окна можно считать в нескольких потоках; на общем
         # растре это даёт заметный выигрыш без изменения результата.
-        workers = max(1, min(4, os.cpu_count() or 2, total)) if total else 1
+        workers = max(1, min(cpu_workers(limit=4), total)) if total else 1
         if shared and workers > 1:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {

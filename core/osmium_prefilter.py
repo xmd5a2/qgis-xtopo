@@ -17,12 +17,12 @@ GDAL работает с маленьким файлом.
 такое отношение теряет («Relation ... has missing ways»).
 """
 
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import osmium_tool
+from .cpu import cpu_workers
 
 # Запас вокруг области вырезки (в градусах и доля от размера области).
 # Запас нужен для линий и полигонов, пересекающих границу: osmium оставляет
@@ -137,7 +137,7 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
             # карту независимо, а разные карты не зависят друг от друга.
             # Несколько процессов osmium на ядрах заметно быстрее
             # последовательного прохода, результат тот же.
-            workers = max(1, min(4, len(tasks) * 2, os.cpu_count() or 2))
+            workers = max(1, min(cpu_workers(), len(tasks) * 2))
             say_lock = threading.Lock()
 
             def say(message):

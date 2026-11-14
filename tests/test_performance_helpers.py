@@ -40,6 +40,7 @@ class ParallelWorkersTest(unittest.TestCase):
             self.assertEqual(loaded.parallel_workers, 5)
 
     def test_worker_count(self):
+        from qgis_xtopo.core.cpu import cpu_workers
         from qgis_xtopo.core.pipeline import Pipeline
 
         class FakeConfig:
@@ -48,7 +49,9 @@ class ParallelWorkersTest(unittest.TestCase):
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.config = FakeConfig()
         self.assertGreaterEqual(pipeline._worker_count(100), 1)
-        self.assertLessEqual(pipeline._worker_count(100), 8)
+        self.assertEqual(
+            pipeline._worker_count(100), min(cpu_workers(limit=8), 100)
+        )
 
         FakeConfig.parallel_workers = 3
         self.assertEqual(pipeline._worker_count(100), 3)
