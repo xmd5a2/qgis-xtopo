@@ -1,8 +1,8 @@
 """Линия подписи вдоль полигона: форма, гладкость, границы.
 
 Рабочие данные пользователя в репозитории не лежат. Синтетические контуры
-проверяются всегда, а случаи с листов проверки включаются переменными
-окружения:
+и компактные копии отмеченных объектов проверяются всегда, а сами случаи
+с листов проверки включаются переменными окружения:
 
 * ``QGIS_XTOPO_TEST_VECTOR`` — каталог ``vector`` проекта (wood, water,
   wetland, bay_polygon, glacier, strait);
@@ -11,9 +11,11 @@
   (швейцарские ледники, дубликат Feegletscher).
 """
 
+import json
 import math
 import os
 import unittest
+from pathlib import Path
 
 import numpy as np
 from osgeo import ogr
@@ -26,6 +28,11 @@ METRES_PER_DEGREE = 111320.0
 VECTOR_ENV = "QGIS_XTOPO_TEST_VECTOR"
 GLACIER_ENV = "QGIS_XTOPO_TEST_GLACIER"
 AUTOMAP_ENV = "QGIS_XTOPO_TEST_AUTOMAP"
+# Компактные копии отмеченных объектов: лежат в репозитории, поэтому
+# проверка работает без рабочих каталогов.
+FIXTURE_PATH = Path(__file__).parent / "data" / "label_cases.json"
+# Насколько линия может отличаться от зафиксированной, в метрах.
+LINE_TOLERANCE_METRES = 1.0
 
 CORNER_NAMES = {
     "tl": "левый верхний",
@@ -326,15 +333,10 @@ def _marked_glaciers():
     return [by_name[name] for name in GLACIER_NAMES if name in by_name]
 
 
-def _check_marked_case(case):
-    """Проверяет один отмеченный случай; выполняется в отдельном процессе."""
-    number, layer_name, index, rules = case
-    geometry = _marked_geometry(layer_name, index)
-    line = label_line.label_line(
-        geometry, main_flow=rules.get("main_flow", False)
-    )
+def _violations(geometry, line, rules, number):
+    """Нарушения норм для линии подписи; пустой список — всё в порядке."""
     if len(line) < 2:
-        return number, [f"№{number}: линии нет"]
+        return [f"№{number}: линии нет"]
     points = np.asarray(line, dtype="float64")
     dense = _dense(line, step=0.00003)
     probe = ogr.Geometry(ogr.wkbPoint)
@@ -409,7 +411,17 @@ def _check_marked_case(case):
                 f"№{number}: начало линии в {CORNER_NAMES[actual]} углу "
                 f"(нужен {CORNER_NAMES[rules['start']]})"
             )
-    return number, failures
+    return failures
+
+
+def _check_marked_case(case):
+    """Проверяет один отмеченный случай; выполняется в отдельном процессе."""
+    number, layer_name, index, rules = case
+    geometry = _marked_geometry(layer_name, index)
+    line = label_line.label_line(
+        geometry, main_flow=rules.get("main_flow", False)
+    )
+    return number, _violations(geometry, line, rules, number)
 
 
 @unittest.skipUnless(
@@ -428,6 +440,86 @@ class MarkedCasesTest(unittest.TestCase):
         failures = []
         for number, problems in sorted(results):
             failures.extend(problems)
+        self.assertEqual(failures, [], "\n".join(failures))
+
+
+def _polygon_from_rings(rings):
+    """Полигон из колец фикстуры."""
+    polygon = ogr.Geometry(ogr.wkbPolygon)
+    for points in rings:
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for x, y in points:
+            ring.AddPoint_2D(x, y)
+        ring.AddPoint_2D(points[0][0], points[0][1])
+        polygon.AddGeometry(ring)
+    return polygon
+
+
+def _deviation(points, starts, ends):
+    """Наибольшее расстояние от точек до ближайшего отрезка, в градусах."""
+    px = points[:, 0][:, None]
+    py = points[:, 1][:, None]
+    ax = starts[:, 0][None, :]
+    ay = starts[:, 1][None, :]
+    dx = ends[:, 0][None, :] - ax
+    dy = ends[:, 1][None, :] - ay
+    length = dx * dx + dy * dy
+    safe = np.where(length > 0.0, length, 1.0)
+    t = np.clip(((px - ax) * dx + (py - ay) * dy) / safe, 0.0, 1.0)
+    cx = ax + t * dx
+    cy = ay + t * dy
+    nearest = np.min(np.hypot(px - cx, py - cy), axis=1)
+    return float(np.max(nearest))
+
+
+class FixtureCasesTest(unittest.TestCase):
+    """Компактные копии отмеченных объектов: линия должна идти так же.
+
+    Фикстура лежит в репозитории (`tests/data/label_cases.json`), поэтому
+    проверка работает без рабочих каталогов пользователя.  Собрана
+    `tools/make_label_fixtures.py` из настоящих отмеченных объектов.
+    """
+
+    def _cases(self):
+        data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        return data["cases"]
+
+    def test_lines_satisfy_the_norms(self):
+        failures = []
+        for case in self._cases():
+            geometry = _polygon_from_rings(case["rings"])
+            line = label_line.label_line(
+                geometry, main_flow=case["main_flow"]
+            )
+            failures.extend(
+                _violations(geometry, line, case["rules"], case["number"])
+            )
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_lines_match_the_fixture(self):
+        failures = []
+        tolerance = LINE_TOLERANCE_METRES / METRES_PER_DEGREE
+        for case in self._cases():
+            geometry = _polygon_from_rings(case["rings"])
+            line = label_line.label_line(
+                geometry, main_flow=case["main_flow"]
+            )
+            if len(line) < 2:
+                failures.append(f"№{case['number']}: линии нет")
+                continue
+            expected = np.asarray(case["line"], dtype="float64")
+            actual = np.asarray(line, dtype="float64")
+            starts = expected[:-1]
+            ends = expected[1:]
+            deviation = max(
+                _deviation(actual, starts, ends),
+                _deviation(expected, actual[:-1], actual[1:]),
+            )
+            if deviation > tolerance:
+                failures.append(
+                    f"№{case['number']}: линия отличается на "
+                    f"{deviation * METRES_PER_DEGREE:.1f} м"
+                )
         self.assertEqual(failures, [], "\n".join(failures))
 
 
