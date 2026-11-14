@@ -7,8 +7,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, gdal_log, i18n, icon_angles, osm_convert, peak_filter,
-    poi_icons, polygon_overlaps, project, sources, terrain,
+    coastline, gdal_log, i18n, icon_angles, label_cache, osm_convert,
+    peak_filter, poi_icons, polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -1048,14 +1048,20 @@ class Pipeline:
 
         from .label_line import label_line_geometry
 
+        path = self.config.temp_dir / f"{name}_axis.gpkg"
+        path.unlink(missing_ok=True)
+        # Линия подписи — чистая функция геометрии слоя, поэтому при
+        # повторной подготовке она берётся из кэша.
+        key = label_cache.cache_key(self.config, name, current, main_flow)
+        if label_cache.restore(self.config, key, path):
+            self.progress(f"{name}: label lines restored from cache")
+            return path
         source = ogr.Open(str(current))
         if source is None:
             raise PipelineError(f"Cannot open {current}")
         layer = source.GetLayer(0)
         definition = layer.GetLayerDefn()
         spatial_ref = layer.GetSpatialRef()
-        path = self.config.temp_dir / f"{name}_axis.gpkg"
-        path.unlink(missing_ok=True)
         writer = _GpkgWriter(
             path, name, definition, spatial_ref,
             geometry_type=ogr.wkbMultiLineString,
@@ -1099,6 +1105,7 @@ class Pipeline:
         writer.close()
         if not writer.count:
             raise PipelineError(f"{name}: no label lines built")
+        label_cache.store(self.config, key, path)
         self.progress(f"{name}: label lines for {built} objects")
         return writer.path
 

@@ -630,6 +630,94 @@ class LabelAxisTest(unittest.TestCase):
             dataset = None
 
 
+class LabelCacheTest(unittest.TestCase):
+    """Линии подписи берутся из кэша при повторной подготовке."""
+
+    def _source(self, path, count=1):
+        from osgeo import ogr
+
+        dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(path))
+        layer = dataset.CreateLayer("wood", None, ogr.wkbPolygon)
+        layer.CreateField(ogr.FieldDefn("id", ogr.OFTString))
+        layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+        corners = ((0.0, 0.0), (0.02, 0.0), (0.02, 0.006), (0.0, 0.006))
+        for index in range(count):
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("id", f"way/{index + 1}")
+            feature.SetField("name", "Лес")
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in corners + corners[:1]:
+                ring.AddPoint_2D(x + index * 0.05, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    def _lines(self, path):
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(path))
+        layer = dataset.GetLayer(0)
+        lines = [
+            feature.GetGeometryRef().ExportToWkt()
+            for feature in layer
+        ]
+        dataset = None
+        return lines
+
+    def test_second_run_uses_cache(self):
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "wood.gpkg"
+            self._source(source)
+            messages = []
+            pipeline = Pipeline(
+                config, BBox(0, 0, 0.02, 0.006), _FakeRunner(None),
+                progress=messages.append,
+            )
+            first = pipeline._label_axis("wood", source, False)
+            lines = self._lines(first)
+            self.assertEqual(len(lines), 1)
+
+            messages.clear()
+            second = pipeline._label_axis("wood", source, False)
+            self.assertEqual(self._lines(second), lines)
+            self.assertTrue(
+                any("restored from cache" in message for message in messages),
+                messages,
+            )
+
+    def test_changed_layer_is_recalculated(self):
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "wood.gpkg"
+            self._source(source)
+            messages = []
+            pipeline = Pipeline(
+                config, BBox(0, 0, 0.07, 0.006), _FakeRunner(None),
+                progress=messages.append,
+            )
+            pipeline._label_axis("wood", source, False)
+
+            self._source(source, count=2)
+            messages.clear()
+            output = pipeline._label_axis("wood", source, False)
+            self.assertEqual(len(self._lines(output)), 2)
+            self.assertFalse(
+                any("restored from cache" in message for message in messages),
+                messages,
+            )
+
+
 class LabelAxisRecipeTest(unittest.TestCase):
     """Рецепт подписи не должен заранее сглаживать контур."""
 

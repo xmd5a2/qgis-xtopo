@@ -214,6 +214,10 @@ class Config:
     def terrain_result_cache_dir(self):
         return self.projects_dir / "qgisxtopo-cache" / "terrain"
 
+    @property
+    def label_cache_dir(self):
+        return self.projects_dir / "qgisxtopo-cache" / "labels"
+
     def resolved_terrain_source(self):
         """Ключ источника рельефа.
 
