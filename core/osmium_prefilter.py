@@ -23,6 +23,10 @@ from pathlib import Path
 
 from . import osmium_tool
 from .cpu import cpu_workers
+from .memory import (
+    GIB, MemoryLimiter, memory_budget, osmium_extract_bytes,
+    osmium_filter_bytes,
+)
 
 # Запас вокруг области вырезки (в градусах и доля от размера области).
 # Запас нужен для линий и полигонов, пересекающих границу: osmium оставляет
@@ -137,7 +141,16 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
             # карту независимо, а разные карты не зависят друг от друга.
             # Несколько процессов osmium на ядрах заметно быстрее
             # последовательного прохода, результат тот же.
+            # Рельеф в это время уже строится в своём потоке, поэтому
+            # оставляем ему запас памяти.
+            budget = memory_budget(extra_reserve=2 * GIB)
+            limiter = MemoryLimiter(budget)
             workers = max(1, min(cpu_workers(), len(tasks) * 2))
+            if progress:
+                progress(
+                    f"osmium: карт {len(tasks)}, память под вырезку "
+                    f"{budget / GIB:.1f} ГБ"
+                )
             say_lock = threading.Lock()
 
             def say(message):
@@ -151,19 +164,20 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                     f"osmium: вырезка области из {Path(source).name} "
                     f"({position}/{len(original)})…"
                 )
-                osmium_tool.run(
-                    executable,
-                    [
-                        "extract",
-                        "-b", _bbox_argument(bbox),
-                        "--strategy=smart",
-                        "-S", "types=any",
-                        "-o", str(extracted_path),
-                        "--overwrite",
-                        source,
-                    ],
-                    cancel=cancel,
-                )
+                with limiter.reservation(osmium_extract_bytes(source)):
+                    osmium_tool.run(
+                        executable,
+                        [
+                            "extract",
+                            "-b", _bbox_argument(bbox),
+                            "--strategy=smart",
+                            "-S", "types=any",
+                            "-o", str(extracted_path),
+                            "--overwrite",
+                            source,
+                        ],
+                        cancel=cancel,
+                    )
 
             def find_covering(task):
                 position, source, _extracted_path, covering_path = task
@@ -171,17 +185,18 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                     f"osmium: поиск горных массивов в {Path(source).name} "
                     f"({position}/{len(original)})…"
                 )
-                osmium_tool.run(
-                    executable,
-                    [
-                        "tags-filter",
-                        source,
-                        *COVERING_EXPRESSIONS,
-                        "-o", str(covering_path),
-                        "--overwrite",
-                    ],
-                    cancel=cancel,
-                )
+                with limiter.reservation(osmium_filter_bytes(source)):
+                    osmium_tool.run(
+                        executable,
+                        [
+                            "tags-filter",
+                            source,
+                            *COVERING_EXPRESSIONS,
+                            "-o", str(covering_path),
+                            "--overwrite",
+                        ],
+                        cancel=cancel,
+                    )
 
             failures = []
             with ThreadPoolExecutor(max_workers=workers) as pool:

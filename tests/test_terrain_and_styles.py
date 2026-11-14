@@ -47,6 +47,50 @@ class SlopeResolutionTest(unittest.TestCase):
             self.assertFalse((root / "merged_dem_x2.tif").exists())
 
 
+class RasterBlockTransformTest(unittest.TestCase):
+    """Поблочная обработка даёт тот же растр, что и обработка целиком."""
+
+    def test_transform_matches_full_array(self):
+        from osgeo import gdal, osr
+        import numpy as np
+        from qgis_xtopo.core import terrain
+
+        gdal.UseExceptions()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.tif"
+            destination_path = root / "destination.tif"
+            driver = gdal.GetDriverByName("GTiff")
+            source = driver.Create(
+                str(source_path), 37, 29, 1, gdal.GDT_Float32
+            )
+            source.SetGeoTransform((10, 0.01, 0, 20, 0, -0.01))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            source.SetProjection(srs.ExportToWkt())
+            values = np.arange(37 * 29, dtype="float32").reshape(29, 37)
+            source.GetRasterBand(1).WriteArray(values)
+            source = None
+
+            original = terrain.RASTER_BLOCK_SIDE
+            terrain.RASTER_BLOCK_SIDE = 11
+            try:
+                terrain._transform_raster(
+                    source_path, destination_path,
+                    lambda array: array * 2.0 + 1.0,
+                )
+            finally:
+                terrain.RASTER_BLOCK_SIDE = original
+
+            result = gdal.Open(str(destination_path))
+            array = result.GetRasterBand(1).ReadAsArray()
+            self.assertEqual(result.RasterXSize, 37)
+            self.assertEqual(result.RasterYSize, 29)
+            self.assertEqual(result.GetGeoTransform(), (10, 0.01, 0, 20, 0, -0.01))
+            result = None
+        np.testing.assert_array_equal(array, values * 2.0 + 1.0)
+
+
 class HillshadeStyleTest(unittest.TestCase):
     """Отмывка как у gdaldem hillshade: одно направление света, тени не чёрные."""
 

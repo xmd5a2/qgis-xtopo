@@ -57,6 +57,8 @@ CONTOUR_TILE_WORKERS_RATIO = 0.75
 def _gdal():
     from osgeo import gdal, ogr, osr
 
+    from .memory import gdal_cache_mb
+
     gdal.UseExceptions()
     ogr.UseExceptions()
     # Растры читаются по HTTP Range (/vsicurl): без коротких таймаутов
@@ -65,6 +67,9 @@ def _gdal():
     gdal.SetConfigOption("CPL_VSIL_CURL_TIMEOUT", "15")
     gdal.SetConfigOption("GDAL_HTTP_CONNECTTIMEOUT", "5")
     gdal.SetConfigOption("GDAL_HTTP_TIMEOUT", "15")
+    # Кэш GDAL — часть общего бюджета памяти. На 8 ГБ он меньше, на
+    # машинах с запасом — больше, но не выше 2 ГБ.
+    gdal.SetConfigOption("GDAL_CACHEMAX", str(gdal_cache_mb()))
     return gdal, ogr, osr
 
 
@@ -981,33 +986,49 @@ def _relief_creation_options():
     return ["COMPRESS=LZW", "BIGTIFF=YES", f"NUM_THREADS={threads}"]
 
 
-def _write_raster(path, array, template):
+RASTER_BLOCK_SIDE = 2048
+
+
+def _transform_raster(source_path, destination_path, operation):
+    """Пишет растр поблочно, применяя поэлементную функцию.
+
+    Читать весь растр в numpy нельзя: уклон и отмывка в шесть раз
+    крупнее DEM, и на области 300 км массив занимает больше десяти
+    гигабайт.  Блок 2048×2048 — это около 16 МБ на float32.
+    """
     gdal, _, _ = _gdal()
+    source = gdal.Open(str(source_path))
+    if source is None:
+        raise RuntimeError(f"Cannot open raster: {source_path}")
     driver = gdal.GetDriverByName("GTiff")
+    width = source.RasterXSize
+    height = source.RasterYSize
     output = driver.Create(
-        str(path),
-        array.shape[1],
-        array.shape[0],
+        str(destination_path),
+        width,
+        height,
         1,
         gdal.GDT_Float32,
         options=_relief_creation_options(),
     )
-    output.SetGeoTransform(template.GetGeoTransform())
-    output.SetProjection(template.GetProjection())
-    band = output.GetRasterBand(1)
-    band.WriteArray(array)
-    band.FlushCache()
-    output = None
-
-
-def _read_band(path):
-    gdal, _, _ = _gdal()
-    dataset = gdal.Open(str(path))
-    if dataset is None:
-        raise RuntimeError(f"Cannot open raster: {path}")
-    band = dataset.GetRasterBand(1)
-    array = band.ReadAsArray().astype("float32")
-    return dataset, array
+    output.SetGeoTransform(source.GetGeoTransform())
+    output.SetProjection(source.GetProjection())
+    source_band = source.GetRasterBand(1)
+    target_band = output.GetRasterBand(1)
+    try:
+        for y in range(0, height, RASTER_BLOCK_SIDE):
+            rows = min(RASTER_BLOCK_SIDE, height - y)
+            for x in range(0, width, RASTER_BLOCK_SIDE):
+                columns = min(RASTER_BLOCK_SIDE, width - x)
+                array = source_band.ReadAsArray(x, y, columns, rows)
+                if array is None:
+                    continue
+                block = operation(array.astype("float32"))
+                target_band.WriteArray(block, x, y)
+        target_band.FlushCache()
+    finally:
+        output = None
+        source = None
 
 
 def _file_sha256(path):
@@ -1118,11 +1139,11 @@ def _generate_slope(config, merged, dem_width, dem_height, progress=None):
     result = None
     dem_x2.unlink(missing_ok=True)
 
-    template, slope_array = _read_band(slope)
-    slope_cut = slope_array * (slope_array > 1.04)
-    height, width = slope_cut.shape
+    width, height = dem_width * 2, dem_height * 2
     slope_cut_path = config.raster_dir / "slope_cut.tif"
-    _write_raster(slope_cut_path, slope_cut, template)
+    _transform_raster(
+        slope, slope_cut_path, lambda array: array * (array > 1.04)
+    )
 
     if progress:
         progress("Upscaling slope")
@@ -1196,11 +1217,15 @@ def _generate_hillshade(config, merged, width, height, progress=None):
         raise RuntimeError("Failed to generate hillshade")
     result = None
 
-    hillshade_template, hillshade_array = _read_band(hillshade)
     # 10 % подсветки: самые глубокие тени не проваливаются в чёрный.
-    composite = numpy.clip(255.0 * (0.10 + 0.90 * (hillshade_array / 255.0)), 0, 255)
     composite_path = config.raster_dir / "hillshade_composite.tif"
-    _write_raster(composite_path, composite, hillshade_template)
+    _transform_raster(
+        hillshade,
+        composite_path,
+        lambda array: numpy.clip(
+            255.0 * (0.10 + 0.90 * (array / 255.0)), 0, 255
+        ),
+    )
     hillshade.unlink(missing_ok=True)
 
 
@@ -1452,9 +1477,11 @@ def _contour_workers(tiles):
     Занимаем три четверти ядер: замер на реальном рельефе показывает,
     что дальше потолок — GEOS держит GIL, и лишние потоки мешают.
     """
+    from .memory import CONTOUR_WORKER_BYTES, worker_cap
+
     available = os.cpu_count() or 2
     limit = max(1, int(available * CONTOUR_TILE_WORKERS_RATIO))
-    return max(1, min(tiles, limit))
+    return max(1, min(tiles, limit, worker_cap(CONTOUR_WORKER_BYTES, cpu_limit=limit)))
 
 
 def _try_mask_glaciers(raster, config, keep_only=False):
@@ -1533,9 +1560,20 @@ def _try_mask_glaciers(raster, config, keep_only=False):
             mask.SetGeoTransform(raster.GetGeoTransform())
             mask.SetProjection(projection)
             gdal.RasterizeLayer(mask, [1], holder_layer, burn_values=[1])
-            array = band.ReadAsArray()
-            array[mask.GetRasterBand(1).ReadAsArray() != 1] = nodata
-            band.WriteArray(array)
+            mask_band = mask.GetRasterBand(1)
+            for y in range(0, raster.RasterYSize, RASTER_BLOCK_SIDE):
+                rows = min(RASTER_BLOCK_SIDE, raster.RasterYSize - y)
+                for x in range(0, raster.RasterXSize, RASTER_BLOCK_SIDE):
+                    columns = min(RASTER_BLOCK_SIDE, raster.RasterXSize - x)
+                    array = band.ReadAsArray(x, y, columns, rows)
+                    if array is None:
+                        continue
+                    mask_array = mask_band.ReadAsArray(
+                        x, y, columns, rows
+                    )
+                    array[mask_array != 1] = nodata
+                    band.WriteArray(array, x, y)
+            band.FlushCache()
             mask = None
         else:
             gdal.RasterizeLayer(

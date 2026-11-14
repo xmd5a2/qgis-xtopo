@@ -1865,8 +1865,14 @@ class ContourTilingTest(unittest.TestCase):
         """Потоков — три четверти ядер, но не больше числа тайлов."""
         from qgis_xtopo.core import terrain
 
+        from qgis_xtopo.core import memory
+
         cores = os.cpu_count() or 2
         expected = max(1, int(cores * terrain.CONTOUR_TILE_WORKERS_RATIO))
+        expected = min(
+            expected,
+            memory.worker_cap(memory.CONTOUR_WORKER_BYTES, cpu_limit=expected),
+        )
         self.assertEqual(terrain._contour_workers(1000), expected)
         self.assertEqual(terrain._contour_workers(1), 1)
 

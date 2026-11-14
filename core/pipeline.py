@@ -12,6 +12,7 @@ from . import (
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
+from .memory import LAYER_WORKER_BYTES, worker_cap
 from .query_recipes import recipe_for
 
 
@@ -616,13 +617,20 @@ class Pipeline:
         return self._run_parallel(source, query_names, workers)
 
     def _worker_count(self, total):
-        """Сколько слоёв обрабатывать одновременно."""
+        """Сколько слоёв обрабатывать одновременно.
+
+        Потолок по ядрам не должен приводить к OOM: на машине с 8 ГБ
+        одновременно помещается заметно меньше слоёв, чем на 32 ГБ.
+        Явно заданное ``parallel_workers`` тоже ограничивается памятью.
+        """
         configured = int(getattr(self.config, "parallel_workers", 0) or 0)
-        if configured > 0:
-            return max(1, min(configured, total))
         # 3/4 ядер, но не больше 8: на 16 ядрах 12 слоёв оказались
         # медленнее восьми из-за конкуренции за диск и память.
-        return max(1, min(cpu_workers(limit=8), total))
+        requested = configured if configured > 0 else cpu_workers(limit=8)
+        requested = max(1, min(requested, total))
+        return max(
+            1, min(requested, worker_cap(LAYER_WORKER_BYTES, cpu_limit=requested))
+        )
 
     def _run_layer(self, name, source, index, total):
         if self.cancel is not None and self.cancel.is_set():

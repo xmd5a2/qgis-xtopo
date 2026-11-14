@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from qgis_xtopo.core import sources
 from qgis_xtopo.core.config import Config
@@ -48,15 +49,98 @@ class ParallelWorkersTest(unittest.TestCase):
 
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.config = FakeConfig()
-        self.assertGreaterEqual(pipeline._worker_count(100), 1)
+        # Здесь проверяется только потолок по ядрам; ограничение памяти
+        # проверяется отдельно в MemoryBudgetTest.
+        with mock.patch(
+            "qgis_xtopo.core.pipeline.worker_cap",
+            side_effect=lambda per_worker, cpu_limit=None, budget=None:
+                cpu_limit,
+        ):
+            self.assertGreaterEqual(pipeline._worker_count(100), 1)
+            self.assertEqual(
+                pipeline._worker_count(100), min(cpu_workers(limit=8), 100)
+            )
+
+            FakeConfig.parallel_workers = 3
+            self.assertEqual(pipeline._worker_count(100), 3)
+            # потоков не может быть больше, чем слоёв
+            self.assertEqual(pipeline._worker_count(2), 2)
+
+
+class MemoryBudgetTest(unittest.TestCase):
+    def test_budget_on_eight_gigabytes(self):
+        from qgis_xtopo.core import memory
+
+        budget = memory.memory_budget(
+            total=8 * memory.GIB, available=5 * memory.GIB
+        )
+        self.assertGreaterEqual(budget, memory.MIN_BUDGET)
+        self.assertLess(budget, 5 * memory.GIB)
         self.assertEqual(
-            pipeline._worker_count(100), min(cpu_workers(limit=8), 100)
+            memory.worker_cap(
+                memory.LAYER_WORKER_BYTES, cpu_limit=8, budget=budget
+            ),
+            2,
         )
 
-        FakeConfig.parallel_workers = 3
-        self.assertEqual(pipeline._worker_count(100), 3)
-        # потоков не может быть больше, чем слоёв
-        self.assertEqual(pipeline._worker_count(2), 2)
+    def test_more_memory_gives_more_workers(self):
+        from qgis_xtopo.core import memory
+
+        small = memory.memory_budget(
+            total=8 * memory.GIB, available=5 * memory.GIB
+        )
+        large = memory.memory_budget(
+            total=32 * memory.GIB, available=28 * memory.GIB
+        )
+        small_workers = memory.worker_cap(
+            memory.LAYER_WORKER_BYTES, cpu_limit=16, budget=small
+        )
+        large_workers = memory.worker_cap(
+            memory.LAYER_WORKER_BYTES, cpu_limit=16, budget=large
+        )
+        self.assertLess(small_workers, large_workers)
+        self.assertGreaterEqual(large_workers, 8)
+
+    def test_osmium_estimate_scales_with_map_size(self):
+        from qgis_xtopo.core import memory
+
+        with tempfile.TemporaryDirectory() as directory:
+            small = Path(directory) / "small.osm.pbf"
+            large = Path(directory) / "large.osm.pbf"
+            small.write_bytes(b"")
+            with large.open("wb") as handle:
+                handle.truncate(100 * memory.MIB)
+            small_estimate = memory.osmium_extract_bytes(small)
+            large_estimate = memory.osmium_extract_bytes(large)
+            filter_estimate = memory.osmium_filter_bytes(large)
+        self.assertGreater(small_estimate, 0)
+        self.assertGreater(large_estimate, small_estimate)
+        self.assertLess(filter_estimate, large_estimate)
+
+    def test_windows_memory_source_is_used(self):
+        from qgis_xtopo.core import memory
+
+        with mock.patch.object(memory.sys, "platform", "win32"), \
+                mock.patch.object(memory.os, "name", "nt"), \
+                mock.patch.object(
+                    memory, "_windows_memory",
+                    return_value=(8 * memory.GIB, 5 * memory.GIB),
+                ):
+            self.assertEqual(
+                memory.memory_state(), (8 * memory.GIB, 5 * memory.GIB)
+            )
+
+    def test_limiter_serializes_tasks_over_budget(self):
+        from qgis_xtopo.core.memory import MemoryLimiter
+
+        limiter = MemoryLimiter(100)
+        with limiter.reservation(80):
+            self.assertEqual(limiter.used, 80)
+        self.assertEqual(limiter.used, 0)
+        # Задача крупнее бюджета всё равно должна запуститься одна.
+        with limiter.reservation(200):
+            self.assertEqual(limiter.used, 200)
+        self.assertEqual(limiter.used, 0)
 
 
 class TimingsTest(unittest.TestCase):

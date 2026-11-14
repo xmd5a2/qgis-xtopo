@@ -39,8 +39,11 @@ class PbfError(RuntimeError):
 def _gdal():
     from osgeo import gdal, ogr
 
+    from .memory import gdal_cache_mb
+
     gdal.UseExceptions()
     ogr.UseExceptions()
+    gdal.SetConfigOption("GDAL_CACHEMAX", str(gdal_cache_mb()))
     return gdal, ogr
 
 
