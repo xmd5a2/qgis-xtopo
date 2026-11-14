@@ -202,29 +202,15 @@ def _is_empty_datasource(datasource, base_dir):
     return False
 
 
-def _remove_empty_layers(text, base_dir):
-    removed = set()
+def _drop_removed_references(text, removed):
+    """Убирает ссылки на удалённые слои из дерева, легенды и порядка.
 
-    def scan(match):
-        block = match.group(0)
-        layer_id = _element(block, "id")
-        datasource = _element(block, "datasource")
-        if layer_id and datasource is not None:
-            if _is_empty_datasource(html.unescape(datasource), base_dir):
-                removed.add(layer_id)
-        return block
-
-    MAPLAYER_PATTERN.sub(scan, text)
-    if not removed:
-        return text, removed
-
-    def drop_layer(match):
-        block = match.group(0)
-        layer_id = _element(block, "id")
-        return "" if layer_id in removed else block
-
-    text = MAPLAYER_PATTERN.sub(drop_layer, text)
-
+    Теги дерева и легенды лежат вне блоков ``maplayer``, а сами блоки
+    занимают почти весь текст проекта.  Поэтому проходы по ссылкам
+    выполняются по кускам между слоями, а не по всему документу:
+    иначе удаление слоёв стоило бы нескольких полных сканирований
+    стилей на десятки мегабайт.
+    """
     def drop_tree(match):
         return "" if match.group(1) in removed else match.group(0)
 
@@ -251,7 +237,34 @@ def _remove_empty_layers(text, base_dir):
             lambda match: "" if match.group(1) in removed else match.group(0),
             text,
         )
-    return text, removed
+    return text
+
+
+def _remove_empty_layers(text, base_dir):
+    removed = set()
+    blocks = []
+    for match in MAPLAYER_PATTERN.finditer(text):
+        block = match.group(0)
+        layer_id = _element(block, "id")
+        datasource = _element(block, "datasource")
+        if layer_id and datasource is not None:
+            if _is_empty_datasource(html.unescape(datasource), base_dir):
+                removed.add(layer_id)
+        blocks.append((match, layer_id))
+    if not removed:
+        return text, removed
+
+    pieces = []
+    previous = 0
+    for match, layer_id in blocks:
+        pieces.append(
+            _drop_removed_references(text[previous:match.start()], removed)
+        )
+        if layer_id not in removed:
+            pieces.append(match.group(0))
+        previous = match.end()
+    pieces.append(_drop_removed_references(text[previous:], removed))
+    return "".join(pieces), removed
 
 
 def _rewrite_archive(path, transform):
