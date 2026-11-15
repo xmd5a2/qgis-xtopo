@@ -21,7 +21,10 @@ from qgis.PyQt.QtWidgets import (
     QStyleOptionViewItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core import dem_sources, geofabrik, i18n, performance, proxy, sonny
+from ..core import (
+    dem_sources, geofabrik, i18n, measure, performance, proxy, sonny,
+    terrain_cache,
+)
 from ..core.bbox import parse_bbox
 from ..core.config import (
     Config, default_projects_dir, default_queries, project_name_error,
@@ -1918,17 +1921,85 @@ class XtopoDockWidget(QDockWidget):
         фильтра: долю этой области в выгрузке даёт быстрая оценка.
         Дальше добавляется время обработки слоёв.  Скорость чтения берётся
         из замера PBF-пробы, скорость процессора — из короткого бенчмарка,
-        а параллелизм — из фактического ограничения по памяти.
+        а параллелизм — из фактического ограничения по памяти.  Рельеф
+        считается отдельно: он идёт параллельно слоям, но тоже занимает
+        время и зависит от площади охвата.
         """
         layers = len(self.queries) if hasattr(self, "queries") else 0
+        cpu = performance.cpu_score(self.settings)
         return performance.estimate_preparation_seconds(
             total,
             matched,
             extended_ratio,
             layers,
             bytes_per_second=bytes_per_second,
-            cpu=performance.cpu_score(self.settings),
+            cpu=cpu,
+            terrain_seconds=self._terrain_estimate_seconds(cpu=cpu),
         )
+
+    def _terrain_estimate_config(self, bbox):
+        """Настройки рельефа из панели — для проверки кэша и оценки."""
+        manual = self.dem_source.currentData() == dem_sources.MANUAL_SOURCE
+        return Config(
+            qgis_projects_dir=(
+                self.projects_dir.text().strip() or default_projects_dir()
+            ),
+            project_name=self.project_name.text().strip() or "automap",
+            bbox=bbox.as_csv(),
+            array_queries=[],
+            generate_terrain=self.generate_terrain.isChecked(),
+            terrain_source=(
+                self.dem_source.currentData() or dem_sources.DEFAULT_SOURCE
+            ),
+            download_terrain_tiles=not manual,
+            get_terrain_tiles=manual,
+            terrain_src_dir=(
+                self.dem_dir.text().strip() if manual else ""
+            ),
+            generate_terrain_hillshade_slope=(
+                self.hillshade_slope.isChecked()
+            ),
+            terrain_resample_method=(
+                self.resample_method.currentData() or "cubicspline"
+            ),
+            generate_terrain_isolines=self.isolines.isChecked(),
+            isolines_step=self._current_isolines_step(),
+            smooth_isolines=self.smooth_isolines.isChecked(),
+        )
+
+    def _terrain_estimate_seconds(self, cpu=None):
+        """Сколько примерно займёт растровый рельеф для текущего охвата."""
+        if not self.generate_terrain.isChecked():
+            return 0.0
+        try:
+            bbox = parse_bbox(self.bbox.text().strip())
+            config = self._terrain_estimate_config(bbox)
+            width, height = measure.frame_sizes_km(bbox)
+            cached = terrain_cache.dem_cached(config, bbox)
+        except Exception:
+            return 0.0
+        return performance.estimate_terrain_seconds(
+            width * height,
+            source=self._terrain_estimate_source(config),
+            cached=cached,
+            hillshade=config.generate_terrain_hillshade_slope,
+            cpu=cpu,
+        )
+
+    def _terrain_estimate_source(self, config):
+        """Набор DEM, который фактически определит скорость рельефа."""
+        source = config.resolved_terrain_source()
+        if source != dem_sources.AUTO_SOURCE:
+            return source
+        try:
+            keys = dem_sources.auto_source_keys(
+                self._dem_availability, self._dem_sonny_tiles
+            )
+        except Exception:
+            return source
+        # Если доступен 3DEP, автоматический режим берёт его на
+        # покрытых тайлах: это самые тяжёлые растры.
+        return "3dep" if "3dep" in keys else source
 
     def _show_pbf_estimate(self, pending, total):
         """Оценка по объёму карт (до точного подсчёта объектов)."""
@@ -2024,7 +2095,12 @@ class XtopoDockWidget(QDockWidget):
                     "подготовка ≈ {}",
                     _estimate_duration(
                         performance.estimate_map_seconds(
-                            total / 1048576, cpu=cpu, workers=workers
+                            total / 1048576,
+                            cpu=cpu,
+                            workers=workers,
+                            terrain_seconds=self._terrain_estimate_seconds(
+                                cpu=cpu
+                            ),
                         )
                     ),
                 )

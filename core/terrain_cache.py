@@ -422,6 +422,27 @@ def dem_required(config):
     return tuple(names)
 
 
+def dem_cached(config, bbox):
+    """Есть ли готовый рельеф для области, без копирования в проект.
+
+    Проверяет ту же подсказку, что и :func:`restore_dem_by_hint`, но
+    ничего не восстанавливает: панель оценки не должна трогать файлы
+    проекта при каждом пересчёте времени.
+    """
+    hint = dem_hint(config, bbox)
+    try:
+        data = json.loads(
+            _hint_path(config, hint).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return False
+    signature = str(data.get("signature") or "")
+    if not signature:
+        return False
+    source = _group_dir(config, "dem", signature)
+    return all((source / name).exists() for name in dem_required(config))
+
+
 def restore_dem(config, signature):
     """Возвращает готовые растры рельефа из кэша (True — удалось)."""
     return _restore(

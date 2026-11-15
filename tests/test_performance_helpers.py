@@ -212,8 +212,8 @@ class PerformanceEstimateTest(unittest.TestCase):
 
         fast = performance.estimate_map_seconds(100, cpu=2.0, workers=8)
         slow = performance.estimate_map_seconds(100, cpu=0.5, workers=3)
-        self.assertAlmostEqual(fast, 22.5)
-        self.assertAlmostEqual(slow, 150.0)
+        self.assertAlmostEqual(fast, 27.0)
+        self.assertAlmostEqual(slow, 168.0)
         self.assertLess(fast, slow)
 
     def test_read_score_is_clamped(self):
@@ -224,6 +224,43 @@ class PerformanceEstimateTest(unittest.TestCase):
         self.assertEqual(performance.read_score(reference / 100), 0.5)
         self.assertEqual(performance.read_score(reference * 100), 2.0)
         self.assertEqual(performance.read_score(0), 1.0)
+
+    def test_terrain_estimate_depends_on_source_and_cache(self):
+        from qgis_xtopo.core import performance
+
+        cold = performance.estimate_terrain_seconds(
+            1000, source="auto", cpu=1.0, workers=8,
+        )
+        cached = performance.estimate_terrain_seconds(
+            1000, source="auto", cpu=1.0, workers=8, cached=True,
+        )
+        highres = performance.estimate_terrain_seconds(
+            1000, source="3dep", cpu=1.0, workers=8,
+        )
+        self.assertLess(cached, cold)
+        self.assertGreater(highres, cold)
+
+    def test_preparation_estimate_includes_terrain(self):
+        from qgis_xtopo.core import performance
+
+        common = dict(
+            bytes_per_second=30 * 1024 * 1024, cpu=1.0, workers=8,
+        )
+        without = performance.estimate_preparation_seconds(
+            1_000_000, 50_000, 0.5, 100, **common,
+        )
+        # Рельеф идёт параллельно слоям: короткий рельеф не добавляет
+        # времени, длинный — становится ограничителем.
+        short = performance.estimate_preparation_seconds(
+            1_000_000, 50_000, 0.5, 100, terrain_seconds=1.0, **common,
+        )
+        long = performance.estimate_preparation_seconds(
+            1_000_000, 50_000, 0.5, 100, terrain_seconds=100.0, **common,
+        )
+        self.assertAlmostEqual(short, without)
+        self.assertAlmostEqual(
+            long, 100.0 + performance.POSTPROCESS_SECONDS
+        )
 
 
 class TimingsTest(unittest.TestCase):

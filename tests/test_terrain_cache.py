@@ -61,6 +61,26 @@ class TerrainCacheTest(unittest.TestCase):
             for name in names:
                 self.assertTrue((config.raster_dir / name).exists(), name)
 
+    def test_dem_cached_checks_files_without_restoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(43.0, 42.0, 43.1, 42.1)
+            self.assertFalse(terrain_cache.dem_cached(config, bbox))
+            for name in terrain_cache.DEM_FILES:
+                (config.raster_dir / name).write_bytes(b"raster")
+            key = terrain_cache.dem_signature(config, bbox)
+            self.assertTrue(terrain_cache.store_dem(config, key))
+            terrain_cache.store_dem_hint(
+                config, terrain_cache.dem_hint(config, bbox), key
+            )
+            self.assertTrue(terrain_cache.dem_cached(config, bbox))
+            # Неполная запись кэша не должна считаться готовой.
+            required = terrain_cache.dem_required(config)[0]
+            terrain_cache._group_dir(config, "dem", key).joinpath(
+                required
+            ).unlink()
+            self.assertFalse(terrain_cache.dem_cached(config, bbox))
+
     def test_restored_rasters_are_links_not_copies(self):
         """Крупные растры возвращаются ссылкой: копия гигабайтов стоит
         больше 20 секунд.

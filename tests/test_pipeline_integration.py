@@ -1473,19 +1473,77 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock = XtopoDockWidget(None)
         try:
             with mock.patch.object(
+                dock, "_terrain_estimate_seconds", return_value=0.0
+            ), mock.patch.object(
                 dockwidget.performance, "cpu_score", return_value=2.0
             ), mock.patch.object(
                 dockwidget.performance, "layer_worker_count", return_value=8
             ):
                 fast = dock._geofabrik_estimate(0, 100 * 1048576)
             with mock.patch.object(
+                dock, "_terrain_estimate_seconds", return_value=0.0
+            ), mock.patch.object(
                 dockwidget.performance, "cpu_score", return_value=0.5
             ), mock.patch.object(
                 dockwidget.performance, "layer_worker_count", return_value=3
             ):
                 slow = dock._geofabrik_estimate(0, 100 * 1048576)
-            self.assertIn("22 с", fast)
+            self.assertIn("27 с", fast)
             self.assertIn("2 мин", slow)
+        finally:
+            dock.deleteLater()
+
+    def test_dock_geofabrik_estimate_includes_terrain(self):
+        from unittest import mock
+
+        from qgis_xtopo.gui import dockwidget
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            with mock.patch.object(
+                dockwidget.performance, "cpu_score", return_value=2.0
+            ), mock.patch.object(
+                dockwidget.performance, "layer_worker_count", return_value=8
+            ):
+                with mock.patch.object(
+                    dock, "_terrain_estimate_seconds", return_value=0.0
+                ):
+                    without = dock._geofabrik_estimate(0, 100 * 1048576)
+                with mock.patch.object(
+                    dock, "_terrain_estimate_seconds", return_value=120.0
+                ):
+                    with_terrain = dock._geofabrik_estimate(
+                        0, 100 * 1048576
+                    )
+            self.assertIn("27 с", without)
+            self.assertIn("2 мин", with_terrain)
+        finally:
+            dock.deleteLater()
+
+    def test_dock_estimate_includes_terrain(self):
+        from unittest import mock
+
+        from qgis_xtopo.gui import dockwidget
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock.bbox.setText("37.5,55.7,37.7,55.8")
+            arguments = (1_000_000, 10_000, 0.5, 1, 30 * 1024 * 1024)
+            with mock.patch.object(
+                dockwidget.performance, "cpu_score", return_value=1.0
+            ), mock.patch.object(
+                dock, "_terrain_estimate_seconds", return_value=12.0
+            ), mock.patch.object(
+                dockwidget.performance,
+                "estimate_preparation_seconds",
+                return_value=1.0,
+            ) as estimate:
+                dock._estimate_seconds(*arguments)
+            self.assertEqual(
+                estimate.call_args.kwargs["terrain_seconds"], 12.0
+            )
         finally:
             dock.deleteLater()
 

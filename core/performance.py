@@ -9,7 +9,9 @@
 * процессор проходит короткий детерминированный бенчмарк, результат
   кэшируется в QSettings;
 * число одновременных слоёв берётся из фактического memory-aware
-  ограничения (`Pipeline._worker_count`).
+  ограничения (`Pipeline._worker_count`);
+* рельеф оценивается отдельно по площади охвата, выбранному набору DEM
+  и наличию готового кэша.
 
 Абсолютные константы оставлены от прежней калибровки, а измерения дают
 поправочные коэффициенты.  Так оценка остаётся в привычных единицах, но
@@ -31,6 +33,18 @@ REFERENCE_WORKERS = 8
 
 # Грубая оценка до скачивания PBF: секунд на мегабайт выгрузки.
 REFERENCE_SECONDS_PER_MB = 0.45
+
+# Оценка рельефа: фиксированная часть (загрузка тайлов, мозаика,
+# репроекция) и работа на км² для 30-м DEM и 3DEP.
+TERRAIN_FIXED_SECONDS = 7.5
+TERRAIN_SECONDS_PER_KM2 = 0.012
+TERRAIN_3DEP_SECONDS_PER_KM2 = 0.040
+TERRAIN_CACHED_SECONDS = 1.5
+
+# Общий хвост после слоёв: создание проекта, значки POI, пересечения
+# полигонов, очистка.  Он не зависит от размера выгрузки, но заметен
+# на маленьких охватах.
+POSTPROCESS_SECONDS = 9.0
 
 # Эталон бенчмарка на машине, где калибровалась формула.
 REFERENCE_CPU_SECONDS = 0.0223
@@ -137,7 +151,37 @@ def read_score(bytes_per_second):
     )
 
 
-def estimate_map_seconds(megabytes, cpu=None, workers=None):
+def estimate_terrain_seconds(area_km2, source="auto", cpu=None,
+                             workers=None, cached=False, hillshade=True):
+    """Оценка подготовки растрового рельефа в секундах.
+
+    ``area_km2`` — площадь охвата, ``source`` — ключ выбранного набора
+    DEM.  Для 3DEP (1/3″) работы примерно втрое больше на ту же площадь.
+    Если готовый рельеф уже лежит в кэше, остаётся только восстановить
+    файлы.  ``workers`` — фактическое число параллельных задач; на
+    машинах с малым объёмом памяти их меньше, и рельеф идёт медленнее.
+    """
+    speed = cpu_score() if cpu is None else _clamp(float(cpu), CPU_MIN, CPU_MAX)
+    if cached:
+        return TERRAIN_CACHED_SECONDS / speed
+    if workers is None:
+        workers = layer_worker_count(REFERENCE_WORKERS)
+    rate = (
+        TERRAIN_3DEP_SECONDS_PER_KM2
+        if source == "3dep"
+        else TERRAIN_SECONDS_PER_KM2
+    )
+    seconds = TERRAIN_FIXED_SECONDS + max(0.0, float(area_km2 or 0.0)) * rate
+    if not hillshade:
+        seconds *= 0.8
+    # При нехватке памяти воркеров меньше восьми; зависимость слабее
+    # линейной, потому что часть работы последовательная.
+    memory_factor = (REFERENCE_WORKERS / max(1, workers)) ** 0.35
+    return seconds / speed * min(1.6, max(1.0, memory_factor))
+
+
+def estimate_map_seconds(megabytes, cpu=None, workers=None,
+                         terrain_seconds=0.0):
     """Грубая оценка подготовки по объёму карт, до скачивания PBF.
 
     ``megabytes`` — суммарный размер выгрузок Geofabrik.  Формула
@@ -149,21 +193,27 @@ def estimate_map_seconds(megabytes, cpu=None, workers=None):
     if workers is None:
         workers = layer_worker_count(8)
     return (
-        megabytes * REFERENCE_SECONDS_PER_MB
-        / (speed * parallel_factor(workers))
+        max(
+            megabytes * REFERENCE_SECONDS_PER_MB
+            / (speed * parallel_factor(workers)),
+            max(0.0, float(terrain_seconds or 0.0)),
+        )
+        + POSTPROCESS_SECONDS / speed
     )
 
 
 def estimate_preparation_seconds(total, matched, extended_ratio, layers,
                                  bytes_per_second=0.0, cpu=None,
-                                 workers=None):
-    """Оценка подготовки OSM в секундах для конкретной машины.
+                                 workers=None, terrain_seconds=0.0):
+    """Оценка подготовки OSM и рельефа в секундах для конкретной машины.
 
     ``total`` — объектов во входных выгрузках, ``matched`` — сколько из
     них попадает в выбранные слои, ``extended_ratio`` — доля выгрузки,
     которую придётся прочитать.  ``bytes_per_second`` — измеренная
     скорость PBF-пробы; ``cpu`` и ``workers`` можно передать явно для
-    тестов и для оценки до запуска пробы.
+    тестов и для оценки до запуска пробы.  ``terrain_seconds`` —
+    отдельная оценка рельефа (``estimate_terrain_seconds``): рельеф
+    считается параллельно слоям, поэтому берётся максимум, а не сумма.
     """
     share = max(0.0, min(1.0, float(extended_ratio or 0.0))) or 1.0
     speed = cpu_score() if cpu is None else _clamp(float(cpu), CPU_MIN, CPU_MAX)
@@ -176,4 +226,7 @@ def estimate_preparation_seconds(total, matched, extended_ratio, layers,
         layers * REFERENCE_LAYER_OVERHEAD / speed
         + REFERENCE_FIXED_OVERHEAD / speed
     )
-    return read + layer + overhead
+    return (
+        max(read + layer + overhead, max(0.0, float(terrain_seconds or 0.0)))
+        + POSTPROCESS_SECONDS / speed
+    )
