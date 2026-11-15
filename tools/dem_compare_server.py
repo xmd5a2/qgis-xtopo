@@ -86,9 +86,27 @@ gdal.SetConfigOption("GDAL_CACHEMAX", "512")
 # поисках sidecar-файлов. У ALOS на Azure это десятки секунд на открытие.
 gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
 gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.tiff")
+# COG читается по HTTP Range. По умолчанию GDAL запрашивает блоки по
+# одному: окно в 0,28° на медленной сети собирается десятки секунд,
+# а объединение соседних запросов в один укладывает ту же работу в
+# 5–10 с.  Проверено на GLO-30: 55 с на окно против 7 с.
+gdal.SetConfigOption("GDAL_HTTP_MULTIRANGE", "YES")
+gdal.SetConfigOption("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
+# Кэш загруженных кусков COG: 16 МБ не хватает на окно, и следующий тайл
+# того же окна качает блоки заново.
+gdal.SetConfigOption("CPL_VSIL_CURL_CACHE_SIZE", str(128 * 1024 * 1024))
 # Одновременных перепроекций тайлов: больше — сеть и кэш GDAL только
-# мешают друг другу, а память растёт.
-RENDER_PARALLEL = max(1, int(os.environ.get("DEM_COMPARE_SLOTS", "6")))
+# мешают друг другу, а память растёт.  Подготовка окна упирается в сеть,
+# поэтому потоков нужно больше, чем ядер: по умолчанию до двенадцати,
+# но не меньше шести.
+RENDER_PARALLEL = max(1, int(os.environ.get(
+    "DEM_COMPARE_SLOTS",
+    str(min(12, max(6, os.cpu_count() or 6))))))
+# Одновременных чтений из сети: их немного.  Канал один, и лишние
+# соединения его не ускоряют, а только замедляют — на 12 потоках окно
+# в четыре раза дольше, чем на шести.
+SOURCE_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get(
+    "DEM_COMPARE_SOURCES", "4"))))
 RENDER_SLOTS = threading.BoundedSemaphore(RENDER_PARALLEL)
 # Потоковая пачка /tiles рисует несколько тайлов сразу. Пул общий на процесс:
 # иначе каждая вкладка плодила бы свои потоки.
@@ -715,6 +733,80 @@ def restore_local_sources(store):
 
 
 # ---------------------------------------------------------------------------
+# Ограничитель скорости
+# ---------------------------------------------------------------------------
+
+class BandwidthGovernor:
+    """Не больше 80% пропускной способности канала.
+
+    Потолок считается по лучшей измеренной скорости: сначала канал
+    трогается целиком, потом инструмент держит себя в его 80% и
+    замедляется, если сеть уже не тянет.  Пока скорость не измерена,
+    ограничивать нечего, и работа идёт как обычно.
+    """
+
+    SHARE = 0.8
+    WINDOW = 20.0
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.samples = []
+        self.peak = 0.0
+
+    def note(self, size, seconds, establish=True):
+        """Отметить переданный объём и время.
+
+        ``establish=False`` — трафик учитывается, но лучшую скорость
+        он не задаёт: тайлы подложки мелкие и быстрые, ими нельзя
+        мерить пропускную способность канала.
+        """
+        if size <= 0 or seconds <= 0:
+            return
+        with self.lock:
+            now = time.monotonic()
+            self.samples.append((now, size))
+            self.samples = [item for item in self.samples
+                            if now - item[0] < self.WINDOW]
+            if len(self.samples) < 2:
+                return
+            span = now - self.samples[0][0]
+            if span <= 0:
+                return
+            rate = sum(item[1] for item in self.samples) / span
+            if establish and rate > self.peak:
+                self.peak = rate
+
+    def rate(self):
+        """Текущая скорость по окну последних передач."""
+        with self.lock:
+            if len(self.samples) < 2:
+                return 0.0
+            now = time.monotonic()
+            span = now - self.samples[0][0]
+            if span <= 0:
+                return 0.0
+            return sum(item[1] for item in self.samples) / span
+
+    def ceiling(self):
+        """Потолок: 80% от лучшей измеренной скорости."""
+        with self.lock:
+            return self.peak * self.SHARE
+
+    def wait(self):
+        """Подождать, если канал уже занят.
+
+        Ждать приходится и тем, кто уже начал читать: скорость видна
+        с задержкой окна, поэтому лишние запросы успевают выйти за
+        потолок — их и придерживаем.
+        """
+        while True:
+            limit = self.ceiling()
+            if limit <= 0 or self.rate() <= limit:
+                return
+            time.sleep(0.2)
+
+
+# ---------------------------------------------------------------------------
 # Слепки локальных копий
 # ---------------------------------------------------------------------------
 
@@ -888,6 +980,8 @@ class SourceStore:
         # Ответы HEAD: проверка не должна дёргать сеть на каждый кадр.
         self._head_cache = {}
         self._head_lock = threading.Lock()
+        # Ограничитель скорости: канал используется не больше чем на 80%.
+        self.bandwidth = BandwidthGovernor()
 
     def remember_source(self, path, label, cell=None):
         """Запоминает подпись удалённого источника: «ALOS AW3D30 · N43E043»."""
@@ -1003,6 +1097,10 @@ class SourceStore:
     # недостающая область один раз сохраняется локально блоком примерно в
     # AUTO_BLOCK_PIXELS пикселей источника — соседние тайлы попадают в один
     # блок и сеть дёргается один раз.
+    # Размер блока выбран по объёму данных, а не по времени: окно больше
+    # — запросов меньше, но байт столько же, а сетка блоков не совпадает
+    # с краем экрана и часть данных скачивается впустую.  На канале в
+    # 0,6 МБ/с лишние байты дороже лишних запросов.
     AUTO_BLOCK_PIXELS = 1024
     AUTO_BLOCK_PAD = 0.01
     AUTO_BLOCK_LIMIT = 160
@@ -1472,15 +1570,20 @@ class SourceStore:
             labels = [f"{DATASETS[ds]['short']} · "
                       f"{_tile_label(center_lat, center_lon)}"]
         label = labels[0] if len(labels) == 1 else f"{labels[0]} +{len(labels) - 1}"
+        # Канал занят — ждём, пока освободится доля в 80% его скорости.
+        self.bandwidth.wait()
+        started = time.monotonic()
         _download_enter(key, label)
         try:
-            result = gdal.Warp(str(temporary), sources, options=options)
+            with SOURCE_SLOTS:
+                result = gdal.Warp(str(temporary), sources, options=options)
         except Exception as exc:
             _log(f"{ds}: не удалось сохранить область: {exc}")
             temporary.unlink(missing_ok=True)
             return None
         finally:
             _download_leave(key)
+            elapsed = time.monotonic() - started
         if result is None:
             temporary.unlink(missing_ok=True)
             return None
@@ -1501,6 +1604,12 @@ class SourceStore:
             _log(f"{ds}: не удалось сохранить область: {exc}")
             temporary.unlink(missing_ok=True)
             return None
+        # Размер окна — proxy переданных байт: COG и сохранённое окно
+        # сжаты одинаково, поэтому скорость по нему близка к настоящей.
+        try:
+            self.bandwidth.note(target.stat().st_size, elapsed)
+        except OSError:
+            pass
         self._register_prepared(ds, target.name, bbox)
         self._record_granules(ds, sources)
         return target
@@ -1766,6 +1875,9 @@ class SourceStore:
                 f"{target.name}.{os.getpid()}.raw")
             key = f"srtm:{target.name}"
             label = f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}"
+            # Канал занят — ждём своей доли в 80% его скорости.
+            self.bandwidth.wait()
+            started = time.monotonic()
             _download_enter(key, label)
             try:
                 headers = _download(_aws_url("skadi", lat, lon), raw)
@@ -1774,6 +1886,13 @@ class SourceStore:
                     return None
             finally:
                 _download_leave(key)
+                elapsed = time.monotonic() - started
+            # Здесь объём известен точно: Content-Length от бакета.
+            try:
+                self.bandwidth.note(int(headers.get("Content-Length") or 0),
+                                    elapsed)
+            except (TypeError, ValueError):
+                pass
             try:
                 with gzip.open(raw, "rb") as source_handle:
                     data = source_handle.read()
@@ -3023,6 +3142,9 @@ class Handler(BaseHTTPRequestHandler):
         if head == "osm" and len(parts) == 4:
             self._osm(parts[1], parts[2], parts[3])
             return
+        if head == "osm" and len(parts) == 1:
+            self._osm_batch(query)
+            return
         if head == "favicon.ico":
             # Иконка уже в странице (data-URI); старые вкладки могут
             # попросить её отдельно — отвечаем без тела и без записи в лог.
@@ -3313,6 +3435,37 @@ class Handler(BaseHTTPRequestHandler):
             for future in futures:
                 future.cancel()
 
+    def _osm_fetch(self, z, x, y):
+        """Тайл подложки из кэша или из сети; None — не отдан."""
+        cache_file = self.osm_cache / str(z) / str(x) / f"{y}.png"
+        if cache_file.exists():
+            return cache_file.read_bytes()
+        # Один и тот же тайл могут запросить соседние вкладки/потоки.
+        with _osm_lock(f"{z}/{x}/{y}"):
+            if cache_file.exists():
+                return cache_file.read_bytes()
+            url = OSM_TILE_URL.format(z=z, x=x, y=y)
+            request = urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT,
+                              "Referer": "http://127.0.0.1/"})
+            # Подложка тоже ест канал: тайлы мелкие, но их десятки.
+            self.store.bandwidth.wait()
+            started = time.monotonic()
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    data = response.read()
+            except urllib.error.HTTPError:
+                return None
+            except Exception:  # noqa: BLE001 - сеть может отвалиться
+                return None
+            finally:
+                elapsed = time.monotonic() - started
+            if not data:
+                return None
+            self.store.bandwidth.note(len(data), elapsed, establish=False)
+            write_bytes_atomic(cache_file, data)
+            return data
+
     def _osm(self, z, x, y):
         """Тайл подложки OpenStreetMap, с локальным кэшем."""
         z, x, y = int(z), int(x), int(y.split(".")[0])
@@ -3320,37 +3473,75 @@ class Handler(BaseHTTPRequestHandler):
         if z < 0 or z > OSM_MAX_ZOOM or not (0 <= x < count and 0 <= y < count):
             self._send(404, b"", "text/plain")
             return
-        cache_file = self.osm_cache / str(z) / str(x) / f"{y}.png"
         headers = {"X-Tile-Status": "cached", "Cache-Control": "max-age=86400"}
-        if cache_file.exists():
-            self._send(200, cache_file.read_bytes(), "image/png", headers)
+        data = self._osm_fetch(z, x, y)
+        if data is None:
+            self._send(502, b"", "text/plain")
             return
-        # Один и тот же тайл могут запросить соседние вкладки/потоки.
-        with _osm_lock(f"{z}/{x}/{y}"):
-            if cache_file.exists():
-                self._send(200, cache_file.read_bytes(), "image/png", headers)
-                return
-            url = OSM_TILE_URL.format(z=z, x=x, y=y)
-            request = urllib.request.Request(
-                url, headers={"User-Agent": USER_AGENT,
-                              "Referer": "http://127.0.0.1/"})
+        self._send(200, data, "image/png", headers)
+
+    def _osm_batch(self, query):
+        """Пачка тайлов подложки одним ответом.
+
+        Браузер держит шесть соединений на хост, а тайлов подложки на
+        экране около тридцати: по одному запросу на тайл они шли бы
+        пятью волнами. Здесь сервер тянет их из сети параллельно, и
+        ограничение браузера не мешает.
+        """
+        try:
+            z = int(query.get("z", ["0"])[0])
+        except ValueError:
+            self._json({"error": "bad zoom"}, code=400)
+            return
+        count = 2 ** z
+        tasks = []
+        for raw in query.get("t", []):
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
-                    data = response.read()
-            except urllib.error.HTTPError as exc:
-                self._send(404 if exc.code in (403, 404) else 502,
-                           b"", "text/plain")
-                return
-            except Exception:
-                self._send(502, b"", "text/plain")
-                return
-            if not data:
-                self._send(404, b"", "text/plain")
-                return
-            write_bytes_atomic(cache_file, data)
-            self._send(200, data, "image/png",
-                       {"X-Tile-Status": "osm",
-                        "Cache-Control": "max-age=86400"})
+                tx, ty = raw.split(",")
+                tx, ty = int(tx), int(ty)
+            except ValueError:
+                continue
+            if z < 0 or z > OSM_MAX_ZOOM:
+                continue
+            if not (0 <= tx < count and 0 <= ty < count):
+                continue
+            tasks.append((tx, ty))
+        tasks = tasks[:TILE_BATCH_MAX]
+        if not tasks:
+            self._json({"error": "нужны тайлы"}, code=400)
+            return
+        # Content-Length неизвестен: ответ закрывается концом данных.
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        futures = {
+            BATCH_POOL.submit(self._osm_fetch, z, x, y): (x, y)
+            for x, y in tasks
+        }
+        try:
+            for future in as_completed(futures):
+                x, y = futures[future]
+                try:
+                    data = future.result()
+                except Exception:  # noqa: BLE001 - сеть может отвалиться
+                    data = None
+                if not data:
+                    self.wfile.write(
+                        f"DEMFRAME {x} {y} empty 0.000 0\n".encode("ascii"))
+                    self.wfile.flush()
+                    continue
+                header = (f"DEMFRAME {x} {y} osm 0.000 {len(data)}\n"
+                          ).encode("ascii")
+                self.wfile.write(header)
+                self.wfile.write(data)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            for future in futures:
+                future.cancel()
 
     def _diff(self, ds_a, ds_b, z, x, y):
         z, x, y = int(z), int(x), int(y.split(".")[0])

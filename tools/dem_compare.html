@@ -864,7 +864,7 @@ function tileCacheKey(ds, mode, z, x, y, lim) {
 // Браузер держит не больше шести соединений на хост, поэтому тайлы уходят
 // пачками: один потоковый ответ несёт несколько тайлов и отдаёт их по мере
 // готовности. Так заняты все слоты рендера сервера, а не только шесть.
-const BATCH_SIZE = 8;
+const BATCH_SIZE = 16;
 const pendingBatches = new Map();
 let batchTimer = 0;
 
@@ -885,8 +885,6 @@ function getTile(ds, mode, z, x, y) {
   if (ds === "__diff__") {
     fetchSingleTile(`/diff/${state.a}/${state.b}/${z}/${x}/${y}.png`,
                     ds, z, x, y, entry, true);
-  } else if (ds === "__osm__") {
-    fetchSingleTile(`/osm/${z}/${x}/${y}.png`, ds, z, x, y, entry, false);
   } else {
     queueTile(ds, mode, z, x, y, lim, entry);
   }
@@ -908,7 +906,8 @@ function queueTile(ds, mode, z, x, y, lim, entry) {
 
 // Ниже z9 новые загрузки рельефа не начинаются: ещё не отправленные
 // пачки выбрасываем, а записи тайлов убираем, чтобы при возврате на
-// рабочий зум они запросились заново.
+// рабочий зум они запросились заново.  Подложка нужна и ниже z9 — её
+// пачку не трогаем.
 function dropTileEntry(group, item) {
   item.entry.queued = false;
   state.tiles.delete(tileCacheKey(group.ds, group.mode, group.z,
@@ -916,10 +915,11 @@ function dropTileEntry(group, item) {
 }
 
 function dropReliefQueue() {
-  for (const group of pendingBatches.values()) {
+  for (const [key, group] of pendingBatches) {
+    if (group.ds === "__osm__") continue;
     for (const item of group.items) dropTileEntry(group, item);
+    pendingBatches.delete(key);
   }
-  pendingBatches.clear();
 }
 
 function flushBatches() {
@@ -939,17 +939,22 @@ async function requestBatch(group, items) {
     return;
   }
   const params = new URLSearchParams();
-  params.set("ds", group.ds);
   params.set("z", group.z);
-  params.set("mode", group.mode);
-  if (group.lim) {
-    params.set("lo", group.lim.lo);
-    params.set("hi", group.lim.hi);
+  if (group.ds !== "__osm__") {
+    params.set("ds", group.ds);
+    params.set("mode", group.mode);
+    if (group.lim) {
+      params.set("lo", group.lim.lo);
+      params.set("hi", group.lim.hi);
+    }
   }
   for (const item of items) params.append("t", `${item.x},${item.y}`);
+  // Подложка и рельеф идут разными адресами, формат ответа у них один.
+  const url = group.ds === "__osm__"
+    ? `/osm?${params}` : `/tiles?${params}`;
   const decoder = new TextDecoder();
   try {
-    const response = await fetch(`/tiles?${params}`);
+    const response = await fetch(url);
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -981,7 +986,9 @@ async function requestBatch(group, items) {
     for (const item of items) {
       item.entry.queued = false;
       item.entry.failed = true;
-      addLog(group.ds, `${group.z}/${item.x}/${item.y}`, "нет данных", 0);
+      if (group.ds !== "__osm__") {
+        addLog(group.ds, `${group.z}/${item.x}/${item.y}`, "нет данных", 0);
+      }
     }
     requestRender();
   }
@@ -1015,7 +1022,10 @@ function applyFrame(group, x, y, status, seconds, body) {
     // Перерисовка важнее журнала: если запись в журнал сломается,
     // тайл всё равно должен появиться без действий пользователя.
     requestRender();
-    addLog(group.ds, `${group.z}/${x}/${y}`, entry.status, entry.seconds);
+    // Журнал — про рельеф: тайлы подложки в него не пишутся.
+    if (group.ds !== "__osm__") {
+      addLog(group.ds, `${group.z}/${x}/${y}`, entry.status, entry.seconds);
+    }
   };
   image.onerror = () => { entry.failed = true; requestRender(); };
   image.src = URL.createObjectURL(new Blob([body], {type: "image/png"}));
