@@ -1005,6 +1005,16 @@ async function requestBatch(group, items) {
   try {
     const response = await fetch(url, {signal: controller.signal});
     if (!response.ok || !response.body) {
+      // Сервер без пачек (запущен до этой правки) — подложку берём
+      // по одному тайлу, как было раньше.
+      if (group.ds === "__osm__" && response.status === 404) {
+        for (const item of items) {
+          item.entry.queued = false;
+          fetchSingleTile(`/osm/${group.z}/${item.x}/${item.y}.png`,
+                          group.ds, group.z, item.x, item.y, item.entry, false);
+        }
+        return;
+      }
       throw new Error(`HTTP ${response.status}`);
     }
     const reader = response.body.getReader();
