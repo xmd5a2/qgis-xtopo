@@ -673,7 +673,10 @@ const state = {
   limits: null,
   // Что с шкалой: null — всё в порядке, иначе причина ожидания.
   limitsError: null,
-  limitsSig: ""
+  limitsSig: "",
+  // Когда вид менялся в последний раз: от этой отметки считается пауза
+  // перед загрузкой.
+  viewChangedAt: 0,
 };
 
 const canvas = document.getElementById("canvas");
@@ -691,6 +694,8 @@ let frameState = null;
 const TILE = 256;
 // Ниже этого зума рельеф не рисуется: остаётся подложка OSM.
 const RELIEF_MIN_ZOOM = 9;
+// Выше этого зума тайлов OpenStreetMap нет — подложка растягивается.
+const OSM_MAX_ZOOM = 19;
 // Охват выбранных наборов показывается только на малых зумах: с z1 до z9.
 const COVERAGE_MIN_ZOOM = 1;
 const COVERAGE_MAX_ZOOM = 9;
@@ -812,9 +817,28 @@ let limitsRequest = 0;
 // шкалу по DEM и может докачивать набор минутами.
 const LIMITS_TIMEOUT = 20000;
 
-function scheduleLimits(delay = 0) {
+function scheduleLimits(delay = null) {
   clearTimeout(limitsTimer);
-  limitsTimer = setTimeout(updateLimits, delay);
+  // Шкала считается по видимым тайлам, поэтому она тоже ждёт покоя вида:
+  // при быстром зуме считать её для каждого промежуточного масштаба
+  // бессмысленно — считать будут долго, а нужен один, последний.
+  const wait = delay === null ? loadDelay() : delay;
+  limitsTimer = setTimeout(updateLimits, wait);
+}
+
+// Отметка: вид изменился.  Загрузка начинается через LOAD_DELAY после
+// последней отметки.
+function markViewChanged() {
+  state.viewChangedAt = performance.now();
+  // Запросы прежнего вида отменяются: сервер всё равно рисует эти тайлы,
+// а нужны будут другие.
+  for (const controller of activeBatches) controller.abort();
+  activeBatches.clear();
+}
+
+// Сколько осталось ждать перед загрузкой.
+function loadDelay() {
+  return Math.max(0, LOAD_DELAY - (performance.now() - state.viewChangedAt));
 }
 
 async function updateLimits() {
@@ -865,6 +889,11 @@ function tileCacheKey(ds, mode, z, x, y, lim) {
 // пачками: один потоковый ответ несёт несколько тайлов и отдаёт их по мере
 // готовности. Так заняты все слоты рендера сервера, а не только шесть.
 const BATCH_SIZE = 16;
+// Загрузка начинается не сразу, а через секунду после того, как вид
+// перестал двигаться.  При быстром зуме промежуточные масштабы успевают
+// заказать столько тайлов, что до нужного масштаба приходится ждать
+// дольше, чем если бы их не заказывали вовсе.
+const LOAD_DELAY = 1000;
 const pendingBatches = new Map();
 let batchTimer = 0;
 
@@ -900,8 +929,22 @@ function queueTile(ds, mode, z, x, y, lim, entry) {
   }
   entry.queued = true;
   group.items.push({x, y, entry});
-  // Все тайлы текущего прохода отрисовки попадают в одну пачку.
-  if (!batchTimer) batchTimer = setTimeout(flushBatches, 0);
+  // Все тайлы текущего прохода отрисовки попадают в одну пачку.  Пачка
+  // уходит через секунду после того, как вид перестал двигаться: при
+  // быстром зуме иначе уходят заказы всех промежуточных масштабов.
+  if (!batchTimer) batchTimer = setTimeout(flushBatches, loadDelay());
+}
+
+// Тайлы прежнего масштаба не понадобятся: вид ушёл дальше, и заказывать
+// их — значит потратить сеть на кадры, которые сразу слетят.
+function dropStaleZooms() {
+  const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
+  const osmZoom = Math.min(tz, OSM_MAX_ZOOM);
+  for (const [key, group] of pendingBatches) {
+    if (group.z === tz || group.z === osmZoom) continue;
+    for (const item of group.items) dropTileEntry(group, item);
+    pendingBatches.delete(key);
+  }
 }
 
 // Ниже z9 новые загрузки рельефа не начинаются: ещё не отправленные
@@ -933,6 +976,10 @@ function flushBatches() {
   }
 }
 
+// Запросы, что сейчас в полёте: при смене вида их отменяют — тайлы
+// прежнего масштаба всё равно не понадобятся, а сервер их рисует.
+const activeBatches = new Set();
+
 async function requestBatch(group, items) {
   if (!reliefAvailable()) {
     for (const item of items) dropTileEntry(group, item);
@@ -953,8 +1000,10 @@ async function requestBatch(group, items) {
   const url = group.ds === "__osm__"
     ? `/osm?${params}` : `/tiles?${params}`;
   const decoder = new TextDecoder();
+  const controller = new AbortController();
+  activeBatches.add(controller);
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, {signal: controller.signal});
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -983,6 +1032,12 @@ async function requestBatch(group, items) {
       }
     }
   } catch (error) {
+    if (error && error.name === "AbortError") {
+      // Отмена по смене вида: записи убираем, иначе тайл останется
+      // вечно ждущим и больше не закажется.
+      for (const item of items) dropTileEntry(group, item);
+      return;
+    }
     for (const item of items) {
       item.entry.queued = false;
       item.entry.failed = true;
@@ -991,6 +1046,8 @@ async function requestBatch(group, items) {
       }
     }
     requestRender();
+  } finally {
+    activeBatches.delete(controller);
   }
 }
 
@@ -1143,6 +1200,7 @@ function resize() {
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  markViewChanged();
   scheduleLimits();
   scheduleCoverage();
   scheduleFreshness();
@@ -1441,6 +1499,9 @@ function draw() {
   const {w, h} = viewSize();
   // Ниже z9 рельеф не рисуется и не запрашивается.
   if (!reliefAvailable()) dropReliefQueue();
+  // Тайлы прежнего масштаба отменяются: вид ушёл дальше, и заказывать их
+  // — значит потратить сеть на кадры, которые сразу слетят.
+  dropStaleZooms();
   const tz = Math.max(0, Math.min(state.maxZoom, Math.round(state.zoom)));
   const center = centerPoint();
   // Левый верхний угол видимой области в пикселях мира текущего зума.
@@ -1548,7 +1609,7 @@ function draw() {
     (!state.osm || state.reliefAlpha > 0.002);
   const demAlpha = state.osm ? state.reliefAlpha : 1;
   // Выше 19-го зума OSM тайлов нет — растягиваем последний доступный.
-  const osmZoom = Math.min(tz, 19);
+  const osmZoom = Math.min(tz, OSM_MAX_ZOOM);
   const osmLayer = osmVisible
     ? collectLayer("__osm__", "osm", null, "osm", osmZoom, false)
     : null;
@@ -2530,6 +2591,7 @@ canvas.addEventListener("pointerup", event => {
     canvas.classList.remove("grabbing");
     // Вид уехал — пересчитываем шкалу и охват. До отпускания тайлы
     // рисовались по прежним пределам, поэтому перетаскивание не ждёт сервер.
+    markViewChanged();
     scheduleLimits();
     scheduleCoverage();
     scheduleFreshness();
@@ -2561,10 +2623,11 @@ canvas.addEventListener("wheel", event => {
     lat: state.center.lat + (before.lat - after.lat)
   };
   refreshPlaceBadge();
+  markViewChanged();
   requestRender();
   refreshReadout();
   // Колесо во время жеста (пинч) шлёт события пачками — ждём тишины.
-  scheduleLimits(300);
+  scheduleLimits();
   scheduleCoverage(300);
   scheduleFreshness(300);
 }, {passive: false});
@@ -2576,11 +2639,13 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------------------
 document.getElementById("ds-a").addEventListener("change", event => {
   state.a = event.target.value;
+  markViewChanged();
   scheduleLimits(); scheduleCoverage(0); scheduleFreshness(0);
   requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("ds-b").addEventListener("change", event => {
   state.b = event.target.value;
+  markViewChanged();
   scheduleLimits(); scheduleCoverage(0); scheduleFreshness(0);
   requestRender(); refreshReadout(); refreshProfile();
 });
@@ -2594,12 +2659,14 @@ document.getElementById("mode").addEventListener("change", event => {
     document.getElementById("diff").classList.remove("active");
     document.getElementById("compare").classList.add("active");
   }
+  markViewChanged();
   scheduleLimits(); requestRender();
 });
 document.getElementById("swap").addEventListener("click", () => {
   const a = state.a; state.a = state.b; state.b = a;
   document.getElementById("ds-a").value = state.a;
   document.getElementById("ds-b").value = state.b;
+  markViewChanged();
   scheduleCoverage(0);
   scheduleFreshness(0);
   requestRender(); refreshReadout();
@@ -2652,6 +2719,7 @@ document.getElementById("zoom-native").addEventListener("click", async () => {
   const zoom = Math.log2(156543.03392 *
     Math.cos(state.center.lat * Math.PI / 180) / native);
   state.zoom = Math.min(state.maxZoom, Math.max(state.minZoom, zoom));
+  markViewChanged();
   scheduleCoverage();
   scheduleFreshness();
   requestRender();
@@ -2803,6 +2871,7 @@ async function chooseBrowserDir() {
     await loadDatasets();
     fillSelect(document.getElementById("ds-a"), state.a);
     fillSelect(document.getElementById("ds-b"), state.b);
+    markViewChanged();
     scheduleCoverage(0);
     scheduleFreshness(0);
     requestRender();
@@ -2899,6 +2968,7 @@ document.getElementById("points").addEventListener("click", event => {
   selectPlace(point, Number(button.dataset.index), true);
   state.center = {lon: point.lon, lat: point.lat};
   state.zoom = point.zoom;
+  markViewChanged();
   scheduleCoverage();
   scheduleFreshness();
   requestRender();
@@ -3009,6 +3079,7 @@ async function openOsmLink() {
   }
   note.textContent = `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} · ` +
     `z=${state.zoom.toFixed(1)}`;
+  markViewChanged();
   scheduleCoverage();
   scheduleFreshness();
   requestRender();
@@ -3147,6 +3218,7 @@ loadDatasets().then(() => {
     selectPlace(found.point, found.index);
   }
   resize();
+  markViewChanged();
   scheduleLimits();
   requestRender();
   refreshReadout();
