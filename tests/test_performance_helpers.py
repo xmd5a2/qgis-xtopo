@@ -143,6 +143,89 @@ class MemoryBudgetTest(unittest.TestCase):
         self.assertEqual(limiter.used, 0)
 
 
+class PerformanceEstimateTest(unittest.TestCase):
+    class Store:
+        def __init__(self, values=None):
+            self.values = dict(values or {})
+
+        def value(self, key, default=None):
+            return self.values.get(key, default)
+
+        def setValue(self, key, value):
+            self.values[key] = value
+
+    def test_cpu_score_uses_fresh_cache(self):
+        import time
+
+        from qgis_xtopo.core import performance
+
+        store = self.Store(
+            {
+                performance.SETTINGS_CPU: "1.25",
+                performance.SETTINGS_CPU_TIME: str(time.time()),
+            }
+        )
+        with mock.patch.object(
+            performance, "measure_cpu_score", return_value=3.0
+        ) as measure:
+            self.assertAlmostEqual(performance.cpu_score(store), 1.25)
+        measure.assert_not_called()
+
+    def test_cpu_score_measures_after_expiry(self):
+        import time
+
+        from qgis_xtopo.core import performance
+
+        store = self.Store(
+            {
+                performance.SETTINGS_CPU: "0.5",
+                performance.SETTINGS_CPU_TIME: str(
+                    time.time() - performance.CPU_MAX_AGE - 60
+                ),
+            }
+        )
+        with mock.patch.object(
+            performance, "measure_cpu_score", return_value=1.75
+        ):
+            self.assertAlmostEqual(performance.cpu_score(store), 1.75)
+        self.assertEqual(
+            float(store.values[performance.SETTINGS_CPU]), 1.75
+        )
+
+    def test_fast_machine_gets_shorter_estimate(self):
+        from qgis_xtopo.core import performance
+
+        fast = performance.estimate_preparation_seconds(
+            2_000_000, 100_000, 0.5, 120,
+            bytes_per_second=60 * 1024 * 1024,
+            cpu=1.5, workers=8,
+        )
+        slow = performance.estimate_preparation_seconds(
+            2_000_000, 100_000, 0.5, 120,
+            bytes_per_second=10 * 1024 * 1024,
+            cpu=0.6, workers=3,
+        )
+        self.assertLess(fast, slow)
+
+    def test_map_estimate_before_download_scales_with_pc(self):
+        from qgis_xtopo.core import performance
+
+        fast = performance.estimate_map_seconds(100, cpu=2.0, workers=8)
+        slow = performance.estimate_map_seconds(100, cpu=0.5, workers=3)
+        self.assertAlmostEqual(fast, 22.5)
+        self.assertAlmostEqual(slow, 150.0)
+        self.assertLess(fast, slow)
+
+    def test_read_score_is_clamped(self):
+        from qgis_xtopo.core import performance
+
+        reference = 30 * 1024 * 1024
+        self.assertAlmostEqual(performance.read_score(reference), 1.0)
+        self.assertEqual(performance.read_score(reference / 100), 0.5)
+        self.assertEqual(performance.read_score(reference * 100), 2.0)
+        self.assertEqual(performance.read_score(0), 1.0)
+
+
 class TimingsTest(unittest.TestCase):
     def test_summary_and_top_steps(self):
         from qgis_xtopo.core.pipeline import Timings

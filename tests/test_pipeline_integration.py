@@ -1464,6 +1464,67 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertNotIn("Скачивание", local)
         dock.deleteLater()
 
+    def test_dock_geofabrik_estimate_follows_pc_speed(self):
+        from unittest import mock
+
+        from qgis_xtopo.gui import dockwidget
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            with mock.patch.object(
+                dockwidget.performance, "cpu_score", return_value=2.0
+            ), mock.patch.object(
+                dockwidget.performance, "layer_worker_count", return_value=8
+            ):
+                fast = dock._geofabrik_estimate(0, 100 * 1048576)
+            with mock.patch.object(
+                dockwidget.performance, "cpu_score", return_value=0.5
+            ), mock.patch.object(
+                dockwidget.performance, "layer_worker_count", return_value=3
+            ):
+                slow = dock._geofabrik_estimate(0, 100 * 1048576)
+            self.assertIn("22 с", fast)
+            self.assertIn("2 мин", slow)
+        finally:
+            dock.deleteLater()
+
+    def test_pbf_probe_reports_read_throughput(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from qgis_xtopo.core.config import Config
+        from qgis_xtopo.gui import dockwidget
+        from qgis_xtopo.gui.dockwidget import PbfProbeWorker
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.osm.pbf"
+            path.write_bytes(b"x" * 1000)
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="demo",
+                bbox="1,2,3,4",
+                array_queries=[],
+                source_mode="pbf",
+                pbf_path=str(path),
+            )
+            worker = PbfProbeWorker(config, None, [], {}, paths=[path])
+            results = []
+            worker.result.connect(lambda *args: results.append(args))
+            probe = SimpleNamespace(
+                total=100, in_bbox=50, matched=10, elapsed=0.5,
+                approximate=False, sampled_blobs=1, total_blobs=2,
+                extended_ratio=0.25,
+            )
+            with mock.patch.object(
+                dockwidget, "probe_fast", return_value=probe
+            ):
+                worker.run()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], 100)
+        self.assertEqual(results[0][8], 0.25)
+        self.assertAlmostEqual(results[0][9], 2000.0)
+
     def test_dock_extent_moved_to_project_group(self):
         from qgis.PyQt.QtWidgets import QGroupBox
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget

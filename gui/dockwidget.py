@@ -21,7 +21,7 @@ from qgis.PyQt.QtWidgets import (
     QStyleOptionViewItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core import dem_sources, geofabrik, i18n, proxy, sonny
+from ..core import dem_sources, geofabrik, i18n, performance, proxy, sonny
 from ..core.bbox import parse_bbox
 from ..core.config import (
     Config, default_projects_dir, default_queries, project_name_error,
@@ -335,7 +335,7 @@ class ServerCheckWorker(QThread):
 
 
 class PbfProbeWorker(QThread):
-    result = pyqtSignal(int, int, int, float, bool, int, int, int, float)
+    result = pyqtSignal(int, int, int, float, bool, int, int, int, float, float)
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
@@ -391,10 +391,19 @@ class PbfProbeWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
         else:
+            # Скорость чтения нужна оценке подготовки: она показывает,
+            # насколько диск и кэш быстрее или медленнее эталонных.
+            source_bytes = 0
+            for path in self.paths:
+                try:
+                    source_bytes += path.stat().st_size
+                except OSError:
+                    pass
+            bytes_per_second = source_bytes / elapsed if elapsed > 0 else 0.0
             self.result.emit(
                 total, in_bbox, matched, elapsed,
                 approximate, sampled, total_blobs, len(self.paths),
-                extended_ratio,
+                extended_ratio, bytes_per_second,
             )
 
     def cancel(self):
@@ -1847,13 +1856,14 @@ class XtopoDockWidget(QDockWidget):
         self.pbf_info.setText(i18n.tr(message))
 
     def _pbf_probed(self, total, in_bbox, matched, elapsed, approximate,
-                    sampled, total_blobs, file_count, extended_ratio=0.0):
+                    sampled, total_blobs, file_count, extended_ratio=0.0,
+                    bytes_per_second=0.0):
         if approximate:
             prefix = "≈ "
         else:
             prefix = ""
         estimate = self._estimate_seconds(
-            total, matched, extended_ratio, file_count
+            total, matched, extended_ratio, file_count, bytes_per_second
         )
         if self.source_mode.currentData() == "geofabrik":
             plan = self._geofabrik_plan
@@ -1873,23 +1883,25 @@ class XtopoDockWidget(QDockWidget):
             )
         self._render_pbf_info()
 
-    def _estimate_seconds(self, total, matched, extended_ratio, file_count=1):
+    def _estimate_seconds(self, total, matched, extended_ratio, file_count=1,
+                          bytes_per_second=0.0):
         """Оценка времени подготовки в секундах.
 
         Читать приходится не весь файл, а только область с запасом
         фильтра: долю этой области в выгрузке даёт быстрая оценка.
-        Дальше добавляется время обработки слоёв — примерно 0,5 мс на
-        объект и около 50 мс на слой (запуск обработки, подготовка слоёв).
-        Калибровано на замерах по выгрузкам Малопольши, Грузии, Армении
-        и Юкона.
+        Дальше добавляется время обработки слоёв.  Скорость чтения берётся
+        из замера PBF-пробы, скорость процессора — из короткого бенчмарка,
+        а параллелизм — из фактического ограничения по памяти.
         """
-        share = max(0.0, min(1.0, float(extended_ratio or 0.0)))
-        if not share:
-            # Площадь выгрузки неизвестна: читаем весь файл.
-            share = 1.0
-        read = total * share / 20000.0
         layers = len(self.queries) if hasattr(self, "queries") else 0
-        return read + matched * 0.0005 + layers * 0.05 + 5.0
+        return performance.estimate_preparation_seconds(
+            total,
+            matched,
+            extended_ratio,
+            layers,
+            bytes_per_second=bytes_per_second,
+            cpu=performance.cpu_score(self.settings),
+        )
 
     def _show_pbf_estimate(self, pending, total):
         """Оценка по объёму карт (до точного подсчёта объектов)."""
@@ -1964,8 +1976,7 @@ class XtopoDockWidget(QDockWidget):
                 pending += size
         return pending, total
 
-    @staticmethod
-    def _geofabrik_estimate(pending, total):
+    def _geofabrik_estimate(self, pending, total):
         parts = []
         if pending:
             parts.append(
@@ -1975,13 +1986,20 @@ class XtopoDockWidget(QDockWidget):
                 )
             )
         if total:
-            # Rough processing scale before exact object counts are known:
-            # about 16 thousand OSM objects per megabyte at ~45 thousand
-            # objects per second, plus layer assembly overhead.
+            # Грубая оценка до скачивания PBF: около 0,45 с на мегабайт
+            # на эталонной машине, с поправкой на процессор и параллелизм.
+            cpu = performance.cpu_score(self.settings)
+            workers = performance.layer_worker_count(
+                len(self.queries) if hasattr(self, "queries") else 0
+            )
             parts.append(
                 i18n.trf(
                     "подготовка ≈ {}",
-                    _duration(total / 1048576 * 0.45),
+                    _duration(
+                        performance.estimate_map_seconds(
+                            total / 1048576, cpu=cpu, workers=workers
+                        )
+                    ),
                 )
             )
         if not parts:
