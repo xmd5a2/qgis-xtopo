@@ -240,6 +240,9 @@ DEFAULT_CACHE = (
 
 USER_AGENT = "qgis-xtopo-dem-compare/1.0"
 STAC_SEARCH = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
+# Страниц STAC на один запрос охвата: сервис отдаёт до 10000 элементов,
+# а на низком зуме нужна вся суша — обход идёт по ссылке «next».
+STAC_MAX_PAGES = 8
 # Подложка OpenStreetMap: тайлы 256×256 в той же проекции, что и рельеф.
 OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 OSM_MAX_ZOOM = 19
@@ -1142,14 +1145,27 @@ class SourceStore:
         limit = 10000
         url = (STAC_SEARCH + f"?collections={collection}"
                f"&bbox={bbox_text}&limit={limit}&fields=id,bbox")
-        try:
-            data = _http_json(url, retries=2, timeout=20)
-        except Exception as exc:  # noqa: BLE001 - охват не критичен
-            _log(f"{ds}: охват недоступен: {exc}")
-            return set(), False, "охват недоступен"
-        items = data.get("features", [])
+        items = []
+        truncated = False
+        # Сервис отдаёт не больше 10000 элементов на страницу, а на z1
+        # нужна вся суша: без постраничного обхода граница обрезалась бы.
+        for _page in range(STAC_MAX_PAGES):
+            try:
+                data = _http_json(url, retries=2, timeout=60)
+            except Exception as exc:  # noqa: BLE001 - охват не критичен
+                _log(f"{ds}: охват недоступен: {exc}")
+                return set(), False, "охват недоступен"
+            page = data.get("features", [])
+            items.extend(page)
+            following = [link for link in data.get("links", [])
+                         if link.get("rel") == "next" and link.get("href")]
+            if not following:
+                break
+            url = following[0]["href"]
+        else:
+            truncated = True
         cells = _cells_from_items(items)
-        truncated = len(items) >= limit
+        truncated = truncated or len(items) >= limit * STAC_MAX_PAGES
         note = f"тайлов: {len(cells)}"
         if truncated:
             note += " (часть)"
