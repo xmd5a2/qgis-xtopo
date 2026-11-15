@@ -570,8 +570,28 @@ def _has_rasters(folder):
     return False
 
 
+# MERIT DEM: тайлы 5°×5°, имя по левому нижнему углу области
+# (n30w120_dem.tif → 30°N–35°N, 120°W–115°W).  Охват берётся из имени,
+# чтобы не открывать файл: тайл весит 144 МБ, а их в наборе сотни.
+_MERIT_IN_NAME = re.compile(r"^([ns])(\d{2})([ew])(\d{3})_dem$", re.I)
+MERIT_TILE_DEGREES = 5
+
+
 def _tile_extent(path):
-    """Охват 1°-тайла по имени файла (N46E009.tif) без открытия растра."""
+    """Охват тайла по имени файла без открытия растра.
+
+    Поддержаны имена 1°-тайлов (N46E009.tif) и 5°-тайлов MERIT DEM
+    (n30w120_dem.tif).
+    """
+    merit = _MERIT_IN_NAME.match(path.stem)
+    if merit is not None:
+        lat = int(merit.group(2))
+        lon = int(merit.group(4))
+        if merit.group(1).lower() == "s":
+            lat = -lat
+        if merit.group(3).lower() == "w":
+            lon = -lon
+        return (lon, lat, lon + MERIT_TILE_DEGREES, lat + MERIT_TILE_DEGREES)
     match = _TILE_IN_ID.search(path.stem)
     if match is None:
         return None
