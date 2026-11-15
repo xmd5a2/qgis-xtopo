@@ -1525,6 +1525,42 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(results[0][8], 0.25)
         self.assertAlmostEqual(results[0][9], 2000.0)
 
+    def test_estimate_warning_thresholds(self):
+        from qgis_xtopo.gui.dockwidget import (
+            ESTIMATE_CAUTION_SECONDS,
+            ESTIMATE_CRITICAL_SECONDS,
+            _estimate_duration,
+        )
+
+        plain = _estimate_duration(ESTIMATE_CAUTION_SECONDS)
+        self.assertEqual(plain, "10 мин")
+        self.assertNotIn("span", plain)
+
+        caution = _estimate_duration(ESTIMATE_CAUTION_SECONDS + 60)
+        self.assertIn("color:#e67e22", caution)
+        self.assertNotIn("bold", caution)
+
+        # Ровно 20 минут — ещё оранжевый, дальше — красный и жирный.
+        self.assertIn(
+            "color:#e67e22",
+            _estimate_duration(ESTIMATE_CRITICAL_SECONDS),
+        )
+        critical = _estimate_duration(ESTIMATE_CRITICAL_SECONDS + 1)
+        self.assertIn("color:#e74c3c", critical)
+        self.assertIn("font-weight:bold", critical)
+
+    def test_pbf_info_colors_long_preparation(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock._pbf_info_state = ("pbf", 1000, 500, 1.2, 1300, 50.0, 1, "")
+            dock._render_pbf_info()
+            self.assertIn("color:#e74c3c", dock.pbf_info.text())
+            self.assertIn("font-weight:bold", dock.pbf_info.text())
+        finally:
+            dock.deleteLater()
+
     def test_dock_extent_moved_to_project_group(self):
         from qgis.PyQt.QtWidgets import QGroupBox
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget

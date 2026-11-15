@@ -175,6 +175,13 @@ _DOWNLOADED_MAP_BG = QColor("#d8efdb")
 # Measured aggregate throughput of four parallel Geofabrik downloads.
 DOWNLOAD_RATE = 1_000_000
 
+# Пороги предупреждения об оценке подготовки: область становится
+# тяжёлой для конкретного ПК.
+ESTIMATE_CAUTION_SECONDS = 10 * 60
+ESTIMATE_CRITICAL_SECONDS = 20 * 60
+ESTIMATE_CAUTION_COLOR = "#e67e22"
+ESTIMATE_CRITICAL_COLOR = "#e74c3c"
+
 
 def _checked_state():
     try:
@@ -243,6 +250,26 @@ def _duration(seconds):
     if minutes < 60:
         return i18n.trf("{} мин", minutes)
     return i18n.trf("{} ч {} мин", minutes // 60, minutes % 60)
+
+
+def _estimate_warning(seconds, text):
+    """Подсвечивает оценку подготовки для тяжёлой области.
+
+    Больше 10 минут — оранжевым, больше 20 — красным и жирным: так
+    видно, что область слишком велика для этого ПК.
+    """
+    if seconds > ESTIMATE_CRITICAL_SECONDS:
+        return (
+            f'<span style="color:{ESTIMATE_CRITICAL_COLOR}; '
+            f'font-weight:bold;">{text}</span>'
+        )
+    if seconds > ESTIMATE_CAUTION_SECONDS:
+        return f'<span style="color:{ESTIMATE_CAUTION_COLOR};">{text}</span>'
+    return text
+
+
+def _estimate_duration(seconds):
+    return _estimate_warning(seconds, _duration(seconds))
 
 
 PRIMARY_BUTTON_STYLE = (
@@ -1934,7 +1961,7 @@ class XtopoDockWidget(QDockWidget):
                     )
                 )
             parts.append(
-                i18n.trf("подготовка ≈ {}", _duration(estimate))
+                i18n.trf("подготовка ≈ {}", _estimate_duration(estimate))
             )
             text = ", ".join(parts)
             self.pbf_info.setText(
@@ -1958,7 +1985,7 @@ class XtopoDockWidget(QDockWidget):
                 title,
                 counts,
                 f"{elapsed:.1f}",
-                f"{estimate:.0f}",
+                _estimate_warning(estimate, f"{estimate:.0f}"),
             )
         )
 
@@ -1995,7 +2022,7 @@ class XtopoDockWidget(QDockWidget):
             parts.append(
                 i18n.trf(
                     "подготовка ≈ {}",
-                    _duration(
+                    _estimate_duration(
                         performance.estimate_map_seconds(
                             total / 1048576, cpu=cpu, workers=workers
                         )
