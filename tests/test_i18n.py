@@ -430,10 +430,11 @@ class DockLanguageTest(unittest.TestCase):
         cls.app = qgis_app()
 
     def setUp(self):
-        from qgis_xtopo.core import i18n, map_language, text_size
+        from qgis_xtopo.core import basemap, i18n, map_language, text_size
 
         self.i18n = i18n
         self.map_language = map_language
+        self.basemap = basemap
         self.text_size = text_size
         self.saved = i18n.language()
         i18n.set_language("ru", save=False)
@@ -459,6 +460,10 @@ class DockLanguageTest(unittest.TestCase):
         self.saved_text_size_setting = self.settings.value(
             text_size.SETTINGS_KEY
         )
+        self.saved_basemap_setting = self.settings.value(
+            basemap.SETTINGS_KEY
+        )
+        basemap.set_last_source(basemap.DEFAULT_SOURCE, save=False)
 
     def tearDown(self):
         self.i18n.set_language(self.saved, save=False)
@@ -500,6 +505,13 @@ class DockLanguageTest(unittest.TestCase):
             self.settings.setValue(
                 self.text_size.SETTINGS_KEY,
                 self.saved_text_size_setting,
+            )
+        if self.saved_basemap_setting is None:
+            self.settings.remove(self.basemap.SETTINGS_KEY)
+        else:
+            self.settings.setValue(
+                self.basemap.SETTINGS_KEY,
+                self.saved_basemap_setting,
             )
 
     def _dock(self):
@@ -923,6 +935,113 @@ class DockLanguageTest(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(panel.text_size_label.text(), "Text size")
         self.assertIn("multiplier", panel.text_size_combo.toolTip())
+
+    def test_basemap_combo_offers_satellites(self):
+        dock = self._dock()
+        panel = dock.project_panel
+        layout = panel.layout()
+        self.assertLess(
+            layout.indexOf(panel.text_size_row),
+            layout.indexOf(panel.basemap_row),
+        )
+        self.assertEqual(
+            [panel.basemap_combo.itemText(i)
+             for i in range(panel.basemap_combo.count())],
+            ["Google sat", "Bing sat", "ArcGIS sat"],
+        )
+        self.assertEqual(
+            [panel.basemap_combo.itemData(i)
+             for i in range(panel.basemap_combo.count())],
+            ["google", "bing", "arcgis"],
+        )
+        self.assertFalse(panel.basemap_check.isChecked())
+        self.assertFalse(panel.basemap_combo.isEnabled())
+
+    def test_basemap_selection_is_saved(self):
+        dock = self._dock()
+        combo = dock.project_panel.basemap_combo
+        combo.setCurrentIndex(combo.findData("arcgis"))
+        self.assertEqual(
+            self.settings.value(self.basemap.SETTINGS_KEY), "arcgis"
+        )
+
+    def test_saved_basemap_is_restored(self):
+        self.settings.setValue(self.basemap.SETTINGS_KEY, "bing")
+        dock = self._dock()
+        self.assertEqual(
+            dock.project_panel.basemap_combo.currentData(), "bing"
+        )
+
+    def test_basemap_toggle_adds_and_removes_layer(self):
+        from unittest import mock
+
+        from qgis.core import QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                combo = panel.basemap_combo
+                combo.setCurrentIndex(combo.findData("bing"))
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                self.assertTrue(combo.isEnabled())
+                self.assertEqual(
+                    self.basemap.active_source(project).key, "bing"
+                )
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+                self.assertIsNone(self.basemap.active_source(project))
+                self.assertFalse(combo.isEnabled())
+        finally:
+            self.basemap.remove(project)
+
+    def test_basemap_is_restored_from_project(self):
+        from unittest import mock
+
+        from qgis.core import QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        self.basemap.apply("arcgis", project)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.refresh()
+                self.app.processEvents()
+            self.assertTrue(panel.basemap_check.isChecked())
+            self.assertEqual(
+                panel.basemap_combo.currentData(), "arcgis"
+            )
+            self.assertTrue(panel.basemap_combo.isEnabled())
+        finally:
+            self.basemap.remove(project)
+
+    def test_basemap_labels_follow_interface_language(self):
+        dock = self._dock()
+        panel = dock.project_panel
+        self.assertEqual(
+            panel.basemap_check.text(), "Растровая подложка"
+        )
+        dock._switch_language()
+        self.app.processEvents()
+        self.assertEqual(panel.basemap_check.text(), "Raster basemap")
+        self.assertIn("satellite", panel.basemap_combo.toolTip())
 
     def test_saved_map_language_is_restored(self):
         self.settings.setValue(self.map_language.SETTINGS_KEY, "fr")

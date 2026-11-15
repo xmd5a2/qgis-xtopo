@@ -435,6 +435,176 @@ class ProjectTextSizeTest(unittest.TestCase):
             )
 
 
+class ProjectBasemapTest(unittest.TestCase):
+    """Подложка проекта: нижний слой и площадные слои без полигонов."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def setUp(self):
+        from qgis.core import (
+            QgsFeature,
+            QgsFillSymbol,
+            QgsGeometry,
+            QgsLineSymbol,
+            QgsPalLayerSettings,
+            QgsPointXY,
+            QgsProject,
+            QgsSingleSymbolRenderer,
+            QgsVectorLayer,
+            QgsVectorLayerSimpleLabeling,
+        )
+        from qgis_xtopo.core import basemap
+
+        self.basemap = basemap
+        self.project = QgsProject()
+        self.polygon = QgsVectorLayer(
+            "Polygon?crs=EPSG:3857&field=name:string", "wood", "memory"
+        )
+        feature = QgsFeature(self.polygon.fields())
+        feature["name"] = "Лес"
+        feature.setGeometry(QgsGeometry.fromPolygonXY([[
+            QgsPointXY(0, 0), QgsPointXY(10, 0), QgsPointXY(10, 10),
+            QgsPointXY(0, 10),
+        ]]))
+        self.polygon.dataProvider().addFeature(feature)
+        self.polygon.updateExtents()
+        self.polygon.setRenderer(QgsSingleSymbolRenderer(
+            QgsFillSymbol.createSimple({"color": "0,150,0"})
+        ))
+        labeling = QgsPalLayerSettings()
+        labeling.fieldName = "name"
+        self.polygon.setLabeling(QgsVectorLayerSimpleLabeling(labeling))
+        self.polygon.setLabelsEnabled(True)
+        self.project.addMapLayer(self.polygon)
+
+        self.line = QgsVectorLayer(
+            "LineString?crs=EPSG:3857", "path", "memory"
+        )
+        self.line.setRenderer(QgsSingleSymbolRenderer(
+            QgsLineSymbol.createSimple({"color": "120,80,20"})
+        ))
+        self.project.addMapLayer(self.line)
+
+        self.osm = QgsVectorLayer(
+            "Polygon?crs=EPSG:3857", "OpenStreetMap", "memory"
+        )
+        self.project.addMapLayer(self.osm)
+        self.bbox = QgsVectorLayer(
+            "Polygon?crs=EPSG:3857", "BBOX", "memory"
+        )
+        self.bbox.setRenderer(QgsSingleSymbolRenderer(
+            QgsFillSymbol.createSimple({"color": "255,0,0"})
+        ))
+        self.project.addMapLayer(self.bbox)
+
+    def tearDown(self):
+        self.project.clear()
+
+    def _visible(self, layer):
+        node = self.project.layerTreeRoot().findLayer(layer.id())
+        return bool(node is not None and node.itemVisibilityChecked())
+
+    def test_sources_are_satellite_xyz(self):
+        self.assertEqual(
+            [item.key for item in self.basemap.SOURCES],
+            ["google", "bing", "arcgis"],
+        )
+        for item in self.basemap.SOURCES:
+            self.assertIn("type=xyz", item.uri)
+            self.assertIn("zmax=", item.uri)
+        self.assertIn("{q}", self.basemap.source("bing").uri)
+
+    def test_apply_adds_layer_at_bottom_and_hides_polygons(self):
+        before_line = self.line.renderer().type()
+        before_bbox = self.bbox.renderer().type()
+        layer = self.basemap.apply("google", self.project)
+        self.assertIsNotNone(layer)
+        self.assertEqual(
+            self.project.layerTreeRoot().children()[-1].layer().id(),
+            layer.id(),
+        )
+        self.assertEqual(
+            self.basemap.active_source(self.project).key, "google"
+        )
+        self.assertEqual(
+            self.polygon.styleManager().currentStyle(),
+            self.basemap.LABELS_STYLE,
+        )
+        self.assertEqual(self.polygon.renderer().type(), "nullSymbol")
+        self.assertTrue(self.polygon.labelsEnabled())
+        self.assertEqual(self.line.renderer().type(), before_line)
+        self.assertEqual(self.bbox.renderer().type(), before_bbox)
+        self.assertFalse(self._visible(self.osm))
+        self.assertEqual(
+            layer.customProperty(self.basemap.SOURCE_PROPERTY), "google"
+        )
+        self.assertIn("mt1.google.com", layer.source())
+
+    def test_switch_source_keeps_single_basemap(self):
+        self.basemap.apply("google", self.project)
+        layer = self.basemap.apply("bing", self.project)
+        self.assertEqual(
+            len(self.basemap.active_layers(self.project)), 1
+        )
+        self.assertEqual(
+            self.basemap.active_source(self.project).key, "bing"
+        )
+        self.assertIn("virtualearth", layer.source())
+        self.assertEqual(
+            self.project.layerTreeRoot().children()[-1].layer().id(),
+            layer.id(),
+        )
+
+    def test_remove_restores_styles_and_osm(self):
+        self.basemap.apply("google", self.project)
+        self.assertTrue(self.basemap.remove(self.project))
+        self.assertEqual(self.basemap.active_layers(self.project), [])
+        self.assertEqual(self.polygon.renderer().type(), "singleSymbol")
+        self.assertTrue(self.polygon.labelsEnabled())
+        self.assertTrue(self._visible(self.osm))
+        self.assertEqual(self.bbox.renderer().type(), "singleSymbol")
+
+    def test_failed_switch_restores_state(self):
+        from unittest import mock
+
+        self.basemap.apply("google", self.project)
+        with mock.patch.object(
+            self.basemap, "_create_layer", return_value=None
+        ):
+            self.assertIsNone(self.basemap.apply("bing", self.project))
+        self.assertEqual(self.basemap.active_layers(self.project), [])
+        self.assertEqual(self.polygon.renderer().type(), "singleSymbol")
+        self.assertTrue(self._visible(self.osm))
+
+    def test_styles_survive_project_save(self):
+        from qgis.core import QgsProject
+
+        self.basemap.apply("google", self.project)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "demo.qgz"
+            self.assertTrue(self.project.write(str(path)))
+            saved = QgsProject()
+            self.assertTrue(saved.read(str(path)))
+            try:
+                layer = saved.mapLayersByName("wood")[0]
+                self.assertEqual(
+                    layer.styleManager().currentStyle(),
+                    self.basemap.LABELS_STYLE,
+                )
+                self.assertEqual(layer.renderer().type(), "nullSymbol")
+                self.assertEqual(
+                    self.basemap.active_source(saved).key, "google"
+                )
+                self.assertTrue(self.basemap.remove(saved))
+                self.assertEqual(layer.renderer().type(), "singleSymbol")
+            finally:
+                saved.clear()
+
+
 class ProjectAttributionTest(unittest.TestCase):
     """Атрибуция источника рельефа попадает в подпись макета атласа."""
 

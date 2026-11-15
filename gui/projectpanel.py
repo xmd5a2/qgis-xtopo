@@ -56,7 +56,7 @@ try:
 except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
-from ..core import i18n, map_language, slope_style, text_size
+from ..core import basemap, i18n, map_language, slope_style, text_size
 from ..core.project import fit_project_extent
 from ..core.resources import template_path
 from .atlas import (
@@ -701,9 +701,29 @@ class ProjectPanel(QWidget):
         text_size_layout.addWidget(self.text_size_combo)
         text_size_layout.addStretch(1)
         layout.addWidget(self.text_size_row)
+
+        # Спутниковая подложка: слой XYZ в самом низу проекта; площадные
+        # слои на время её включения показывают только названия.
+        self.basemap_row = QWidget(self)
+        basemap_layout = QHBoxLayout(self.basemap_row)
+        basemap_layout.setContentsMargins(0, 0, 0, 0)
+        basemap_layout.setSpacing(6)
+        self.basemap_check = QCheckBox(
+            "Растровая подложка", self.basemap_row
+        )
+        self.basemap_check.toggled.connect(self._basemap_toggled)
+        self.basemap_combo = QComboBox(self.basemap_row)
+        self.basemap_combo.currentIndexChanged.connect(
+            self._basemap_source_changed
+        )
+        basemap_layout.addWidget(self.basemap_check)
+        basemap_layout.addWidget(self.basemap_combo)
+        basemap_layout.addStretch(1)
+        layout.addWidget(self.basemap_row)
         self._fill_map_language_combo()
         self._fill_detail_combo()
         self._fill_text_size_combo()
+        self._fill_basemap_combo()
 
         self.isolines_check = self._checkbox(
             "Контуры высот (изогипсы)", "isolines"
@@ -2031,6 +2051,7 @@ class ProjectPanel(QWidget):
         self._fill_map_language_combo()
         self._fill_detail_combo()
         self._fill_text_size_combo()
+        self._fill_basemap_combo()
         # Название варианта в кнопке и в меню зависит от языка.
         self._update_steep_variants()
         self._update_hillshade_variants()
@@ -2244,6 +2265,95 @@ class ProjectPanel(QWidget):
         text_size.set_percent(percent, save=False)
         return True
 
+    BASEMAP_TIP = (
+        "Растровая подложка: спутниковый снимок под картой; "
+        "площадные слои показывают только названия"
+    )
+
+    def _fill_basemap_combo(self):
+        """Заполняет список подложек, сохраняя текущий выбор."""
+        combo = self.basemap_combo
+        current = combo.currentData() or basemap.last_source()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for item in basemap.SOURCES:
+                combo.addItem(item.name, item.key)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+        finally:
+            combo.blockSignals(False)
+        tip = i18n.tr(self.BASEMAP_TIP)
+        combo.setToolTip(tip)
+        self.basemap_check.setToolTip(tip)
+        combo.setEnabled(self.basemap_check.isChecked())
+        metrics = combo.fontMetrics()
+        width = max(
+            metrics.horizontalAdvance(combo.itemText(i))
+            for i in range(combo.count())
+        )
+        combo.setFixedWidth(max(100, width + 34))
+        combo.setFixedHeight(22)
+
+    def _basemap_toggled(self, checked):
+        self.basemap_combo.setEnabled(bool(checked))
+        project = QgsProject.instance()
+        if not self.is_xtopo_project(project):
+            return
+        if checked:
+            key = self.basemap_combo.currentData() or basemap.DEFAULT_SOURCE
+            if basemap.apply(key, project) is None:
+                self.basemap_check.blockSignals(True)
+                try:
+                    self.basemap_check.setChecked(False)
+                finally:
+                    self.basemap_check.blockSignals(False)
+                self.basemap_combo.setEnabled(False)
+                self._notify("Не удалось включить растровую подложку")
+                return
+            basemap.set_last_source(key)
+        else:
+            basemap.remove(project)
+        self._repaint_canvas()
+
+    def _basemap_source_changed(self, _index=None):
+        key = self.basemap_combo.currentData()
+        if not key:
+            return
+        basemap.set_last_source(key)
+        if not self.basemap_check.isChecked():
+            return
+        project = QgsProject.instance()
+        if not self.is_xtopo_project(project):
+            return
+        if basemap.apply(key, project) is None:
+            self._notify("Не удалось включить растровую подложку")
+            return
+        self._repaint_canvas()
+
+    def _sync_basemap_state(self):
+        """Показывает в панели подложку, сохранённую в проекте."""
+        active = basemap.active_source()
+        check = self.basemap_check
+        combo = self.basemap_combo
+        check.blockSignals(True)
+        try:
+            check.setChecked(active is not None)
+        finally:
+            check.blockSignals(False)
+        if active is not None:
+            index = combo.findData(active.key)
+            if index >= 0 and combo.currentData() != active.key:
+                combo.blockSignals(True)
+                try:
+                    combo.setCurrentIndex(index)
+                finally:
+                    combo.blockSignals(False)
+            basemap.sync()
+        else:
+            # Если слой подложки удалили вручную, вернуть обычные стили.
+            basemap.remove()
+        combo.setEnabled(check.isChecked())
+
     def _repaint_canvas(self):
         canvas = self._canvas()
         if canvas is not None:
@@ -2298,6 +2408,7 @@ class ProjectPanel(QWidget):
             text_size.set_project_text_size(
                 self.text_size_combo.currentData() or text_size.percent()
             )
+        self._sync_basemap_state()
 
     def focus_first(self):
         widget = self.toolbar.widgetForAction(self.fit_action)
