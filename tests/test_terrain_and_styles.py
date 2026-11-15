@@ -32,7 +32,7 @@ class SlopeResolutionTest(unittest.TestCase):
             ds = driver.Create(str(dem_path), 40, 40, 1, gdal.GDT_Float32)
             ds.SetGeoTransform((0, 0.01, 0, 0, 0, -0.01))
             srs = osr.SpatialReference()
-            srs.ImportFromEPSG(3857)
+            srs.ImportFromEPSG(4326)
             ds.SetProjection(srs.ExportToWkt())
             band = ds.GetRasterBand(1)
             x = np.linspace(0, 100, 40, dtype=np.float32)
@@ -45,6 +45,72 @@ class SlopeResolutionTest(unittest.TestCase):
             self.assertEqual(slope_up.RasterYSize, 40 * 2 * 3)
             slope_up = None
             self.assertFalse((root / "merged_dem_x2.tif").exists())
+
+
+class HighResolutionTerrainTest(unittest.TestCase):
+    """DEM точнее 0,9″ не укрупняется искусственно."""
+
+    def test_fine_dem_keeps_native_size(self):
+        from osgeo import gdal, osr
+        import numpy as np
+        from qgis_xtopo.core.terrain import generate_hillshade_slope
+
+        gdal.UseExceptions()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = type("Config", (), {})()
+            config.raster_dir = root
+            config.temp_dir = root / "tmp"
+            config.temp_dir.mkdir()
+            config.terrain_resample_method = "cubicspline"
+
+            dem_path = root / "merged_dem.tif"
+            driver = gdal.GetDriverByName("GTiff")
+            dataset = driver.Create(
+                str(dem_path), 40, 40, 1, gdal.GDT_Float32
+            )
+            # 0,0002° — 0,72″, точнее одной секунды.
+            dataset.SetGeoTransform((0, 0.0002, 0, 0, 0, -0.0002))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset.SetProjection(srs.ExportToWkt())
+            x = np.linspace(0, 100, 40, dtype=np.float32)
+            dataset.GetRasterBand(1).WriteArray(np.tile(x, (40, 1)))
+            dataset = None
+
+            generate_hillshade_slope(config, None)
+
+            for name in (
+                "slope_upscaled.tif",
+                "hillshade_composite.tif",
+                "merged_dem_upscaled.tif",
+            ):
+                raster = gdal.Open(str(root / name))
+                self.assertIsNotNone(raster, name)
+                self.assertEqual(raster.RasterXSize, 40, name)
+                self.assertEqual(raster.RasterYSize, 40, name)
+                raster = None
+            self.assertFalse((root / "merged_dem_downscaled.tif").exists())
+            self.assertFalse((root / "merged_dem_x2.tif").exists())
+
+    def test_nominal_one_arcsecond_still_upscales(self):
+        from osgeo import gdal, osr
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dem.tif"
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(path), 1, 1, 1, gdal.GDT_Float32
+            )
+            # 0,0002772° — это 0,998″; так GLO-30 выглядит после варпа.
+            dataset.SetGeoTransform((0, 0.0002772, 0, 0, 0, -0.0002772))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset.SetProjection(srs.ExportToWkt())
+            dataset = None
+            dataset = gdal.Open(str(path))
+            self.assertTrue(terrain._needs_upscale(dataset))
+            dataset = None
 
 
 class RasterBlockTransformTest(unittest.TestCase):

@@ -1107,25 +1107,90 @@ def build_dem(config, bbox, progress=None, cancel=None):
     return merged
 
 
-def _generate_slope(config, merged, dem_width, dem_height, progress=None):
-    """Ветка уклона: растр в шесть раз детальнее исходного DEM."""
+def _dem_resolution_arcseconds(dataset):
+    """Разрешение растра в угловых секундах (приблизительно).
+
+    ``merged_dem.tif`` обычно в EPSG:4326, но ручной DEM может быть в
+    метрах.  Для проекции переводим шаг пикселя в градусы в центре растра.
+    """
+    gdal, _, osr = _gdal()
+    transform = dataset.GetGeoTransform()
+    step_x = abs(transform[1])
+    step_y = abs(transform[5])
+    if step_x <= 0 or step_y <= 0:
+        return None
+    projection = dataset.GetProjection()
+    if not projection:
+        return None
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(projection)
+    srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    if srs.IsGeographic():
+        return max(step_x, step_y) * 3600.0
+    wgs84 = osr.SpatialReference()
+    wgs84.ImportFromEPSG(4326)
+    wgs84.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    try:
+        coordinate_transform = osr.CoordinateTransformation(srs, wgs84)
+        center_x = transform[0] + step_x * dataset.RasterXSize / 2
+        center_y = transform[3] - step_y * dataset.RasterYSize / 2
+        lon1, lat1, _ = coordinate_transform.TransformPoint(center_x, center_y)
+        lon2, lat2, _ = coordinate_transform.TransformPoint(
+            center_x + step_x, center_y
+        )
+        lon3, lat3, _ = coordinate_transform.TransformPoint(
+            center_x, center_y + step_y
+        )
+    except Exception:  # noqa: BLE001 - неизвестная проекция
+        return None
+    longitude = abs(lon2 - lon1) * 3600.0 * math.cos(
+        math.radians((lat1 + lat2) / 2)
+    )
+    latitude = abs(lat3 - lat1) * 3600.0
+    return max(longitude, latitude)
+
+
+def _needs_upscale(dataset):
+    """Нужно ли искусственное укрупнение DEM.
+
+    DEM точнее 0,9″ (3DEP 1/3″, ручные LiDAR-модели) уже достаточно
+    подробен: шестикратное укрупнение даёт гигабайты на ровном месте.
+    """
+    resolution = _dem_resolution_arcseconds(dataset)
+    if resolution is None:
+        return True
+    # GLO-30 и ALOS после варпа дают 0,998″ вместо ровно 1″.
+    return resolution >= 0.9
+
+
+def _generate_slope(config, merged, dem_width, dem_height, upscale,
+                    progress=None):
+    """Ветка уклона: для грубого DEM — в шесть раз детальнее исходного."""
     gdal, _, _ = _gdal()
     if progress:
         progress("Generating slope")
-    # Сначала удваиваем разрешение DEM с интерполяцией: уклон получается
-    # детальнее, чем при интерполяции уже готового растра уклона.
-    dem_x2 = config.raster_dir / "merged_dem_x2.tif"
-    options = gdal.WarpOptions(
-        width=dem_width * 2,
-        height=dem_height * 2,
-        resampleAlg=config.terrain_resample_method,
-        outputType=gdal.GDT_Float32,
-        creationOptions=_relief_creation_options(),
-    )
-    result = gdal.Warp(str(dem_x2), str(merged), options=options)
-    if result is None:
-        raise RuntimeError("Failed to upscale DEM for slope")
-    result = None
+    dem_x2 = None
+    if upscale:
+        # Сначала удваиваем разрешение DEM с интерполяцией: уклон
+        # получается детальнее, чем при интерполяции готового растра.
+        dem_x2 = config.raster_dir / "merged_dem_x2.tif"
+        options = gdal.WarpOptions(
+            width=dem_width * 2,
+            height=dem_height * 2,
+            resampleAlg=config.terrain_resample_method,
+            outputType=gdal.GDT_Float32,
+            creationOptions=_relief_creation_options(),
+        )
+        result = gdal.Warp(str(dem_x2), str(merged), options=options)
+        if result is None:
+            raise RuntimeError("Failed to upscale DEM for slope")
+        result = None
+        slope_source = dem_x2
+        width, height = dem_width * 2, dem_height * 2
+    else:
+        slope_source = merged
+        width, height = dem_width, dem_height
+
     slope = config.raster_dir / "slope.tif"
     options = gdal.DEMProcessingOptions(
         computeEdges=True,
@@ -1133,38 +1198,56 @@ def _generate_slope(config, merged, dem_width, dem_height, progress=None):
         scale=111120,
         creationOptions=_relief_creation_options(),
     )
-    result = gdal.DEMProcessing(str(slope), str(dem_x2), "slope", options=options)
+    result = gdal.DEMProcessing(
+        str(slope), str(slope_source), "slope", options=options
+    )
     if result is None:
         raise RuntimeError("Failed to generate slope")
     result = None
-    dem_x2.unlink(missing_ok=True)
+    if dem_x2 is not None:
+        dem_x2.unlink(missing_ok=True)
 
-    width, height = dem_width * 2, dem_height * 2
-    slope_cut_path = config.raster_dir / "slope_cut.tif"
-    _transform_raster(
-        slope, slope_cut_path, lambda array: array * (array > 1.04)
-    )
-
-    if progress:
-        progress("Upscaling slope")
     slope_up = config.raster_dir / "slope_upscaled.tif"
-    options = gdal.WarpOptions(
-        width=width * 3,
-        height=height * 3,
-        resampleAlg=config.terrain_resample_method,
-        outputType=gdal.GDT_Float32,
-        creationOptions=_relief_creation_options(),
-    )
-    result = gdal.Warp(str(slope_up), str(slope_cut_path), options=options)
-    if result is None:
-        raise RuntimeError("Failed to upscale slope")
-    result = None
+    if upscale:
+        slope_cut_path = config.raster_dir / "slope_cut.tif"
+        _transform_raster(
+            slope, slope_cut_path, lambda array: array * (array > 1.04)
+        )
+        if progress:
+            progress("Upscaling slope")
+        options = gdal.WarpOptions(
+            width=width * 3,
+            height=height * 3,
+            resampleAlg=config.terrain_resample_method,
+            outputType=gdal.GDT_Float32,
+            creationOptions=_relief_creation_options(),
+        )
+        result = gdal.Warp(str(slope_up), str(slope_cut_path), options=options)
+        if result is None:
+            raise RuntimeError("Failed to upscale slope")
+        result = None
+        slope_cut_path.unlink(missing_ok=True)
+    else:
+        if progress:
+            progress("Writing slope")
+        _transform_raster(
+            slope, slope_up, lambda array: array * (array > 1.04)
+        )
     slope.unlink(missing_ok=True)
-    slope_cut_path.unlink(missing_ok=True)
 
 
-def _generate_hillshade(config, merged, width, height, progress=None):
-    """Ветка отмывки: DEM уменьшается, затем укрупняется и затеняется.
+def _link_or_copy(source, destination):
+    """Создаёт жёсткую ссылку, а если файловая система не позволяет — копию."""
+    destination.unlink(missing_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
+                        progress=None):
+    """Ветка отмывки: для грубого DEM — уменьшение, укрупнение и затенение.
 
     Мелкие формы рельефа при этом сглаживаются, а на итоговом растре
     остаются только крупные склоны — так отмывка не рябит.
@@ -1173,32 +1256,39 @@ def _generate_hillshade(config, merged, width, height, progress=None):
     numpy = _numpy()
     if progress:
         progress("Generating hillshade")
-    downscaled = config.raster_dir / "merged_dem_downscaled.tif"
-    options = gdal.WarpOptions(
-        width=width // 2,
-        height=height // 2,
-        resampleAlg=config.terrain_resample_method,
-        outputType=gdal.GDT_Float32,
-        creationOptions=_relief_creation_options(),
-    )
-    result = gdal.Warp(str(downscaled), str(merged), options=options)
-    if result is None:
-        raise RuntimeError("Failed to downscale DEM")
-    result = None
-
     upscaled = config.raster_dir / "merged_dem_upscaled.tif"
-    options = gdal.WarpOptions(
-        width=width * 3,
-        height=height * 3,
-        resampleAlg=config.terrain_resample_method,
-        outputType=gdal.GDT_Float32,
-        creationOptions=_relief_creation_options(),
-    )
-    result = gdal.Warp(str(upscaled), str(downscaled), options=options)
-    if result is None:
-        raise RuntimeError("Failed to upscale DEM")
-    result = None
-    downscaled.unlink(missing_ok=True)
+    if upscale:
+        downscaled = config.raster_dir / "merged_dem_downscaled.tif"
+        options = gdal.WarpOptions(
+            width=dem_width,
+            height=dem_height,
+            resampleAlg=config.terrain_resample_method,
+            outputType=gdal.GDT_Float32,
+            creationOptions=_relief_creation_options(),
+        )
+        result = gdal.Warp(str(downscaled), str(merged), options=options)
+        if result is None:
+            raise RuntimeError("Failed to downscale DEM")
+        result = None
+
+        options = gdal.WarpOptions(
+            width=dem_width * 6,
+            height=dem_height * 6,
+            resampleAlg=config.terrain_resample_method,
+            outputType=gdal.GDT_Float32,
+            creationOptions=_relief_creation_options(),
+        )
+        result = gdal.Warp(str(upscaled), str(downscaled), options=options)
+        if result is None:
+            raise RuntimeError("Failed to upscale DEM")
+        result = None
+        downscaled.unlink(missing_ok=True)
+        hillshade_source = upscaled
+    else:
+        # Шаблон проекта и выражения склонов ссылаются на
+        # merged_dem_upscaled.tif; для точного DEM это тот же нативный растр.
+        _link_or_copy(merged, upscaled)
+        hillshade_source = merged
 
     hillshade = config.raster_dir / "hillshade.tif"
     # Как gdaldem hillshade по умолчанию: солнце 315°/45°, без вертикального
@@ -1212,7 +1302,9 @@ def _generate_hillshade(config, merged, width, height, progress=None):
         scale=111120,
         creationOptions=_relief_creation_options(),
     )
-    result = gdal.DEMProcessing(str(hillshade), str(upscaled), "hillshade", options=options)
+    result = gdal.DEMProcessing(
+        str(hillshade), str(hillshade_source), "hillshade", options=options
+    )
     if result is None:
         raise RuntimeError("Failed to generate hillshade")
     result = None
@@ -1237,8 +1329,10 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
 
     dem_ds = gdal.Open(str(merged))
     dem_width, dem_height = dem_ds.RasterXSize, dem_ds.RasterYSize
+    upscale = _needs_upscale(dem_ds)
     dem_ds = None
-    width, height = dem_width * 2, dem_height * 2
+    if progress and not upscale:
+        progress("DEM точнее 0,9″: укрупнение растров не требуется")
 
     # Ветки уклона и отмывки независимы: обе читают только merged_dem.tif,
     # а пишут каждая в свои файлы.  Параллельный запуск сокращает время
@@ -1265,14 +1359,16 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
             pool.submit(
                 guarded(
                     lambda: _generate_slope(
-                        config, merged, dem_width, dem_height, progress
+                        config, merged, dem_width, dem_height, upscale,
+                        progress,
                     )
                 )
             ),
             pool.submit(
                 guarded(
                     lambda: _generate_hillshade(
-                        config, merged, width, height, progress
+                        config, merged, dem_width, dem_height, upscale,
+                        progress,
                     )
                 )
             ),
