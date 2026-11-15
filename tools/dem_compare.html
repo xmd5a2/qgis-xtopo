@@ -981,7 +981,9 @@ function flushBatches() {
 const activeBatches = new Set();
 
 async function requestBatch(group, items) {
-  if (!reliefAvailable()) {
+  // Ниже z9 рельеф не рисуется и не запрашивается — но подложка нужна
+  // и там, поэтому её пачка сбрасывается только по другой причине.
+  if (group.ds !== "__osm__" && !reliefAvailable()) {
     for (const item of items) dropTileEntry(group, item);
     return;
   }
