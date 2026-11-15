@@ -366,6 +366,7 @@
       охват наборов
     </label>
     <div class="note" id="coverage-note">охват: —</div>
+    <div class="note" id="fresh-note"></div>
 
     <h2>Журнал тайлов</h2>
     <div id="log" class="note">пока ничего не загружено</div>
@@ -404,6 +405,12 @@
         1°-тайлов: у Sonny из каталога, у SRTM по диапазону широт, у
         остальных из STAC. Показывается с z4 до z9; если набор покрывает
         весь экран, границы не рисуются.
+        <br><br>
+        <b>Красная штриховка</b> — тайл, для которого в облаке уже другая
+        версия гранулы: провайдер перезаписал файл, а локальная копия
+        осталась прежней. Отметка ставится по данным, а не по картинке,
+        поэтому она видна и пока тайл ещё грузится: на экране тогда ещё не
+        настоящие высоты, и показывать будет старые.
         <br><br>
         <b>3DEP</b> покрывает только США — в остальных точках он пуст.
         <b>NASADEM</b> не заходит выше 61° и ниже −56°.
@@ -630,6 +637,11 @@ const state = {
   coverageOn: true,
   coverageRequest: 0,
   coverageTimer: 0,
+  // Актуальность локальных копий: устаревшие тайлы приходят из
+  // /api/freshness и помечаются штриховкой прямо на карте.
+  fresh: {a: null, b: null},
+  freshRequest: 0,
+  freshTimer: 0,
   divider: 0.5,
   dragging: false,
   dragDivider: false,
@@ -1123,6 +1135,7 @@ function resize() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   scheduleLimits();
   scheduleCoverage();
+  scheduleFreshness();
   requestRender();
 }
 
@@ -1583,6 +1596,7 @@ function draw() {
 
   drawTileGrid(left, top, w, h);
   drawCoverage(left, top, w, h);
+  drawStaleHatch(left, top, w, h);
   if (splitAt !== null) drawDivider(splitAt, h);
   drawProfileOverlay(left, top);
   drawProfileHover(left, top);
@@ -1874,6 +1888,125 @@ async function updateCoverage() {
 function scheduleCoverage(delay = 250) {
   clearTimeout(state.coverageTimer);
   state.coverageTimer = setTimeout(updateCoverage, delay);
+}
+
+// ---------------------------------------------------------------------------
+// Актуальность локальных копий
+// ---------------------------------------------------------------------------
+
+// Тайлы, которые локально отстают от облака: их видно как устаревшие.
+function freshCells(data) {
+  return ((data && data.cells) || []).filter(cell =>
+    cell.state === "stale" || cell.state === "missing");
+}
+
+function scheduleFreshness(delay = 700) {
+  clearTimeout(state.freshTimer);
+  state.freshTimer = setTimeout(updateFreshness, delay);
+}
+
+async function updateFreshness() {
+  if (!reliefAvailable() || (!state.a && !state.b)) {
+    if (state.fresh.a || state.fresh.b) {
+      state.fresh = {a: null, b: null};
+      setFreshNote("");
+      requestRender();
+    }
+    return;
+  }
+  const bbox = coverageBounds().map(value => value.toFixed(4)).join(",");
+  const keys = [...new Set([state.a, state.b].filter(Boolean))];
+  const request = ++state.freshRequest;
+  const results = await Promise.all(keys.map(ds =>
+    fetch(`/api/freshness?ds=${ds}&bbox=${bbox}`)
+      .then(response => response.json())
+      .catch(() => null)));
+  // Пока считали, вид или наборы могли смениться.
+  if (request !== state.freshRequest) return;
+  const next = {a: null, b: null};
+  keys.forEach((ds, index) => {
+    const data = results[index];
+    if (!data || data.error) return;
+    if (state.a === ds) next.a = data;
+    if (state.b === ds) next.b = data;
+  });
+  state.fresh = next;
+  setFreshNote(freshText(), freshTitle());
+  requestRender();
+}
+
+function freshText() {
+  const parts = [];
+  const seen = new Set();
+  [["a", "A"], ["b", "B"]].forEach(([key, label]) => {
+    const ds = key === "a" ? state.a : state.b;
+    if (!ds || seen.has(ds)) return;
+    seen.add(ds);
+    const cells = freshCells(state.fresh[key]);
+    if (!cells.length) return;
+    parts.push(`${label}: ${cells.map(cell => cell.cell).join(", ")}`);
+  });
+  return parts.join(" · ");
+}
+
+function freshTitle() {
+  const lines = [];
+  [["a", "A"], ["b", "B"]].forEach(([key, label]) => {
+    freshCells(state.fresh[key]).forEach(cell => {
+      lines.push(`${label} · ${cell.cell}: ${cell.reason || "устарел"}`);
+    });
+  });
+  return lines.join("\n");
+}
+
+function setFreshNote(text, title) {
+  const box = document.getElementById("fresh-note");
+  if (!box) return;
+  box.textContent = text ? `устарело: ${text}` : "";
+  box.title = title || "";
+}
+
+// Устаревший тайл: редкая красная диагональная штриховка прямо по нему.
+function drawStaleHatch(left, top, w, h) {
+  if (!state.fresh || (!state.fresh.a && !state.fresh.b)) return;
+  const split = dividerVisible() ? Math.round(w * state.divider) : null;
+  [["a", state.fresh.a], ["b", state.fresh.b]].forEach(([side, data]) => {
+    const cells = freshCells(data);
+    if (!cells.length) return;
+    ctx.save();
+    if (split !== null && !state.diff) {
+      // В шторке A слева, B справа: отметка лежит на своём наборе.
+      ctx.beginPath();
+      if (side === "a") ctx.rect(0, 0, split, h);
+      else ctx.rect(split, 0, w - split, h);
+      ctx.clip();
+    }
+    ctx.strokeStyle = "rgba(255, 92, 64, 0.55)";
+    ctx.lineWidth = 1.5;
+    for (const cell of cells) {
+      const [minx, miny, maxx, maxy] = cell.bbox;
+      const nw = project(minx, maxy, state.zoom);
+      const se = project(maxx, miny, state.zoom);
+      const rx = nw.x - left;
+      const ry = nw.y - top;
+      const rw = se.x - nw.x;
+      const rh = se.y - nw.y;
+      if (rw <= 0 || rh <= 0) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(rx, ry, rw, rh);
+      ctx.clip();
+      ctx.beginPath();
+      // Штриховка редкая: рельеф под ней остаётся читаемым.
+      for (let offset = -rh; offset < rw; offset += 30) {
+        ctx.moveTo(rx + offset, ry);
+        ctx.lineTo(rx + offset + rh, ry + rh);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.restore();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2389,6 +2522,7 @@ canvas.addEventListener("pointerup", event => {
     // рисовались по прежним пределам, поэтому перетаскивание не ждёт сервер.
     scheduleLimits();
     scheduleCoverage();
+    scheduleFreshness();
   }
   state.dragDivider = false;
   // Клик без перетаскивания сбрасывает построенный профиль. Панорамирование
@@ -2422,6 +2556,7 @@ canvas.addEventListener("wheel", event => {
   // Колесо во время жеста (пинч) шлёт события пачками — ждём тишины.
   scheduleLimits(300);
   scheduleCoverage(300);
+  scheduleFreshness(300);
 }, {passive: false});
 
 window.addEventListener("resize", resize);
@@ -2431,12 +2566,12 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------------------
 document.getElementById("ds-a").addEventListener("change", event => {
   state.a = event.target.value;
-  scheduleLimits(); scheduleCoverage(0);
+  scheduleLimits(); scheduleCoverage(0); scheduleFreshness(0);
   requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("ds-b").addEventListener("change", event => {
   state.b = event.target.value;
-  scheduleLimits(); scheduleCoverage(0);
+  scheduleLimits(); scheduleCoverage(0); scheduleFreshness(0);
   requestRender(); refreshReadout(); refreshProfile();
 });
 document.getElementById("mode").addEventListener("change", event => {
@@ -2456,6 +2591,7 @@ document.getElementById("swap").addEventListener("click", () => {
   document.getElementById("ds-a").value = state.a;
   document.getElementById("ds-b").value = state.b;
   scheduleCoverage(0);
+  scheduleFreshness(0);
   requestRender(); refreshReadout();
   // Меняются только буквы A и B, но график и легенда к ним привязаны.
   refreshProfile();
@@ -2507,6 +2643,7 @@ document.getElementById("zoom-native").addEventListener("click", async () => {
     Math.cos(state.center.lat * Math.PI / 180) / native);
   state.zoom = Math.min(state.maxZoom, Math.max(state.minZoom, zoom));
   scheduleCoverage();
+  scheduleFreshness();
   requestRender();
   refreshReadout();
 });
@@ -2657,6 +2794,7 @@ async function chooseBrowserDir() {
     fillSelect(document.getElementById("ds-a"), state.a);
     fillSelect(document.getElementById("ds-b"), state.b);
     scheduleCoverage(0);
+    scheduleFreshness(0);
     requestRender();
     refreshReadout();
     // Набор сменился — профиль по нему строим заново.
@@ -2752,6 +2890,7 @@ document.getElementById("points").addEventListener("click", event => {
   state.center = {lon: point.lon, lat: point.lat};
   state.zoom = point.zoom;
   scheduleCoverage();
+  scheduleFreshness();
   requestRender();
   refreshReadout();
 });
@@ -2861,6 +3000,7 @@ async function openOsmLink() {
   note.textContent = `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} · ` +
     `z=${state.zoom.toFixed(1)}`;
   scheduleCoverage();
+  scheduleFreshness();
   requestRender();
   refreshReadout();
   writeUrl();

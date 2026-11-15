@@ -114,6 +114,11 @@ TILE_CACHE_VERSION = 8
 TILE_OVERLAP = 1
 # Ограничение на размер промежуточного растра (пиксели по стороне).
 MAX_GRID = 2048
+# Версия файла слепков: старые записи не читаются, они без отпечатков.
+META_VERSION = 1
+# Проверку актуальности не повторяем чаще: панорамирование не должно
+# дёргать сеть на каждый кадр.
+FRESH_TTL = 1800.0
 
 # Счётчик для уникальных имён временных файлов.
 _counter = 0
@@ -363,6 +368,11 @@ PC_COLLECTIONS = {
     "cop30": "cop-dem-glo-30",
 }
 
+# Наборы, файлы которых лежат в Planetary Computer: их адрес без подписи
+# не открыть.  GLO-30 в списке нет — его COG лежит в публичном бакете
+# AWS и подписывать его нечем.
+PC_SIGNED = ("nasadem", "alos30", "3dep")
+
 # Наборы для попарного сравнения по умолчанию.
 DEFAULT_A = "cop30"
 DEFAULT_B = "srtm3"
@@ -384,16 +394,22 @@ LOCAL_SUFFIXES = (".tif", ".tiff", ".hgt", ".vrt", ".img", ".asc",
 # ---------------------------------------------------------------------------
 
 def _download(url, target):
-    """Скачивает файл с докачкой: при обрыве продолжаем с места обрыва."""
+    """Скачивает файл с докачкой: при обрыве продолжаем с места обрыва.
+
+    Возвращает заголовки ответа: по ETag и дате видно, что объект в
+    хранилище перезаписали.  ``False`` — объект не отдан (403, 404).
+    """
     tmp = target.with_name(target.name + ".part")
     existing = tmp.stat().st_size if tmp.exists() else 0
     headers = {"User-Agent": USER_AGENT}
     if existing:
         headers["Range"] = f"bytes={existing}-"
+    response_headers = {}
     try:
         with urllib.request.urlopen(
                 urllib.request.Request(url, headers=headers),
                 timeout=300) as response:
+            response_headers = dict(response.headers)
             append = existing > 0 and response.status == 206
             mode = "ab" if append else "wb"
             with tmp.open(mode) as handle:
@@ -411,7 +427,7 @@ def _download(url, target):
         tmp.unlink(missing_ok=True)
         raise
     tmp.replace(target)
-    return True
+    return response_headers
 
 
 def _tile_name(lat, lon):
@@ -695,6 +711,127 @@ def restore_local_sources(store):
     return restored
 
 
+# ---------------------------------------------------------------------------
+# Слепки локальных копий
+# ---------------------------------------------------------------------------
+
+def _normalize_etag(value):
+    """ETag без кавычек и префикса W/: у AWS он в кавычках, у Azure нет."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    if text.startswith("W/"):
+        text = text[2:]
+    return text.strip('"')
+
+
+def _fill_fingerprint(record, headers):
+    """Записывает в слепок отпечаток объекта: ETag, дату и размер."""
+    if not headers:
+        return record
+    etag = _normalize_etag(headers.get("ETag"))
+    if etag:
+        record["etag"] = etag
+    modified = headers.get("Last-Modified")
+    if modified:
+        record["last_modified"] = modified
+    try:
+        record["size"] = int(headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        pass
+    return record
+
+
+def _head(url, collection=None, timeout=30):
+    """HEAD по удалённому объекту: заголовки ответа.
+
+    Для наборов Planetary Computer нужна подпись: без SAS-токена бакет
+    отвечает 403.  ``None`` — запрос не прошёл, отличить это от ответа
+    нельзя, поэтому проверка молча остаётся «не проверено».
+    """
+    target = url
+    if collection:
+        try:
+            token = _pc_token(collection)
+        except Exception:  # noqa: BLE001 - без токена проверить нечем
+            return None
+        target = url + ("&" if "?" in url else "?") + token
+    request = urllib.request.Request(
+        target, headers={"User-Agent": USER_AGENT}, method="HEAD")
+    try:
+        with HTTP_OPENER.open(request, timeout=timeout) as response:
+            return dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {"__missing__": True}
+        return None
+    except Exception:  # noqa: BLE001 - сеть может быть недоступна
+        return None
+
+
+def _source_url(path):
+    """Адрес удалённого источника без токена: ``/vsicurl/`` и query убраны."""
+    text = str(path)
+    if text.startswith("/vsicurl/"):
+        text = text[len("/vsicurl/"):]
+    return text.split("?")[0]
+
+
+class MetaStore:
+    """Слепки локальных копий: из чего сделаны и что сейчас лежит в облаке.
+
+    В ``<cache>/meta.json`` для каждого набора и каждой 1°-клетки
+    хранится отпечаток объекта, из которого брали данные: ETag, дата и
+    размер.  Сверка отпечатка с текущим состоянием объекта и есть признак
+    того, что локальная копия отстала от облака.
+
+    Слепок не зависит от того, лежит ли файл на диске: тайл мог ещё не
+    загрузиться, а гранула уже известна как устаревшая — отметка нужна
+    и в этом случае.
+    """
+
+    def __init__(self, cache_dir):
+        self.path = Path(cache_dir) / "meta.json"
+        self.lock = threading.RLock()
+
+    def _read(self):
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = None
+        cells = raw.get("cells") if isinstance(raw, dict) else None
+        if not isinstance(cells, dict):
+            cells = {}
+        return {"version": META_VERSION, "cells": cells}
+
+    def _write(self, data):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False),
+                             encoding="utf-8")
+        temporary.replace(self.path)
+
+    def record(self, dataset, cell, fingerprint):
+        """Запоминает отпечаток объекта, из которого брали данные клетки."""
+        with self.lock:
+            data = self._read()
+            cells = data["cells"].get(dataset)
+            if not isinstance(cells, dict):
+                cells = {}
+                data["cells"][dataset] = cells
+            cells[cell] = fingerprint
+            self._write(data)
+
+    def cells(self, dataset):
+        """Отпечатки набора: ``{клетка: отпечаток}``."""
+        with self.lock:
+            data = self._read()
+        cells = data["cells"].get(dataset)
+        if not isinstance(cells, dict):
+            return {}
+        return cells
+
+
 class SourceStore:
     """Источники DEM: локальный кэш для gzip-SRTM, HTTP-чтение — для COG.
 
@@ -740,16 +877,32 @@ class SourceStore:
         # Охват COG-наборов из STAC: (коллекция, bbox) → ячейки.
         self._coverage_cache = {}
         self._coverage_lock = threading.Lock()
+        # Слепки локальных копий: по ним видно, что тайл отстал от облака.
+        self.meta = MetaStore(cache_dir)
+        # 1°-клетка каждого удалённого источника: по ней рисуется отметка
+        # устаревшего тайла.
+        self._source_cells = {}
+        # Ответы HEAD: проверка не должна дёргать сеть на каждый кадр.
+        self._head_cache = {}
+        self._head_lock = threading.Lock()
 
-    def remember_source(self, path, label):
+    def remember_source(self, path, label, cell=None):
         """Запоминает подпись удалённого источника: «ALOS AW3D30 · N43E043»."""
         with self._lock:
-            self._source_labels[_source_key(path)] = label
+            key = _source_key(path)
+            self._source_labels[key] = label
+            if cell:
+                self._source_cells[key] = cell
 
     def source_label(self, path):
         """Подпись удалённого источника; пусто, если источник локальный."""
         with self._lock:
             return self._source_labels.get(_source_key(path), "")
+
+    def source_cell(self, path):
+        """1°-клетка удалённого источника («N43E043»)."""
+        with self._lock:
+            return self._source_cells.get(_source_key(path), "")
 
     def open_source(self, path):
         """Открывает (и запоминает) источник: возвращает (dataset, lock)."""
@@ -1058,7 +1211,8 @@ class SourceStore:
                 paths.append(path)
                 # У GLO-30 гранула названа по юго-западному углу, как у SRTM.
                 self.remember_source(
-                    path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}")
+                    path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}",
+                    _tile_label(lat, lon))
             return paths
         if source == "fabdem":
             paths = []
@@ -1066,7 +1220,8 @@ class SourceStore:
                 path = "/vsicurl/" + _fabdem_url(lat, lon)
                 paths.append(path)
                 self.remember_source(
-                    path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}")
+                    path, f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}",
+                    _tile_label(lat, lon))
             return paths
         return self._pc_sources(ds, bbox)
 
@@ -1148,6 +1303,12 @@ class SourceStore:
                     return None
                 finally:
                     _download_leave(key)
+                # Слепок файла Drive: если провайдер перезальёт архив,
+                # идентификатор в каталоге сменится — тайл станет старым.
+                label = _tile_label(*cell)
+                self.meta.record(ds, label,
+                                 {"cell": label, "file_id": file_id,
+                                  "fetched_at": time.time()})
             if (path.suffix.lower() == ".hgt" and
                     dataset.samples not in sonny.SRTMHGT_SAMPLES):
                 # Драйвер SRTMHGT не читает 7201 точку (0,5″): нужен VRT.
@@ -1325,6 +1486,7 @@ class SourceStore:
             temporary.unlink(missing_ok=True)
             return None
         self._register_prepared(ds, target.name, bbox)
+        self._record_granules(ds, sources)
         return target
     def _register_prepared(self, ds, filename, bbox):
         folder = self.prepared_dir(ds)
@@ -1363,6 +1525,141 @@ class SourceStore:
             temporary.replace(index_path)
             with self._lock:
                 self._prepared_cache.pop(ds, None)
+
+    def _record_granules(self, ds, sources):
+        """Запоминает отпечатки гранул, из которых собрано окно.
+
+        Отпечатки нужны, чтобы отличить окно, сделанное из свежих данных,
+        от окна, оставшегося от прежней версии набора.  Слепок гранулы не
+        зависит от того, лежит ли окно на диске: тайл мог ещё не
+        загрузиться, а гранула уже известна как устаревшая.
+        """
+        collection = None
+        if DATASETS[ds]["source"] in PC_SIGNED:
+            collection = PC_COLLECTIONS[DATASETS[ds]["source"]]
+        remote = []
+        for path in sources:
+            text = str(path)
+            if not text.startswith("/vsicurl/"):
+                # Локальная копия (тайл SRTM, файл Sonny): её отпечаток
+                # записан при скачивании, здесь дублировать нечего.
+                continue
+            cell = self.source_cell(path)
+            if not cell:
+                continue
+            remote.append((text, cell))
+        if not remote:
+            return
+
+        def _probe(item):
+            path, cell = item
+            record = {"cell": cell, "url": _source_url(path),
+                      "fetched_at": time.time()}
+            if collection:
+                record["collection"] = collection
+            headers = _head(record["url"], collection)
+            if headers:
+                _fill_fingerprint(record, headers)
+            return record
+
+        # Отпечатки снимаем параллельно: каждый HEAD — запрос в сеть.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for record in pool.map(_probe, remote):
+                self.meta.record(ds, record["cell"], record)
+
+    # ------------------------------------------------------------------
+    # Актуальность локальных копий
+    # ------------------------------------------------------------------
+
+    def freshness(self, ds, bbox, force=False):
+        """Актуальность локальных копий набора в области.
+
+        Для каждой 1°-клетки сверяется отпечаток гранулы с тем, что сейчас
+        лежит в облаке.  Тайл при этом может быть ещё не загружен: отметка
+        ставится по данным, а не по картинке.
+        """
+        cells = []
+        known = self.meta.cells(ds)
+        for lat, lon in _cells_in_bbox(bbox):
+            cell = _tile_label(lat, lon)
+            fingerprint = known.get(cell)
+            if not isinstance(fingerprint, dict):
+                # Слепка нет: судить не о чем, клетку не помечаем.
+                continue
+            state, reason = self._check_object(ds, fingerprint, force)
+            cells.append({"cell": cell,
+                          "bbox": [lon, lat, lon + 1, lat + 1],
+                          "state": state, "reason": reason})
+        return {"dataset": ds, "cells": cells, "checked_at": time.time()}
+
+    def _check_object(self, ds, item, force):
+        """Состояние одного объекта: fresh, stale, missing, unknown."""
+        if item.get("file_id"):
+            return self._check_sonny(item)
+        url = item.get("url")
+        if not url:
+            return "unknown", "нет слепка"
+        headers = self._head_cached(url, item.get("collection"), force)
+        if headers is None:
+            return "unknown", "облако не отвечает"
+        if headers.get("__missing__"):
+            return "missing", "объекта больше нет в облаке"
+        recorded_etag = _normalize_etag(item.get("etag"))
+        current_etag = _normalize_etag(headers.get("ETag"))
+        if recorded_etag and current_etag:
+            if recorded_etag != current_etag:
+                return "stale", "в облаке другая версия файла"
+            return "fresh", ""
+        recorded_modified = item.get("last_modified")
+        current_modified = headers.get("Last-Modified")
+        if recorded_modified and current_modified:
+            if recorded_modified != current_modified:
+                return "stale", "в облаке другая дата файла"
+            return "fresh", ""
+        try:
+            current_size = int(headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            current_size = 0
+        recorded_size = item.get("size")
+        if recorded_size and current_size and recorded_size != current_size:
+            return "stale", "в облаке другой размер файла"
+        if recorded_etag or recorded_modified or recorded_size:
+            return "fresh", ""
+        return "unknown", "нет слепка"
+
+    def _check_sonny(self, item):
+        """Sonny: файл в каталоге Drive сменился — тайл старый."""
+        cell = item.get("cell", "")
+        recorded = item.get("file_id", "")
+        catalogue = self.sonny_catalogue(allow_refresh=False) or {}
+        current = ""
+        for listing in catalogue.values():
+            for name, file_id in listing.items():
+                if os.path.splitext(name)[0] == cell:
+                    current = file_id
+                    break
+            if current:
+                break
+        if not current:
+            return "unknown", "тайла нет в каталоге Drive"
+        if current != recorded:
+            return "stale", "файл в каталоге Drive заменён"
+        return "fresh", ""
+
+    def _head_cached(self, url, collection, force):
+        """Ответ HEAD с кэшем: панорамирование не должно дёргать сеть."""
+        now = time.time()
+        if not force:
+            with self._head_lock:
+                entry = self._head_cache.get(url)
+            if entry and now - entry[0] < FRESH_TTL:
+                return entry[1]
+        headers = _head(url, collection)
+        if headers is None:
+            return None
+        with self._head_lock:
+            self._head_cache[url] = (now, headers)
+        return headers
 
     def open_at(self, ds, lon, lat, allow_download=True):
         """Открывает набор так, чтобы в него попала точка.
@@ -1455,7 +1752,8 @@ class SourceStore:
             label = f"{DATASETS[ds]['short']} · {_tile_label(lat, lon)}"
             _download_enter(key, label)
             try:
-                if not _download(_aws_url("skadi", lat, lon), raw):
+                headers = _download(_aws_url("skadi", lat, lon), raw)
+                if not headers:
                     raw.unlink(missing_ok=True)
                     return None
             finally:
@@ -1485,6 +1783,12 @@ class SourceStore:
                 raise
             finally:
                 raw.unlink(missing_ok=True)
+        # Слепок объекта: по нему позже видно, что тайл в бакете перезаписали.
+        cell = _tile_label(lat, lon)
+        record = {"cell": cell, "url": _aws_url("skadi", lat, lon),
+                  "fetched_at": time.time()}
+        _fill_fingerprint(record, headers)
+        self.meta.record(ds, cell, record)
         return target
 
     def _pc_sources(self, ds, bbox, center_only=False):
@@ -1564,7 +1868,8 @@ class SourceStore:
             cell = item.get("bbox")
             if cell:
                 self.remember_source(
-                    source, f"{DATASETS[ds]['short']} · {_cell_label(cell)}")
+                    source, f"{DATASETS[ds]['short']} · {_cell_label(cell)}",
+                    _cell_label(cell))
         return sources
 
 
@@ -2780,6 +3085,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = self.store.coverage(ds, bbox)
             result["dataset"] = ds
+            self._json(result)
+            return
+        if action == "freshness":
+            text = query.get("bbox", [""])[0]
+            try:
+                bbox = tuple(float(value) for value in text.split(","))
+                if len(bbox) != 4:
+                    raise ValueError
+            except ValueError:
+                self._json(
+                    {"error": "нужен bbox=minx,miny,maxx,maxy"}, code=400)
+                return
+            force = query.get("force", ["0"])[0] not in ("0", "", "false")
+            try:
+                result = self.store.freshness(ds, bbox, force=force)
+            except Exception as exc:  # noqa: BLE001 - проверка не должна
+                # ломать страницу: тайлы показываются и без неё
+                self._json({"error": str(exc)}, code=500)
+                return
             self._json(result)
             return
         if action == "value":
