@@ -89,24 +89,59 @@ class TemplateLayoutTest(unittest.TestCase):
 
 
 class TemplateFilterExpressionTest(unittest.TestCase):
-    """Фильтры шаблона — валидные выражения QGIS.
+    """Выражения шаблона — валидные выражения QGIS.
 
-    При запекании фильтров подавления в шаблон HTML-сущности однажды
-    экранировали дважды: в XML осталось ``&amp;lt;``, QGIS читал
-    ``&lt;``, и правило с таким фильтром не срабатывало.
+    Проверяются не только фильтры правил, но и подписи, выражения полей
+    и data-defined свойства: ошибка в любом из них ломает отрисовку или
+    вычисление атрибута.  При запекании фильтров подавления в шаблон
+    HTML-сущности однажды экранировали дважды: в XML осталось
+    ``&amp;lt;``, QGIS читал ``&lt;``, и правило с таким фильтром не
+    срабатывало.
     """
 
     @classmethod
     def setUpClass(cls):
         from tests import qgis_app
+        from qgis_xtopo.core.expressions import load_expressions
 
         cls.app = qgis_app()
+        load_expressions()
         cls.root = _template_root()
 
     def _expressions(self):
+        extra_attributes = (
+            "pageNameExpression",
+            "filterFeatures",
+            "annotationExpression",
+            "startExpression",
+            "endExpression",
+            "sortExpression",
+            "classificationAttributeExpression",
+        )
         for element in self.root.iter():
-            for attribute, value in element.attrib.items():
-                if attribute == "filter" and value:
+            if element.tag == "rule":
+                value = element.get("filter")
+                if value and value.strip().upper() != "ELSE":
+                    yield element, "filter", value
+            if element.tag == "text-style" and element.get("isExpression") == "1":
+                value = element.get("fieldName")
+                if value:
+                    yield element, "fieldName", value
+            if element.tag == "previewExpression":
+                value = "".join(element.itertext())
+                if value.strip():
+                    yield element, "text", value
+            if element.tag == "Option" and element.get("name") == "expression":
+                value = element.get("value")
+                if value:
+                    yield element, "expression", value
+            if element.tag == "field" and element.get("expression"):
+                yield element, "expression", element.get("expression")
+            if element.tag == "constraint" and element.get("exp"):
+                yield element, "exp", element.get("exp")
+            for attribute in extra_attributes:
+                value = element.get(attribute)
+                if value:
                     yield element, attribute, value
 
     def test_no_html_entities_in_expressions(self):
