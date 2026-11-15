@@ -317,6 +317,8 @@
   "Запасное название (когда нет name:xx) приводится к читаемому виду: незнакомая письменность переводится в латиницу": "The fallback name (when there is no name:xx) is made readable: an unfamiliar script is transliterated into Latin",
   "Детализация": "Detail",
   "Уровень детализации: какие мелкие объекты показывать (названия, дороги, тропы, родники)": "Detail level: which small features to show (names, roads, paths, springs)",
+  "Размер текста": "Text size",
+  "Размер текста: множитель размера всех подписей на карте": "Text size: multiplier for all map labels",
   "3 — главное": "3 — main",
   "4 — обычный": "4 — normal",
   "5 — подробнее": "5 — more",

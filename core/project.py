@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from .bbox import parse_bbox
-from . import dem_sources
+from . import dem_sources, text_size
 from .map_language import DETAIL_VARIABLE
 from .resources import resource_path, template_path
 
@@ -361,7 +361,11 @@ VARIABLE_NAMES_PATTERN = re.compile(
 VARIABLE_VALUES_PATTERN = re.compile(
     r'<variableValues type="QStringList">(.*?)</variableValues>', re.S
 )
-VARIABLE_VALUE_PATTERN = re.compile(r"<value>(.*?)</value>", re.S)
+# Пустое значение QGIS пишет самозакрывающимся тегом `<value />`;
+# пропуск такого тега сдвигал все последующие значения относительно имён.
+VARIABLE_VALUE_PATTERN = re.compile(
+    r"<value\b[^>]*?/>|<value\b[^>]*?>(.*?)</value>", re.S
+)
 
 
 def _set_detail_variable(text, level=None):
@@ -458,7 +462,12 @@ def rewrite_project_archive(source, destination, project_name, dem_attribution="
                     if new_font:
                         text = text.replace(old_font, new_font)
                     text = _set_detail_variable(text)
-                    text = _set_project_variable(text, "dem_attribution", dem_attribution)
+                    text = _set_project_variable(
+                        text, text_size.VARIABLE, text_size.multiplier()
+                    )
+                    text = _set_project_variable(
+                        text, "dem_attribution", dem_attribution
+                    )
                     data = text.encode("utf-8")
                     name = f"{project_name}.qgs"
                 elif name.endswith(".qgd"):

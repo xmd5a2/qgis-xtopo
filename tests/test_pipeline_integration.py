@@ -184,7 +184,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(dock.tabs.tabText(dock.project_tab_index), "Проект")
         self.assertFalse(dock.tabs.isTabEnabled(dock.project_tab_index))
         self.assertEqual(dock.tabs.currentIndex(), 0)
-        self.assertLessEqual(dock.minimumSizeHint().height(), 600)
+        self.assertLessEqual(dock.minimumSizeHint().height(), 610)
         self.assertFalse(dock.log_toggle.isChecked())
         self.assertEqual(dock.overpass_server.count(), 5)
         self.assertEqual(

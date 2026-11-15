@@ -56,7 +56,7 @@ try:
 except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
-from ..core import i18n, map_language, slope_style
+from ..core import i18n, map_language, slope_style, text_size
 from ..core.project import fit_project_extent
 from ..core.resources import template_path
 from .atlas import (
@@ -685,8 +685,25 @@ class ProjectPanel(QWidget):
         detail_layout.addWidget(self.detail_combo)
         detail_layout.addStretch(1)
         layout.addWidget(self.detail_row)
+
+        # Размер подписей: переменная проекта text_size_mult умножает
+        # размер каждой подписи в шаблоне.
+        self.text_size_row = QWidget(self)
+        text_size_layout = QHBoxLayout(self.text_size_row)
+        text_size_layout.setContentsMargins(0, 0, 0, 0)
+        text_size_layout.setSpacing(6)
+        self.text_size_label = QLabel("Размер текста", self.text_size_row)
+        self.text_size_combo = QComboBox(self.text_size_row)
+        self.text_size_combo.currentIndexChanged.connect(
+            self._text_size_changed
+        )
+        text_size_layout.addWidget(self.text_size_label)
+        text_size_layout.addWidget(self.text_size_combo)
+        text_size_layout.addStretch(1)
+        layout.addWidget(self.text_size_row)
         self._fill_map_language_combo()
         self._fill_detail_combo()
+        self._fill_text_size_combo()
 
         self.isolines_check = self._checkbox(
             "Контуры высот (изогипсы)", "isolines"
@@ -2013,6 +2030,7 @@ class ProjectPanel(QWidget):
         translate_tree(self)
         self._fill_map_language_combo()
         self._fill_detail_combo()
+        self._fill_text_size_combo()
         # Название варианта в кнопке и в меню зависит от языка.
         self._update_steep_variants()
         self._update_hillshade_variants()
@@ -2163,6 +2181,69 @@ class ProjectPanel(QWidget):
             combo.blockSignals(False)
         map_language.sync_level_of_detail(level)
 
+    TEXT_SIZE_TIP = (
+        "Размер текста: множитель размера всех подписей на карте"
+    )
+
+    def _fill_text_size_combo(self):
+        """Заполняет список размеров текста, сохраняя выбор."""
+        combo = self.text_size_combo
+        current = combo.currentData()
+        if current is None:
+            current = text_size.percent()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for value in text_size.PERCENTS:
+                combo.addItem(f"{value} %", value)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+        finally:
+            combo.blockSignals(False)
+        combo.setToolTip(i18n.tr(self.TEXT_SIZE_TIP))
+        metrics = combo.fontMetrics()
+        width = max(
+            metrics.horizontalAdvance(combo.itemText(i))
+            for i in range(combo.count())
+        )
+        combo.setFixedWidth(max(78, width + 34))
+        combo.setFixedHeight(22)
+
+    def _text_size_changed(self, _index=None):
+        value = self.text_size_combo.currentData()
+        if value is None:
+            return
+        text_size.set_percent(value)
+        project = QgsProject.instance()
+        if self.is_xtopo_project(project):
+            text_size.set_project_text_size(value, project)
+            self._repaint_canvas()
+
+    def _sync_text_size_combo(self):
+        """Показывает в списке размер текста открытого проекта.
+
+        Возвращает True, если переменная в проекте есть: тогда трогать её
+        не нужно.  Старый проект мог хранить множитель, которого нет
+        среди пунктов списка (например, 1.2); ближайший пункт только
+        показывается, а значение проекта не перезаписывается.
+        """
+        project = QgsProject.instance()
+        try:
+            value = project.customVariables().get(text_size.VARIABLE)
+        except Exception:
+            value = None
+        if value is None or not self.is_xtopo_project(project):
+            return False
+        percent = text_size.percent_from_multiplier(value)
+        combo = self.text_size_combo
+        if combo.currentData() != percent:
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(max(0, combo.findData(percent)))
+            finally:
+                combo.blockSignals(False)
+        text_size.set_percent(percent, save=False)
+        return True
+
     def _repaint_canvas(self):
         canvas = self._canvas()
         if canvas is not None:
@@ -2209,6 +2290,13 @@ class ProjectPanel(QWidget):
         if before == self.detail_combo.currentData():
             map_language.set_project_detail(
                 self.detail_combo.currentData() or map_language.level_of_detail()
+            )
+        # Размер текста: если переменной в проекте нет, ставим выбранный
+        # в панели; существующее значение (в том числе 1.2 из старых
+        # проектов) не перезаписываем.
+        if not self._sync_text_size_combo():
+            text_size.set_project_text_size(
+                self.text_size_combo.currentData() or text_size.percent()
             )
 
     def focus_first(self):

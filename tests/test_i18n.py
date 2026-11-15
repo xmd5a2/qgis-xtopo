@@ -430,10 +430,11 @@ class DockLanguageTest(unittest.TestCase):
         cls.app = qgis_app()
 
     def setUp(self):
-        from qgis_xtopo.core import i18n, map_language
+        from qgis_xtopo.core import i18n, map_language, text_size
 
         self.i18n = i18n
         self.map_language = map_language
+        self.text_size = text_size
         self.saved = i18n.language()
         i18n.set_language("ru", save=False)
         self.settings = i18n.settings()
@@ -452,6 +453,11 @@ class DockLanguageTest(unittest.TestCase):
         )
         self.saved_detail_setting = self.settings.value(
             map_language.SETTINGS_KEY_DETAIL
+        )
+        self.saved_text_size = text_size.percent()
+        text_size.set_percent(text_size.DEFAULT_PERCENT, save=False)
+        self.saved_text_size_setting = self.settings.value(
+            text_size.SETTINGS_KEY
         )
 
     def tearDown(self):
@@ -487,6 +493,15 @@ class DockLanguageTest(unittest.TestCase):
                 self.map_language.SETTINGS_KEY_DETAIL,
                 self.saved_detail_setting,
             )
+        self.text_size.set_percent(self.saved_text_size, save=False)
+        if self.saved_text_size_setting is None:
+            self.settings.remove(self.text_size.SETTINGS_KEY)
+        else:
+            self.settings.setValue(
+                self.text_size.SETTINGS_KEY,
+                self.saved_text_size_setting,
+            )
+
     def _dock(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 
@@ -767,6 +782,147 @@ class DockLanguageTest(unittest.TestCase):
         self.assertEqual(dock.project_panel.detail_label.text(), "Detail")
         self.assertIn("main", combo.itemText(0))
         self.assertIn("everything", combo.itemText(3))
+
+    def test_text_size_combo_offers_percents(self):
+        dock = self._dock()
+        panel = dock.project_panel
+        layout = panel.layout()
+        self.assertLess(
+            layout.indexOf(panel.detail_row),
+            layout.indexOf(panel.text_size_row),
+        )
+        row_layout = panel.text_size_row.layout()
+        widgets = [
+            row_layout.itemAt(i).widget() for i in range(row_layout.count())
+        ]
+        self.assertLess(
+            widgets.index(panel.text_size_label),
+            widgets.index(panel.text_size_combo),
+        )
+        self.assertEqual(
+            [panel.text_size_combo.itemData(i)
+             for i in range(panel.text_size_combo.count())],
+            list(self.text_size.PERCENTS),
+        )
+
+    def test_text_size_selection_is_saved(self):
+        dock = self._dock()
+        combo = dock.project_panel.text_size_combo
+        combo.setCurrentIndex(combo.findData(150))
+        self.assertEqual(self.text_size.percent(), 150)
+        self.assertEqual(
+            self.settings.value(self.text_size.SETTINGS_KEY), "150"
+        )
+
+    def test_saved_text_size_is_restored(self):
+        self.settings.setValue(self.text_size.SETTINGS_KEY, "75")
+        self.text_size.load_percent()
+        dock = self._dock()
+        self.assertEqual(
+            dock.project_panel.text_size_combo.currentData(), 75
+        )
+
+    def test_text_size_is_written_to_open_project(self):
+        from unittest import mock
+
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        dock = self._dock()
+        panel = dock.project_panel
+        project = QgsProject.instance()
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.text_size.VARIABLE, "1"
+        )
+        try:
+            combo = panel.text_size_combo
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                combo.setCurrentIndex(combo.findData(200))
+                self.app.processEvents()
+            self.assertEqual(
+                project.customVariables()[self.text_size.VARIABLE], "2"
+            )
+        finally:
+            QgsExpressionContextUtils.removeProjectVariable(
+                project, self.text_size.VARIABLE
+            )
+
+    def test_refresh_writes_text_size_into_project(self):
+        from unittest import mock
+
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        dock = self._dock()
+        panel = dock.project_panel
+        project = QgsProject.instance()
+        QgsExpressionContextUtils.removeProjectVariable(
+            project, self.text_size.VARIABLE
+        )
+        try:
+            self.text_size.set_percent(125, save=False)
+            combo = panel.text_size_combo
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(combo.findData(125))
+            finally:
+                combo.blockSignals(False)
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.refresh()
+            self.assertEqual(
+                project.customVariables()[self.text_size.VARIABLE], "1.25"
+            )
+        finally:
+            QgsExpressionContextUtils.removeProjectVariable(
+                project, self.text_size.VARIABLE
+            )
+
+    def test_old_project_multiplier_is_not_rewritten(self):
+        from unittest import mock
+
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        dock = self._dock()
+        panel = dock.project_panel
+        project = QgsProject.instance()
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.text_size.VARIABLE, "1.2"
+        )
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.refresh()
+            self.assertEqual(
+                panel.text_size_combo.currentData(), 125
+            )
+            self.assertEqual(
+                project.customVariables()[self.text_size.VARIABLE], "1.2"
+            )
+        finally:
+            QgsExpressionContextUtils.removeProjectVariable(
+                project, self.text_size.VARIABLE
+            )
+
+    def test_text_size_labels_follow_interface_language(self):
+        dock = self._dock()
+        panel = dock.project_panel
+        self.assertEqual(panel.text_size_label.text(), "Размер текста")
+        dock._switch_language()
+        self.app.processEvents()
+        self.assertEqual(panel.text_size_label.text(), "Text size")
+        self.assertIn("multiplier", panel.text_size_combo.toolTip())
 
     def test_saved_map_language_is_restored(self):
         self.settings.setValue(self.map_language.SETTINGS_KEY, "fr")

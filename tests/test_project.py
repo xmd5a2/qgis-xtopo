@@ -1,11 +1,27 @@
 import re
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
 from qgis_xtopo.core.project import project_file_path, rewrite_project_archive
 from qgis_xtopo.core.resources import template_path
+
+VARIABLE_VALUE = re.compile(
+    r"<value\b[^>]*?/>|<value\b[^>]*?>(.*?)</value>", re.S
+)
+
+
+def project_variables(text):
+    """Переменные проекта: значения, включая пустые `<value />`."""
+    start = text.rfind("<Variables>")
+    block = text[start:text.find("</Variables>", start)]
+    names, values = block.split("</variableNames>")
+    return dict(zip(
+        [match.group(1) for match in VARIABLE_VALUE.finditer(names)],
+        [match.group(1) or "" for match in VARIABLE_VALUE.finditer(values)],
+    ))
 
 
 class ProjectTemplateTest(unittest.TestCase):
@@ -186,13 +202,7 @@ class ProjectDetailLevelTest(unittest.TestCase):
     """Уровень детализации из панели попадает в переменные проекта."""
 
     def _variables(self, text):
-        start = text.rfind("<Variables>")
-        block = text[start:text.find("</Variables>", start)]
-        names, values = block.split("</variableNames>")
-        return dict(zip(
-            re.findall(r"<value>(.*?)</value>", names),
-            re.findall(r"<value>(.*?)</value>", values),
-        ))
+        return project_variables(text)
 
     def _text(self, level):
         from qgis_xtopo.core.project import _set_detail_variable
@@ -239,17 +249,197 @@ class ProjectDetailLevelTest(unittest.TestCase):
         self.assertEqual(self._variables(text)["level_of_detail"], "6")
 
 
+class ProjectTextSizeTest(unittest.TestCase):
+    """Переменная text_size_mult масштабирует все подписи слоёв."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _template_text(self):
+        with zipfile.ZipFile(template_path()) as archive:
+            return archive.read("automap.qgs").decode("utf-8")
+
+    def test_percent_maps_to_multiplier(self):
+        from qgis_xtopo.core import text_size
+
+        expected = {
+            50: "0.5", 75: "0.75", 100: "1", 125: "1.25",
+            150: "1.5", 200: "2",
+        }
+        for percent, value in expected.items():
+            self.assertEqual(text_size.multiplier(percent), value)
+
+    def test_percent_is_normalized_to_available_choices(self):
+        from qgis_xtopo.core import text_size
+
+        self.assertEqual(text_size.normalize(74), 75)
+        self.assertEqual(text_size.normalize(120), 125)
+        self.assertEqual(text_size.normalize(-10), 50)
+        self.assertEqual(text_size.normalize(500), 200)
+        self.assertEqual(text_size.normalize("bad"), 100)
+
+    def test_template_scales_every_drawn_label(self):
+        root = ET.fromstring(self._template_text())
+        missing = []
+        for layer in root.iter("maplayer"):
+            labeling = layer.find("labeling")
+            if labeling is None:
+                continue
+            name = layer.findtext("layername") or layer.findtext("id")
+            for settings in labeling.iter("settings"):
+                rendering = settings.find("rendering")
+                if (rendering is not None
+                        and rendering.get("drawLabels") == "0"):
+                    continue
+                dd = settings.find("dd_properties")
+                properties = (
+                    dd.find("Option/Option[@name='properties']")
+                    if dd is not None else None
+                )
+                size = (
+                    properties.find("Option[@name='Size']")
+                    if properties is not None else None
+                )
+                active = (
+                    size.find("Option[@name='active']")
+                    if size is not None else None
+                )
+                expression = (
+                    size.find("Option[@name='expression']")
+                    if size is not None else None
+                )
+                value = ""
+                if expression is not None:
+                    value = expression.get("value") or ""
+                if (active is None or active.get("value") != "true"
+                        or value.count("@text_size_mult") != 1):
+                    missing.append(name)
+        self.assertEqual(missing, [])
+
+    def test_template_has_no_undeclared_multiplier(self):
+        self.assertNotIn(
+            "@text_size_mult_low_mapscale", self._template_text()
+        )
+
+    def test_template_size_expressions_parse(self):
+        from qgis.core import QgsExpression
+        from qgis_xtopo.core.expressions import load_expressions
+
+        load_expressions()
+        root = ET.fromstring(self._template_text())
+        errors = []
+        for option in root.iter("Option"):
+            if option.get("name") != "Size":
+                continue
+            expression = option.find("Option[@name='expression']")
+            if expression is None:
+                continue
+            value = expression.get("value") or ""
+            if "@text_size_mult" not in value:
+                continue
+            parsed = QgsExpression(value)
+            if parsed.hasParserError():
+                errors.append((value, parsed.parserErrorString()))
+        self.assertEqual(errors, [])
+
+    def test_template_expression_doubles_label_size(self):
+        from qgis.core import (
+            QgsExpression,
+            QgsExpressionContext,
+            QgsExpressionContextUtils,
+            QgsPalLayerSettings,
+            QgsProject,
+        )
+        from qgis_xtopo.core import text_size
+        from qgis_xtopo.core.expressions import load_expressions
+
+        load_expressions()
+        project = QgsProject()
+        project.read(
+            str(template_path()), QgsProject.FlagDontResolveLayers
+        )
+        try:
+            layer = project.mapLayersByName("cliff")[0]
+            settings = layer.labeling().settings()
+            prop = settings.dataDefinedProperties().property(
+                QgsPalLayerSettings.Size
+            )
+            base = settings.format().font().pointSizeF()
+            for value, expected in (("1", base), ("2", base * 2)):
+                QgsExpressionContextUtils.setProjectVariable(
+                    project, text_size.VARIABLE, value
+                )
+                context = QgsExpressionContext()
+                context.appendScope(
+                    QgsExpressionContextUtils.projectScope(project)
+                )
+                context.appendScope(
+                    QgsExpressionContextUtils.layerScope(layer)
+                )
+                context.setOriginalValueVariable(base)
+                expression = QgsExpression(prop.expressionString())
+                self.assertAlmostEqual(
+                    expression.evaluate(context), expected
+                )
+        finally:
+            project.clear()
+
+    def test_rewrite_writes_selected_size(self):
+        from qgis_xtopo.core import text_size
+
+        previous = text_size.percent()
+        try:
+            text_size.set_percent(150, save=False)
+            with tempfile.TemporaryDirectory() as directory:
+                destination = Path(directory) / "demo.qgz"
+                rewrite_project_archive(
+                    template_path(), destination, "demo"
+                )
+                with zipfile.ZipFile(destination) as archive:
+                    text = archive.read("demo.qgs").decode("utf-8")
+        finally:
+            text_size.set_percent(previous, save=False)
+        self.assertEqual(project_variables(text)["text_size_mult"], "1.5")
+
+    def test_rewrite_keeps_variable_positions(self):
+        """Пустое значение dem_attribution не сдвигает остальные."""
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "demo.qgz"
+            rewrite_project_archive(
+                template_path(), destination, "demo",
+                dem_attribution="ATTRIBUTION",
+            )
+            with zipfile.ZipFile(destination) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        variables = project_variables(text)
+        self.assertEqual(variables["dem_attribution"], "ATTRIBUTION")
+        self.assertEqual(variables["disable_surface_integrity"], "false")
+        self.assertEqual(variables["mountain_pass_text_buffer_width"], "0.5")
+
+    def test_project_variable_is_written(self):
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+        from qgis_xtopo.core import text_size
+
+        project = QgsProject()
+        try:
+            text_size.set_project_text_size(125, project)
+            self.assertEqual(
+                project.customVariables()[text_size.VARIABLE], "1.25"
+            )
+        finally:
+            QgsExpressionContextUtils.removeProjectVariable(
+                project, text_size.VARIABLE
+            )
+
+
 class ProjectAttributionTest(unittest.TestCase):
     """Атрибуция источника рельефа попадает в подпись макета атласа."""
 
     def _variables(self, text):
-        start = text.rfind("<Variables>")
-        block = text[start:text.find("</Variables>", start)]
-        names, values = block.split("</variableNames>")
-        return dict(zip(
-            re.findall(r"<value>(.*?)</value>", names),
-            re.findall(r"<value>(.*?)</value>", values),
-        ))
+        return project_variables(text)
 
     def test_template_has_attribution_expression(self):
         with zipfile.ZipFile(template_path()) as archive:
