@@ -2607,6 +2607,61 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertFalse(dialog.reset_button.isEnabled())
         dialog.done(0)
 
+    def test_extent_dialog_right_button_pans_while_drawing(self):
+        from qgis.PyQt.QtCore import QPoint
+        from qgis_xtopo.gui.extentdialog import (
+            ExtentDialog, _left_button, _right_button,
+        )
+
+        class Event:
+            def __init__(self, button, position, buttons=0):
+                self._button = button
+                self._position = position
+                self._buttons = buttons
+
+            def button(self):
+                return self._button
+
+            def pos(self):
+                return self._position
+
+            def buttons(self):
+                return self._buttons
+
+        dialog = ExtentDialog("37.5,55.7,37.7,55.8")
+        try:
+            tool = dialog._draw_tool
+            before = dialog.canvas.extent()
+            start = QPoint(100, 100)
+            move = QPoint(80, 120)
+            tool.canvasPressEvent(
+                Event(_right_button(), start, _right_button())
+            )
+            tool.canvasMoveEvent(
+                Event(_right_button(), move, _right_button())
+            )
+            after = dialog.canvas.extent()
+            # Тянем влево и вниз — карта следует за курсором.
+            self.assertGreater(after.center().x(), before.center().x())
+            self.assertGreater(after.center().y(), before.center().y())
+            tool.canvasReleaseEvent(Event(_right_button(), move))
+            self.assertIsNone(tool.pan_point)
+            # Левая кнопка по-прежнему рисует прямоугольник.
+            drawn = []
+            tool.rectangleDrawn.connect(drawn.append)
+            tool.canvasPressEvent(
+                Event(_left_button(), QPoint(50, 50), _left_button())
+            )
+            tool.canvasMoveEvent(
+                Event(_left_button(), QPoint(150, 150), _left_button())
+            )
+            tool.canvasReleaseEvent(
+                Event(_left_button(), QPoint(150, 150))
+            )
+            self.assertEqual(len(drawn), 1)
+        finally:
+            dialog.done(0)
+
     def test_extent_dialog_escape_and_scale_bar(self):
         """Esc отменяет выбор, шкала масштаба рисуется на холсте."""
         from qgis.PyQt.QtCore import Qt

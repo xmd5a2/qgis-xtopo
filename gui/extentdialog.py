@@ -130,6 +130,13 @@ def _left_button():
         return Qt.LeftButton
 
 
+def _right_button():
+    try:
+        return Qt.MouseButton.RightButton
+    except AttributeError:
+        return Qt.RightButton
+
+
 # Подписи размеров — общие для окна выбора охвата и разметки листов
 # атласа, поэтому живут в core/measure.py.
 from ..core.measure import format_length, frame_sizes_km  # noqa: E402,F401
@@ -343,7 +350,11 @@ class MeasuredCanvas(QgsMapCanvas):
 
 
 class RectangleMapTool(QgsMapTool):
-    """Drag with the left mouse button to outline a rectangular extent."""
+    """Drag with the left mouse button to outline a rectangular extent.
+
+    The right mouse button pans the map, so the extent can be positioned
+    without leaving the drawing tool.
+    """
 
     rectangleDrawn = pyqtSignal(object)
     rectangleChanged = pyqtSignal(object)
@@ -353,6 +364,7 @@ class RectangleMapTool(QgsMapTool):
         self.canvas = canvas
         self.start_point = None
         self.end_point = None
+        self.pan_point = None
         self.band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
         self.band.setColor(QColor(0, 120, 215))
         self.band.setFillColor(QColor(0, 120, 215, 40))
@@ -360,7 +372,11 @@ class RectangleMapTool(QgsMapTool):
         self.band.hide()
 
     def canvasPressEvent(self, event):
-        if event.button() != _left_button():
+        if event.button() == _right_button():
+            if self.start_point is None:
+                self._start_pan(event.pos())
+            return
+        if event.button() != _left_button() or self.pan_point is not None:
             return
         self.start_point = self.toMapCoordinates(event.pos())
         self.end_point = self.start_point
@@ -368,6 +384,12 @@ class RectangleMapTool(QgsMapTool):
         self._draw_band()
 
     def canvasMoveEvent(self, event):
+        if self.pan_point is not None:
+            if event.buttons() & _right_button():
+                self._pan(event.pos())
+            else:
+                self._stop_pan()
+            return
         if self.start_point is None:
             return
         self.end_point = self.toMapCoordinates(event.pos())
@@ -378,6 +400,9 @@ class RectangleMapTool(QgsMapTool):
             self.rectangleChanged.emit(rectangle)
 
     def canvasReleaseEvent(self, event):
+        if event.button() == _right_button() and self.pan_point is not None:
+            self._stop_pan()
+            return
         if self.start_point is None or event.button() != _left_button():
             return
         self.end_point = self.toMapCoordinates(event.pos())
@@ -386,6 +411,42 @@ class RectangleMapTool(QgsMapTool):
         self.end_point = None
         if rectangle.width() > 0 and rectangle.height() > 0:
             self.rectangleDrawn.emit(rectangle)
+
+    def _start_pan(self, position):
+        self.pan_point = position
+        self._pan_origin = position
+        self._pan_extent = QgsRectangle(self.canvas.extent())
+        self._pan_units = self.canvas.mapUnitsPerPixel()
+        self._pan_cursor = self.canvas.cursor()
+        self.canvas.setCursor(Qt.ClosedHandCursor)
+
+    def _pan(self, position):
+        delta = position - self._pan_origin
+        if delta.isNull():
+            return
+        # Карта следует за курсором: тянем вправо — область уходит влево.
+        dx = -delta.x() * self._pan_units
+        dy = delta.y() * self._pan_units
+        extent = self._pan_extent
+        self.canvas.setExtent(
+            QgsRectangle(
+                extent.xMinimum() + dx,
+                extent.yMinimum() + dy,
+                extent.xMaximum() + dx,
+                extent.yMaximum() + dy,
+            )
+        )
+        self.canvas.refresh()
+
+    def _stop_pan(self):
+        if self.pan_point is None:
+            return
+        self.pan_point = None
+        self.canvas.setCursor(getattr(self, "_pan_cursor", Qt.ArrowCursor))
+
+    def deactivate(self):
+        self._stop_pan()
+        super().deactivate()
 
     def _rectangle(self):
         rectangle = QgsRectangle(self.start_point, self.end_point)
@@ -404,6 +465,7 @@ class RectangleMapTool(QgsMapTool):
         self.band.show()
 
     def clear(self):
+        self._stop_pan()
         self.start_point = None
         self.end_point = None
         self.band.reset(QgsWkbTypes.PolygonGeometry)
@@ -532,8 +594,8 @@ class ExtentDialog(QDialog):
         if self.draw_button.icon().isNull():
             self.draw_button.setText("Нарисовать охват")
         self.draw_button.setToolTip(
-            "Нарисовать охват: зажмите левую кнопку мыши на карте "
-            "и протяните прямоугольник"
+            "Нарисовать охват: левой кнопкой протяните прямоугольник, "
+            "правой — перемещайте карту"
         )
         self.draw_button.toggled.connect(self._toggle_draw)
         tools.addWidget(self.draw_button)
@@ -577,9 +639,9 @@ class ExtentDialog(QDialog):
 
         hint = QLabel(
             "Перетаскивайте карту мышью, колесом меняйте масштаб. Найдите "
-            "место в строке поиска или нажмите кнопку с иконкой прямоугольника "
-            "и протяните рамку, чтобы задать область точнее. Затем нажмите "
-            "«Использовать охват»."
+            "место в строке поиска или нажмите кнопку с иконкой прямоугольника: "
+            "левой кнопкой рисуется рамка, правой карта перемещается. Затем "
+            "нажмите «Использовать охват»."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
