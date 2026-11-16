@@ -188,12 +188,12 @@ class PipelineIntegrationTest(unittest.TestCase):
         for key in ("geo2day", "osmfr", "movisda"):
             self.assertIn(key, modes)
             dock.source_mode.setCurrentIndex(dock.source_mode.findData(key))
-            self.assertTrue(dock.geofabrik_group.isVisibleTo(dock))
+            self.assertTrue(dock.map_index_group.isVisibleTo(dock))
             self.assertFalse(dock.source_value.isVisibleTo(dock))
         self.assertFalse(hasattr(dock, "extract_provider"))
         # Режим выреза по рамке: список карт не нужен.
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
-        self.assertFalse(dock.geofabrik_group.isVisibleTo(dock))
+        self.assertFalse(dock.map_index_group.isVisibleTo(dock))
         self.assertFalse(dock.source_value.isVisibleTo(dock))
 
     def test_dock_is_compact(self):
@@ -224,7 +224,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertFalse(dock.browse_source.isVisibleTo(dock))
         self.assertFalse(dock.download_pbf_button.isVisibleTo(dock))
         self.assertFalse(hasattr(dock, "download_maps_button"))
-        self.assertTrue(dock.geofabrik_info.isVisibleTo(dock))
+        self.assertTrue(dock.map_index_status.isVisibleTo(dock))
         self.assertFalse(dock.close_button.isEnabled())
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("pbf"))
         self.assertTrue(dock.source_value.isVisibleTo(dock))
@@ -1440,19 +1440,19 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertIn("«!»", dock.project_name_hint.text())
         dock.deleteLater()
 
-    def test_dock_geofabrik_timer(self):
+    def test_dock_map_index_timer(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 
         dock = XtopoDockWidget(None)
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("geofabrik"))
-        dock._geofabrik_timer.stop()
+        dock._map_index_timer.stop()
         dock.bbox.setText("37.5,55.7,37.7,55.8")
-        self.assertTrue(dock._geofabrik_timer.isActive())
-        self.assertIsNone(dock._geofabrik_plan)
-        dock._geofabrik_timer.stop()
+        self.assertTrue(dock._map_index_timer.isActive())
+        self.assertIsNone(dock._map_index_plan)
+        dock._map_index_timer.stop()
         dock.deleteLater()
 
-    def test_dock_geofabrik_plan_format(self):
+    def test_dock_map_index_plan_format(self):
         from qgis_xtopo.core import geofabrik
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 
@@ -1467,21 +1467,72 @@ class PipelineIntegrationTest(unittest.TestCase):
             geofabrik.GeofabrikIndex(), 0, "Tue, 20 Oct 2026 04:04:13 GMT"
         )
         plan = geofabrik.GeofabrikPlan(state, [item], [status])
-        dock._geofabrik_plan = plan
-        dock._apply_geofabrik_plan(plan)
+        dock._map_index_plan = plan
+        dock._apply_map_index_plan(plan)
         self.assertEqual(dock.source_value.text(), "bayern")
-        self.assertIn("Bayern", dock.geofabrik_maps.item(0).text())
-        self.assertIn("100.0 МБ", dock.geofabrik_maps.item(0).text())
-        self.assertTrue(dock.geofabrik_maps.item(0).checkState())
-        self.assertEqual(dock._geofabrik_selected_ids(), ["bayern"])
-        self.assertIn("20.10.2026", dock.geofabrik_title.text())
-        self.assertNotIn("Индекс Geofabrik", dock.geofabrik_info.text())
-        self.assertIn("100.0 МБ", dock.geofabrik_summary.text())
-        estimate = dock._geofabrik_estimate(50 * 1048576, 100 * 1048576)
+        self.assertIn("Bayern", dock.map_index_list.item(0).text())
+        self.assertIn("100.0 МБ", dock.map_index_list.item(0).text())
+        self.assertTrue(dock.map_index_list.item(0).checkState())
+        self.assertEqual(dock._selected_map_ids(), ["bayern"])
+        self.assertIn("20.10.2026", dock.map_index_title.text())
+        self.assertNotIn("Индекс Geofabrik", dock.map_index_status.text())
+        self.assertIn("Найдено карт: 1", dock.map_index_status.text())
+        self.assertIn("100.0 МБ", dock.map_index_summary.text())
+        estimate = dock._map_download_estimate(50 * 1048576, 100 * 1048576)
         self.assertIn("Скачивание", estimate)
         self.assertIn("подготовка", estimate)
-        local = dock._geofabrik_estimate(0, 100 * 1048576)
+        local = dock._map_download_estimate(0, 100 * 1048576)
         self.assertNotIn("Скачивание", local)
+        dock.deleteLater()
+
+    def test_map_list_position_is_stable(self):
+        """Сообщения и полоса загрузки не сдвигают список карт."""
+        from qgis.PyQt.QtCore import QPoint
+
+        from qgis_xtopo.core import geofabrik
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("geofabrik"))
+        dock._map_index_timer.stop()
+        dock.show()
+        self.app.processEvents()
+
+        def list_y():
+            return dock.map_index_list.mapTo(dock, QPoint(0, 0)).y()
+
+        start = list_y()
+        dock._clear_map_index_view("Обновление индекса…")
+        dock._set_map_index_busy(True)
+        self.app.processEvents()
+        loading = list_y()
+        self.assertTrue(dock.map_index_progress.isVisible())
+        dock._set_map_index_busy(False)
+
+        state = geofabrik.IndexState(geofabrik.GeofabrikIndex(), 0, "")
+        empty = geofabrik.GeofabrikPlan(state, [], [])
+        dock._map_index_plan = empty
+        dock._apply_map_index_plan(empty)
+        self.app.processEvents()
+        empty_y = list_y()
+        self.assertIn("не найдены", dock.map_index_status.text())
+
+        item = geofabrik.GeofabrikMap(
+            "corse", "Corse", "france",
+            "https://download.geofabrik.de/europe/france/corse-latest.osm.pbf",
+        )
+        status = geofabrik.MapStatus(item, True, 34506434)
+        plan = geofabrik.GeofabrikPlan(state, [item], [status])
+        dock._map_index_plan = plan
+        dock._apply_map_index_plan(plan)
+        self.app.processEvents()
+        found_y = list_y()
+        self.assertIn("Найдено карт: 1", dock.map_index_status.text())
+
+        self.assertEqual(
+            {start, loading, empty_y, found_y}, {start}
+        )
+        dock.close()
         dock.deleteLater()
 
     def test_dock_empty_plan_names_actual_provider(self):
@@ -1492,15 +1543,15 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock = XtopoDockWidget(None)
         state = geofabrik.IndexState(geofabrik.GeofabrikIndex(), 0, "")
         plan = geofabrik.GeofabrikPlan(state, [], [])
-        dock._geofabrik_plan = plan
-        dock._apply_geofabrik_plan(plan, "movisda")
-        self.assertIn("movisda", dock.geofabrik_info.text())
-        self.assertNotIn("Geofabrik", dock.geofabrik_info.text())
-        dock._apply_geofabrik_plan(plan)
-        self.assertIn("Geofabrik", dock.geofabrik_info.text())
+        dock._map_index_plan = plan
+        dock._apply_map_index_plan(plan, "movisda")
+        self.assertIn("movisda", dock.map_index_status.text())
+        self.assertNotIn("Geofabrik", dock.map_index_status.text())
+        dock._apply_map_index_plan(plan)
+        self.assertIn("Geofabrik", dock.map_index_status.text())
         dock.deleteLater()
 
-    def test_dock_geofabrik_estimate_follows_pc_speed(self):
+    def test_dock_map_download_estimate_follows_pc_speed(self):
         from unittest import mock
 
         from qgis_xtopo.gui import dockwidget
@@ -1515,7 +1566,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             ), mock.patch.object(
                 dockwidget.performance, "layer_worker_count", return_value=8
             ):
-                fast = dock._geofabrik_estimate(0, 100 * 1048576)
+                fast = dock._map_download_estimate(0, 100 * 1048576)
             with mock.patch.object(
                 dock, "_terrain_estimate_seconds", return_value=0.0
             ), mock.patch.object(
@@ -1523,13 +1574,13 @@ class PipelineIntegrationTest(unittest.TestCase):
             ), mock.patch.object(
                 dockwidget.performance, "layer_worker_count", return_value=3
             ):
-                slow = dock._geofabrik_estimate(0, 100 * 1048576)
+                slow = dock._map_download_estimate(0, 100 * 1048576)
             self.assertIn("27 с", fast)
             self.assertIn("2 мин", slow)
         finally:
             dock.deleteLater()
 
-    def test_dock_geofabrik_estimate_includes_terrain(self):
+    def test_dock_map_download_estimate_includes_terrain(self):
         from unittest import mock
 
         from qgis_xtopo.gui import dockwidget
@@ -1545,11 +1596,11 @@ class PipelineIntegrationTest(unittest.TestCase):
                 with mock.patch.object(
                     dock, "_terrain_estimate_seconds", return_value=0.0
                 ):
-                    without = dock._geofabrik_estimate(0, 100 * 1048576)
+                    without = dock._map_download_estimate(0, 100 * 1048576)
                 with mock.patch.object(
                     dock, "_terrain_estimate_seconds", return_value=120.0
                 ):
-                    with_terrain = dock._geofabrik_estimate(
+                    with_terrain = dock._map_download_estimate(
                         0, 100 * 1048576
                     )
             self.assertIn("27 с", without)
@@ -2545,19 +2596,19 @@ class PipelineIntegrationTest(unittest.TestCase):
             extra_statuses=[geofabrik.MapStatus(extra, True, 5103585179)],
             parent_names={"corse": "France", "france": "Europe"},
         )
-        dock._geofabrik_plan = plan
-        dock._apply_geofabrik_plan(plan)
-        self.assertEqual(dock.geofabrik_maps.count(), 3)
-        self.assertTrue(dock.geofabrik_maps.item(0).checkState())
-        self.assertFalse(dock.geofabrik_maps.item(2).checkState())
-        self.assertEqual(dock._geofabrik_selected_ids(), ["corse"])
-        self.assertIn("32.9 МБ", dock.geofabrik_maps.item(0).text())
-        self.assertIn("France", dock.geofabrik_maps.item(0).text())
-        self.assertNotIn("corse", dock.geofabrik_maps.item(0).text())
-        self.assertNotIn("доступна", dock.geofabrik_maps.item(0).text())
-        self.assertIn("Выбрано карт: 1", dock.geofabrik_summary.text())
-        dock.geofabrik_maps.item(0).setCheckState(Qt.Unchecked)
-        self.assertEqual(dock._geofabrik_selected_ids(), [])
+        dock._map_index_plan = plan
+        dock._apply_map_index_plan(plan)
+        self.assertEqual(dock.map_index_list.count(), 3)
+        self.assertTrue(dock.map_index_list.item(0).checkState())
+        self.assertFalse(dock.map_index_list.item(2).checkState())
+        self.assertEqual(dock._selected_map_ids(), ["corse"])
+        self.assertIn("32.9 МБ", dock.map_index_list.item(0).text())
+        self.assertIn("France", dock.map_index_list.item(0).text())
+        self.assertNotIn("corse", dock.map_index_list.item(0).text())
+        self.assertNotIn("доступна", dock.map_index_list.item(0).text())
+        self.assertIn("Выбрано карт: 1", dock.map_index_summary.text())
+        dock.map_index_list.item(0).setCheckState(Qt.Unchecked)
+        self.assertEqual(dock._selected_map_ids(), [])
         with self.assertRaises(ValueError):
             dock._build_config()
         dock.deleteLater()
@@ -2581,9 +2632,9 @@ class PipelineIntegrationTest(unittest.TestCase):
             [chosen],
             [geofabrik.MapStatus(chosen, True, 34506434, local=True)],
         )
-        dock._geofabrik_plan = plan
-        dock._apply_geofabrik_plan(plan)
-        entry = dock.geofabrik_maps.item(0)
+        dock._map_index_plan = plan
+        dock._apply_map_index_plan(plan)
+        entry = dock.map_index_list.item(0)
         self.assertIn("скачана", entry.text())
         self.assertNotEqual(entry.background().style(), Qt.NoBrush)
         self.assertGreater(entry.background().color().green(),
@@ -2599,7 +2650,7 @@ class PipelineIntegrationTest(unittest.TestCase):
 
         dock = XtopoDockWidget(None)
         self.assertEqual(
-            dock.geofabrik_maps.resizeMode(), QListView.Adjust
+            dock.map_index_list.resizeMode(), QListView.Adjust
         )
         chosen = geofabrik.GeofabrikMap(
             "russia", "Russian Federation", "europe",
@@ -2613,21 +2664,21 @@ class PipelineIntegrationTest(unittest.TestCase):
             [chosen],
             [geofabrik.MapStatus(chosen, True, 5103585179)],
         )
-        dock._geofabrik_plan = plan
-        dock._apply_geofabrik_plan(plan)
-        dock.geofabrik_maps.resize(260, 150)
-        dock.geofabrik_maps.show()
+        dock._map_index_plan = plan
+        dock._apply_map_index_plan(plan)
+        dock.map_index_list.resize(260, 150)
+        dock.map_index_list.show()
         self.app.processEvents()
         # Ширина элемента по мнению делегата не превышает ширину окна —
         # прокрутка не нужна, а текст обрезается многоточием посередине.
-        delegate = dock.geofabrik_maps.itemDelegate()
-        index = dock.geofabrik_maps.model().index(0, 0)
+        delegate = dock.map_index_list.itemDelegate()
+        index = dock.map_index_list.model().index(0, 0)
         hint = delegate.sizeHint(QStyleOptionViewItem(), index)
         self.assertLessEqual(
-            hint.width(), dock.geofabrik_maps.viewport().width()
+            hint.width(), dock.map_index_list.viewport().width()
         )
         self.assertFalse(
-            dock.geofabrik_maps.horizontalScrollBar().isVisible()
+            dock.map_index_list.horizontalScrollBar().isVisible()
         )
         dock.deleteLater()
 
@@ -3071,7 +3122,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             dialog.done(0)
             self.app.processEvents()
 
-    def test_geofabrik_refresh_button(self):
+    def test_map_index_refresh_button(self):
         """Кнопка обновления индекса помечает кэш индекса устаревшим."""
         from unittest import mock
 
@@ -3102,22 +3153,22 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock = XtopoDockWidget(None)
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("movisda"))
         dock.bbox.setText("6.80,45.80,7.00,46.00")
-        dock._geofabrik_timer.stop()
-        dock.geofabrik_maps.addItem("старая карта")
-        dock.geofabrik_summary.setText("Выбрано карт: 1")
+        dock._map_index_timer.stop()
+        dock.map_index_list.addItem("старая карта")
+        dock.map_index_summary.setText("Выбрано карт: 1")
         with mock.patch.object(extracts, "invalidate_cache") as invalidate, \
                 mock.patch.object(net, "reset") as reset, \
-                mock.patch.object(dock, "_start_geofabrik") as start:
-            dock._refresh_geofabrik_index()
-        self.assertEqual(dock.geofabrik_maps.count(), 0)
-        self.assertEqual(dock.geofabrik_summary.text(), "")
-        self.assertIn("Обновление индекса", dock.geofabrik_info.text())
-        self.assertTrue(dock.geofabrik_info.isVisibleTo(dock))
+                mock.patch.object(dock, "_start_map_index") as start:
+            dock._refresh_map_index()
+        self.assertEqual(dock.map_index_list.count(), 0)
+        self.assertEqual(dock.map_index_summary.text(), "")
+        self.assertIn("Обновление индекса", dock.map_index_status.text())
+        self.assertTrue(dock.map_index_status.isVisibleTo(dock))
         reset.assert_called_once_with()
         invalidate.assert_called_once()
         start.assert_called_once_with(refreshing=True)
         self.assertEqual(
-            dock.geofabrik_refresh.toolTip(), "Обновить индекс выгрузок"
+            dock.map_index_refresh.toolTip(), "Обновить индекс выгрузок"
         )
         dock.deleteLater()
 

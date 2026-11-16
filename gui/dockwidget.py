@@ -156,7 +156,7 @@ def _short_status(text, limit=58):
 class _MiddleElideDelegate(QStyledItemDelegate):
     """Обрезает длинные строки списка многоточием посередине.
 
-    Названия карт Geofabrik не влезают в ширину панели; обрезка посередине
+    Названия карт выгрузок не влезают в ширину панели; обрезка посередине
     оставляет видимым и начало названия, и конец строки со статусом
     («скачана»). Полный текст доступен в подсказке элемента.
     """
@@ -188,7 +188,7 @@ class _MiddleElideDelegate(QStyledItemDelegate):
 # Фон строк карт, уже лежащих в локальном кэше: слабый светло-зелёный.
 _DOWNLOADED_MAP_BG = QColor("#d8efdb")
 
-# Measured aggregate throughput of four parallel Geofabrik downloads.
+# Измеренная суммарная скорость четырёх параллельных загрузок карт.
 DOWNLOAD_RATE = 1_000_000
 
 # Пороги предупреждения об оценке подготовки: область становится
@@ -525,7 +525,7 @@ class ProxyCheckWorker(QThread):
         self.checked.emit(self.generation, proxy.probe(self.config))
 
 
-class GeofabrikPlanWorker(QThread):
+class MapIndexWorker(QThread):
     result = pyqtSignal(object)
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
@@ -607,7 +607,7 @@ class XtopoDockWidget(QDockWidget):
         self.worker = None
         self.server_workers = []
         self.pbf_probe = None
-        self.geofabrik_worker = None
+        self.map_index_worker = None
         self.dem_availability_worker = None
         self._dem_availability = {}
         self._dem_bbox = None
@@ -622,13 +622,13 @@ class XtopoDockWidget(QDockWidget):
         self._dem_check_timer = QTimer(self)
         self._dem_check_timer.setSingleShot(True)
         self._dem_check_timer.timeout.connect(self._start_dem_availability)
-        self._geofabrik_plan = None
-        self._geofabrik_plan_bbox = ""
-        self._geofabrik_stats_maps = ()
+        self._map_index_plan = None
+        self._map_index_plan_bbox = ""
+        self._map_index_stats_maps = ()
         self._pbf_info_state = None
-        self._geofabrik_timer = QTimer(self)
-        self._geofabrik_timer.setSingleShot(True)
-        self._geofabrik_timer.timeout.connect(self._start_geofabrik)
+        self._map_index_timer = QTimer(self)
+        self._map_index_timer.setSingleShot(True)
+        self._map_index_timer.timeout.connect(self._start_map_index)
         self._pbf_probe_timer = QTimer(self)
         self._pbf_probe_timer.setSingleShot(True)
         self._pbf_probe_timer.timeout.connect(self._start_pbf_probe)
@@ -732,7 +732,7 @@ class XtopoDockWidget(QDockWidget):
             return
         self._shutting_down = True
         for timer in (
-                self._pbf_probe_timer, self._geofabrik_timer,
+                self._pbf_probe_timer, self._map_index_timer,
                 self._dem_check_timer, self._project_timer,
                 self._proxy_timer):
             try:
@@ -741,7 +741,7 @@ class XtopoDockWidget(QDockWidget):
                 pass
         workers = []
         for name in (
-                "worker", "pbf_probe", "geofabrik_worker",
+                "worker", "pbf_probe", "map_index_worker",
                 "dem_availability_worker", "sonny_catalogue_worker",
                 "proxy_check"):
             worker = getattr(self, name, None)
@@ -759,7 +759,7 @@ class XtopoDockWidget(QDockWidget):
         timeouts = {
             "worker": 30000,
             "pbf_probe": 10000,
-            "geofabrik_worker": 15000,
+            "map_index_worker": 15000,
             "dem_availability_worker": 15000,
             "sonny_catalogue_worker": 30000,
             "proxy_check": 5000,
@@ -776,7 +776,7 @@ class XtopoDockWidget(QDockWidget):
                 pass
         self.server_workers = []
         for name in (
-                "worker", "pbf_probe", "geofabrik_worker",
+                "worker", "pbf_probe", "map_index_worker",
                 "dem_availability_worker", "sonny_catalogue_worker",
                 "proxy_check"):
             setattr(self, name, None)
@@ -981,55 +981,63 @@ class XtopoDockWidget(QDockWidget):
         self.source_hint = QLabel("")
         self.source_hint.setWordWrap(True)
         source_form.addRow(self.source_hint)
-        self.geofabrik_info = QLabel("")
-        self.geofabrik_info.setWordWrap(True)
-        self.geofabrik_info.setVisible(False)
-        source_form.addRow(self.geofabrik_info)
-        self.geofabrik_group = QGroupBox("")
-        maps_layout = QVBoxLayout(self.geofabrik_group)
+        self.map_index_group = QGroupBox("")
+        maps_layout = QVBoxLayout(self.map_index_group)
         maps_layout.setContentsMargins(4, 4, 4, 4)
         # Заголовок группы с датой индекса и кнопкой обновления.
         maps_header = QHBoxLayout()
-        self.geofabrik_title = QLabel(i18n.tr("Карты Geofabrik"))
-        maps_header.addWidget(self.geofabrik_title)
+        self.map_index_title = QLabel(i18n.tr("Карты Geofabrik"))
+        maps_header.addWidget(self.map_index_title)
         maps_header.addStretch(1)
-        self.geofabrik_refresh = QToolButton()
-        self.geofabrik_refresh.setIcon(
+        self.map_index_refresh = QToolButton()
+        self.map_index_refresh.setIcon(
             QgsApplication.getThemeIcon("mActionReload.svg")
         )
-        self.geofabrik_refresh.setAutoRaise(True)
-        self.geofabrik_refresh.setFixedSize(QSize(18, 18))
-        self.geofabrik_refresh.setIconSize(QSize(14, 14))
-        self.geofabrik_refresh.setToolTip(
+        self.map_index_refresh.setAutoRaise(True)
+        self.map_index_refresh.setFixedSize(QSize(18, 18))
+        self.map_index_refresh.setIconSize(QSize(14, 14))
+        self.map_index_refresh.setToolTip(
             i18n.tr("Обновить индекс выгрузок")
         )
-        self.geofabrik_refresh.clicked.connect(self._refresh_geofabrik_index)
-        maps_header.addWidget(self.geofabrik_refresh)
+        self.map_index_refresh.clicked.connect(self._refresh_map_index)
+        maps_header.addWidget(self.map_index_refresh)
         maps_layout.addLayout(maps_header)
-        # Пока грузится индекс, полоса в режиме ожидания показывает, что
-        # список карт обновляется, а не просто пуст.
-        self.geofabrik_progress = QProgressBar()
-        self.geofabrik_progress.setRange(0, 0)
-        self.geofabrik_progress.setTextVisible(False)
-        self.geofabrik_progress.setFixedHeight(4)
-        self.geofabrik_progress.setVisible(False)
-        maps_layout.addWidget(self.geofabrik_progress)
-        self.geofabrik_maps = QListWidget()
-        self.geofabrik_maps.setMaximumHeight(150)
+        # Статус и полоса прогресса занимают постоянное место: иначе при
+        # смене сообщений список карт подпрыгивал вверх.
+        status_row = QWidget()
+        status_layout = QVBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(0)
+        self.map_index_status = QLabel("")
+        self.map_index_status.setWordWrap(True)
+        self.map_index_status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        line_height = self.fontMetrics().lineSpacing()
+        self.map_index_status.setFixedHeight(2 * line_height)
+        status_layout.addWidget(self.map_index_status)
+        self.map_index_progress = QProgressBar()
+        self.map_index_progress.setRange(0, 0)
+        self.map_index_progress.setTextVisible(False)
+        self.map_index_progress.setFixedHeight(4)
+        self.map_index_progress.setVisible(False)
+        status_layout.addWidget(self.map_index_progress)
+        status_row.setFixedHeight(2 * line_height + 4)
+        maps_layout.addWidget(status_row)
+        self.map_index_list = QListWidget()
+        self.map_index_list.setMaximumHeight(150)
         # Элементы всегда по ширине окна списка: иначе длинные названия
         # дают горизонтальную прокрутку, а делегат обрезает строку у края
         # вместо многоточия посередине.
-        self.geofabrik_maps.setResizeMode(QListView.Adjust)
-        self.geofabrik_maps.setItemDelegate(
-            _MiddleElideDelegate(self.geofabrik_maps)
+        self.map_index_list.setResizeMode(QListView.Adjust)
+        self.map_index_list.setItemDelegate(
+            _MiddleElideDelegate(self.map_index_list)
         )
-        self.geofabrik_maps.itemChanged.connect(self._geofabrik_selection_changed)
-        maps_layout.addWidget(self.geofabrik_maps)
-        self.geofabrik_summary = QLabel("")
-        self.geofabrik_summary.setWordWrap(True)
-        maps_layout.addWidget(self.geofabrik_summary)
-        self.geofabrik_group.setVisible(False)
-        source_form.addRow(self.geofabrik_group)
+        self.map_index_list.itemChanged.connect(self._map_selection_changed)
+        maps_layout.addWidget(self.map_index_list)
+        self.map_index_summary = QLabel("")
+        self.map_index_summary.setWordWrap(True)
+        maps_layout.addWidget(self.map_index_summary)
+        self.map_index_group.setVisible(False)
+        source_form.addRow(self.map_index_group)
         self.pbf_info = QLabel("")
         self.pbf_info.setWordWrap(True)
         self.pbf_info.setVisible(False)
@@ -1422,18 +1430,17 @@ class XtopoDockWidget(QDockWidget):
         self.browse_source.setToolTip(
             i18n.tr("Выбрать файл .pbf или .osm") if mode == "pbf" else ""
         )
-        self.geofabrik_info.setVisible(is_file)
-        self.geofabrik_group.setVisible(is_file)
+        self.map_index_group.setVisible(is_file)
         if not is_file:
-            self._geofabrik_timer.stop()
-            self._geofabrik_plan = None
-            self.geofabrik_info.clear()
-            self.geofabrik_maps.clear()
-            self.geofabrik_summary.clear()
+            self._map_index_timer.stop()
+            self._map_index_plan = None
+            self.map_index_status.clear()
+            self.map_index_list.clear()
+            self.map_index_summary.clear()
             self._pbf_info_state = None
-            self._reset_geofabrik_index_stamp()
-            if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
-                self.geofabrik_worker.cancel()
+            self._reset_map_index_stamp()
+            if self.map_index_worker is not None and self.map_index_worker.isRunning():
+                self.map_index_worker.cancel()
 
         is_overpass = mode == "overpass"
         if mode != "pbf":
@@ -1499,10 +1506,10 @@ class XtopoDockWidget(QDockWidget):
                     )
                 )
             self.pbf_info.setVisible(True)
-            self.geofabrik_info.setText(
+            self.map_index_status.setText(
                 i18n.tr("Определение карт по охвату…")
             )
-            self._schedule_geofabrik()
+            self._schedule_map_index()
         elif mode == "slice":
             self.source_value.setEnabled(False)
             self.source_value.setPlaceholderText(
@@ -1555,7 +1562,7 @@ class XtopoDockWidget(QDockWidget):
             if self.pbf_probe is not None and self.pbf_probe.isRunning():
                 self.pbf_probe.cancel()
             self.pbf_info.setText("")
-            self._schedule_geofabrik()
+            self._schedule_map_index()
         self._schedule_dem_availability()
 
     def _queries_changed(self, _item):
@@ -1579,43 +1586,38 @@ class XtopoDockWidget(QDockWidget):
     def _schedule_pbf_probe(self):
         self._pbf_probe_timer.start(700)
 
-    def _clear_geofabrik_view(self, message=""):
+    def _clear_map_index_view(self, status):
         """Сбрасывает список карт и связанную оценку PBF."""
-        self._geofabrik_plan = None
-        self._geofabrik_plan_bbox = ""
-        self._geofabrik_stats_maps = ()
+        self._map_index_plan = None
+        self._map_index_plan_bbox = ""
+        self._map_index_stats_maps = ()
         if self.pbf_probe is not None and self.pbf_probe.isRunning():
             self.pbf_probe.cancel()
-        widget = self.geofabrik_maps
+        widget = self.map_index_list
         widget.blockSignals(True)
         try:
             widget.clear()
         finally:
             widget.blockSignals(False)
-        self.geofabrik_summary.clear()
+        self.map_index_summary.clear()
         self.source_value.clear()
         self._pbf_info_state = None
         self.pbf_info.clear()
-        self.geofabrik_info.setText(message)
-        self.geofabrik_info.setVisible(bool(message))
+        self.map_index_status.setText(status)
+        self.map_index_status.setToolTip(status)
 
-    def _set_geofabrik_busy(self, busy):
+    def _set_map_index_busy(self, busy):
         """Пока индекс обновляется, список и кнопка обновления недоступны."""
-        self.geofabrik_refresh.setEnabled(not busy)
-        self.geofabrik_maps.setEnabled(not busy)
-        self.geofabrik_progress.setVisible(busy)
+        self.map_index_refresh.setEnabled(not busy)
+        self.map_index_list.setEnabled(not busy)
+        self.map_index_progress.setVisible(busy)
 
-    def _schedule_geofabrik(self):
-        self._clear_geofabrik_view()
-        self._reset_geofabrik_index_stamp()
-        if self.source_mode.currentData() in FILE_MODES:
-            self.geofabrik_info.setText(
-                i18n.tr("Определение карт по охвату…")
-            )
-            self.geofabrik_info.setVisible(True)
-        self._geofabrik_timer.start(700)
+    def _schedule_map_index(self):
+        self._clear_map_index_view(i18n.tr("Определение карт по охвату…"))
+        self._reset_map_index_stamp()
+        self._map_index_timer.start(700)
 
-    def _geofabrik_config(self, bbox):
+    def _maps_config(self, bbox):
         provider = self._file_provider()
         return Config(
             qgis_projects_dir=self.projects_dir.text().strip() or default_projects_dir(),
@@ -1626,51 +1628,53 @@ class XtopoDockWidget(QDockWidget):
             extract_provider=provider if provider != "geofabrik" else "geo2day",
         )
 
-    def _start_geofabrik(self, refreshing=False):
-        self._geofabrik_timer.stop()
+    def _start_map_index(self, refreshing=False):
+        self._map_index_timer.stop()
         if self.source_mode.currentData() not in FILE_MODES or not self.isVisible():
             return
         try:
             bbox = parse_bbox(self.bbox.text().strip())
         except Exception as exc:
-            self._geofabrik_plan = None
-            self.geofabrik_info.setText(
+            self._map_index_plan = None
+            self.map_index_status.setText(
                 i18n.trf("Определение карт недоступно: {}", exc)
             )
             return
-        if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
-            self.geofabrik_worker.cancel()
-            self.geofabrik_worker.wait(1000)
-        config = self._geofabrik_config(bbox)
+        if self.map_index_worker is not None and self.map_index_worker.isRunning():
+            self.map_index_worker.cancel()
+            self.map_index_worker.wait(1000)
+        config = self._maps_config(bbox)
         provider = self._file_provider()
-        worker = GeofabrikPlanWorker(config, bbox, self, provider=provider)
-        self.geofabrik_worker = worker
-        worker.progress.connect(self._geofabrik_progress)
-        worker.result.connect(lambda plan, w=worker: self._geofabrik_ready(w, plan))
-        worker.failed.connect(lambda message, w=worker: self._geofabrik_failed(w, message))
-        worker.finished.connect(lambda w=worker: self._geofabrik_done(w))
+        worker = MapIndexWorker(config, bbox, self, provider=provider)
+        self.map_index_worker = worker
+        worker.progress.connect(self._map_index_progress)
+        worker.result.connect(lambda plan, w=worker: self._map_index_ready(w, plan))
+        worker.failed.connect(lambda message, w=worker: self._map_index_failed(w, message))
+        worker.finished.connect(lambda w=worker: self._map_index_done(w))
         if refreshing:
             message = i18n.tr("Обновление индекса…")
         elif provider == "geofabrik":
             message = i18n.tr("Загрузка индекса Geofabrik…")
         else:
             message = i18n.trf("Загрузка индекса {}…", provider)
-        self.geofabrik_info.setText(message)
-        self.geofabrik_info.setVisible(True)
-        self._set_geofabrik_busy(True)
+        self.map_index_status.setText(message)
+        self.map_index_status.setToolTip(message)
+        self._set_map_index_busy(True)
         worker.start()
 
-    def _geofabrik_done(self, worker):
-        if worker is self.geofabrik_worker:
-            self.geofabrik_worker = None
-            self._set_geofabrik_busy(False)
+    def _map_index_done(self, worker):
+        if worker is self.map_index_worker:
+            self.map_index_worker = None
+            self._set_map_index_busy(False)
         worker.deleteLater()
 
-    def _geofabrik_progress(self, message):
-        self.geofabrik_info.setText(i18n.tr(message))
+    def _map_index_progress(self, message):
+        text = i18n.tr(message)
+        self.map_index_status.setText(text)
+        self.map_index_status.setToolTip(text)
 
-    def _geofabrik_ready(self, worker, plan):
-        if worker is not self.geofabrik_worker:
+    def _map_index_ready(self, worker, plan):
+        if worker is not self.map_index_worker:
             return
         if worker.provider != self._file_provider():
             return
@@ -1684,29 +1688,29 @@ class XtopoDockWidget(QDockWidget):
             return
         if current != worker.bbox.as_csv():
             return
-        self._geofabrik_plan = plan
-        self._geofabrik_plan_bbox = worker.bbox.as_csv()
-        self._apply_geofabrik_plan(plan, worker.provider)
-        self._start_geofabrik_stats(plan)
+        self._map_index_plan = plan
+        self._map_index_plan_bbox = worker.bbox.as_csv()
+        self._apply_map_index_plan(plan, worker.provider)
+        self._start_map_index_stats(plan)
 
-    def _geofabrik_failed(self, worker, message):
-        if worker is not self.geofabrik_worker:
+    def _map_index_failed(self, worker, message):
+        if worker is not self.map_index_worker:
             return
         if self.worker is not None and self.worker.isRunning():
             return
-        self._geofabrik_plan = None
-        self.geofabrik_info.setText(
-            i18n.trf("Не удалось определить карты: {}", message)
-        )
+        self._map_index_plan = None
+        text = i18n.trf("Не удалось определить карты: {}", message)
+        self.map_index_status.setText(text)
+        self.map_index_status.setToolTip(text)
 
-    def _apply_geofabrik_plan(self, plan, provider="geofabrik"):
-        self._fill_geofabrik_list(plan)
-        selected = self._geofabrik_selected_maps()
+    def _apply_map_index_plan(self, plan, provider="geofabrik"):
+        self._fill_map_list(plan)
+        selected = self._selected_maps()
         self.source_value.setText(", ".join(item.id for item in selected))
         base = []
         if plan.state.warning:
             base.append(i18n.tr(plan.state.warning))
-        self._set_geofabrik_index_stamp(plan)
+        self._set_map_index_stamp(plan)
         details = []
         total_line = []
         if not plan.maps:
@@ -1722,6 +1726,9 @@ class XtopoDockWidget(QDockWidget):
                     )
                 )
         else:
+            base.append(
+                i18n.trf("Найдено карт: {}", len(plan.maps))
+            )
             total = 0
             for item, status in plan.items():
                 size = (
@@ -1742,15 +1749,14 @@ class XtopoDockWidget(QDockWidget):
                 total_line.append(
                     i18n.trf("Всего: {} МБ", f"{total / 1048576:.1f}")
                 )
-        self.geofabrik_info.setText("\n".join(base))
-        self.geofabrik_info.setVisible(bool(self.geofabrik_info.text()))
-        self.geofabrik_info.setToolTip(
+        self.map_index_status.setText("\n".join(base))
+        self.map_index_status.setToolTip(
             "\n".join(base + details + total_line) if details else "\n".join(base)
         )
-        self._update_geofabrik_summary()
+        self._update_map_summary()
 
-    def _set_geofabrik_index_stamp(self, plan):
-        """Дату индекса Geofabrik показываем в заголовке группы карт."""
+    def _set_map_index_stamp(self, plan):
+        """Дату индекса выбранного хоста показываем в заголовке группы."""
         stamp = ""
         state = getattr(plan, "state", None)
         if state is not None:
@@ -1763,15 +1769,15 @@ class XtopoDockWidget(QDockWidget):
                     stamp = state.last_modified
             elif state.fetched_at:
                 stamp = time.strftime("%d.%m.%Y %H:%M", time.localtime(state.fetched_at))
-        self._reset_geofabrik_index_stamp(stamp)
+        self._reset_map_index_stamp(stamp)
 
-    def _reset_geofabrik_index_stamp(self, stamp=""):
+    def _reset_map_index_stamp(self, stamp=""):
         title = self._provider_title(self._file_provider())
         if stamp:
             title = i18n.trf("{} · индекс {}", title, stamp)
-        self.geofabrik_title.setText(title)
+        self.map_index_title.setText(title)
 
-    def _refresh_geofabrik_index(self):
+    def _refresh_map_index(self):
         """Перезагрузить индекс выгрузок из сети."""
         if self.source_mode.currentData() not in FILE_MODES:
             return
@@ -1779,32 +1785,28 @@ class XtopoDockWidget(QDockWidget):
         try:
             bbox = parse_bbox(self.bbox.text().strip())
         except Exception as exc:
-            self.geofabrik_info.setText(
-                i18n.trf("Не удалось обновить индекс: {}", exc)
-            )
-            self.geofabrik_info.setVisible(True)
+            text = i18n.trf("Не удалось обновить индекс: {}", exc)
+            self.map_index_status.setText(text)
+            self.map_index_status.setToolTip(text)
             return
         # Кнопка обновления — повод попробовать сеть заново: после
         # недавней ошибки предохранитель иначе сразу отклонит запрос.
         net.reset()
         try:
             if provider == "geofabrik":
-                geofabrik.invalidate_index(self._geofabrik_config(bbox))
+                geofabrik.invalidate_index(self._maps_config(bbox))
             else:
-                extracts.invalidate_cache(self._geofabrik_config(bbox), provider)
+                extracts.invalidate_cache(self._maps_config(bbox), provider)
         except Exception as exc:
-            self.geofabrik_info.setText(
-                i18n.trf("Не удалось обновить индекс: {}", exc)
-            )
-            self.geofabrik_info.setVisible(True)
+            text = i18n.trf("Не удалось обновить индекс: {}", exc)
+            self.map_index_status.setText(text)
+            self.map_index_status.setToolTip(text)
             return
-        self._clear_geofabrik_view()
-        self._reset_geofabrik_index_stamp()
-        self.geofabrik_info.setText(i18n.tr("Обновление индекса…"))
-        self.geofabrik_info.setVisible(True)
-        self._start_geofabrik(refreshing=True)
+        self._clear_map_index_view(i18n.tr("Обновление индекса…"))
+        self._reset_map_index_stamp()
+        self._start_map_index(refreshing=True)
 
-    def _geofabrik_item(self, item, status, checked):
+    def _map_list_item(self, item, status, checked):
         size = (
             i18n.trf("{} МБ", f"{status.size / 1048576:.1f}")
             if status.size
@@ -1817,7 +1819,7 @@ class XtopoDockWidget(QDockWidget):
         else:
             state = ""
         parts = [item.name]
-        parent = self._geofabrik_parent_name(item)
+        parent = self._map_parent_name(item)
         if parent:
             parts.append(parent)
         text = " — ".join(parts + [size])
@@ -1835,20 +1837,20 @@ class XtopoDockWidget(QDockWidget):
         entry.setCheckState(checked_state if checked else unchecked_state)
         return entry
 
-    def _geofabrik_parent_name(self, item):
+    def _map_parent_name(self, item):
         """Название родительского региона карты (например, Россия)."""
-        if self._geofabrik_plan is None:
+        if self._map_index_plan is None:
             return ""
-        name = self._geofabrik_plan.parent_names.get(item.id, "")
+        name = self._map_index_plan.parent_names.get(item.id, "")
         return "" if name == item.name else name
 
-    def _fill_geofabrik_list(self, plan):
-        widget = self.geofabrik_maps
+    def _fill_map_list(self, plan):
+        widget = self.map_index_list
         widget.blockSignals(True)
         widget.clear()
         try:
             for item, status in zip(plan.maps, plan.statuses):
-                widget.addItem(self._geofabrik_item(item, status, True))
+                widget.addItem(self._map_list_item(item, status, True))
             if plan.extra:
                 header = QListWidgetItem(
                     i18n.tr("Другие карты для этой области")
@@ -1856,13 +1858,13 @@ class XtopoDockWidget(QDockWidget):
                 header.setFlags(_no_flags())
                 widget.addItem(header)
                 for item, status in zip(plan.extra, plan.extra_statuses):
-                    widget.addItem(self._geofabrik_item(item, status, False))
+                    widget.addItem(self._map_list_item(item, status, False))
         finally:
             widget.blockSignals(False)
-        self._geofabrik_stats_maps = ()
+        self._map_index_stats_maps = ()
         stored = self._stored_map_selection()
         if stored:
-            self._restore_geofabrik_selection(set(stored))
+            self._restore_map_selection(set(stored))
 
     def _stored_map_selection(self):
         """Сохранённый список карт для текущего провайдера."""
@@ -1874,78 +1876,78 @@ class XtopoDockWidget(QDockWidget):
 
     def _store_map_selection(self):
         provider = self._file_provider() or "geofabrik"
-        if not self.geofabrik_maps.count():
+        if not self.map_index_list.count():
             return
-        self.settings.setValue(f"maps_{provider}", self._geofabrik_selected_ids())
+        self.settings.setValue(f"maps_{provider}", self._selected_map_ids())
 
-    def _geofabrik_selected_ids(self):
+    def _selected_map_ids(self):
         checked_state = _checked_state()[0]
         selected = []
-        for row in range(self.geofabrik_maps.count()):
-            entry = self.geofabrik_maps.item(row)
+        for row in range(self.map_index_list.count()):
+            entry = self.map_index_list.item(row)
             identifier = entry.data(_user_role())
             if identifier and entry.checkState() == checked_state:
                 selected.append(str(identifier))
         return selected
 
-    def _geofabrik_selected_maps(self):
-        if self._geofabrik_plan is None:
+    def _selected_maps(self):
+        if self._map_index_plan is None:
             return []
-        chosen = set(self._geofabrik_selected_ids())
+        chosen = set(self._selected_map_ids())
         return [
             item
-            for item in self._geofabrik_plan.maps + self._geofabrik_plan.extra
+            for item in self._map_index_plan.maps + self._map_index_plan.extra
             if item.id in chosen
         ]
 
-    def _geofabrik_selected_statuses(self):
-        if self._geofabrik_plan is None:
+    def _selected_map_statuses(self):
+        if self._map_index_plan is None:
             return []
-        chosen = set(self._geofabrik_selected_ids())
+        chosen = set(self._selected_map_ids())
         return [
             status
             for status in (
-                self._geofabrik_plan.statuses + self._geofabrik_plan.extra_statuses
+                self._map_index_plan.statuses + self._map_index_plan.extra_statuses
             )
             if status.map.id in chosen
         ]
 
-    def _update_geofabrik_summary(self):
-        statuses = self._geofabrik_selected_statuses()
+    def _update_map_summary(self):
+        statuses = self._selected_map_statuses()
         total = sum(status.size or 0 for status in statuses)
         text = i18n.trf("Выбрано карт: {}", len(statuses))
         if total:
             text += i18n.trf(", объём {} МБ", f"{total / 1048576:.1f}")
-        self.geofabrik_summary.setText(text)
+        self.map_index_summary.setText(text)
 
-    def _geofabrik_selection_changed(self, _item):
-        if self._geofabrik_plan is None:
+    def _map_selection_changed(self, _item):
+        if self._map_index_plan is None:
             return
-        selected = self._geofabrik_selected_maps()
+        selected = self._selected_maps()
         self.source_value.setText(", ".join(item.id for item in selected))
-        self._update_geofabrik_summary()
+        self._update_map_summary()
         self._store_map_selection()
-        pending, total = self._geofabrik_pending(self._geofabrik_plan)
+        pending, total = self._pending_map_bytes(self._map_index_plan)
         self._show_pbf_estimate(pending, total)
-        self._start_geofabrik_stats(self._geofabrik_plan)
+        self._start_map_index_stats(self._map_index_plan)
 
-    def _start_geofabrik_stats(self, plan):
-        maps = self._geofabrik_selected_maps()
+    def _start_map_index_stats(self, plan):
+        maps = self._selected_maps()
         if not maps:
             self._pbf_info_state = None
             self.pbf_info.setText("")
-            self._geofabrik_stats_maps = ()
+            self._map_index_stats_maps = ()
             return
         current = tuple(item.id for item in maps)
-        if current == getattr(self, "_geofabrik_stats_maps", ()):
+        if current == getattr(self, "_map_index_stats_maps", ()):
             return
-        self._geofabrik_stats_maps = current
+        self._map_index_stats_maps = current
         try:
             bbox = parse_bbox(self.bbox.text().strip())
-            config = self._geofabrik_config(bbox)
+            config = self._maps_config(bbox)
             paths = geofabrik.source_paths(config, maps)
         except Exception:
-            pending, total = self._geofabrik_pending(plan)
+            pending, total = self._pending_map_bytes(plan)
             self._show_pbf_estimate(pending, total)
             return
         names = self._selected_queries()
@@ -1976,19 +1978,19 @@ class XtopoDockWidget(QDockWidget):
             )
             return
         if mode in FILE_MODES:
-            plan = self._geofabrik_plan
+            plan = self._map_index_plan
             if plan is None:
-                self._schedule_geofabrik()
+                self._schedule_map_index()
                 return
-            maps = self._geofabrik_selected_maps()
+            maps = self._selected_maps()
             if not maps:
                 self.pbf_info.setText("")
                 return
-            config = self._geofabrik_config(bbox)
+            config = self._maps_config(bbox)
             try:
                 paths = geofabrik.source_paths(config, maps)
             except Exception:
-                pending, total = self._geofabrik_pending(plan)
+                pending, total = self._pending_map_bytes(plan)
                 self._show_pbf_estimate(pending, total)
                 return
             source_config = config
@@ -2047,8 +2049,8 @@ class XtopoDockWidget(QDockWidget):
             total, matched, extended_ratio, file_count, bytes_per_second
         )
         if self.source_mode.currentData() in FILE_MODES:
-            plan = self._geofabrik_plan
-            pending, _size = self._geofabrik_pending(plan) if plan else (0, 0)
+            plan = self._map_index_plan
+            pending, _size = self._pending_map_bytes(plan) if plan else (0, 0)
             self._pbf_info_state = (
                 "geo", total, in_bbox, estimate, pending, prefix
             )
@@ -2165,7 +2167,7 @@ class XtopoDockWidget(QDockWidget):
         kind = state[0]
         if kind == "estimate":
             _, pending, total = state
-            self.pbf_info.setText(self._geofabrik_estimate(pending, total))
+            self.pbf_info.setText(self._map_download_estimate(pending, total))
             return
         if kind == "geo":
             _, total, in_bbox, estimate, pending, prefix = state
@@ -2211,21 +2213,21 @@ class XtopoDockWidget(QDockWidget):
             )
         )
 
-    def _geofabrik_pending(self, plan=None):
+    def _pending_map_bytes(self, plan=None):
         try:
             bbox = parse_bbox(self.bbox.text().strip())
-            config = self._geofabrik_config(bbox)
+            config = self._maps_config(bbox)
         except Exception:
             return 0, 0
         pending = total = 0
-        for status in self._geofabrik_selected_statuses():
+        for status in self._selected_map_statuses():
             size = status.size or 0
             total += size
             if not geofabrik.local_ready(config, status.map):
                 pending += size
         return pending, total
 
-    def _geofabrik_estimate(self, pending, total):
+    def _map_download_estimate(self, pending, total):
         parts = []
         if pending:
             parts.append(
@@ -2363,7 +2365,7 @@ class XtopoDockWidget(QDockWidget):
         if mode == "overpass":
             self._check_servers()
         elif mode in FILE_MODES:
-            self._schedule_geofabrik()
+            self._schedule_map_index()
 
     def _terrain_changed(self, enabled):
         manual = self.dem_source.currentData() == dem_sources.MANUAL_SOURCE
@@ -3019,16 +3021,16 @@ class XtopoDockWidget(QDockWidget):
         self._render_pbf_info()
         self._update_dem_info()
         self._update_dem_warning()
-        plan = self._geofabrik_plan
+        plan = self._map_index_plan
         if plan is None:
             return
-        chosen = set(self._geofabrik_selected_ids())
-        self._apply_geofabrik_plan(plan, self._file_provider())
-        self._restore_geofabrik_selection(chosen)
+        chosen = set(self._selected_map_ids())
+        self._apply_map_index_plan(plan, self._file_provider())
+        self._restore_map_selection(chosen)
 
-    def _restore_geofabrik_selection(self, chosen):
+    def _restore_map_selection(self, chosen):
         checked, unchecked = _checked_state()
-        widget = self.geofabrik_maps
+        widget = self.map_index_list
         widget.blockSignals(True)
         try:
             for row in range(widget.count()):
@@ -3041,7 +3043,7 @@ class XtopoDockWidget(QDockWidget):
                 )
         finally:
             widget.blockSignals(False)
-        self._update_geofabrik_summary()
+        self._update_map_summary()
 
     def _update_action_buttons(self):
         can_create = not self._running and not self._own_project_open
@@ -3076,11 +3078,11 @@ class XtopoDockWidget(QDockWidget):
                 )
             if mode == "ssh" and "user@server" in value:
                 raise ValueError("Замените user@server на адрес вашего сервера")
-        if mode in FILE_MODES and self._geofabrik_plan is not None:
+        if mode in FILE_MODES and self._map_index_plan is not None:
             title = self._provider_title(self._file_provider())
-            if not self._geofabrik_plan.maps:
+            if not self._map_index_plan.maps:
                 raise ValueError(f"Для этого охвата карты не найдены ({title})")
-            if not self._geofabrik_selected_ids():
+            if not self._selected_map_ids():
                 raise ValueError(f"Выберите хотя бы одну карту ({title})")
         endpoints = [server.url for server in DEFAULT_OVERPASS_SERVERS]
         endpoint = endpoints[0]
@@ -3112,7 +3114,7 @@ class XtopoDockWidget(QDockWidget):
             ),
             pbf_path=value if mode == "pbf" else "",
             geofabrik_maps=(
-                self._geofabrik_selected_ids() if mode in FILE_MODES else []
+                self._selected_map_ids() if mode in FILE_MODES else []
             ),
             extract_provider=(
                 provider if provider and provider != "geofabrik" else "geo2day"
@@ -3156,10 +3158,10 @@ class XtopoDockWidget(QDockWidget):
         if self.pbf_probe is not None and self.pbf_probe.isRunning():
             self.pbf_probe.cancel()
             self.pbf_probe.wait(5000)
-        self._geofabrik_timer.stop()
-        if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
-            self.geofabrik_worker.cancel()
-            self.geofabrik_worker.wait(1000)
+        self._map_index_timer.stop()
+        if self.map_index_worker is not None and self.map_index_worker.isRunning():
+            self.map_index_worker.cancel()
+            self.map_index_worker.wait(1000)
         self._save_settings()
         # Новая обработка — прошлое сообщение о замене тайлов неактуально.
         self._terrain_fallback = ""
@@ -3266,7 +3268,7 @@ class XtopoDockWidget(QDockWidget):
                 i18n.trf("Проект создан, но не открылся: {}", exc),
             )
         if self.source_mode.currentData() in FILE_MODES:
-            self._schedule_geofabrik()
+            self._schedule_map_index()
 
     def _failed(self, message):
         self.worker = None
@@ -3287,8 +3289,8 @@ class XtopoDockWidget(QDockWidget):
         if self.worker is not None and self.worker.isRunning():
             self.worker.cancel()
             cancelled = True
-        if self.geofabrik_worker is not None and self.geofabrik_worker.isRunning():
-            self.geofabrik_worker.cancel()
+        if self.map_index_worker is not None and self.map_index_worker.isRunning():
+            self.map_index_worker.cancel()
             cancelled = True
         if cancelled:
             self._set_status("Отмена...")
