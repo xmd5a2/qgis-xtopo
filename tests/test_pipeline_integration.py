@@ -176,6 +176,26 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertTrue(single)
         self.assertEqual(single, doubled)
 
+    def test_file_extract_modes(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        # Режим файловых выгрузок: виден выбор хоста и список карт.
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("extracts"))
+        self.assertTrue(dock.extract_provider.isVisibleTo(dock))
+        self.assertEqual(dock.extract_provider.count(), 3)
+        self.assertIn("geo2day", [
+            dock.extract_provider.itemData(index)
+            for index in range(dock.extract_provider.count())
+        ])
+        self.assertTrue(dock.geofabrik_group.isVisibleTo(dock))
+        self.assertFalse(dock.source_value.isVisibleTo(dock))
+        # Режим выреза по рамке: список карт не нужен.
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        self.assertFalse(dock.extract_provider.isVisibleTo(dock))
+        self.assertFalse(dock.geofabrik_group.isVisibleTo(dock))
+        self.assertFalse(dock.source_value.isVisibleTo(dock))
+
     def test_dock_is_compact(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 
@@ -191,7 +211,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock.overpass_server.itemData(1),
             "https://overpass.private.coffee/api/interpreter",
         )
-        self.assertEqual(dock.source_mode.count(), 5)
+        self.assertEqual(dock.source_mode.count(), 7)
         self.assertEqual(dock.source_mode.itemData(0), "geofabrik")
         self.assertEqual(
             dock.source_mode.itemText(0), "Карты с Geofabrik (предпочтительно)"

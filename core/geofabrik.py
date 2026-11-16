@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -157,6 +158,27 @@ class IndexState:
     warning: str = ""
 
 
+def build_index(maps):
+    """Индекс из выгрузок с их границами.
+
+    ``maps`` — список пар (выгрузка, геометрия).  Выгрузки без границ в
+    индекс не попадают: по ним нельзя выбрать покрытие области.
+    """
+    entries = []
+    for item, geometry in maps:
+        if geometry is None:
+            continue
+        entries.append(
+            _Entry(
+                map=item,
+                geometry=geometry,
+                bounds=geometry.boundingBox(),
+                area=geometry.area(),
+            )
+        )
+    return GeofabrikIndex(entries)
+
+
 @dataclass
 class GeofabrikPlan:
     state: IndexState
@@ -180,7 +202,7 @@ _size_cache = {}
 _index_cache = {}
 
 
-def _qgs_geometry(payload):
+def qgs_geometry(payload):
     if not payload:
         return None
     try:
@@ -208,7 +230,7 @@ def _parse_index(data):
         identifier = properties.get("id")
         if not identifier or not url:
             continue
-        geometry = _qgs_geometry(feature.get("geometry"))
+        geometry = qgs_geometry(feature.get("geometry"))
         if geometry is None:
             continue
         entries.append(
@@ -455,8 +477,23 @@ def check_maps(config, maps, cancel=None, progress=None, report=True):
     return [statuses[item.id] for item in maps]
 
 
+def local_name(item):
+    """Имя файла выгрузки: идентификатор без недопустимых символов.
+
+    Идентификаторы Geofabrik безопасны, а у других провайдеров в них есть
+    косая черта (иерархия регионов), поэтому путь собирается здесь.
+    Провайдер добавляется к имени: выгрузки разных хостов не должны
+    попадать в один файл.
+    """
+    namespace = str(getattr(item, "namespace", "") or "")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(item.id or "map"))
+    if namespace:
+        name = f"{namespace}_{name}"
+    return name
+
+
 def local_path(config, item):
-    return config.geofabrik_dir / f"{item.id}.osm.pbf"
+    return config.geofabrik_dir / f"{local_name(item)}.osm.pbf"
 
 
 def local_ready(config, item):

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import geofabrik, overpass_batch, osmium_tool, pbf_source
+from . import extracts, geofabrik, overpass_batch, osmium_tool, pbf_source
 from .overpass_client import OverpassClient, build_query
 from .resources import read_query
 
@@ -176,81 +176,166 @@ def _selected_maps(index, config, bbox):
     return maps
 
 
+def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
+                        percent, cancel):
+    """Скачать выбранные выгрузки и подготовить по ним слои.
+
+    Общий путь для файловых источников: Geofabrik и другие провайдеры
+    отдают файлы PBF одинаково, отличается только список выгрузок.
+    """
+    query_texts = {name: read_query(name) for name in query_names}
+    warnings = []
+    # С osmium выгрузки обрабатываются по отдельности: склейка нужна
+    # только для чтения карт целиком драйвером GDAL.
+    osmium_ready = osmium_tool.find_osmium(config.temp_dir) is not None
+    try:
+        if not all(geofabrik.local_ready(config, item) for item in maps):
+            with timer.measure():
+                downloaded = geofabrik.ensure_maps(
+                    config, maps, progress=progress, percent=percent,
+                    cancel=cancel,
+                )
+            if not osmium_ready:
+                try:
+                    geofabrik.merge_if_available(
+                        config, maps, downloaded,
+                        progress=progress, cancel=cancel,
+                    )
+                except InterruptedError:
+                    raise
+                except Exception as exc:
+                    warnings.append(f"Склейка osmium не удалась: {exc}")
+        if osmium_ready:
+            paths = geofabrik.source_paths(
+                config, maps, progress=progress, cancel=cancel,
+                prefer_separate=True,
+            )
+        else:
+            paths = geofabrik.source_paths(
+                config, maps, progress=progress, cancel=cancel
+            )
+    except geofabrik.GeofabrikError as exc:
+        raise SourceError(str(exc)) from exc
+    try:
+        dataset = pbf_source.prepare_dataset(
+            config, bbox, query_names, query_texts=query_texts,
+            cancel=cancel, progress=progress, sources=paths,
+        )
+    except RuntimeError:
+        # Склеенный osmium файл может не читаться драйвером GDAL:
+        # пограничные объекты выгрузок имеют разные версии, и после
+        # merge драйвер обрывает чтение.  Тогда карты читаются по
+        # отдельности без предварительной склейки: объекты с
+        # одинаковым id уйдут в один слой при разборе.  Даже если
+        # paths уже отдельные (osmium склеил их внутри себя), повтор
+        # с use_osmium=False обязателен — иначе откат не сработает.
+        separate = geofabrik.local_maps(config, maps)
+        if (not osmium_ready
+                and [str(item) for item in separate]
+                == [str(item) for item in paths]):
+            raise
+        warnings.append(
+            "Склеенный файл не читается драйвером GDAL, "
+            "карты обработаны по отдельности"
+        )
+        dataset = pbf_source.prepare_dataset(
+            config, bbox, query_names, query_texts=query_texts,
+            cancel=cancel, progress=progress, sources=separate,
+            use_osmium=False,
+        )
+    return dataset, warnings
+
+
 def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
                     percent=None):
     if config.source_mode == "geofabrik":
-        query_texts = {name: read_query(name) for name in query_names}
         timer = _DownloadTimer()
         with timer.measure():
             state = geofabrik.fetch_index(config, progress=progress, cancel=cancel)
         maps = _selected_maps(state.index, config, bbox)
         if not maps:
             raise SourceError("Для выбранного охвата карты Geofabrik не найдены")
-        warnings = []
-        # С osmium выгрузки обрабатываются по отдельности: склейка нужна
-        # только для чтения карт целиком драйвером GDAL.
-        osmium_ready = osmium_tool.find_osmium(config.temp_dir) is not None
-        try:
-            if not all(geofabrik.local_ready(config, item) for item in maps):
-                with timer.measure():
-                    downloaded = geofabrik.ensure_maps(
-                        config, maps, progress=progress, percent=percent,
-                        cancel=cancel,
-                    )
-                if not osmium_ready:
-                    try:
-                        geofabrik.merge_if_available(
-                            config, maps, downloaded,
-                            progress=progress, cancel=cancel,
-                        )
-                    except InterruptedError:
-                        raise
-                    except Exception as exc:
-                        warnings.append(f"Склейка osmium не удалась: {exc}")
-            if osmium_ready:
-                paths = geofabrik.source_paths(
-                    config, maps, progress=progress, cancel=cancel,
-                    prefer_separate=True,
-                )
-            else:
-                paths = geofabrik.source_paths(
-                    config, maps, progress=progress, cancel=cancel
-                )
-        except geofabrik.GeofabrikError as exc:
-            raise SourceError(str(exc)) from exc
-        try:
-            dataset = pbf_source.prepare_dataset(
-                config, bbox, query_names, query_texts=query_texts,
-                cancel=cancel, progress=progress, sources=paths,
-            )
-        except RuntimeError:
-            # Склеенный osmium файл может не читаться драйвером GDAL:
-            # пограничные объекты выгрузок имеют разные версии, и после
-            # merge драйвер обрывает чтение.  Тогда карты читаются по
-            # отдельности без предварительной склейки: объекты с
-            # одинаковым id уйдут в один слой при разборе.  Даже если
-            # paths уже отдельные (osmium склеил их внутри себя), повтор
-            # с use_osmium=False обязателен — иначе откат не сработает.
-            separate = geofabrik.local_maps(config, maps)
-            if (not osmium_ready
-                    and [str(item) for item in separate]
-                    == [str(item) for item in paths]):
-                raise
-            warnings.append(
-                "Склеенный файл не читается драйвером GDAL, "
-                "карты обработаны по отдельности"
-            )
-            dataset = pbf_source.prepare_dataset(
-                config, bbox, query_names, query_texts=query_texts,
-                cancel=cancel, progress=progress, sources=separate,
-                use_osmium=False,
-            )
+        dataset, warnings = _prepare_file_maps(
+            config, bbox, query_names, maps, timer, progress, percent, cancel,
+        )
         warnings.extend(dataset.warnings)
         if state.warning:
             warnings.append(state.warning)
         return SourceResult(
             dataset=dataset,
             warnings=warnings,
+            notes=_dataset_notes(dataset),
+            download_seconds=timer.total,
+        )
+
+    if config.source_mode == "extracts":
+        # Файловые выгрузки с других хостов: тот же Geofabrik-механизм,
+        # но список карт и их границы берутся у другого провайдера.
+        timer = _DownloadTimer()
+        try:
+            with timer.measure():
+                index, catalogue = extracts.build_index(
+                    config, config.extract_provider, bbox,
+                    progress=progress, cancel=cancel,
+                )
+        except extracts.ExtractError as exc:
+            raise SourceError(str(exc)) from exc
+        except InterruptedError:
+            raise
+        maps = _selected_maps(index, config, bbox)
+        if not maps:
+            raise SourceError(
+                "Для выбранного охвата выгрузки не найдены "
+                f"({config.extract_provider})"
+            )
+        dataset, warnings = _prepare_file_maps(
+            config, bbox, query_names, maps, timer, progress, percent, cancel,
+        )
+        warnings.extend(dataset.warnings)
+        if catalogue.warning:
+            warnings.append(catalogue.warning)
+        return SourceResult(
+            dataset=dataset,
+            warnings=warnings,
+            notes=_dataset_notes(dataset),
+            download_seconds=timer.total,
+        )
+
+    if config.source_mode == "slice":
+        # Вырез по рамке через SliceOSM: сервис собирает файл PBF по
+        # указанной области, данные свежее минуты.
+        timer = _DownloadTimer()
+        query_texts = {name: read_query(name) for name in query_names}
+        client = extracts.SliceOsm()
+        key = hashlib.sha1(bbox.as_csv().encode("utf-8")).hexdigest()[:12]
+        destination = config.geofabrik_dir / f"slice_{key}.osm.pbf"
+        if not (destination.exists() and destination.stat().st_size > 0):
+            config.geofabrik_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with timer.measure():
+                    uuid = client.submit(bbox, cancel=cancel)
+                    if progress:
+                        progress("SliceOSM: вырез заказан")
+                    client.wait(uuid, cancel=cancel, progress=progress)
+                    if progress:
+                        progress("SliceOSM: скачивание выреза")
+                    client.download(
+                        uuid, destination, progress=progress, cancel=cancel,
+                    )
+            except extracts.ExtractError as exc:
+                raise SourceError(str(exc)) from exc
+            except InterruptedError:
+                raise
+        try:
+            dataset = pbf_source.prepare_dataset(
+                config, bbox, query_names, query_texts=query_texts,
+                cancel=cancel, progress=progress, sources=[destination],
+            )
+        except RuntimeError as exc:
+            raise SourceError(f"Не удалось разобрать вырез SliceOSM: {exc}") from exc
+        return SourceResult(
+            dataset=dataset,
+            warnings=list(dataset.warnings),
             notes=_dataset_notes(dataset),
             download_seconds=timer.total,
         )

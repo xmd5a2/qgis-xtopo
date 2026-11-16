@@ -51,7 +51,8 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 ## Структура
 
 - `core/pipeline.py` — оркестрация. Источники OSM (`geofabrik.py`,
-  `overpass_*.py`, `sources.py`) → вырезка `osmium_prefilter.py` → чтение
+  `extracts.py`, `overpass_*.py`, `sources.py`) → вырезка `osmium_prefilter.py` →
+  чтение
   `pbf_source.py` → раскладка по слоям (`query_recipes.py`,
   `resources/queries/`) → рельеф `terrain.py` → чистка пустых слоёв.
   `core/project.py` собирает проект из шаблона в начале и удаляет пустые слои

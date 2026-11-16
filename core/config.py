@@ -129,6 +129,9 @@ class Config:
     source_mode: str = "geofabrik"
     pbf_path: str = ""
     geofabrik_maps: list = field(default_factory=list)
+    # Провайдер файловых выгрузок для режима «extracts»: geo2day,
+    # osmfr, movisda.
+    extract_provider: str = "geo2day"
     overpass_endpoint: str = DEFAULT_OVERPASS_SERVERS[0].url
     overpass_endpoints: list = field(
         default_factory=lambda: [server.url for server in DEFAULT_OVERPASS_SERVERS]
@@ -207,6 +210,11 @@ class Config:
         return self.projects_dir / "qgisxtopo-cache" / "geofabrik"
 
     @property
+    def extracts_dir(self):
+        """Кэш индексов и границ других провайдеров выгрузок."""
+        return self.projects_dir / "qgisxtopo-cache" / "extracts"
+
+    @property
     def terrain_cache_dir(self):
         return self.projects_dir / "qgisxtopo-cache" / "srtm"
 
@@ -239,7 +247,9 @@ class Config:
             raise ValueError(error)
         if not self.bbox:
             raise ValueError("Bounding box is required")
-        if self.source_mode not in ("geofabrik", "overpass", "pbf", "local", "ssh"):
+        if self.source_mode not in (
+            "geofabrik", "extracts", "slice", "overpass", "pbf", "local", "ssh"
+        ):
             raise ValueError(f"Unknown source mode: {self.source_mode}")
         if self.source_mode == "pbf" and self.array_queries and not self.pbf_path:
             raise ValueError("PBF path is required for the local extract mode")
@@ -277,6 +287,7 @@ class Config:
             source_mode=source_mode,
             pbf_path=values.get("pbf_path", defaults.pbf_path),
             geofabrik_maps=values.get("geofabrik_maps", defaults.geofabrik_maps),
+            extract_provider=values.get("extract_provider", defaults.extract_provider),
             overpass_endpoint=values.get(
                 "overpass_endpoint",
                 values.get("overpass_endpoint_external", defaults.overpass_endpoint),
@@ -330,6 +341,7 @@ geofabrik_maps=(
 )
 
 source_mode={self.source_mode}
+extract_provider="{self.extract_provider}"
 pbf_path="{self.pbf_path}"
 overpass_instance={self.overpass_instance}
 overpass_endpoint="{self.overpass_endpoint}"

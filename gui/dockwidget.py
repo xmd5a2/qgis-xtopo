@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from dataclasses import replace
@@ -22,7 +23,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..core import (
-    dem_sources, geofabrik, i18n, measure, performance, proxy, sonny,
+    dem_sources, extracts, geofabrik, i18n, measure, performance, proxy, sonny,
     terrain_cache,
 )
 from ..core.bbox import parse_bbox
@@ -54,6 +55,16 @@ MODE_EXAMPLES = {
     "local": "/usr/bin/osm3s_query --db-dir=/path/to/overpass_db",
     "ssh": 'ssh user@server "/usr/bin/osm3s_query --db-dir=/path/to/overpass_db"',
 }
+
+# Провайдеры файловых выгрузок: ключ и подпись в списке.
+EXTRACT_PROVIDERS = (
+    ("geo2day", "geo2day — 1028 регионов, обновление ежедневно"),
+    ("osmfr", "openstreetmap.fr — выгрузки по странам и регионам"),
+    ("movisda", "movisda — выгрузки по точным границам областей"),
+)
+
+# Режимы, где данные берутся из готовых файлов выгрузок.
+FILE_MODES = ("geofabrik", "extracts")
 
 
 def _enum(owner, group, name):
@@ -517,18 +528,25 @@ class GeofabrikPlanWorker(QThread):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, config, bbox, parent=None):
+    def __init__(self, config, bbox, parent=None, provider="geofabrik"):
         super().__init__(parent)
         self.config = config
         self.bbox = bbox
+        self.provider = provider
         self.cancel_event = threading.Event()
 
     def run(self):
         try:
-            plan = geofabrik.analyse(
-                self.config, self.bbox,
-                cancel=self.cancel_event, progress=self.progress.emit,
-            )
+            if self.provider == "geofabrik":
+                plan = geofabrik.analyse(
+                    self.config, self.bbox,
+                    cancel=self.cancel_event, progress=self.progress.emit,
+                )
+            else:
+                plan = extracts.build_plan(
+                    self.config, self.provider, self.bbox,
+                    cancel=self.cancel_event, progress=self.progress.emit,
+                )
         except InterruptedError:
             return
         except Exception as exc:
@@ -913,12 +931,24 @@ class XtopoDockWidget(QDockWidget):
         source_form = QFormLayout(source_group)
         self.source_mode = QComboBox()
         self.source_mode.addItem("Карты с Geofabrik (предпочтительно)", "geofabrik")
+        self.source_mode.addItem("Файловые выгрузки: geo2day, openstreetmap.fr", "extracts")
+        self.source_mode.addItem("Вырез по рамке (SliceOSM)", "slice")
         self.source_mode.addItem("Публичный Overpass API", "overpass")
         self.source_mode.addItem("Локальный PBF/OSM экстракт", "pbf")
         self.source_mode.addItem("Локальный Overpass", "local")
         self.source_mode.addItem("Overpass по SSH", "ssh")
         self.source_mode.currentIndexChanged.connect(self._source_changed)
         source_form.addRow("Режим:", self.source_mode)
+
+        self.extract_provider = QComboBox()
+        for key, title in EXTRACT_PROVIDERS:
+            self.extract_provider.addItem(title, key)
+        self.extract_provider.currentIndexChanged.connect(self._extract_provider_changed)
+        self.extract_provider.setVisible(False)
+        source_form.addRow("Хост выгрузок:", self.extract_provider)
+        self.extract_provider_label = source_form.labelForField(self.extract_provider)
+        if self.extract_provider_label is not None:
+            self.extract_provider_label.setVisible(False)
 
         self.overpass_server = QComboBox()
         role = _tooltip_role()
@@ -1323,7 +1353,13 @@ class XtopoDockWidget(QDockWidget):
             self.source_value.setText(path)
 
     def _open_geofabrik(self):
-        QDesktopServices.openUrl(QUrl("https://download.geofabrik.de/"))
+        provider = self._file_provider()
+        url = (
+            "https://download.geofabrik.de/"
+            if provider == "geofabrik"
+            else extracts.provider(provider).homepage
+        )
+        QDesktopServices.openUrl(QUrl(url))
 
     def _browse_dem(self):
         path = QFileDialog.getExistingDirectory(
@@ -1350,18 +1386,20 @@ class XtopoDockWidget(QDockWidget):
     def _source_changed(self, _index):
         mode = self.source_mode.currentData()
         if self._active_mode != mode:
-            if self._active_mode != "geofabrik":
+            if self._active_mode not in FILE_MODES:
                 current = self.source_value.text()
                 if current or self._active_mode not in self._mode_values:
                     self._mode_values[self._active_mode] = current
             self._active_mode = mode
-            if mode == "geofabrik":
+            if mode in FILE_MODES or mode == "slice":
                 self.source_value.clear()
             elif mode != "overpass":
                 self.source_value.setText(self._mode_values.get(mode, ""))
 
         labels = {
             "geofabrik": "",
+            "extracts": "",
+            "slice": "",
             "overpass": "Сервер:",
             "pbf": "Файл PBF:",
             "local": "Команда:",
@@ -1372,19 +1410,23 @@ class XtopoDockWidget(QDockWidget):
                 i18n.tr(labels.get(mode, "Адрес/файл:"))
             )
 
-        is_geofabrik = mode == "geofabrik"
-        self.source_value.setVisible(not is_geofabrik)
-        self.source_label.setVisible(not is_geofabrik)
+        is_file = mode in FILE_MODES
+        is_extracts = mode == "extracts"
+        self.source_value.setVisible(not (is_file or mode == "slice"))
+        self.source_label.setVisible(not (is_file or mode == "slice"))
         self.download_pbf_button.setEnabled(mode == "pbf")
-        self.download_pbf_button.setVisible(not is_geofabrik)
+        self.download_pbf_button.setVisible(not (is_file or mode == "slice"))
         self.browse_source.setEnabled(mode == "pbf")
-        self.browse_source.setVisible(not is_geofabrik)
+        self.browse_source.setVisible(not (is_file or mode == "slice"))
         self.browse_source.setToolTip(
             i18n.tr("Выбрать файл .pbf или .osm") if mode == "pbf" else ""
         )
-        self.geofabrik_info.setVisible(is_geofabrik)
-        self.geofabrik_group.setVisible(is_geofabrik)
-        if not is_geofabrik:
+        self.extract_provider.setVisible(is_extracts)
+        if self.extract_provider_label is not None:
+            self.extract_provider_label.setVisible(is_extracts)
+        self.geofabrik_info.setVisible(is_file)
+        self.geofabrik_group.setVisible(is_file)
+        if not is_file:
             self._geofabrik_timer.stop()
             self._geofabrik_plan = None
             self.geofabrik_info.clear()
@@ -1400,7 +1442,7 @@ class XtopoDockWidget(QDockWidget):
             self._pbf_probe_timer.stop()
             if self.pbf_probe is not None and self.pbf_probe.isRunning():
                 self.pbf_probe.cancel()
-        if mode not in ("pbf", "geofabrik"):
+        if mode not in ("pbf",) + FILE_MODES:
             self.pbf_info.setVisible(False)
         self.overpass_server.parentWidget().setVisible(is_overpass)
         self.recheck_servers.setVisible(is_overpass)
@@ -1434,25 +1476,49 @@ class XtopoDockWidget(QDockWidget):
             )
             self.pbf_info.setVisible(True)
             self._schedule_pbf_probe()
-        elif is_geofabrik:
+        elif is_file:
             self.source_value.setEnabled(False)
             self.source_value.setPlaceholderText(
                 i18n.tr("Определяется по охвату автоматически")
             )
             self.source_value.clear()
-            self.source_hint.setText(
-                i18n.tr(
-                    "Список карт определяется по охвату из онлайн-индекса "
-                    "Geofabrik. Отмеченные карты скачиваются автоматически "
-                    "при нажатии «Подготовить данные». Снимите галочку с "
-                    "лишней карты, чтобы не качать её целиком."
+            if is_extracts:
+                self.source_hint.setText(
+                    i18n.tr(
+                        "Файловые выгрузки с другого хоста: список карт "
+                        "определяется по охвату, отмеченные карты "
+                        "скачиваются автоматически при нажатии "
+                        "«Подготовить данные»."
+                    )
                 )
-            )
+            else:
+                self.source_hint.setText(
+                    i18n.tr(
+                        "Список карт определяется по охвату из онлайн-индекса "
+                        "Geofabrik. Отмеченные карты скачиваются автоматически "
+                        "при нажатии «Подготовить данные». Снимите галочку с "
+                        "лишней карты, чтобы не качать её целиком."
+                    )
+                )
             self.pbf_info.setVisible(True)
             self.geofabrik_info.setText(
                 i18n.tr("Определение карт по охвату…")
             )
             self._schedule_geofabrik()
+        elif mode == "slice":
+            self.source_value.setEnabled(False)
+            self.source_value.setPlaceholderText(
+                i18n.tr("Вырез по охвату")
+            )
+            self.source_value.clear()
+            self.source_hint.setText(
+                i18n.tr(
+                    "Сервис SliceOSM собирает файл PBF по указанной рамке: "
+                    "данные свежее минуты, но вырез готовится на стороне "
+                    "сервиса и занимает от нескольких секунд до минут."
+                )
+            )
+            self.pbf_info.setVisible(False)
         elif mode == "local":
             self.source_value.setEnabled(True)
             self.source_value.setPlaceholderText(
@@ -1486,7 +1552,7 @@ class XtopoDockWidget(QDockWidget):
         mode = self.source_mode.currentData()
         if mode == "pbf":
             self._schedule_pbf_probe()
-        elif mode == "geofabrik":
+        elif mode in FILE_MODES:
             self._pbf_probe_timer.stop()
             if self.pbf_probe is not None and self.pbf_probe.isRunning():
                 self.pbf_probe.cancel()
@@ -1498,8 +1564,29 @@ class XtopoDockWidget(QDockWidget):
         mode = self.source_mode.currentData()
         if mode == "pbf":
             self._schedule_pbf_probe()
-        elif mode == "geofabrik":
+        elif mode in FILE_MODES:
             self._pbf_probe_timer.start(700)
+
+    def _file_provider(self):
+        """Провайдер файловых выгрузок для текущего режима."""
+        mode = self.source_mode.currentData()
+        if mode == "geofabrik":
+            return "geofabrik"
+        if mode == "extracts":
+            return self.extract_provider.currentData() or "geo2day"
+        return ""
+
+    def _provider_title(self, provider):
+        if provider == "geofabrik":
+            return i18n.tr("Карты Geofabrik")
+        item = extracts.provider(provider)
+        return i18n.tr("Выгрузки {}").format(item.title)
+
+    def _extract_provider_changed(self, _index):
+        """Сменился хост выгрузок: список карт строим заново."""
+        if self.source_mode.currentData() != "extracts":
+            return
+        self._schedule_geofabrik()
 
     def _schedule_pbf_probe(self):
         self._pbf_probe_timer.start(700)
@@ -1514,7 +1601,7 @@ class XtopoDockWidget(QDockWidget):
         self.geofabrik_summary.clear()
         self._pbf_info_state = None
         self._reset_geofabrik_index_stamp()
-        if self.source_mode.currentData() == "geofabrik":
+        if self.source_mode.currentData() in FILE_MODES:
             self.source_value.clear()
             self.geofabrik_info.setText(
                 i18n.tr("Определение карт по охвату…")
@@ -1522,17 +1609,19 @@ class XtopoDockWidget(QDockWidget):
         self._geofabrik_timer.start(700)
 
     def _geofabrik_config(self, bbox):
+        provider = self._file_provider()
         return Config(
             qgis_projects_dir=self.projects_dir.text().strip() or default_projects_dir(),
             project_name=self.project_name.text().strip() or "automap",
             bbox=bbox.as_csv(),
             array_queries=[],
-            source_mode="geofabrik",
+            source_mode="geofabrik" if provider == "geofabrik" else "extracts",
+            extract_provider=provider if provider != "geofabrik" else "geo2day",
         )
 
     def _start_geofabrik(self):
         self._geofabrik_timer.stop()
-        if self.source_mode.currentData() != "geofabrik" or not self.isVisible():
+        if self.source_mode.currentData() not in FILE_MODES or not self.isVisible():
             return
         try:
             bbox = parse_bbox(self.bbox.text().strip())
@@ -1546,13 +1635,18 @@ class XtopoDockWidget(QDockWidget):
             self.geofabrik_worker.cancel()
             self.geofabrik_worker.wait(1000)
         config = self._geofabrik_config(bbox)
-        worker = GeofabrikPlanWorker(config, bbox, self)
+        provider = self._file_provider()
+        worker = GeofabrikPlanWorker(config, bbox, self, provider=provider)
         self.geofabrik_worker = worker
         worker.progress.connect(self._geofabrik_progress)
         worker.result.connect(lambda plan, w=worker: self._geofabrik_ready(w, plan))
         worker.failed.connect(lambda message, w=worker: self._geofabrik_failed(w, message))
         worker.finished.connect(lambda w=worker: self._geofabrik_done(w))
-        self.geofabrik_info.setText(i18n.tr("Загрузка индекса Geofabrik…"))
+        self.geofabrik_info.setText(
+            i18n.tr("Загрузка индекса Geofabrik…")
+            if provider == "geofabrik"
+            else i18n.trf("Загрузка индекса {}…", provider)
+        )
         worker.start()
 
     def _geofabrik_done(self, worker):
@@ -1568,7 +1662,7 @@ class XtopoDockWidget(QDockWidget):
             return
         if self.worker is not None and self.worker.isRunning():
             return
-        if self.source_mode.currentData() != "geofabrik":
+        if self.source_mode.currentData() not in FILE_MODES:
             return
         try:
             current = parse_bbox(self.bbox.text().strip()).as_csv()
@@ -1648,27 +1742,47 @@ class XtopoDockWidget(QDockWidget):
         self._reset_geofabrik_index_stamp(stamp)
 
     def _reset_geofabrik_index_stamp(self, stamp=""):
-        title = i18n.tr("Карты Geofabrik")
+        title = self._provider_title(self._file_provider())
         if stamp:
             title = i18n.trf("{} · индекс {}", title, stamp)
         self.geofabrik_title.setText(title)
 
     def _refresh_geofabrik_index(self):
-        """Перезагрузить индекс Geofabrik из сети."""
-        if self.source_mode.currentData() != "geofabrik":
+        """Перезагрузить индекс выгрузок из сети."""
+        if self.source_mode.currentData() not in FILE_MODES:
             return
+        provider = self._file_provider()
         try:
             bbox = parse_bbox(self.bbox.text().strip())
         except Exception:
             return
-        try:
-            geofabrik.invalidate_index(self._geofabrik_config(bbox))
-        except Exception as exc:
+        if provider == "geofabrik":
+            try:
+                geofabrik.invalidate_index(self._geofabrik_config(bbox))
+            except Exception as exc:
+                self.geofabrik_info.setText(
+                    i18n.trf("Не удалось обновить индекс: {}", exc)
+                )
+                return
+            self.geofabrik_info.setText(i18n.tr("Обновление индекса Geofabrik…"))
+        else:
+            # У остальных провайдеров индексы живут в кэше: сбрасываем
+            # срок, чтобы следующий запрос скачал их заново.
+            cache = self._geofabrik_config(bbox).extracts_dir / provider
+            for path in cache.glob("*") if cache.exists() else []:
+                meta = path.with_name(path.name + ".meta")
+                if path.suffix == ".json" and meta.exists():
+                    try:
+                        data = json.loads(meta.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    data["fetched_at"] = 0
+                    meta.write_text(
+                        json.dumps(data, ensure_ascii=False), encoding="utf-8"
+                    )
             self.geofabrik_info.setText(
-                i18n.trf("Не удалось обновить индекс: {}", exc)
+                i18n.trf("Обновление индекса {}…", provider)
             )
-            return
-        self.geofabrik_info.setText(i18n.tr("Обновление индекса Geofabrik…"))
         self._start_geofabrik()
 
     def _geofabrik_item(self, item, status, checked):
@@ -1727,6 +1841,23 @@ class XtopoDockWidget(QDockWidget):
         finally:
             widget.blockSignals(False)
         self._geofabrik_stats_maps = ()
+        stored = self._stored_map_selection()
+        if stored:
+            self._restore_geofabrik_selection(set(stored))
+
+    def _stored_map_selection(self):
+        """Сохранённый список карт для текущего провайдера."""
+        provider = self._file_provider() or "geofabrik"
+        value = self.settings.value(f"maps_{provider}", [])
+        if isinstance(value, str):
+            value = [part for part in value.split(",") if part]
+        return [str(item) for item in value or []]
+
+    def _store_map_selection(self):
+        provider = self._file_provider() or "geofabrik"
+        if not self.geofabrik_maps.count():
+            return
+        self.settings.setValue(f"maps_{provider}", self._geofabrik_selected_ids())
 
     def _geofabrik_selected_ids(self):
         checked_state = _checked_state()[0]
@@ -1774,6 +1905,7 @@ class XtopoDockWidget(QDockWidget):
         selected = self._geofabrik_selected_maps()
         self.source_value.setText(", ".join(item.id for item in selected))
         self._update_geofabrik_summary()
+        self._store_map_selection()
         pending, total = self._geofabrik_pending(self._geofabrik_plan)
         self._show_pbf_estimate(pending, total)
         self._start_geofabrik_stats(self._geofabrik_plan)
@@ -1815,7 +1947,7 @@ class XtopoDockWidget(QDockWidget):
     def _start_pbf_probe(self):
         self._pbf_probe_timer.stop()
         mode = self.source_mode.currentData()
-        if mode not in ("pbf", "geofabrik"):
+        if mode not in ("pbf",) + FILE_MODES:
             return
         try:
             bbox = parse_bbox(self.bbox.text().strip())
@@ -1824,7 +1956,7 @@ class XtopoDockWidget(QDockWidget):
                 i18n.trf("Оценка PBF недоступна: {}", exc)
             )
             return
-        if mode == "geofabrik":
+        if mode in FILE_MODES:
             plan = self._geofabrik_plan
             if plan is None:
                 self._schedule_geofabrik()
@@ -1895,7 +2027,7 @@ class XtopoDockWidget(QDockWidget):
         estimate = self._estimate_seconds(
             total, matched, extended_ratio, file_count, bytes_per_second
         )
-        if self.source_mode.currentData() == "geofabrik":
+        if self.source_mode.currentData() in FILE_MODES:
             plan = self._geofabrik_plan
             pending, _size = self._geofabrik_pending(plan) if plan else (0, 0)
             self._pbf_info_state = (
@@ -2211,7 +2343,7 @@ class XtopoDockWidget(QDockWidget):
         mode = self.source_mode.currentData()
         if mode == "overpass":
             self._check_servers()
-        elif mode == "geofabrik":
+        elif mode in FILE_MODES:
             self._schedule_geofabrik()
 
     def _terrain_changed(self, enabled):
@@ -2534,9 +2666,13 @@ class XtopoDockWidget(QDockWidget):
         self.source_mode.setCurrentIndex(
             max(0, self.source_mode.findData(self.settings.value("source_mode", "geofabrik")))
         )
+        provider = str(self.settings.value("extract_provider", "geo2day") or "geo2day")
+        provider_index = self.extract_provider.findData(provider)
+        if provider_index >= 0:
+            self.extract_provider.setCurrentIndex(provider_index)
         self._source_changed(0)
         mode = self.source_mode.currentData()
-        if mode == "geofabrik":
+        if mode in FILE_MODES or mode == "slice":
             self.source_value.clear()
             self.source_value.setEnabled(False)
         elif mode == "overpass" and self.overpass_server.currentData():
@@ -2609,8 +2745,13 @@ class XtopoDockWidget(QDockWidget):
         self.settings.setValue("bbox", self.bbox.text())
         mode = self.source_mode.currentData()
         self.settings.setValue("source_mode", mode)
+        self.settings.setValue(
+            "extract_provider", self.extract_provider.currentData() or "geo2day"
+        )
         self.settings.setValue("server_url", self.overpass_server.currentData())
-        value = "" if mode == "geofabrik" else self.source_value.text()
+        value = (
+            "" if (mode in FILE_MODES or mode == "slice") else self.source_value.text()
+        )
         self.settings.setValue("source_value", value)
         values = dict(self._mode_values)
         values[mode] = value
@@ -2914,11 +3055,12 @@ class XtopoDockWidget(QDockWidget):
                 )
             if mode == "ssh" and "user@server" in value:
                 raise ValueError("Замените user@server на адрес вашего сервера")
-        if mode == "geofabrik" and self._geofabrik_plan is not None:
+        if mode in FILE_MODES and self._geofabrik_plan is not None:
+            title = self._provider_title(self._file_provider())
             if not self._geofabrik_plan.maps:
-                raise ValueError("Для этого охвата карты Geofabrik не найдены")
+                raise ValueError(f"Для этого охвата карты не найдены ({title})")
             if not self._geofabrik_selected_ids():
-                raise ValueError("Выберите хотя бы одну карту Geofabrik")
+                raise ValueError(f"Выберите хотя бы одну карту ({title})")
         endpoints = [server.url for server in DEFAULT_OVERPASS_SERVERS]
         endpoint = endpoints[0]
         if mode == "overpass":
@@ -2947,8 +3089,9 @@ class XtopoDockWidget(QDockWidget):
             source_mode=mode,
             pbf_path=value if mode == "pbf" else "",
             geofabrik_maps=(
-                self._geofabrik_selected_ids() if mode == "geofabrik" else []
+                self._geofabrik_selected_ids() if mode in FILE_MODES else []
             ),
+            extract_provider=self.extract_provider.currentData() or "geo2day",
             overpass_endpoint=endpoint,
             overpass_endpoints=endpoints,
             overpass_endpoint_external=endpoint,
@@ -3097,7 +3240,7 @@ class XtopoDockWidget(QDockWidget):
                 self, "QGIS-xtopo",
                 i18n.trf("Проект создан, но не открылся: {}", exc),
             )
-        if self.source_mode.currentData() == "geofabrik":
+        if self.source_mode.currentData() in FILE_MODES:
             self._schedule_geofabrik()
 
     def _failed(self, message):
