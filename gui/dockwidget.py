@@ -583,6 +583,12 @@ class WrappedLabel(QLabel):
     def setText(self, text):
         super().setText(text)
         self._sync_height()
+        self.updateGeometry()
+        parent = self.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            # Смена текста меняет нужную высоту: без этого QFormLayout
+            # мог оставить старую высоту и обрезать последнюю строку.
+            parent.layout().activate()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
