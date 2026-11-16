@@ -519,15 +519,19 @@ class GlacierIsolinesWaterTest(unittest.TestCase):
         layer.CreateFeature(feature)
         dataset = None
 
-    def _write_dem(self, config, srs):
-        """Склон: высоты растут с запада на восток."""
+    def _write_dem(self, config, srs, axis="x"):
+        """Склон: высоты растут с запада на восток или с севера на юг."""
         import numpy
         from osgeo import gdal
 
         size = 40
         array = numpy.zeros((size, size), dtype="float32")
-        for column in range(size):
-            array[:, column] = column * 10.0 + 3.0
+        if axis == "y":
+            for row in range(size):
+                array[row, :] = row * 10.0 + 3.0
+        else:
+            for column in range(size):
+                array[:, column] = column * 10.0 + 3.0
         raster = gdal.GetDriverByName("GTiff").Create(
             str(config.raster_dir / "merged_dem.tif"), size, size, 1, gdal.GDT_Float32
         )
@@ -537,7 +541,7 @@ class GlacierIsolinesWaterTest(unittest.TestCase):
         raster.FlushCache()
         raster = None
 
-    def _prepare(self, directory, water_name=None):
+    def _prepare(self, directory, water_name=None, axis="x"):
         """Проект со склоном, ледником и (по желанию) водой."""
         from qgis_xtopo.core.config import Config
 
@@ -545,7 +549,7 @@ class GlacierIsolinesWaterTest(unittest.TestCase):
         config.ensure_directories()
         config.isolines_step = 10
         srs = self._srs()
-        self._write_dem(config, srs)
+        self._write_dem(config, srs, axis=axis)
         self._write_layer(
             config.vector_dir / "glacier.sqlite",
             srs,
@@ -578,6 +582,54 @@ class GlacierIsolinesWaterTest(unittest.TestCase):
         """Длина части линии внутри полигона."""
         outside = line.Difference(polygon)
         return line.Length() - (outside.Length() if outside is not None else 0.0)
+
+    def _line_endpoints(self, config, name):
+        """Концы незамкнутых линий слоя: (x, y, высота)."""
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(config.vector_dir / name))
+        layer = dataset.GetLayer(0)
+        points = set()
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty():
+                continue
+            elevation = round(feature.GetField("ELEV"), 6)
+            parts = (
+                [geometry.GetGeometryRef(index)
+                 for index in range(geometry.GetGeometryCount())]
+                if geometry.GetGeometryName() == "MULTILINESTRING"
+                else [geometry]
+            )
+            for line in parts:
+                if line is None or line.GetPointCount() < 2:
+                    continue
+                start = (line.GetX(0), line.GetY(0))
+                end = (
+                    line.GetX(line.GetPointCount() - 1),
+                    line.GetY(line.GetPointCount() - 1),
+                )
+                if start == end:
+                    continue
+                for x, y in (start, end):
+                    points.add((round(x, 6), round(y, 6), elevation))
+        dataset = None
+        return points
+
+    def test_glacier_boundary_isolines_join_regular_lines(self):
+        """Концы ледниковых изолиний совпадают с обычными на границе."""
+        from qgis_xtopo.core.terrain import generate_isolines
+
+        with tempfile.TemporaryDirectory() as directory:
+            config, _srs = self._prepare(directory, axis="y")
+            generate_isolines(config, BBox(0.0, 0.0, 4.0, 4.0))
+            glacier = self._line_endpoints(config, "isolines_glacier.sqlite")
+            regular = self._line_endpoints(config, "isolines_regular.sqlite")
+            self.assertTrue(glacier)
+            self.assertFalse(
+                glacier - regular,
+                "ледниковые изолинии не стыкуются с обычными",
+            )
 
     def _assert_cut_by_water(self, water_name):
         from qgis_xtopo.core.terrain import generate_isolines

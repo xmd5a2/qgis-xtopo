@@ -1580,165 +1580,6 @@ def _contour_workers(tiles):
     return max(1, min(tiles, limit, worker_cap(CONTOUR_WORKER_BYTES, cpu_limit=limit)))
 
 
-def _try_mask_glaciers(raster, config, keep_only=False):
-    """Записывает полигоны ледников в растр DEM значением nodata.
-
-    С ``keep_only=False`` (основные изолинии) ледники вырезаются из
-    растра вместе с водой, и контуры обрываются у их границ при
-    генерации.  С ``keep_only=True`` (ледниковые изолинии) значения
-    остаются только внутри ледников — отдельный проход даёт синие
-    контуры без векторного деления на GEOS.  False — ледников нет или
-    маску применить не удалось, тогда работает запасной векторный путь.
-    """
-    gdal, ogr, osr = _gdal()
-    numpy = _numpy()
-    path = config.vector_dir / "glacier.sqlite"
-    if not path.exists():
-        return False
-    projection = raster.GetProjection()
-    if not projection:
-        return False
-    raster_srs = osr.SpatialReference()
-    raster_srs.ImportFromWkt(projection)
-    raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    try:
-        dataset = ogr.Open(str(path))
-        if dataset is None:
-            return False
-        geometries = []
-        try:
-            for layer in dataset:
-                layer_srs = layer.GetSpatialRef()
-                if layer_srs is None:
-                    return False
-                layer_srs = layer_srs.Clone()
-                layer_srs.SetAxisMappingStrategy(
-                    osr.OAMS_TRADITIONAL_GIS_ORDER
-                )
-                if not layer_srs.IsSame(raster_srs):
-                    return False
-                for feature in layer:
-                    geometry = feature.GetGeometryRef()
-                    if (geometry is None or geometry.IsEmpty()
-                            or geometry.GetDimension() != 2):
-                        continue
-                    flat = ogr.GT_Flatten(geometry.GetGeometryType())
-                    if flat == ogr.wkbMultiPolygon:
-                        for index in range(geometry.GetGeometryCount()):
-                            part = geometry.GetGeometryRef(index)
-                            if part is not None and not part.IsEmpty():
-                                geometries.append(part.Clone())
-                    else:
-                        geometries.append(geometry.Clone())
-        finally:
-            dataset = None
-        if not geometries:
-            return False
-        band = raster.GetRasterBand(1)
-        nodata = band.GetNoDataValue()
-        if nodata is None:
-            nodata = -32768.0
-            band.SetNoDataValue(nodata)
-        # В этой сборке GDAL RasterizeGeometries в Python не прибит —
-        # кладём полигоны во временный слой и растеризуем его.
-        holder = ogr.GetDriverByName("Memory").CreateDataSource("glaciers")
-        holder_layer = holder.CreateLayer("glaciers", raster_srs, ogr.wkbUnknown)
-        definition = holder_layer.GetLayerDefn()
-        for geometry in geometries:
-            feature = ogr.Feature(definition)
-            feature.SetGeometry(geometry)
-            holder_layer.CreateFeature(feature)
-            feature = None
-        if keep_only:
-            mask = gdal.GetDriverByName("MEM").Create(
-                "", raster.RasterXSize, raster.RasterYSize, 1, gdal.GDT_Byte,
-            )
-            mask.SetGeoTransform(raster.GetGeoTransform())
-            mask.SetProjection(projection)
-            gdal.RasterizeLayer(mask, [1], holder_layer, burn_values=[1])
-            mask_band = mask.GetRasterBand(1)
-            for y in range(0, raster.RasterYSize, RASTER_BLOCK_SIDE):
-                rows = min(RASTER_BLOCK_SIDE, raster.RasterYSize - y)
-                for x in range(0, raster.RasterXSize, RASTER_BLOCK_SIDE):
-                    columns = min(RASTER_BLOCK_SIDE, raster.RasterXSize - x)
-                    array = band.ReadAsArray(x, y, columns, rows)
-                    if array is None:
-                        continue
-                    mask_array = mask_band.ReadAsArray(
-                        x, y, columns, rows
-                    )
-                    array[mask_array != 1] = nodata
-                    band.WriteArray(array, x, y)
-            band.FlushCache()
-            mask = None
-        else:
-            gdal.RasterizeLayer(
-                raster, [1], holder_layer, burn_values=[nodata],
-                options=["ALL_TOUCHED=TRUE"],
-            )
-        holder = None
-    except Exception:  # noqa: BLE001 - запасной путь ниже
-        return False
-    return True
-
-
-def _generate_masked_glacier_isolines(config, source, water_paths,
-                                      progress=None):
-    """Изолинии внутри ледников по растру, очищенному от всего, кроме них.
-
-    Возвращает путь к isolines_glacier.sqlite; None — ледников нет или
-    маску применить не удалось.
-    """
-    gdal, ogr, osr = _gdal()
-    memory = gdal.Translate("", str(source), format="MEM")
-    if not _try_mask_glaciers(memory, config, keep_only=True):
-        return None
-    # Вода режет ледниковые изолинии так же, как обычные.
-    _try_mask_water(memory, water_paths)
-    shape_path = config.temp_dir / "isolines_glacier.shp"
-    driver = ogr.GetDriverByName("ESRI Shapefile")
-    shape_path.unlink(missing_ok=True)
-    dataset = driver.CreateDataSource(str(shape_path))
-    spatial_ref = osr.SpatialReference()
-    spatial_ref.ImportFromWkt(memory.GetProjection())
-    layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
-    layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
-    layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
-    band = memory.GetRasterBand(1)
-    nodata = band.GetNoDataValue()
-    if nodata is not None:
-        gdal.ContourGenerate(
-            band, float(config.isolines_step), 0.0, [], 1, nodata,
-            layer, 0, 1,
-        )
-    else:
-        gdal.ContourGenerate(
-            band, float(config.isolines_step), 0.0, [], 0, 0.0,
-            layer, 0, 1,
-        )
-    layer.SyncToDisk()
-    count = layer.GetFeatureCount()
-    dataset = None
-    memory = None
-    destination = config.vector_dir / "isolines_glacier.sqlite"
-    destination.unlink(missing_ok=True)
-    result = gdal.VectorTranslate(
-        str(destination), str(shape_path),
-        options=["-nln", "isolines", "-dsco", "SPATIALITE=YES",
-                 "-lco", "COMPRESS_GEOM=YES"],
-    )
-    shape_path.unlink(missing_ok=True)
-    for suffix in (".shx", ".dbf", ".prj"):
-        shape_path.with_suffix(suffix).unlink(missing_ok=True)
-    if result is None:
-        destination.unlink(missing_ok=True)
-        return None
-    result = None
-    if progress:
-        progress(f"Glacier contour lines ready: {count}")
-    return destination
-
-
 def _try_mask_water(raster, water_paths):
     """Записывает полигоны воды в растр DEM значением nodata.
 
@@ -1999,18 +1840,16 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     side = _contour_tile_side(pixels)
     water_paths = _water_mask_paths(config)
     masked = False
-    glacier_masked = False
     if side <= 1:
         # Вода записывается в копию растра значением nodata: контуры
         # обрываются у берега при генерации (см. _try_mask_water).
-        # Ледники вырезаются той же маской: тогда обычные изолинии не
-        # заходят на ледники, а ледниковые считаются отдельным проходом
-        # по растру, очищенному от всего, кроме ледников.
+        # Ледники в растр не вырезаются: готовые контуры делятся по
+        # полигонам ледников векторно, иначе на границе ледника
+        # ледниковая и обычная линии обрывались в разных точках.
         memory = gdal.Translate("", str(source), format="MEM")
         memory_band = memory.GetRasterBand(1)
         if _try_mask_water(memory, water_paths):
             masked = True
-        glacier_masked = _try_mask_glaciers(memory, config)
         nodata = memory_band.GetNoDataValue()
         if nodata is not None:
             gdal.ContourGenerate(
@@ -2097,41 +1936,6 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         "-dsco", "SPATIALITE=YES",
         "-lco", "COMPRESS_GEOM=YES",
     ]
-    if side <= 1 and glacier_masked:
-        # Обычные изолинии — главный контур (ледники уже вырезаны маской);
-        # ледниковые — отдельный проход по очищенному растру.
-        glacier_destination = _generate_masked_glacier_isolines(
-            config, source, water_paths, progress,
-        )
-        if glacier_destination is None:
-            glacier_masked = False
-    if side <= 1 and glacier_masked:
-        regular_destination = config.vector_dir / "isolines_regular.sqlite"
-        regular_destination.unlink(missing_ok=True)
-        result = gdal.VectorTranslate(
-            str(regular_destination), str(shape_path), options=options,
-        )
-        if result is None:
-            raise RuntimeError("Failed to write contour lines")
-        result = None
-        destination = config.vector_dir / "isolines_full.sqlite"
-        destination.unlink(missing_ok=True)
-        result = gdal.VectorTranslate(
-            str(destination), str(shape_path), options=options,
-        )
-        if result is None:
-            raise RuntimeError("Failed to write contour lines")
-        result = gdal.VectorTranslate(
-            str(destination), str(glacier_destination),
-            options=options + ["-append"],
-        )
-        if result is None:
-            raise RuntimeError("Failed to merge glacier contour lines")
-        result = None
-        for suffix in (".shp", ".shx", ".dbf", ".prj"):
-            (config.temp_dir / f"isolines_full{suffix}").unlink(missing_ok=True)
-        return destination
-
     destination = config.vector_dir / "isolines_full.sqlite"
     try:
         result = gdal.VectorTranslate(str(destination), str(shape_path), options=options)

@@ -47,7 +47,7 @@ HILLSHADE_STYLE_VERSION = 3
 
 # Версия расчёта изолиний: 2 — DEM режется на тайлы с нахлёстом,
 # контуры считаются параллельно, в результат попадает середина тайла.
-ISOLINES_VERSION = 2
+ISOLINES_VERSION = 3
 # Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
 DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
