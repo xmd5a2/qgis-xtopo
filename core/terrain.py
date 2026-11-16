@@ -263,6 +263,8 @@ def _item_overlaps(item, bbox):
 def _cog_sources(source_key, bbox, progress=None, cancel=None):
     """Ссылки на растровые источники набора для области."""
     item = dem_sources.source(source_key)
+    if item.direct_tiles:
+        return _direct_sources(item, bbox, progress=progress, cancel=cancel)
     try:
         items = dem_sources.stac_items(
             item.collection,
@@ -331,6 +333,31 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
         if not href:
             continue
         url = dem_sources.sign_pc(href)
+        sources.append("/vsicurl/" + url)
+        if progress:
+            progress(
+                i18n.trf(
+                    "Загрузка тайла рельефа: {} ({})",
+                    _remote_file_name(url), item.short,
+                )
+            )
+    return sources
+
+
+def _direct_sources(item, bbox, progress=None, cancel=None):
+    """Ссылки на тайлы набора без каталога STAC.
+
+    Адрес файла строится по координатам тайла, наличие проверяется
+    HEAD-запросом: у FABDEM тайлы опубликованы не для всей суши.
+    """
+    tiles = dem_sources.existing_tiles(
+        item, dem_sources.tiles_for_bbox(bbox)
+    )
+    sources = []
+    for lat, lon in sorted(tiles):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        url = dem_sources.source_tile_url(item.key, lat, lon)
         sources.append("/vsicurl/" + url)
         if progress:
             progress(

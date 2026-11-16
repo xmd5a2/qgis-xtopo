@@ -72,6 +72,18 @@ SOURCE_THRESHOLD_PROFILES = {
         "ele_below": 4.6,
         "summit_far_neighbour": 900.0,
     },
+    # FABDEM — тот же Copernicus, но без растительности и построек:
+    # поверхность ближе к «голой земле», поэтому берём профиль
+    # Copernicus (он осторожнее базового). Размеченной выборки для
+    # FABDEM пока нет.
+    "fabdem": {
+        "no_crest_450": 80.0,
+        "far_drop": 260.0,
+        "near_max_d": 400.0,
+        "stream_distance": 50.0,
+        "ele_below": 4.6,
+        "summit_far_neighbour": 900.0,
+    },
     "sonny": {
         "no_crest_450": 80.0,
         "far_drop": 260.0,

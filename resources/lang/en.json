@@ -582,5 +582,10 @@
   "SliceOSM: неожиданный ответ {}": "SliceOSM: unexpected response {}",
   "Определение выгрузок прервана": "Determining extracts cancelled",
   "Обход каталогов прерван": "Browsing directories cancelled",
-  "Вырез прерван": "Cutout cancelled"
+  "Вырез прерван": "Cutout cancelled",
+  "FABDEM (без леса и построек), 30 м": "FABDEM (forest and buildings removed), 30 m",
+  "University of Bristol": "University of Bristol",
+  "60° ю.ш. – 80° с.ш.": "60° S – 80° N",
+  "FABDEM — University of Bristol (CC BY-NC-SA 4.0) — https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn": "FABDEM — University of Bristol (CC BY-NC-SA 4.0) — https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
+  "Copernicus GLO-30 с вычтенными высотами леса и построек: земная поверхность без растительности. Файлы — COG, читаются по частям. Лицензия CC BY-NC-SA 4.0: только некоммерческое использование, поэтому в автоматический подбор набор не входит.": "Copernicus GLO-30 with forest and building heights subtracted: the ground surface without vegetation. The files are COGs, read in parts. Licence CC BY-NC-SA 4.0: non-commercial use only, so the dataset is not part of the automatic selection."
 }

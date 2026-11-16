@@ -67,6 +67,12 @@ WORLD_MAP_LAYER = "countries"
 SRTM_AVERAGE_BYTES = 15 * 1024 * 1024
 SRTM_HEAD_LIMIT = 32
 
+# FABDEM: глобальный DEM без леса и построек — Copernicus GLO-30 с
+# вычтенными высотами растительности и построек. Файлы лежат в открытом
+# бакете Hugging Face, каждый тайл — COG, поэтому читается по частям.
+FABDEM_BASE = "https://huggingface.co/buckets/links-ads/fabdem/resolve"
+FABDEM_VERSION = "V1-2"
+
 # Подпись SAS кэшируется: сервис отвечает 429, если подписывать подряд.
 _SIGN_LOCK = threading.Lock()
 _SIGN_CACHE = {}
@@ -306,6 +312,9 @@ class DemSource:
     lat_max: float = None
     native_resolution: float = 1 / 3600.0
     manual: bool = False
+    # Наборы без каталога STAC: адрес файла тайла строится по его
+    # координатам, а наличие файла проверяется HEAD-запросом.
+    direct_tiles: bool = False
 
     @property
     def remote(self):
@@ -383,6 +392,25 @@ SOURCES = (
         note="DSM: включает растительность и постройки.",
         attribution="ALOS World 3D-30m — © JAXA",
         collection="alos-dem",
+    ),
+    DemSource(
+        key="fabdem",
+        title="FABDEM (без леса и построек), 30 м",
+        short="FABDEM",
+        provider="University of Bristol",
+        resolution="30 м (1″)",
+        datum="EGM2008",
+        coverage="60° ю.ш. – 80° с.ш.",
+        coverage_short="глобально",
+        note="Copernicus GLO-30 с вычтенными высотами леса и построек: "
+             "земная поверхность без растительности. Файлы — COG, читаются "
+             "по частям. Лицензия CC BY-NC-SA 4.0: только некоммерческое "
+             "использование, поэтому в автоматический подбор набор не входит.",
+        attribution="FABDEM — University of Bristol (CC BY-NC-SA 4.0) — "
+                    "https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
+        lat_min=-60.0,
+        lat_max=80.0,
+        direct_tiles=True,
     ),
     DemSource(
         key="3dep",
@@ -512,6 +540,51 @@ def aws_tile_url(key, lat, lon):
                 f"Copernicus_DSM_COG_10_{token}_DEM/"
                 f"Copernicus_DSM_COG_10_{token}_DEM.tif")
     raise ValueError(f"No AWS bucket for source: {key}")
+
+
+def fabdem_tile_name(lat, lon):
+    """Имя файла тайла FABDEM: юго-западный угол плюс версия."""
+    return f"{tile_name(lat, lon)}_FABDEM_{FABDEM_VERSION}.tif"
+
+
+def _corner_name(lat, lon):
+    """Имя угла сетки 10°×10° в стиле каталогов FABDEM.
+
+    Углы блока заканчиваются на 180° долготы — там подпись меняется с
+    «E» на «W»: блок 170…180° называется «N70E170-N80W180».
+    """
+    ns = "N" if lat >= 0 else "S"
+    if lon >= 180:
+        ew = "W"
+    else:
+        ew = "E" if lon >= 0 else "W"
+    return f"{ns}{abs(lat):02d}{ew}{abs(lon):03d}"
+
+
+def fabdem_group(lat, lon):
+    """Каталог с тайлами FABDEM: блок 10°×10°."""
+    start_lat = (lat // 10) * 10
+    start_lon = (lon // 10) * 10
+    return (
+        f"{_corner_name(start_lat, start_lon)}-"
+        f"{_corner_name(start_lat + 10, start_lon + 10)}"
+        f"_FABDEM_{FABDEM_VERSION}"
+    )
+
+
+def fabdem_tile_url(lat, lon):
+    """Адрес файла тайла FABDEM."""
+    return (
+        f"{FABDEM_BASE}/tiles/{fabdem_group(lat, lon)}/"
+        f"{fabdem_tile_name(lat, lon)}"
+    )
+
+
+def source_tile_url(key, lat, lon):
+    """Адрес файла тайла набора (для наборов без каталога STAC)."""
+    if key == "fabdem":
+        return fabdem_tile_url(lat, lon)
+    raise ValueError(f"No direct tile URL for source: {key}")
 
 
 def item_asset_href(item):
@@ -840,6 +913,121 @@ def cop30_existing_tiles(tiles, timeout=15, workers=8):
     return {tile for tile, ok in zip(tiles, found) if ok}
 
 
+def _tile_status(url, timeout=15):
+    """Состояние файла тайла: есть, нет или ошибка сети.
+
+    Запрос идёт обычным urlopen (через прокси, если он настроен), а не
+    через `_OPENER` источников: мультиадресный перебор и повторы нужны
+    каталогу STAC, а не проверке файла.
+    """
+    request = urllib.request.Request(
+        url, method="HEAD", headers={"User-Agent": USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return "ok" if response.status == 200 else "missing"
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 404):
+            return "missing"
+        return "error"
+    except Exception:  # noqa: BLE001 - сеть не должна ломать проверку
+        return "error"
+
+
+def tile_statuses(item, tiles, timeout=15, workers=8):
+    """Состояние файлов тайлов набора: «ok», «missing» или «error»."""
+    tiles = list(tiles)
+    if not tiles:
+        return {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                _tile_status, source_tile_url(item.key, lat, lon), timeout
+            ): (lat, lon)
+            for lat, lon in tiles
+        }
+        states = {}
+        for future, tile in futures.items():
+            try:
+                states[tile] = future.result()
+            except Exception:  # noqa: BLE001 - тайл просто недоступен
+                states[tile] = "error"
+    return states
+
+
+def existing_tiles(item, tiles, timeout=15, workers=8):
+    """Тайлы набора, файлы которых доступны.
+
+    У наборов без каталога STAC адрес строится по координатам тайла, а
+    наличие файла проверяется HEAD-запросом: тайлы есть не везде.
+    """
+    states = tile_statuses(item, tiles, timeout=timeout, workers=workers)
+    return {tile for tile, state in states.items() if state == "ok"}
+
+
+def _direct_availability(item, bbox, timeout=15):
+    """Покрытие набора без каталога STAC: по наличию файлов тайлов."""
+    clipped = _clip_to_coverage(bbox, item)
+    if clipped is None:
+        return Availability(
+            available=False, checked=True,
+            message=i18n.tr("вне покрытия"),
+            detail=i18n.trf(
+                "Охват вне покрытия набора: {}", i18n.tr(item.coverage)
+            ),
+        )
+    clipped_bbox = BBox(*clipped)
+    required = set(tiles_for_bbox(clipped_bbox))
+    states = tile_statuses(item, required, timeout=timeout)
+    covered = {tile for tile, state in states.items() if state == "ok"}
+    missing = required - covered
+    errors = {tile for tile, state in states.items() if state == "error"}
+    outside = clipped != _bbox_tuple(bbox)
+    if not covered:
+        if errors and errors == required:
+            # Хост не ответил ни по одному тайлу: это не «нет данных»,
+            # а неудачная проверка.
+            return _check_failed(RuntimeError(
+                i18n.trf("не удалось проверить тайлы: {}", len(errors))
+            ))
+        return Availability(
+            available=False, checked=True,
+            message=i18n.tr("нет данных"),
+            detail=i18n.trf(
+                "Нет данных для выбранного охвата (покрытие: {})",
+                i18n.tr(item.coverage),
+            ),
+            missing=len(required), total=len(required),
+            required_tiles=frozenset(required),
+            missing_tiles=frozenset(required),
+        )
+    partial = bool(missing) or outside
+    if partial:
+        message = i18n.trf("{} из {} тайлов", len(covered), len(required))
+        detail = i18n.trf(
+            "Данные есть не для всех тайлов охвата: {} из {} "
+            "(часть может быть морем или не опубликована)",
+            len(covered), len(required),
+        )
+        if outside:
+            detail += i18n.tr("; часть охвата вне покрытия набора")
+    else:
+        message = i18n.trf("весь охват, тайлов: {}", len(required))
+        detail = i18n.trf(
+            "Данные есть для всего охвата: тайлов — {}", len(required)
+        )
+    return Availability(
+        available=True, checked=True, partial=partial,
+        message=message, detail=detail,
+        missing=len(missing), total=len(required),
+        required_tiles=frozenset(required),
+        covered_tiles=frozenset(covered),
+        missing_tiles=frozenset(missing),
+        size_bytes=_window_size(clipped_bbox, item),
+        size_estimated=True,
+    )
+
+
 def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=None,
                   force=False):
     """Покрытие наборов, из которых складывается мозаика «Автоматически».
@@ -988,6 +1176,16 @@ def _check_one(item, bbox, timeout, sonny_tiles=(), force=False):
         )
     if item.key == SONNY_SOURCE:
         return sonny_availability(bbox, sonny_tiles)
+    if item.direct_tiles:
+        cached = _cache_lookup(item.key, bbox, force)
+        if cached is not None:
+            return cached
+        try:
+            state = _direct_availability(item, bbox, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - проверка не должна ломать UI
+            state = _check_failed(exc)
+        _cache_store(item.key, bbox, state)
+        return state
     if not item.collection:
         return _range_availability(item, bbox)
     cached = _cache_lookup(item.key, bbox, force)

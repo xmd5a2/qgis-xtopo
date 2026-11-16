@@ -2680,7 +2680,8 @@ class XtopoDockWidget(QDockWidget):
     def _fallback_dem_source(self, availability):
         for key in (
             dem_sources.AUTO_SOURCE, "cop30", "srtm", "nasadem", "alos",
-            "3dep", dem_sources.SONNY_SOURCE, dem_sources.MANUAL_SOURCE,
+            "3dep", "fabdem", dem_sources.SONNY_SOURCE,
+            dem_sources.MANUAL_SOURCE,
         ):
             state = availability.get(key)
             if key == dem_sources.MANUAL_SOURCE:

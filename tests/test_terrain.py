@@ -770,6 +770,99 @@ class DemSourceTest(unittest.TestCase):
         self.assertIn("МБ", dem_sources.format_size(20 * 1024 ** 2))
         self.assertIn("КБ", dem_sources.format_size(2048))
 
+    def test_fabdem_tile_url(self):
+        from qgis_xtopo.core import dem_sources
+
+        self.assertEqual(
+            dem_sources.fabdem_tile_url(36, 36),
+            "https://huggingface.co/buckets/links-ads/fabdem/resolve/tiles/"
+            "N30E030-N40E040_FABDEM_V1-2/N36E036_FABDEM_V1-2.tif",
+        )
+        # Южное полушарие и западная долгота.
+        self.assertEqual(
+            dem_sources.fabdem_tile_url(-5, -5),
+            "https://huggingface.co/buckets/links-ads/fabdem/resolve/tiles/"
+            "S10W010-N00E000_FABDEM_V1-2/S05W005_FABDEM_V1-2.tif",
+        )
+        # У антимеридиана блок заканчивается на 180° и подписан «W180».
+        self.assertEqual(
+            dem_sources.fabdem_tile_url(71, 178),
+            "https://huggingface.co/buckets/links-ads/fabdem/resolve/tiles/"
+            "N70E170-N80W180_FABDEM_V1-2/N71E178_FABDEM_V1-2.tif",
+        )
+
+    def test_fabdem_source_is_registered(self):
+        from qgis_xtopo.core import dem_sources
+
+        item = dem_sources.source("fabdem")
+        self.assertTrue(item.direct_tiles)
+        self.assertEqual(item.datum, "EGM2008")
+        self.assertIn("fabdem", dem_sources.SOURCE_KEYS)
+        text, tooltip = dem_sources.describe("fabdem")
+        self.assertIn("University of Bristol", text)
+        self.assertIn("некоммерческое", tooltip)
+
+    def test_fabdem_availability_uses_tile_files(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        with mock.patch.object(
+            dem_sources, "tile_statuses",
+            return_value={(45, 7): "missing", (46, 7): "ok"},
+        ):
+            state = dem_sources._direct_availability(
+                dem_sources.source("fabdem"),
+                BBox(7.0, 45.9, 8.0, 46.9), timeout=1,
+            )
+        self.assertTrue(state.available)
+        self.assertTrue(state.partial)
+        self.assertEqual(state.total, 2)
+        self.assertEqual(state.covered_tiles, frozenset({(46, 7)}))
+        self.assertEqual(state.missing_tiles, frozenset({(45, 7)}))
+
+    def test_fabdem_availability_without_files(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        with mock.patch.object(
+            dem_sources, "tile_statuses", return_value={(46, 7): "missing"}
+        ):
+            state = dem_sources._direct_availability(
+                dem_sources.source("fabdem"),
+                BBox(7.0, 46.0, 8.0, 47.0), timeout=1,
+            )
+        self.assertFalse(state.available)
+        self.assertIn("нет данных", state.message)
+
+    def test_fabdem_availability_network_error(self):
+        """Молчащий хост — «не удалось проверить», а не «нет данных»."""
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        with mock.patch.object(
+            dem_sources, "tile_statuses", return_value={(46, 7): "error"}
+        ):
+            state = dem_sources._direct_availability(
+                dem_sources.source("fabdem"),
+                BBox(7.0, 46.0, 8.0, 47.0), timeout=1,
+            )
+        self.assertTrue(state.available)
+        self.assertFalse(state.checked)
+        self.assertIn("не удалось проверить", state.message)
+
+    def test_fabdem_outside_coverage(self):
+        from qgis_xtopo.core import dem_sources
+
+        state = dem_sources._direct_availability(
+            dem_sources.source("fabdem"), BBox(15.0, 82.0, 16.0, 83.0),
+            timeout=1,
+        )
+        self.assertFalse(state.available)
+        self.assertIn("вне покрытия", state.message)
+
     def test_describe_shows_download_size(self):
         from qgis_xtopo.core import dem_sources
 
@@ -1821,6 +1914,53 @@ class CogDownloadTest(unittest.TestCase):
             values = band.ReadAsArray()
             self.assertGreater(int(values.max()), 1000)
             dataset = None
+
+
+class DirectSourceTest(unittest.TestCase):
+    """Наборы без каталога STAC: тайлы берутся по координатам."""
+
+    def test_direct_sources_skip_missing_tiles(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, terrain
+
+        with mock.patch.object(
+            dem_sources, "existing_tiles", return_value={(46, 7)}
+        ):
+            sources = terrain._direct_sources(
+                dem_sources.source("fabdem"), BBox(7.0, 45.5, 8.0, 46.5)
+            )
+        self.assertEqual(len(sources), 1)
+        self.assertTrue(sources[0].startswith("/vsicurl/http"))
+        self.assertIn("N46E007_FABDEM_V1-2.tif", sources[0])
+
+
+@unittest.skipUnless(
+    os.environ.get("QGIS_XTOPO_TEST_DEM"),
+    "QGIS_XTOPO_TEST_DEM is not set",
+)
+class LiveFabdemTest(unittest.TestCase):
+    """Живая проверка FABDEM: нужна сеть."""
+
+    def test_tile_exists_and_opens(self):
+        from osgeo import gdal
+
+        from qgis_xtopo.core import dem_sources
+
+        url = dem_sources.fabdem_tile_url(36, 36)
+        self.assertEqual(dem_sources._tile_status(url, timeout=30), "ok")
+        # Нулевой тайл в Гвинейском заливе не опубликован.
+        self.assertEqual(
+            dem_sources._tile_status(
+                dem_sources.fabdem_tile_url(0, 0), timeout=30
+            ),
+            "missing",
+        )
+        dataset = gdal.Open("/vsicurl/" + url)
+        self.assertIsNotNone(dataset)
+        self.assertEqual(dataset.RasterXSize, 3600)
+        self.assertEqual(dataset.GetRasterBand(1).GetNoDataValue(), -9999.0)
+        dataset = None
 
 
 class ContourTilingTest(unittest.TestCase):
