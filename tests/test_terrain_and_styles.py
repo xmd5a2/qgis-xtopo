@@ -350,6 +350,50 @@ class IsolineColorTest(unittest.TestCase):
                 self.assertEqual(color.hue(), QColor(*rgb).hue())
             self.assertLess(color.value(), QColor(*rgb).value() * 0.6)
 
+    def test_label_color_is_lighter_on_basemap(self):
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui.projectpanel import label_color_for
+
+        for rgb in ((0, 255, 0), (220, 120, 10), (60, 120, 200)):
+            source = QColor(*rgb)
+            color = label_color_for(source, light=True)
+            if source.hue() >= 0:
+                self.assertEqual(color.hue(), source.hue())
+            self.assertGreater(color.lightness(), source.lightness())
+            self.assertGreaterEqual(color.value(), source.value())
+
+    def test_apply_light_bold_labels(self):
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui.projectpanel import (
+            _isoline_label_styles, _label_settings, apply_isoline_color,
+            label_color_for,
+        )
+
+        layer = self._layer()
+        self.assertTrue(apply_isoline_color(
+            layer, QColor("#00ff00"), light=True, bold=True
+        ))
+        labels = _isoline_label_styles(layer)
+        self.assertEqual(
+            labels[0][0], label_color_for(QColor("#00ff00"), light=True)
+        )
+        for _rule, settings in _label_settings(layer.labeling()):
+            self.assertTrue(settings.format().font().bold())
+
+    def test_apply_label_bold(self):
+        from qgis_xtopo.gui.projectpanel import (
+            _label_settings, apply_isoline_label_bold,
+        )
+
+        layer = self._layer()
+        self.assertTrue(apply_isoline_label_bold(layer, True))
+        for _rule, settings in _label_settings(layer.labeling()):
+            self.assertTrue(settings.format().font().bold())
+        self.assertFalse(apply_isoline_label_bold(layer, True))
+        self.assertTrue(apply_isoline_label_bold(layer, False))
+        for _rule, settings in _label_settings(layer.labeling()):
+            self.assertFalse(settings.format().font().bold())
+
 
 class IsolineWidthTest(unittest.TestCase):
     def test_template_multiplies_widths(self):
@@ -425,6 +469,90 @@ class IsolineWidthToggleTest(unittest.TestCase):
             self.project, "isolines_width_mult", "1.5"
         )
         self.assertFalse(isolines_width_doubled(self.project))
+
+
+@unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
+class BasemapIsolineStyleTest(unittest.TestCase):
+    """На подложке изогипсы зелёные, толстые и со светлыми жирными подписями."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def setUp(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.core import basemap
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.project = QgsProject.instance()
+        self.project.clear()
+        renderer, labeling = pp._template_layer_objects(pp.ISOLINES_LAYER)
+        self.layer = QgsVectorLayer(
+            "LineString?crs=EPSG:4326", pp.ISOLINES_LAYER, "memory"
+        )
+        self.layer.setRenderer(renderer)
+        self.layer.setLabeling(labeling)
+        self.project.addMapLayer(self.layer)
+        fake = QgsVectorLayer("Point?crs=EPSG:4326", "Google sat", "memory")
+        fake.setCustomProperty(basemap.SOURCE_PROPERTY, "google")
+        self.project.addMapLayer(fake)
+        self.panel = pp.ProjectPanel(None)
+        self.panel._capture_isoline_baseline()
+
+    def tearDown(self):
+        self.panel.deleteLater()
+        self.project.clear()
+
+    def _labels(self):
+        from qgis_xtopo.gui import projectpanel as pp
+
+        return [
+            settings.format()
+            for _rule, settings in pp._label_settings(self.layer.labeling())
+        ]
+
+    def test_basemap_forces_green_thick_and_light_bold_labels(self):
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.assertTrue(self.panel._apply_basemap_isoline_style())
+        self.assertTrue(pp.isolines_width_doubled(self.project))
+        colors = pp._isoline_symbol_colors(self.layer)
+        self.assertEqual(colors[0], QColor("#00ff00"))
+        expected = pp.label_color_for(QColor("#00ff00"), light=True)
+        for fmt in self._labels():
+            self.assertEqual(fmt.color(), expected)
+            self.assertTrue(fmt.font().bold())
+        self.assertEqual(
+            self.layer.customProperty(pp.BASEMAP_WIDTH_PROPERTY), "0"
+        )
+        self.assertEqual(
+            self.layer.customProperty(pp.BASEMAP_COLOR_PROPERTY), ""
+        )
+
+        self.assertTrue(self.panel._restore_isoline_style_after_basemap())
+        self.assertFalse(pp.isolines_width_doubled(self.project))
+        self.assertFalse(any(fmt.font().bold() for fmt in self._labels()))
+        template = pp.template_isoline_styles(pp.ISOLINES_LAYER)
+        self.assertEqual(pp._isoline_symbol_colors(self.layer), template[0])
+        self.assertIsNone(
+            self.layer.customProperty(pp.BASEMAP_WIDTH_PROPERTY)
+        )
+        self.assertIsNone(
+            self.layer.customProperty(pp.BASEMAP_COLOR_PROPERTY)
+        )
+
+    def test_double_width_makes_labels_bold(self):
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.panel._isoline_width_toggled(True)
+        self.assertTrue(pp.isolines_width_doubled(self.project))
+        self.assertTrue(all(fmt.font().bold() for fmt in self._labels()))
+        self.panel._isoline_width_toggled(False)
+        self.assertFalse(pp.isolines_width_doubled(self.project))
+        self.assertFalse(any(fmt.font().bold() for fmt in self._labels()))
 
 
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")

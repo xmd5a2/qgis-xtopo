@@ -164,6 +164,12 @@ HILLSHADE_DEFAULT = 50
 # Переменная проекта, на которую умножается ширина линий изогипс.
 ISOLINES_WIDTH_VARIABLE = "isolines_width_mult"
 
+# На растровой подложке изогипсы принудительно зелёные и вдвое толще:
+# тёмные линии и подписи теряются на спутниковом снимке.
+BASEMAP_ISOLINE_COLOR = "#00ff00"
+BASEMAP_WIDTH_PROPERTY = "qgis_xtopo/basemap_isolines_width"
+BASEMAP_COLOR_PROPERTY = "qgis_xtopo/basemap_isolines_color"
+
 
 def _instant_popup():
     """Режим кнопки, открывающей меню сразу по нажатию."""
@@ -277,12 +283,23 @@ def _isoline_label_styles(layer):
     return _labeling_styles(layer.labeling())
 
 
-def label_color_for(color):
-    """Заметно более тёмный оттенок цвета линии — для подписей."""
+def label_color_for(color, light=False):
+    """Оттенок цвета линии для подписей.
+
+    Обычно подпись темнее линии.  На спутниковой подложке, наоборот,
+    нужен светлый оттенок: тёмный текст сливается с снимком.
+    """
     source = QColor(color)
     hue, saturation, value, alpha = source.getHsvF()
     if hue < 0:
         hue, saturation = 0.0, 0.0
+    if light:
+        return QColor.fromHsvF(
+            hue,
+            min(1.0, saturation * 0.2),
+            1.0,
+            alpha,
+        )
     return QColor.fromHsvF(
         hue,
         min(1.0, saturation + 0.1),
@@ -299,17 +316,38 @@ def _repaint_layer(layer):
         pass
 
 
-def apply_isoline_color(layer, color):
+def apply_isoline_label_bold(layer, bold):
+    """Делает подписи изогипс жирными или обычными."""
+    if layer is None:
+        return False
+    changed = False
+    for rule, settings in _label_settings(layer.labeling()):
+        fmt = settings.format()
+        font = fmt.font()
+        if font.bold() == bool(bold):
+            continue
+        font.setBold(bool(bold))
+        fmt.setFont(font)
+        settings.setFormat(fmt)
+        rule.setSettings(settings)
+        changed = True
+    if changed:
+        _repaint_layer(layer)
+    return changed
+
+
+def apply_isoline_color(layer, color, light=False, bold=None):
     """Перекрашивает линии, штрихи и подписи изогипс одним цветом.
 
     Альфа исходных слоёв сохраняется, поэтому невидимые служебные линии
     остаются невидимыми. Подписи получают затемнённый оттенок того же
-    цвета и остаются без обводки.
+    цвета и остаются без обводки.  ``light`` выбирает светлый оттенок
+    для растровой подложки, ``bold`` при необходимости меняет жирность.
     """
     if layer is None:
         return False
     pen = QColor(color)
-    text = label_color_for(pen)
+    text = label_color_for(pen, light=light)
     changed = False
     for symbol in _renderer_symbols(layer.renderer()):
         for symbol_layer in _symbol_layers(symbol):
@@ -323,14 +361,23 @@ def apply_isoline_color(layer, color):
             changed = True
     for rule, settings in _label_settings(layer.labeling()):
         fmt = settings.format()
-        enabled = fmt.buffer().enabled()
-        if fmt.color() == text and not enabled:
-            continue
-        fmt.setColor(text)
-        if enabled:
+        item_changed = False
+        if fmt.color() != text:
+            fmt.setColor(text)
+            item_changed = True
+        if fmt.buffer().enabled():
             buffer = fmt.buffer()
             buffer.setEnabled(False)
             fmt.setBuffer(buffer)
+            item_changed = True
+        if bold is not None:
+            font = fmt.font()
+            if font.bold() != bool(bold):
+                font.setBold(bool(bold))
+                fmt.setFont(font)
+                item_changed = True
+        if not item_changed:
+            continue
         settings.setFormat(fmt)
         rule.setSettings(settings)
         changed = True
@@ -536,6 +583,7 @@ class ProjectPanel(QWidget):
         self._hillshade_baseline = {}
         self._isoline_color = None
         self._isoline_baseline = {}
+        self._basemap_isoline_forced = False
         self._baseline_project = None
         self._build_ui()
         self._connect_root()
@@ -2311,8 +2359,11 @@ class ProjectPanel(QWidget):
                 self._notify("Не удалось включить растровую подложку")
                 return
             basemap.set_last_source(key)
+            self._apply_basemap_isoline_style()
         else:
             basemap.remove(project)
+            self._restore_isoline_style_after_basemap()
+        self._update_isoline_controls()
         self._repaint_canvas()
 
     def _basemap_source_changed(self, _index=None):
@@ -2328,6 +2379,8 @@ class ProjectPanel(QWidget):
         if basemap.apply(key, project) is None:
             self._notify("Не удалось включить растровую подложку")
             return
+        self._apply_basemap_isoline_style()
+        self._update_isoline_controls()
         self._repaint_canvas()
 
     def _sync_basemap_state(self):
@@ -2349,10 +2402,14 @@ class ProjectPanel(QWidget):
                 finally:
                     combo.blockSignals(False)
             basemap.sync()
+            self._apply_basemap_isoline_style()
         else:
             # Если слой подложки удалили вручную, вернуть обычные стили.
             basemap.remove()
+            self._restore_isoline_style_after_basemap()
+            self._apply_isoline_bold()
         combo.setEnabled(check.isChecked())
+        self._update_isoline_controls()
 
     def _repaint_canvas(self):
         canvas = self._canvas()
@@ -3630,6 +3687,117 @@ class ProjectPanel(QWidget):
         layer = self._layer(ISOLINES_LAYER)
         return layer is not None and isoline_styles_differ(layer)
 
+    def _basemap_isoline_layers(self):
+        layers = []
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
+            layer = self._layer(name)
+            if layer is not None:
+                layers.append(layer)
+        return layers
+
+    def _basemap_state(self, key):
+        for layer in self._basemap_isoline_layers():
+            value = layer.customProperty(key)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _set_basemap_state(self, key, value):
+        for layer in self._basemap_isoline_layers():
+            layer.setCustomProperty(key, value)
+
+    def _clear_basemap_state(self, key):
+        for layer in self._basemap_isoline_layers():
+            layer.removeCustomProperty(key)
+
+    def _custom_isoline_color(self):
+        """Цвет изогипс, который надо вернуть после подложки."""
+        if self._isoline_color is not None:
+            return QColor(self._isoline_color)
+        for layer in self._basemap_isoline_layers():
+            styles = template_isoline_styles(layer.name())
+            colors = _isoline_symbol_colors(layer)
+            if styles is not None and colors == styles[0]:
+                continue
+            if styles is None and not isoline_styles_differ(layer):
+                continue
+            for color in colors:
+                if color is not None and color.alpha() > 0:
+                    return QColor(color)
+        return None
+
+    def _capture_basemap_isoline_state(self):
+        """Запоминает ширину и цвет изогипс до принудительной подложки."""
+        if not self._basemap_isoline_layers():
+            return
+        if self._basemap_state(BASEMAP_WIDTH_PROPERTY) is None:
+            self._set_basemap_state(
+                BASEMAP_WIDTH_PROPERTY,
+                "1" if isolines_width_doubled() else "0",
+            )
+        if self._basemap_state(BASEMAP_COLOR_PROPERTY) is None:
+            color = self._custom_isoline_color()
+            self._set_basemap_state(
+                BASEMAP_COLOR_PROPERTY,
+                color.name(QColor.HexArgb) if color is not None else "",
+            )
+
+    def _apply_basemap_isoline_style(self):
+        """Зелёные толстые изогипсы со светлыми жирными подписями."""
+        project = QgsProject.instance()
+        if basemap.active_source(project) is None:
+            return False
+        layers = self._basemap_isoline_layers()
+        if not layers:
+            return False
+        self._capture_basemap_isoline_state()
+        set_isolines_width_doubled(True, project)
+        color = QColor(BASEMAP_ISOLINE_COLOR)
+        for layer in layers:
+            apply_isoline_color(layer, color, light=True, bold=True)
+        self._basemap_isoline_forced = True
+        return True
+
+    def _restore_isoline_style_after_basemap(self):
+        """Возвращает цвет и ширину изогипс после выключения подложки."""
+        if (
+            not self._basemap_isoline_forced
+            and self._basemap_state(BASEMAP_WIDTH_PROPERTY) is None
+            and self._basemap_state(BASEMAP_COLOR_PROPERTY) is None
+        ):
+            return False
+        project = QgsProject.instance()
+        width = self._basemap_state(BASEMAP_WIDTH_PROPERTY)
+        if width is not None:
+            set_isolines_width_doubled(width == "1", project)
+        saved = self._basemap_state(BASEMAP_COLOR_PROPERTY)
+        color = QColor(saved) if saved else None
+        bold = isolines_width_doubled(project)
+        for layer in self._basemap_isoline_layers():
+            if color is not None and color.isValid():
+                apply_isoline_color(layer, color, light=False, bold=bold)
+            else:
+                captured = self._isoline_baseline.get(layer.name())
+                if captured is None:
+                    captured = (
+                        _isoline_symbol_colors(layer),
+                        _isoline_label_styles(layer),
+                    )
+                colors, labels = isoline_reset_styles(layer, captured)
+                restore_isoline_style(layer, colors, labels)
+                apply_isoline_label_bold(layer, bold)
+        self._clear_basemap_state(BASEMAP_WIDTH_PROPERTY)
+        self._clear_basemap_state(BASEMAP_COLOR_PROPERTY)
+        self._basemap_isoline_forced = False
+        return True
+
+    def _apply_isoline_bold(self, project=None):
+        """Подписи изогипс жирные, когда включена двойная ширина."""
+        project = project or QgsProject.instance()
+        bold = isolines_width_doubled(project)
+        for layer in self._basemap_isoline_layers():
+            apply_isoline_label_bold(layer, bold)
+
     def _update_isoline_controls(self):
         """Образец цвета, кнопки сброса и двойной ширины."""
         if not self._isoline_baseline and self._isoline_color is None:
@@ -3637,20 +3805,24 @@ class ProjectPanel(QWidget):
         layer = self._layer(ISOLINES_LAYER) or self._layer(
             GLACIER_ISOLINES_LAYER
         )
+        basemap_active = basemap.active_source() is not None
         enabled = layer is not None and self.isolines_check.isChecked()
-        self.isolines_width_button.setEnabled(enabled)
+        doubled = isolines_width_doubled() or basemap_active
+        self.isolines_width_button.setEnabled(enabled and not basemap_active)
         self.isolines_width_button.blockSignals(True)
-        self.isolines_width_button.setChecked(isolines_width_doubled())
+        self.isolines_width_button.setChecked(doubled)
         self.isolines_width_button.blockSignals(False)
-        self._style_isoline_width_button(
-            self.isolines_width_button.isChecked()
-        )
-        self.isolines_color_button.setEnabled(enabled)
+        self._style_isoline_width_button(doubled)
+        self.isolines_color_button.setEnabled(enabled and not basemap_active)
         self.isolines_color_button.setIcon(
-            color_swatch_icon(self._isoline_swatch_color())
+            color_swatch_icon(
+                BASEMAP_ISOLINE_COLOR
+                if basemap_active
+                else self._isoline_swatch_color()
+            )
         )
         self.isolines_color_reset.setEnabled(
-            self._reset_available(enabled)
+            self._reset_available(enabled) and not basemap_active
         )
 
     def _isoline_width_toggled(self, checked):
@@ -3659,6 +3831,7 @@ class ProjectPanel(QWidget):
         if self._syncing:
             return
         set_isolines_width_doubled(bool(checked))
+        self._apply_isoline_bold()
         for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             layer = self._layer(name)
             if layer is not None:
