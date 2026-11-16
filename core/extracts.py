@@ -510,7 +510,7 @@ class Provider:
 
 
 class Geo2DayProvider(Provider):
-    """geo2day: 1028 регионов, обновление раз в сутки."""
+    """geo2day: выгрузки по регионам, обновление раз в сутки."""
 
     key = "geo2day"
     title = "geo2day"

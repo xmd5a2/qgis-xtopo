@@ -554,7 +554,7 @@
   "Файловые выгрузки: geo2day, openstreetmap.fr": "File extracts: geo2day, openstreetmap.fr",
   "Вырез по рамке (SliceOSM)": "Cutout by extent (SliceOSM)",
   "Хост выгрузок:": "Extract host:",
-  "geo2day — 1028 регионов, обновление ежедневно": "geo2day — 1028 regions, updated daily",
+  "geo2day — выгрузки по регионам, обновление ежедневно": "geo2day — regional extracts, updated daily",
   "openstreetmap.fr — выгрузки по странам и регионам": "openstreetmap.fr — extracts by country and region",
   "movisda — выгрузки по точным границам областей": "movisda — extracts by precise administrative borders",
   "Выгрузки {}": "{} extracts",
