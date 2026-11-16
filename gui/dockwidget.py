@@ -1660,6 +1660,8 @@ class XtopoDockWidget(QDockWidget):
     def _geofabrik_ready(self, worker, plan):
         if worker is not self.geofabrik_worker:
             return
+        if worker.provider != self._file_provider():
+            return
         if self.worker is not None and self.worker.isRunning():
             return
         if self.source_mode.currentData() not in FILE_MODES:
@@ -1672,7 +1674,7 @@ class XtopoDockWidget(QDockWidget):
             return
         self._geofabrik_plan = plan
         self._geofabrik_plan_bbox = worker.bbox.as_csv()
-        self._apply_geofabrik_plan(plan)
+        self._apply_geofabrik_plan(plan, worker.provider)
         self._start_geofabrik_stats(plan)
 
     def _geofabrik_failed(self, worker, message):
@@ -1685,7 +1687,7 @@ class XtopoDockWidget(QDockWidget):
             i18n.trf("Не удалось определить карты: {}", message)
         )
 
-    def _apply_geofabrik_plan(self, plan):
+    def _apply_geofabrik_plan(self, plan, provider="geofabrik"):
         self._fill_geofabrik_list(plan)
         selected = self._geofabrik_selected_maps()
         self.source_value.setText(", ".join(item.id for item in selected))
@@ -1696,7 +1698,17 @@ class XtopoDockWidget(QDockWidget):
         details = []
         total_line = []
         if not plan.maps:
-            base.append(i18n.tr("Для этого охвата карты Geofabrik не найдены."))
+            if provider == "geofabrik":
+                base.append(
+                    i18n.tr("Для этого охвата карты Geofabrik не найдены.")
+                )
+            else:
+                base.append(
+                    i18n.trf(
+                        "Для выбранного охвата выгрузки не найдены ({})",
+                        provider,
+                    )
+                )
         else:
             total = 0
             for item, status in plan.items():
@@ -3003,7 +3015,7 @@ class XtopoDockWidget(QDockWidget):
         if plan is None:
             return
         chosen = set(self._geofabrik_selected_ids())
-        self._apply_geofabrik_plan(plan)
+        self._apply_geofabrik_plan(plan, self._file_provider())
         self._restore_geofabrik_selection(chosen)
 
     def _restore_geofabrik_selection(self, chosen):

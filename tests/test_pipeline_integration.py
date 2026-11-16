@@ -1484,6 +1484,22 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertNotIn("Скачивание", local)
         dock.deleteLater()
 
+    def test_dock_empty_plan_names_actual_provider(self):
+        """Пустой план выгрузок не должен упоминать Geofabrik для других хостов."""
+        from qgis_xtopo.core import geofabrik
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        state = geofabrik.IndexState(geofabrik.GeofabrikIndex(), 0, "")
+        plan = geofabrik.GeofabrikPlan(state, [], [])
+        dock._geofabrik_plan = plan
+        dock._apply_geofabrik_plan(plan, "movisda")
+        self.assertIn("movisda", dock.geofabrik_info.text())
+        self.assertNotIn("Geofabrik", dock.geofabrik_info.text())
+        dock._apply_geofabrik_plan(plan)
+        self.assertIn("Geofabrik", dock.geofabrik_info.text())
+        dock.deleteLater()
+
     def test_dock_geofabrik_estimate_follows_pc_speed(self):
         from unittest import mock
 
