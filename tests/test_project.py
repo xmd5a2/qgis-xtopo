@@ -640,6 +640,43 @@ class ProjectAttributionTest(unittest.TestCase):
                 text = archive.read("demo.qgs").decode("utf-8")
         self.assertEqual(self._variables(text)["dem_attribution"], "")
 
+    def test_attribution_survives_project_reopen(self):
+        """Новый проект сохраняет атрибуцию после сохранения и открытия."""
+        from qgis.core import QgsProject
+        from qgis_xtopo.core.config import Config
+        from qgis_xtopo.core.project import prepare_project
+        from qgis_xtopo.core.terrain import _write_dem_attribution
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="demo",
+                bbox="7,46,7.1,46.1",
+                array_queries=[],
+                generate_terrain=True,
+                terrain_source="cop30",
+                download_terrain_tiles=True,
+            )
+            path = prepare_project(config)
+            _write_dem_attribution(config, ["cop30"])
+            project = QgsProject()
+            try:
+                self.assertTrue(project.read(str(path)))
+                expected = project.customVariables().get("dem_attribution")
+                self.assertIn("Copernicus", str(expected))
+                self.assertTrue(project.write(str(path)))
+            finally:
+                project.clear()
+            reopened = QgsProject()
+            try:
+                self.assertTrue(reopened.read(str(path)))
+                self.assertEqual(
+                    reopened.customVariables().get("dem_attribution"),
+                    expected,
+                )
+            finally:
+                reopened.clear()
+
     def test_prepare_project_uses_source_attribution(self):
         from qgis_xtopo.core.config import Config
         from qgis_xtopo.core.project import prepare_project
