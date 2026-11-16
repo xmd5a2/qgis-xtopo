@@ -50,7 +50,7 @@ MANUAL_SOURCE = "manual"
 DEFAULT_SOURCE = AUTO_SOURCE
 # Старые config.ini без поля terrain_source: источник был SRTM.
 LEGACY_DEFAULT_SOURCE = "srtm"
-# Набор, которым заполняется фон в режиме «Автоматически».
+# Набор, которым заполняется фон авторежима, когда FABDEM недоступен.
 AUTO_BACKGROUND = "cop30"
 
 # Сколько объектов STAC запрашиваем за один раз и всего.  Для всей страны
@@ -321,8 +321,9 @@ class DemSource:
         return not self.manual
 
 
-# Порядок — как в списке интерфейса: сначала автоматический подбор, затем
-# обычный SRTM, потом более точные наборы, в конце ручной каталог.
+# Порядок — как в списке интерфейса: сначала автоматический подбор и
+# FABDEM (фон авторежима), затем обычный SRTM, потом более точные наборы,
+# в конце ручной каталог.
 SOURCES = (
     DemSource(
         key=AUTO_SOURCE,
@@ -334,9 +335,28 @@ SOURCES = (
         coverage="по покрытию наборов",
         coverage_short="по покрытию",
         note="Для каждого тайла выбирается лучший доступный набор: "
-             "USGS 3DEP, затем Sonny DTM, фон — Copernicus GLO-30, "
-             "в крайнем случае SRTM.",
+             "USGS 3DEP, затем Sonny DTM, в горах ALOS, затем FABDEM; "
+             "фоном — Copernicus GLO-30, в крайнем случае SRTM.",
         attribution="",
+    ),
+    DemSource(
+        key="fabdem",
+        title="FABDEM (без леса и построек), 30 м",
+        short="FABDEM",
+        provider="University of Bristol",
+        resolution="30 м (1″)",
+        datum="EGM2008",
+        coverage="60° ю.ш. – 80° с.ш.",
+        coverage_short="глобально",
+        note="Copernicus GLO-30 с вычтенными высотами леса и построек: "
+             "земная поверхность без растительности. Файлы — COG в бакете "
+             "LINKS, читаются по частям. Лицензия CC BY-NC-SA 4.0: только "
+             "некоммерческое использование. Данные: data.bris.ac.uk/data/"
+             "dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
+        attribution="FABDEM — University of Bristol (CC BY-NC-SA 4.0)",
+        lat_min=-60.0,
+        lat_max=80.0,
+        direct_tiles=True,
     ),
     DemSource(
         key="srtm",
@@ -392,25 +412,6 @@ SOURCES = (
         note="DSM: включает растительность и постройки.",
         attribution="ALOS World 3D-30m — © JAXA",
         collection="alos-dem",
-    ),
-    DemSource(
-        key="fabdem",
-        title="FABDEM (без леса и построек), 30 м",
-        short="FABDEM",
-        provider="University of Bristol",
-        resolution="30 м (1″)",
-        datum="EGM2008",
-        coverage="60° ю.ш. – 80° с.ш.",
-        coverage_short="глобально",
-        note="Copernicus GLO-30 с вычтенными высотами леса и построек: "
-             "земная поверхность без растительности. Файлы — COG, читаются "
-             "по частям. Лицензия CC BY-NC-SA 4.0: только некоммерческое "
-             "использование, поэтому в автоматический подбор набор не входит.",
-        attribution="FABDEM — University of Bristol (CC BY-NC-SA 4.0) — "
-                    "https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
-        lat_min=-60.0,
-        lat_max=80.0,
-        direct_tiles=True,
     ),
     DemSource(
         key="3dep",
@@ -1032,25 +1033,25 @@ def auto_coverage(bbox, timeout=15, sonny_tiles=(), keys=None,
                   force=False):
     """Покрытие наборов, из которых складывается мозаика «Автоматически».
 
-    Проверяются только нужные наборы: 3DEP, Copernicus GLO-30 и ALOS (для
-    горных регионов); Sonny и SRTM считаются по локальным данным.
-    Остальные наборы в мозаику не входят, поэтому их покрытие не
+    Проверяются только нужные наборы: 3DEP, ALOS (для горных регионов),
+    FABDEM и Copernicus GLO-30; Sonny и SRTM считаются по локальным
+    данным. Остальные наборы в мозаику не входят, поэтому их покрытие не
     запрашивается. Результаты берутся из того же кэша, что и у проверки
     в панели.
     """
     keys = tuple(keys) if keys else MOUNTAIN_PRIORITY
     results = {}
-    stac_keys = [
-        key for key in keys if key in ("3dep", "alos", "cop30")
+    remote_keys = [
+        key for key in keys if key in ("3dep", "alos", "fabdem", "cop30")
     ]
 
-    if stac_keys:
-        with ThreadPoolExecutor(max_workers=len(stac_keys)) as pool:
+    if remote_keys:
+        with ThreadPoolExecutor(max_workers=len(remote_keys)) as pool:
             futures = {
                 pool.submit(
                     _check_one, source(key), bbox, timeout, sonny_tiles, force
                 ): key
-                for key in stac_keys
+                for key in remote_keys
             }
             for future, key in futures.items():
                 results[key] = future.result()
@@ -1361,11 +1362,12 @@ def preferred_source(bbox, availability):
 
 # Наборы, из которых складывается мозаика в режиме «Автоматически».
 # Порядок — приоритет: первый подходящий набор выигрывает тайл.
-AUTO_PRIORITY = ("3dep", "sonny", "cop30", "srtm")
+AUTO_PRIORITY = ("3dep", "sonny", "fabdem", "cop30", "srtm")
 
 # В горах ALOS AW3D30 передаёт крутые склоны подробнее Copernicus, но
-# 3DEP и Sonny DTM остаются выше него: у них приоритет всегда.
-MOUNTAIN_PRIORITY = ("3dep", "sonny", "alos", "cop30", "srtm")
+# 3DEP и Sonny DTM остаются выше него: у них приоритет всегда.  FABDEM
+# (DTM без растительности) идёт после ALOS: тот резче на склонах.
+MOUNTAIN_PRIORITY = ("3dep", "sonny", "alos", "fabdem", "cop30", "srtm")
 
 
 def auto_priority(bbox):
@@ -1578,7 +1580,7 @@ def mixed_datum_warning(key, bbox, availability, sonny_tiles=()):
     """Разные системы высот в мозаике рельефа.
 
     Наборы, из которых складывается мозаика, приведены к своим
-    вертикальным системам: 3DEP — NAVD88, Copernicus — EGM2008,
+    вертикальным системам: 3DEP — NAVD88, Copernicus и FABDEM — EGM2008,
     SRTM — EGM96, Sonny — национальные.  Смешивать их в одном проекте
     можно, но на границах тайлов высоты расходятся.
     """
@@ -1587,7 +1589,7 @@ def mixed_datum_warning(key, bbox, availability, sonny_tiles=()):
     if key == AUTO_SOURCE:
         priority = AUTO_PRIORITY
     elif key == SONNY_SOURCE:
-        priority = (SONNY_SOURCE, AUTO_BACKGROUND, "srtm")
+        priority = (SONNY_SOURCE, "fabdem", AUTO_BACKGROUND, "srtm")
     else:
         return ""
     plan = auto_plan(bbox, availability, sonny_tiles, priority=priority)

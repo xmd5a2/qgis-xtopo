@@ -507,7 +507,6 @@
   "по набору": "per dataset",
   "по покрытию наборов": "by dataset coverage",
   "по покрытию": "by coverage",
-  "Для каждого тайла выбирается лучший доступный набор: USGS 3DEP, затем Sonny DTM, фон — Copernicus GLO-30, в крайнем случае SRTM.": "For every tile the best available dataset is picked: USGS 3DEP first, then Sonny DTM, with Copernicus GLO-30 as the background and SRTM as the last resort.",
   "Sonny DTM (LiDAR), 30 м": "Sonny DTM (LiDAR), 30 m",
   "Sonny DTM": "Sonny DTM",
   "Sonny / 4lima.de": "Sonny / 4lima.de",
@@ -586,6 +585,7 @@
   "FABDEM (без леса и построек), 30 м": "FABDEM (forest and buildings removed), 30 m",
   "University of Bristol": "University of Bristol",
   "60° ю.ш. – 80° с.ш.": "60° S – 80° N",
-  "FABDEM — University of Bristol (CC BY-NC-SA 4.0) — https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn": "FABDEM — University of Bristol (CC BY-NC-SA 4.0) — https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
-  "Copernicus GLO-30 с вычтенными высотами леса и построек: земная поверхность без растительности. Файлы — COG, читаются по частям. Лицензия CC BY-NC-SA 4.0: только некоммерческое использование, поэтому в автоматический подбор набор не входит.": "Copernicus GLO-30 with forest and building heights subtracted: the ground surface without vegetation. The files are COGs, read in parts. Licence CC BY-NC-SA 4.0: non-commercial use only, so the dataset is not part of the automatic selection."
+  "Для каждого тайла выбирается лучший доступный набор: USGS 3DEP, затем Sonny DTM, в горах ALOS, затем FABDEM; фоном — Copernicus GLO-30, в крайнем случае SRTM.": "For each tile the best available dataset is picked: USGS 3DEP, then Sonny DTM, ALOS in the mountains, then FABDEM; Copernicus GLO-30 as the background, and SRTM as a last resort.",
+  "Copernicus GLO-30 с вычтенными высотами леса и построек: земная поверхность без растительности. Файлы — COG в бакете LINKS, читаются по частям. Лицензия CC BY-NC-SA 4.0: только некоммерческое использование. Данные: data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn": "Copernicus GLO-30 with forest and building heights subtracted: the ground surface without vegetation. The files are COGs in the LINKS bucket, read in parts. Licence CC BY-NC-SA 4.0: non-commercial use only. Data: data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
+  "FABDEM — University of Bristol (CC BY-NC-SA 4.0)": "FABDEM — University of Bristol (CC BY-NC-SA 4.0)"
 }

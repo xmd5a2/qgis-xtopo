@@ -497,7 +497,7 @@ def download_dem(source_key, bbox, destination, progress=None, cancel=None,
 
 # Порядок наборов в мозаике: чем позже набор в списке, тем выше его
 # приоритет — данные более приоритетного набора перекрывают остальные.
-AUTO_ORDER = ("srtm", dem_sources.AUTO_BACKGROUND, "alos", "sonny", "3dep")
+AUTO_ORDER = ("srtm", dem_sources.AUTO_BACKGROUND, "fabdem", "alos", "sonny", "3dep")
 
 
 def _cells_window(cells):
@@ -911,17 +911,18 @@ def download_sonny_dem(bbox, destination, progress=None, cancel=None,
                        cache_dir=None, status=None, availability=None,
                        sonny_catalogue=None, sonny_tiles_dir=None,
                        used=None):
-    """Скачивает рельеф Sonny DTM, а недостающие тайлы — фоном Copernicus.
+    """Скачивает рельеф Sonny DTM, а недостающие тайлы — фоном FABDEM.
 
     Набор выбран один, но тайлы в нём могут быть разной подробности:
-    0,5″ для Австрии и Швейцарии, 1″ для остальной Европы.
+    0,5″ для Австрии и Швейцарии, 1″ для остальной Европы.  Вне покрытия
+    Sonny фоном идут FABDEM, затем Copernicus GLO-30.
     """
     return download_auto_dem(
         bbox, destination, progress=progress, cancel=cancel,
         cache_dir=cache_dir, status=status, availability=availability,
         sonny_catalogue=sonny_catalogue, sonny_tiles_dir=sonny_tiles_dir,
-        priority=(dem_sources.SONNY_SOURCE, dem_sources.AUTO_BACKGROUND,
-                  "srtm"),
+        priority=(dem_sources.SONNY_SOURCE, "fabdem",
+                  dem_sources.AUTO_BACKGROUND, "srtm"),
         used=used,
     )
 

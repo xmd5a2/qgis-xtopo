@@ -1135,6 +1135,74 @@ class DemSourceTest(unittest.TestCase):
         self.assertEqual(plan, {(48, 70): "cop30"})
         self.assertNotIn("alos", dem_sources.auto_priority(bbox))
 
+    def test_auto_plan_prefers_fabdem_over_background(self):
+        """На равнине FABDEM идёт фоном раньше Copernicus GLO-30."""
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(70.0, 48.0, 71.0, 49.0)  # степь Казахстана, вне Sonny
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("fabdem", "cop30")
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ())
+        self.assertEqual(plan, {(48, 70): "fabdem"})
+
+    def test_auto_plan_prefers_alos_over_fabdem_in_mountains(self):
+        """ALOS резче на склонах и остаётся выше FABDEM."""
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(85.0, 28.0, 86.0, 29.0)  # Непал
+        required = frozenset(dem_sources.tiles_for_bbox(bbox))
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True,
+                required_tiles=required, covered_tiles=required,
+            )
+            for key in ("alos", "fabdem", "cop30")
+        }
+        plan = dem_sources.auto_plan(bbox, availability, ())
+        self.assertEqual(plan, {(28, 85): "alos"})
+
+    def test_auto_priority_puts_fabdem_above_glo30(self):
+        from qgis_xtopo.core import dem_sources
+
+        for order in (dem_sources.AUTO_PRIORITY, dem_sources.MOUNTAIN_PRIORITY):
+            self.assertLess(
+                order.index("fabdem"), order.index("cop30"),
+                f"FABDEM должен идти раньше GLO-30: {order}",
+            )
+            self.assertLess(order.index("3dep"), order.index("fabdem"))
+        self.assertLess(
+            dem_sources.MOUNTAIN_PRIORITY.index("alos"),
+            dem_sources.MOUNTAIN_PRIORITY.index("fabdem"),
+        )
+
+    def test_auto_coverage_checks_fabdem(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        seen = []
+
+        def fake_check(item, bbox, timeout, sonny_tiles=(), force=False):
+            seen.append(item.key)
+            return dem_sources.Availability(available=True, checked=True)
+
+        bbox = BBox(7.0, 45.0, 8.0, 46.0)
+        with mock.patch.object(dem_sources, "_check_one", side_effect=fake_check):
+            dem_sources.auto_coverage(bbox, sonny_tiles=((45, 7),))
+        self.assertIn("fabdem", seen)
+
+    def test_auto_attribution_includes_fabdem(self):
+        from qgis_xtopo.core import dem_sources
+
+        text = dem_sources.attribution_for(dem_sources.AUTO_SOURCE)
+        self.assertIn("FABDEM", text)
+
     def test_sonny_wins_on_plains_too(self):
         from qgis_xtopo.core import dem_sources
 
