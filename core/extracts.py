@@ -4,10 +4,11 @@
 хостов (openstreetmap.fr, geo2day, movisda), плюс вырез по произвольной
 рамке через SliceOSM.  Всё работает по файлам — без Overpass.
 
-Границы регионов берутся из индекса geo2day: там для каждого региона
-есть ссылка на GeoJSON с его контуром.  Остальные провайдеры используют
-те же нарезки по границам OSM, поэтому их выгрузки сопоставляются с
-границами по названию региона.
+Границы регионов geo2day и openstreetmap.fr берутся из индекса geo2day:
+там для каждого региона есть ссылка на GeoJSON с его контуром.  Остальные
+провайдеры используют те же нарезки по границам OSM, поэтому их выгрузки
+сопоставляются с границами по названию региона.  У movisda свои контуры
+в общем индексе `index.geojson`.
 """
 
 import json
@@ -40,6 +41,8 @@ READ_CHUNK = 64 * 1024
 RANGE_CHUNK = 64 * 1024
 # Сколько регионов проверять на границы за один проход.
 GEOMETRY_WORKERS = 8
+# Сколько каталогов openstreetmap.fr запрашивать одновременно.
+WALK_WORKERS = 8
 # Сколько выгрузок проверять HEAD-запросом за раз.
 MAX_HEAD_CHECKS = 24
 
@@ -61,6 +64,9 @@ class ExtractMap:
     # Провайдер-хост: входит в имя локального файла, чтобы выгрузки
     # разных хостов не путались.
     namespace: str = ""
+    # Исходная геометрия GeoJSON: movisda отдаёт её в общем индексе,
+    # а преобразуется она только для регионов, попавших в охват.
+    boundary: object = None
 
 
 @dataclass
@@ -148,13 +154,14 @@ def head_size(url):
 
 
 def download_file(url, destination, progress=None, cancel=None, expected_size=0,
-                  label=""):
+                  label="", check_pbf=True):
     """Скачать файл по частям.
 
     Часть хостов отдаёт ответ не целиком: присылает несколько килобайт и
     замолкает.  Поэтому файл читается диапазонами, а оборванный ответ
     продолжается с места, где он остановился.  Обычные хосты отдают файл
-    целиком с первого запроса.
+    целиком с первого запроса.  ``check_pbf=False`` позволяет скачать так
+    же индекс (JSON), а не только PBF.
     """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -242,7 +249,7 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
         # Данных меньше, чем просили: сервер отдаёт ответ частями.
         stall += 1
         idle = IDLE_TIMEOUT_SHORT
-    if not _looks_like_pbf(temporary):
+    if check_pbf and not _looks_like_pbf(temporary):
         temporary.unlink(missing_ok=True)
         raise ExtractError(f"{url}: полученный файл не похож на PBF")
     os.replace(temporary, destination)
@@ -473,6 +480,9 @@ class Provider:
     key = ""
     title = ""
     homepage = ""
+    # У большинства провайдеров корень индекса — континенты, а страны
+    # лежат на уровень ниже.  У movisda корень — уже страны.
+    ROOTS_ARE_CONTINENTS = True
 
     def catalogue(self, config, progress=None, cancel=None):
         raise NotImplementedError
@@ -581,31 +591,55 @@ class OpenStreetMapFrProvider(Provider):
         return Catalogue(maps=maps, fetched_at=now)
 
     def _walk(self, progress=None, cancel=None):
-        """Собрать адреса выгрузок: имя файла в каталоге задаёт регион."""
+        """Собрать адреса выгрузок: имя файла в каталоге задаёт регион.
+
+        Листинги каталогов запрашиваются уровнями: сначала корень, затем
+        все континенты, страны и области.  Последовательный обход занимал
+        около минуты, потому что каждый запрос ждал ответа сервера.
+        """
         found = {}
-        pending = [("", 0)]
-        while pending:
+        level = [("", 0)]
+        visited = 0
+
+        def fetch(entry):
+            path, _depth = entry
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Обход каталогов прерван")
-            path, depth = pending.pop(0)
             try:
                 html = fetch_bytes(self.BASE + path, cancel=cancel).decode(
                     "utf-8", "replace"
                 )
             except ExtractError:
-                continue
-            directories, files = parse_listing(html)
-            for name in files:
-                if not name.endswith("-latest.osm.pbf"):
+                return entry, None
+            return entry, parse_listing(html)
+
+        while level:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Обход каталогов прерван")
+            with ThreadPoolExecutor(max_workers=WALK_WORKERS) as pool:
+                listings = list(pool.map(fetch, level))
+            following = []
+            for (path, depth), parsed in listings:
+                visited += 1
+                if parsed is None:
                     continue
-                slug = name[: -len("-latest.osm.pbf")]
-                found[f"{path}{slug}"] = f"{self.BASE}{path}{name}"
-            if depth >= self.MAX_DEPTH:
-                continue
-            for name in directories:
-                if name == "merge":
+                directories, files = parsed
+                for name in files:
+                    if not name.endswith("-latest.osm.pbf"):
+                        continue
+                    slug = name[: -len("-latest.osm.pbf")]
+                    found[f"{path}{slug}"] = f"{self.BASE}{path}{name}"
+                if depth >= self.MAX_DEPTH:
                     continue
-                pending.append((f"{path}{name}/", depth + 1))
+                for name in directories:
+                    if name == "merge":
+                        continue
+                    following.append((f"{path}{name}/", depth + 1))
+            if progress:
+                progress(
+                    f"Обход каталогов openstreetmap.fr: {visited}…"
+                )
+            level = following
         entries = []
         for slug, url in sorted(found.items()):
             entries.append(
@@ -626,23 +660,23 @@ class OpenStreetMapFrProvider(Provider):
 class MovisdaProvider(Provider):
     """movisda: выгрузки по точным границам административных областей.
 
-    Индекс — GeoJSON со всеми границами (4,5 МБ), поэтому качать его
-    дорого: индекс сохраняется на диск на сутки.  Границы берутся из
-    него же, отдельно ничего качать не нужно.
+    Индекс — GeoJSON со всеми границами (около 25 МБ): в нём есть и
+    свойства выгрузок, и контуры регионов.  Он сохраняется на диск на
+    сутки; контуры преобразуются в QgsGeometry только для регионов,
+    которые могут пересекаться с охватом.
     """
 
     key = "movisda"
     title = "movisda"
     homepage = "https://osm.download.movisda.io/"
 
-    INDEX_URL = "https://osm.download.movisda.io/index.json"
+    INDEX_URL = "https://osm.download.movisda.io/index.geojson"
     BASE = "https://osm.download.movisda.io/"
-    # Россия в схеме movisda относится к Европе: и по коду страны, и по
-    # названию региона в индексе geo2day.
-    CONTINENTS = {"ru": "europe", "russia": "europe"}
+    # В индексе корневые элементы — страны, области вложены в них.
+    ROOTS_ARE_CONTINENTS = False
 
     def catalogue(self, config, progress=None, cancel=None):
-        cache = _cache_file(config, self.key, "index.json")
+        cache = _cache_file(config, self.key, "index.geojson")
         meta = _read_meta(cache)
         now = time.time()
         warning = ""
@@ -651,19 +685,24 @@ class MovisdaProvider(Provider):
             payload = _read_json(cache)
         else:
             if progress:
-                progress("Загрузка индекса movisda (4,5 МБ)…")
+                progress("Загрузка индекса movisda (25 МБ)…")
             try:
-                payload = fetch_json(self.INDEX_URL, cancel=cancel)
-                _write_json(cache, payload)
+                download_file(
+                    self.INDEX_URL, cache, cancel=cancel, check_pbf=False
+                )
+                payload = _read_json(cache)
+                if not isinstance(payload, dict) or not payload.get("features"):
+                    raise ExtractError(
+                        f"{self.INDEX_URL}: индекс не содержит регионов"
+                    )
                 _write_meta(cache, {"fetched_at": now, "warning": ""})
             except ExtractError as exc:
                 warning = f"Индекс movisda недоступен: {exc}"
                 if not cache.exists():
-                    # Список регионов берём из индекса geo2day: нарезки по
-                    # границам OSM у провайдеров одинаковые, а адрес
-                    # выгрузки movisda строится по названию региона.
-                    return self._fallback_catalogue(config, warning, cancel=cancel)
+                    raise ExtractError(warning) from exc
                 payload = _read_json(cache)
+        if not isinstance(payload, dict) or not payload.get("features"):
+            raise ExtractError(f"{self.INDEX_URL}: индекс не содержит регионов")
         maps = []
         for feature in payload.get("features") or []:
             properties = feature.get("properties") or {}
@@ -672,68 +711,31 @@ class MovisdaProvider(Provider):
                 continue
             names = properties.get("names") or {}
             name = str(names.get("ru") or properties.get("name") or code)
+            urls = properties.get("urls") or {}
             maps.append(
                 ExtractMap(
                     id=code,
                     name=name,
                     parent=str(properties.get("parent") or ""),
-                    url=self._url(code),
-                    geometry=geometry_from_geojson(feature.get("geometry")),
+                    url=str(urls.get("pbf") or self._url(code)),
+                    size=int(properties.get("bytes") or 0),
+                    boundary=feature.get("geometry"),
                     namespace=self.key,
                 )
             )
         return Catalogue(maps=maps, fetched_at=now, warning=warning)
 
     def _url(self, code):
-        """Адрес выгрузки по коду региона.
-
-        Коды вроде «RU-BEL» сервер раскладывает по континентам и стране,
-        прямое имя файла работает не для всех регионов.
-        """
-        parts = str(code).split("-")
-        country = parts[0].lower()
-        path = f"pbf/admin/{self.CONTINENTS.get(country, country)}/{country}"
-        if len(parts) > 1:
-            path += "/" + "-".join(parts[1:]).lower()
-        return self.BASE + path + ".osm.pbf"
-
-    def _url_from_slug(self, slug):
-        """Адрес выгрузки по названию региона (как в индексе geo2day)."""
-        parts = [part for part in str(slug or "").split("/") if part]
-        if not parts:
-            return ""
-        root = parts[0].lower()
-        continent = self.CONTINENTS.get(root, root)
-        if root in self.CONTINENTS:
-            path = "/".join(parts)
-        else:
-            path = "/".join(parts[1:])
-        return self.BASE + f"pbf/admin/{continent}/{path}.osm.pbf"
-
-    def _fallback_catalogue(self, config, warning, cancel=None):
-        """Список регионов из индекса geo2day, если индекс movisda недоступен."""
-        boundaries = Boundaries(config)
-        regions = boundaries._index(cancel=cancel)
-        maps = []
-        for slug, region in regions.items():
-            name = str(region.get("name_ru") or region.get("name_en") or slug)
-            maps.append(
-                ExtractMap(
-                    id=slug,
-                    name=name,
-                    parent=parent_slug(slug),
-                    url=self._url_from_slug(slug),
-                    size=int(region.get("pbf_size_bytes") or 0),
-                    namespace=self.key,
-                )
-            )
-        return Catalogue(maps=maps, warning=warning)
+        """Запасной адрес выгрузки, если в индексе нет ссылки."""
+        return f"{self.BASE}admin/{code}-latest.osm.pbf"
 
     def geometry(self, config, item, boundaries, progress=None, cancel=None):
         if item.geometry is not None:
             return item.geometry
-        key = normalize_name(item.id.split("/")[-1])
-        return boundaries.geometry(key, progress=progress, cancel=cancel)
+        if item.boundary is None:
+            return None
+        item.geometry = geometry_from_geojson(item.boundary)
+        return item.geometry
 
 
 PROVIDERS = {
@@ -800,12 +802,17 @@ def build_index(config, provider_key, bbox, progress=None, cancel=None):
 
     # Страны (дети континентов) — самая мелкая нарезка, что есть у всех
     # провайдеров; дальше спускаемся только внутрь подходящих стран.
+    # У movisda наоборот: корень — страны, а области вложены в них,
+    # поэтому сначала проверяются только корневые элементы.
     level = []
-    for root in roots:
-        if root.geometry is not None:
-            # Границы уже в индексе (movisda).
-            level.append(root)
-        level.extend(children.get(root.id, []))
+    if source.ROOTS_ARE_CONTINENTS:
+        for root in roots:
+            if root.geometry is not None:
+                # Границы уже в индексе.
+                level.append(root)
+            level.extend(children.get(root.id, []))
+    else:
+        level.extend(roots)
     entries = []
     while level:
         if cancel is not None and cancel.is_set():
@@ -929,6 +936,33 @@ def _write_meta(path, meta):
     temporary = meta_path.with_suffix(meta_path.suffix + ".part")
     temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, meta_path)
+
+
+def invalidate_cache(config, provider_key):
+    """Помечает кэш индекса провайдера устаревшим.
+
+    Обновление кнопкой должно перекачать индекс при следующем запросе.
+    Метаданные лежат рядом с каждым файлом кэша, поэтому сбрасываются
+    для всех файлов провайдера: у movisda это index.geojson, у
+    openstreetmap.fr — catalogue.json.
+    """
+    directory = config.extracts_dir / str(provider_key or "")
+    if not directory.exists():
+        return
+    for path in directory.glob("*"):
+        if path.name.endswith((".meta", ".part")):
+            continue
+        meta_path = path.with_name(path.name + ".meta")
+        if not meta_path.exists():
+            continue
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        data["fetched_at"] = 0
+        _write_meta(path, data)
 
 
 # ---------------------------------------------------------------------------

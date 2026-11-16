@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import socket
 import tempfile
@@ -112,31 +113,86 @@ class GeometryTest(unittest.TestCase):
         self.assertIsNone(extracts.geometry_from_poly(""))
 
 
-class MovisdaUrlTest(unittest.TestCase):
+class MovisdaProviderTest(unittest.TestCase):
     def test_url_from_code(self):
         provider = extracts.MOVISDA
         self.assertEqual(
             provider._url("RU-BEL"),
-            "https://osm.download.movisda.io/pbf/admin/europe/ru/bel.osm.pbf",
-        )
-        self.assertEqual(
-            provider._url("EG"),
-            "https://osm.download.movisda.io/pbf/admin/eg/eg.osm.pbf",
+            "https://osm.download.movisda.io/admin/RU-BEL-latest.osm.pbf",
         )
 
-    def test_url_from_slug(self):
-        provider = extracts.MOVISDA
+    def test_catalogue_uses_index_links_and_lazy_geometry(self):
+        feature = {
+            "type": "Feature",
+            "properties": {
+                "id": "FR-ARA",
+                "parent": "FR",
+                "name": "Auvergne-Rhone-Alpes",
+                "names": {"ru": "Овернь — Рона — Альпы"},
+                "bytes": 759841211,
+                "urls": {
+                    "pbf": "https://osm.download.movisda.io/admin/"
+                           "FR-ARA-latest.osm.pbf",
+                    "geojson": "https://osm.download.movisda.io/admin/"
+                               "FR-ARA-latest.geojson",
+                },
+            },
+            "geometry": _square(1, 45, 3, 47),
+        }
+        payload = {"type": "FeatureCollection", "features": [feature]}
+
+        def fake_download(url, destination, **_kwargs):
+            Path(destination).write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            return Path(destination)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="movisda"
+            )
+            with mock.patch.object(
+                extracts, "download_file", side_effect=fake_download
+            ):
+                catalogue = extracts.MOVISDA.catalogue(config)
+        self.assertEqual(len(catalogue.maps), 1)
+        item = catalogue.maps[0]
+        self.assertEqual(item.id, "FR-ARA")
+        self.assertEqual(item.parent, "FR")
+        self.assertEqual(item.name, "Овернь — Рона — Альпы")
         self.assertEqual(
-            provider._url_from_slug("europe/france"),
-            "https://osm.download.movisda.io/pbf/admin/europe/france.osm.pbf",
+            item.url,
+            "https://osm.download.movisda.io/admin/FR-ARA-latest.osm.pbf",
         )
-        self.assertEqual(
-            provider._url_from_slug(
-                "russia/central_federal_district/belgorod_oblast"
-            ),
-            "https://osm.download.movisda.io/pbf/admin/europe/russia/"
-            "central_federal_district/belgorod_oblast.osm.pbf",
-        )
+        self.assertEqual(item.size, 759841211)
+        self.assertIsNone(item.geometry)
+        self.assertIsNotNone(item.boundary)
+        geometry = extracts.MOVISDA.geometry(config, item, None)
+        self.assertIsNotNone(geometry)
+        self.assertAlmostEqual(geometry.boundingBox().xMinimum(), 1.0, places=6)
+        self.assertIs(item.geometry, geometry)
+
+    def test_invalidate_cache_handles_any_index_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="movisda"
+            )
+            folder = config.extracts_dir / "movisda"
+            folder.mkdir(parents=True)
+            for name in ("index.geojson", "index.json"):
+                path = folder / name
+                path.write_text("{}", encoding="utf-8")
+                path.with_name(name + ".meta").write_text(
+                    '{"fetched_at": 123}', encoding="utf-8"
+                )
+            extracts.invalidate_cache(config, "movisda")
+            for name in ("index.geojson", "index.json"):
+                meta = json.loads(
+                    (folder / (name + ".meta")).read_text(encoding="utf-8")
+                )
+                self.assertEqual(meta["fetched_at"], 0)
+            # Каталог без кэша не должен ломать обновление.
+            extracts.invalidate_cache(config, "osmfr")
 
 
 def _square(x1, y1, x2, y2):
@@ -146,6 +202,43 @@ def _square(x1, y1, x2, y2):
             [[x1, y1], [x2, y1], [x2, y2], [x1, y2], [x1, y1]]
         ],
     }
+
+
+class WalkTest(unittest.TestCase):
+    def test_walks_listing_tree(self):
+        base = extracts.OSMFR.BASE
+        pages = {
+            base: (
+                '<a href="../">../</a>'
+                '<a href="europe/">europe/</a>'
+                '<a href="merge/">merge/</a>'
+                '<a href="world-latest.osm.pbf">world-latest.osm.pbf</a>'
+                '<a href="world.osm.pbf.md5">world.osm.pbf.md5</a>'
+            ),
+            base + "europe/": (
+                '<a href="france/">france/</a>'
+                '<a href="france-latest.osm.pbf">france-latest.osm.pbf</a>'
+            ),
+            base + "europe/france/": (
+                '<a href="alsace-latest.osm.pbf">alsace-latest.osm.pbf</a>'
+            ),
+        }
+        messages = []
+
+        def fetch(url, **_kwargs):
+            return pages[url].encode("utf-8")
+
+        with mock.patch.object(extracts, "fetch_bytes", side_effect=fetch):
+            entries = extracts.OSMFR._walk(progress=messages.append)
+        self.assertEqual(
+            [entry["id"] for entry in entries],
+            ["europe/france", "europe/france/alsace", "world"],
+        )
+        self.assertEqual(
+            entries[1]["url"],
+            base + "europe/france/alsace-latest.osm.pbf",
+        )
+        self.assertTrue(messages)
 
 
 class BuildIndexTest(unittest.TestCase):
@@ -214,6 +307,54 @@ class BuildIndexTest(unittest.TestCase):
         self.assertIn("europe/france", candidates)
         self.assertIn("europe/france/alsace", candidates)
         self.assertNotIn("europe/germany", candidates)
+
+    def test_country_roots_descend_into_regions(self):
+        """У movisda корень — страна: сначала проверяются страны, потом области."""
+        maps = [
+            extracts.ExtractMap(
+                id="FR", name="Франция", parent="", url="http://example.org/fr",
+                namespace="movisda",
+            ),
+            extracts.ExtractMap(
+                id="FR-ARA", name="Овернь", parent="FR",
+                url="http://example.org/fr-ara", namespace="movisda",
+            ),
+            extracts.ExtractMap(
+                id="IT", name="Италия", parent="", url="http://example.org/it",
+                namespace="movisda",
+            ),
+            extracts.ExtractMap(
+                id="IT-23", name="Валле-д’Аоста", parent="IT",
+                url="http://example.org/it-23", namespace="movisda",
+            ),
+        ]
+        geometries = {
+            "FR": _square(0, 40, 10, 50),
+            "FR-ARA": _square(1, 45, 3, 47),
+            "IT": _square(7, 44, 19, 47),
+            "IT-23": _square(6.5, 45.5, 7.5, 46),
+        }
+        catalogue = extracts.Catalogue(maps=maps, fetched_at=1.0)
+        bbox = BBox(1.5, 45.5, 2.5, 46.5)
+        with mock.patch.object(
+            extracts.MOVISDA, "catalogue", return_value=catalogue
+        ), mock.patch.object(
+            extracts.MOVISDA,
+            "geometry",
+            side_effect=lambda config, item, boundaries, progress=None,
+                cancel=None: extracts.geometry_from_geojson(
+                    geometries[item.id]
+                ),
+        ):
+            index, _catalogue = extracts.build_index(
+                self.config, "movisda", bbox
+            )
+        self.assertEqual(
+            [item.id for item in index.required(bbox)], ["FR-ARA"]
+        )
+        self.assertNotIn(
+            "IT-23", [item.id for item in index.candidates(bbox)]
+        )
 
 
 class _FakeResponse:
@@ -291,6 +432,19 @@ class DownloadTest(unittest.TestCase):
                     extracts.download_file(
                         "http://example.org/map.osm.pbf", self.destination
                     )
+
+    def test_allows_json_when_pbf_check_disabled(self):
+        payload = b'{"type": "FeatureCollection", "features": []}'
+        with mock.patch.object(
+            extracts, "_urlopen", return_value=_FakeResponse(payload)
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(True, len(payload), "")
+        ):
+            result = extracts.download_file(
+                "http://example.org/index.geojson", self.destination,
+                check_pbf=False,
+            )
+        self.assertEqual(result.read_bytes(), payload)
 
 
 class SliceOsmTest(unittest.TestCase):

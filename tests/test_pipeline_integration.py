@@ -180,19 +180,19 @@ class PipelineIntegrationTest(unittest.TestCase):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 
         dock = XtopoDockWidget(None)
-        # Режим файловых выгрузок: виден выбор хоста и список карт.
-        dock.source_mode.setCurrentIndex(dock.source_mode.findData("extracts"))
-        self.assertTrue(dock.extract_provider.isVisibleTo(dock))
-        self.assertEqual(dock.extract_provider.count(), 3)
-        self.assertIn("geo2day", [
-            dock.extract_provider.itemData(index)
-            for index in range(dock.extract_provider.count())
-        ])
-        self.assertTrue(dock.geofabrik_group.isVisibleTo(dock))
-        self.assertFalse(dock.source_value.isVisibleTo(dock))
+        # Каждый хост выгрузок — отдельный режим, отдельного выбора хоста нет.
+        modes = [
+            dock.source_mode.itemData(index)
+            for index in range(dock.source_mode.count())
+        ]
+        for key in ("geo2day", "osmfr", "movisda"):
+            self.assertIn(key, modes)
+            dock.source_mode.setCurrentIndex(dock.source_mode.findData(key))
+            self.assertTrue(dock.geofabrik_group.isVisibleTo(dock))
+            self.assertFalse(dock.source_value.isVisibleTo(dock))
+        self.assertFalse(hasattr(dock, "extract_provider"))
         # Режим выреза по рамке: список карт не нужен.
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
-        self.assertFalse(dock.extract_provider.isVisibleTo(dock))
         self.assertFalse(dock.geofabrik_group.isVisibleTo(dock))
         self.assertFalse(dock.source_value.isVisibleTo(dock))
 
@@ -211,7 +211,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock.overpass_server.itemData(1),
             "https://overpass.private.coffee/api/interpreter",
         )
-        self.assertEqual(dock.source_mode.count(), 7)
+        self.assertEqual(dock.source_mode.count(), 9)
         self.assertEqual(dock.source_mode.itemData(0), "geofabrik")
         self.assertEqual(
             dock.source_mode.itemText(0), "Карты с Geofabrik (предпочтительно)"
@@ -3091,6 +3091,35 @@ class PipelineIntegrationTest(unittest.TestCase):
             ) as invalidate:
                 invalidate(config)
             invalidate.assert_called_once()
+
+    def test_refresh_clears_maps_and_shows_progress(self):
+        """Обновление очищает список и показывает индикацию для любого хоста."""
+        from unittest import mock
+
+        from qgis_xtopo.core import extracts, net
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("movisda"))
+        dock.bbox.setText("6.80,45.80,7.00,46.00")
+        dock._geofabrik_timer.stop()
+        dock.geofabrik_maps.addItem("старая карта")
+        dock.geofabrik_summary.setText("Выбрано карт: 1")
+        with mock.patch.object(extracts, "invalidate_cache") as invalidate, \
+                mock.patch.object(net, "reset") as reset, \
+                mock.patch.object(dock, "_start_geofabrik") as start:
+            dock._refresh_geofabrik_index()
+        self.assertEqual(dock.geofabrik_maps.count(), 0)
+        self.assertEqual(dock.geofabrik_summary.text(), "")
+        self.assertIn("Обновление индекса", dock.geofabrik_info.text())
+        self.assertTrue(dock.geofabrik_info.isVisibleTo(dock))
+        reset.assert_called_once_with()
+        invalidate.assert_called_once()
+        start.assert_called_once_with(refreshing=True)
+        self.assertEqual(
+            dock.geofabrik_refresh.toolTip(), "Обновить индекс выгрузок"
+        )
+        dock.deleteLater()
 
     def test_synthetic_osm(self):
         from qgis_xtopo.core.config import Config
