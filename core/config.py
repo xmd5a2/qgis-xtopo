@@ -126,7 +126,7 @@ class Config:
     bbox: str = ""
     array_queries: list = field(default_factory=default_queries)
 
-    source_mode: str = "geofabrik"
+    source_mode: str = "slice"
     pbf_path: str = ""
     geofabrik_maps: list = field(default_factory=list)
     # Провайдер файловых выгрузок для режима «extracts»: geo2day,

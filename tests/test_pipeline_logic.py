@@ -1588,6 +1588,37 @@ class IconAngleTest(unittest.TestCase):
             self.assertEqual(feature.GetField(index), 90)
             dataset = None
 
+    def test_far_pass_is_not_rotated(self):
+        """Перевал дальше 200 м от гребня не поворачивается."""
+        from qgis_xtopo.core import icon_angles
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            self._write(
+                vector / "ridge_exploded.sqlite", 3857,
+                [("line", [(0.0, 0.0), (1000.0, 0.0)])],
+            )
+            # 0.01° по широте — около 1.1 км от гребня.
+            self._write(
+                vector / "mountain_pass.sqlite", 4326,
+                [("point", (0.0, 0.01))],
+            )
+
+            class _Config:
+                vector_dir = vector
+
+            self.assertEqual(icon_angles.compute_icon_angles(_Config()), 1)
+
+            from osgeo import ogr
+
+            ogr.UseExceptions()
+            dataset = ogr.Open(str(vector / "mountain_pass.sqlite"))
+            layer = dataset.GetLayer(0)
+            index = layer.FindFieldIndex(icon_angles.FIELD, True)
+            feature = layer.GetNextFeature()
+            self.assertTrue(feature.IsFieldNull(index))
+            dataset = None
+
 
 class RouteHikingTest(unittest.TestCase):
     def test_not_prepared(self):

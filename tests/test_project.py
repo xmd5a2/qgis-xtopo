@@ -198,6 +198,72 @@ class OverlayFilterPatchTest(unittest.TestCase):
         self.assertNotIn("if(overlay_within", text)
 
 
+class RasterResamplingTest(unittest.TestCase):
+    """Растры рельефа передискретизируются бикубом, и по возможности
+    силами самого GDAL."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    RASTER = (
+        '<maplayer type="raster">'
+        "<provider>gdal</provider>"
+        "<pipe>"
+        '<provider><resampling maxOversampling="2" enabled="false" '
+        'zoomedOutResamplingMethod="nearestNeighbour" '
+        'zoomedInResamplingMethod="nearestNeighbour" /></provider>'
+        '<rasterresampler maxOversampling="2" />'
+        "<resamplingStage>resamplingFilter</resamplingStage>"
+        "</pipe>"
+        "</maplayer>"
+    )
+    TILES = (
+        '<maplayer type="raster">'
+        "<provider>wms</provider>"
+        "<pipe>"
+        '<provider><resampling maxOversampling="2" enabled="false" '
+        'zoomedInResamplingMethod="nearestNeighbour" /></provider>'
+        "<resamplingStage>resamplingFilter</resamplingStage>"
+        "</pipe>"
+        "</maplayer>"
+    )
+
+    def test_terrain_raster_uses_cubic_and_early_resampling(self):
+        from qgis_xtopo.core.project import patch_raster_resampling
+
+        patched = patch_raster_resampling(self.RASTER)
+        self.assertIn('zoomedInResamplingMethod="cubic"', patched)
+        self.assertIn('enabled="true"', patched)
+        self.assertIn('zoomedInResampler="cubic"', patched)
+        self.assertIn("<resamplingStage>provider</resamplingStage>", patched)
+
+    def test_tile_layer_is_untouched(self):
+        from qgis_xtopo.core.project import patch_raster_resampling
+
+        self.assertEqual(patch_raster_resampling(self.TILES), self.TILES)
+
+    def test_patch_is_idempotent(self):
+        from qgis_xtopo.core.project import patch_raster_resampling
+
+        once = patch_raster_resampling(self.RASTER)
+        self.assertEqual(patch_raster_resampling(once), once)
+
+    def test_template_terrain_rasters_are_patched(self):
+        from qgis_xtopo.core.project import patch_raster_resampling
+
+        with zipfile.ZipFile(template_path()) as archive:
+            text = archive.read("automap.qgs").decode("utf-8")
+        patched = patch_raster_resampling(text)
+        self.assertNotEqual(patched, text)
+        self.assertIn("<resamplingStage>provider</resamplingStage>", patched)
+        # Подложка из плиток остаётся как была.
+        tiles = patched.split('<layername>OpenStreetMap</layername>')[0]
+        self.assertNotIn("zoomedInResampler", tiles)
+
+
 class ProjectDetailLevelTest(unittest.TestCase):
     """Уровень детализации из панели попадает в переменные проекта."""
 

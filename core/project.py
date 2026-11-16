@@ -48,6 +48,21 @@ OVERLAY_FILTERS = (
     ),
 )
 
+# Передискретизация растров рельефа.  При увеличении карты растр
+# показывается крупнее исходного разрешения: без передискретизации
+# QGIS берёт соседние пиксели, и отмывка рассыпается на квадраты.
+#
+# Ранняя передискретизация (этап «provider») отдаёт пересчёт самому
+# GDAL: он читает растр сразу в нужном масштабе, это быстрее и
+# экономнее по памяти, чем фильтр QGIS.  Бикубическая передискретизация
+# при увеличении сглаживает укрупнение.
+RESAMPLING_ELEMENT_PATTERN = re.compile(r"<resampling\b[^>]*/>")
+RASTER_RESAMPLER_PATTERN = re.compile(r"<rasterresampler\b[^>]*/>")
+RESAMPLING_STAGE_PATTERN = re.compile(
+    r"<resamplingStage>[^<]*</resamplingStage>"
+)
+GDAL_PROVIDER_PATTERN = re.compile(r"<provider[^>]*>\s*gdal\s*</provider>")
+
 
 def resolve_label_font():
     try:
@@ -324,6 +339,53 @@ def patch_overlay_filters(text):
     return text
 
 
+def _set_attribute(element, name, value):
+    """Заменяет или добавляет атрибут самозакрывающегося тега."""
+    if re.search(rf'{name}="', element):
+        return re.sub(rf'{name}="[^"]*"', f'{name}="{value}"', element)
+    return re.sub(r"\s*/>$", f' {name}="{value}" />', element)
+
+
+def _provider_resampling(match):
+    """Включает раннюю передискретизацию и бикуб при увеличении."""
+    element = match.group(0)
+    element = _set_attribute(element, "enabled", "true")
+    return _set_attribute(element, "zoomedInResamplingMethod", "cubic")
+
+
+def _filter_resampling(match):
+    """Бикубическая передискретизация при увеличении в фильтре QGIS."""
+    return _set_attribute(match.group(0), "zoomedInResampler", "cubic")
+
+
+def patch_raster_resampling(text):
+    """Настраивает передискретизацию растров рельефа.
+
+    Растры читает GDAL, поэтому у него свой этап передискретизации и
+    свой метод при увеличении.  Слой-плитка (подложка OpenStreetMap)
+    не трогаем: у него нет файла на диске и пересчитывать нечего.
+    """
+    def fix_layer(match):
+        block = match.group(0)
+        opening = block.split(">", 1)[0]
+        if 'type="raster"' not in opening:
+            return block
+        if not GDAL_PROVIDER_PATTERN.search(block):
+            return block
+        block = RESAMPLING_ELEMENT_PATTERN.sub(
+            _provider_resampling, block,
+        )
+        block = RESAMPLING_STAGE_PATTERN.sub(
+            "<resamplingStage>provider</resamplingStage>", block,
+        )
+        block = RASTER_RESAMPLER_PATTERN.sub(
+            _filter_resampling, block,
+        )
+        return block
+
+    return MAPLAYER_PATTERN.sub(fix_layer, text)
+
+
 def repair_project(path):
     """Patch fonts and drop empty layers in a single archive rewrite."""
     path = Path(path)
@@ -343,6 +405,7 @@ def repair_project(path):
 
     updated, _removed = _remove_empty_layers(text, base_dir)
     updated = patch_overlay_filters(updated)
+    updated = patch_raster_resampling(updated)
     if new_font:
         updated = updated.replace(old_font, new_font)
     if updated == text:
@@ -468,6 +531,7 @@ def rewrite_project_archive(source, destination, project_name, dem_attribution="
                     text = _set_project_variable(
                         text, "dem_attribution", dem_attribution
                     )
+                    text = patch_raster_resampling(text)
                     data = text.encode("utf-8")
                     name = f"{project_name}.qgs"
                 elif name.endswith(".qgd"):

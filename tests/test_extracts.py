@@ -1,4 +1,5 @@
 import importlib.util
+import itertools
 import json
 import os
 import socket
@@ -479,7 +480,7 @@ class DownloadTest(unittest.TestCase):
 
 
 class SliceOsmTest(unittest.TestCase):
-    """Вырез по рамке: заказ, ожидание и разбор ответа."""
+    """Вырезка по охвату: заказ, ожидание и разбор ответа."""
 
     def test_submit(self):
         captured = {}
@@ -514,6 +515,56 @@ class SliceOsmTest(unittest.TestCase):
         self.assertTrue(client.is_complete({"Complete": "true"}))
         self.assertTrue(client.is_complete({"Complete": True}))
         self.assertFalse(client.is_complete({"Complete": "false"}))
+
+    def test_size_and_share(self):
+        client = extracts.SliceOsm()
+        payload = {
+            "NodesTotal": 1000, "NodesProg": 250, "SizeBytes": 4096,
+        }
+        self.assertEqual(client.size_bytes(payload), 4096)
+        self.assertAlmostEqual(client.share(payload), 0.25)
+        # До готовности размер неизвестен, и прогресс нулевой.
+        self.assertEqual(client.size_bytes({"SizeBytes": 0}), 0)
+        self.assertEqual(client.share({"NodesTotal": 0}), 0.0)
+
+    def test_progress_text_estimates_the_rest(self):
+        client = extracts.SliceOsm()
+        payload = {"NodesTotal": 1000, "NodesProg": 500}
+        text = client._progress_text(payload, 60.0)
+        self.assertIn("50%", text)
+        self.assertIn("1 мин", text)
+        # Пока сервис не сказал, сколько узлов ждать, оценки нет.
+        self.assertEqual(
+            client._progress_text({"NodesTotal": 0}, 60.0),
+            "SliceOSM: сборка выреза…",
+        )
+
+    def test_service_status(self):
+        client = extracts.SliceOsm()
+        with mock.patch.object(
+            extracts, "fetch_json", return_value={"QueueSize": 2},
+        ):
+            self.assertEqual(client.service_status()["QueueSize"], 2)
+
+    def test_wait_keeps_waiting_while_service_moves(self):
+        """Пока сервис продвигается, ожидание не обрывается по таймауту."""
+        client = extracts.SliceOsm()
+        payloads = [
+            {"CellsProg": 10, "NodesProg": 0, "Complete": False},
+            {"CellsProg": 10, "NodesProg": 100, "Complete": False},
+            {"CellsProg": 10, "NodesProg": 200, "Complete": True},
+        ]
+        clock = itertools.count(0.0)
+        with mock.patch.object(
+            client, "status", side_effect=payloads
+        ), mock.patch.object(
+            extracts.time, "sleep"
+        ), mock.patch.object(
+            extracts.time, "monotonic",
+            side_effect=lambda: next(clock) * 0.01,
+        ):
+            payload = client.wait("uuid", timeout=1)
+        self.assertTrue(client.is_complete(payload))
 
 
 @unittest.skipUnless(

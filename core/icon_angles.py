@@ -34,10 +34,21 @@ BUILDING_FIELD = "icon_building"
 # значение должно совпадать с тем, что QGIS считал при отрисовке.
 # Условие по переменной проекта (@rotate_mountain_pass) в шаблоне
 # остаётся: переключатель поворота должен работать и после подготовки.
+#
+# Перевал поворачивается по гребню, только если он рядом с ним: до 200 м.
+# Предел задан в метрах, а слой значков в градусах, поэтому расстояние
+# считается в метрической системе.  overlay_nearest расстояние не
+# ограничивает: пятый его аргумент измеряется в единицах слоя значков,
+# то есть в градусах, и 200 градусов не ограничивают ничего.
+PASS_MAX_DISTANCE = 200
+METRIC_CRS = "EPSG:3857"
 PASS_EXPRESSION = (
-    "round(degrees(azimuth(start_point(array_get(overlay_nearest( "
-    "'ridge_exploded', $geometry,1,1,200),0)), end_point(array_get("
-    "overlay_nearest( 'ridge_exploded', $geometry,1,1,200),0)))))"
+    "IF(distance(transform($geometry,'{crs}','{metric}'),"
+    "transform(array_get(overlay_nearest('ridge_exploded',$geometry,1,1),0),"
+    "'{crs}','{metric}')) <= {limit},"
+    "round(degrees(azimuth(start_point(array_get(overlay_nearest("
+    "'ridge_exploded',$geometry,1,1),0)),end_point(array_get("
+    "overlay_nearest('ridge_exploded',$geometry,1,1),0))))),NULL)"
 )
 STATION_EXPRESSION = (
     "round(main_angle(array_get(overlay_nearest( "
@@ -120,6 +131,15 @@ def compute_icon_angles(config, progress=None, cancel=None):
     return done
 
 
+def _fill(text, crs):
+    """Подставляет в выражение систему координат слоя и предел расстояния."""
+    return text.format(
+        crs=crs or "EPSG:4326",
+        metric=METRIC_CRS,
+        limit=PASS_MAX_DISTANCE,
+    )
+
+
 def _evaluate(source_path, layer_name, fields, overlay_paths):
     """Считает выражения по объектам слоя.
 
@@ -148,7 +168,7 @@ def _evaluate(source_path, layer_name, fields, overlay_paths):
             store.addMapLayer(overlay)
     expressions = {}
     for field, text in fields:
-        expression = QgsExpression(text)
+        expression = QgsExpression(_fill(text, source.crs().authid()))
         context = QgsExpressionContext()
         context.appendScope(QgsExpressionContextUtils.globalScope())
         context.appendScope(QgsExpressionContextUtils.layerScope(source))

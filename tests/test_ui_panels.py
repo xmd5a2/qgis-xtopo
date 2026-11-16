@@ -237,6 +237,126 @@ class ProxyIconTest(unittest.TestCase):
             self.assertEqual(pixmap.pixelColor(0, 15).alpha(), 0)
 
 
+class ProxyCheckOnShowTest(unittest.TestCase):
+    """Значок прокси проверяется при показе панели."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _dock(self):
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+
+        class Iface:
+            def mainWindow(self):
+                return window
+
+        dock = XtopoDockWidget(Iface())
+        self.addCleanup(dock.deleteLater)
+        return dock
+
+    def test_show_checks_proxy_and_marks_it_working(self):
+        import time
+        from unittest import mock
+
+        from qgis_xtopo.core import proxy
+        from qgis_xtopo.gui import dockwidget
+
+        dock = self._dock()
+        config = proxy.ProxyConfig(
+            enabled=True, ptype="socks5", host="127.0.0.1", port=1080,
+        )
+        with mock.patch.object(
+            dockwidget.proxy, "load", return_value=config
+        ), mock.patch.object(
+            dockwidget.proxy, "probe", return_value=True
+        ):
+            dock.show()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not dock._proxy_known:
+                self.app.processEvents()
+                time.sleep(0.02)
+            self.assertTrue(dock._proxy_known)
+            self.assertTrue(dock._proxy_ok)
+            self.assertEqual(dock._proxy_icon_key, "ok")
+            dock.hide()
+
+    def test_panel_has_single_show_event(self):
+        """Два showEvent перекрывали друг друга: проверка не запускалась."""
+        import inspect
+
+        from qgis_xtopo.gui import dockwidget
+
+        source = inspect.getsource(dockwidget.XtopoDockWidget)
+        self.assertEqual(source.count("def showEvent"), 1)
+
+
+class SourceModeTest(unittest.TestCase):
+    """Порядок источников и приглушение редких режимов."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _dock(self):
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+
+        class Iface:
+            def mainWindow(self):
+                return window
+
+        dock = XtopoDockWidget(Iface())
+        self.addCleanup(dock.deleteLater)
+        return dock
+
+    def test_slice_comes_first_and_geofabrik_second(self):
+        dock = self._dock()
+        self.assertEqual(dock.source_mode.itemData(0), "slice")
+        self.assertEqual(dock.source_mode.itemData(1), "geofabrik")
+
+    def test_rare_modes_are_greyed_out(self):
+        from qgis.PyQt.QtCore import Qt
+
+        from qgis_xtopo.gui.dockwidget import RARE_SOURCE_MODES
+
+        dock = self._dock()
+        for index in range(dock.source_mode.count()):
+            key = dock.source_mode.itemData(index)
+            color = dock.source_mode.itemData(
+                index, Qt.ItemDataRole.ForegroundRole
+            )
+            if key in RARE_SOURCE_MODES:
+                self.assertIsNotNone(color, key)
+            else:
+                self.assertIsNone(color, key)
+
+    def test_rare_modes_start_with_public_overpass(self):
+        from qgis_xtopo.gui.dockwidget import RARE_SOURCE_MODES
+
+        dock = self._dock()
+        keys = [
+            dock.source_mode.itemData(index)
+            for index in range(dock.source_mode.count())
+        ]
+        first_rare = keys.index(RARE_SOURCE_MODES[0])
+        self.assertEqual(keys[first_rare], "overpass")
+        self.assertEqual(keys[first_rare:], list(RARE_SOURCE_MODES))
+
+
 class TabCornerButtonsTest(unittest.TestCase):
     """Кнопки прокси и языка не должны быть выше полосы вкладок."""
 

@@ -1,4 +1,4 @@
-"""Файловые выгрузки OSM с других хостов и вырез по рамке.
+"""Файловые выгрузки OSM с других хостов и вырезка по охвату.
 
 Модуль дополняет Geofabrik: те же выгрузки по регионам, но с других
 хостов (openstreetmap.fr, geo2day, movisda), плюс вырез по произвольной
@@ -983,8 +983,20 @@ def invalidate_cache(config, provider_key):
 
 
 # ---------------------------------------------------------------------------
-# Вырез по рамке (SliceOSM)
+# Вырезка по охвату (SliceOSM)
 # ---------------------------------------------------------------------------
+
+
+def _duration(seconds):
+    """Время словами: «40 с», «7 мин», «1 ч 20 мин»."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} с"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} мин"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин"
 
 
 class SliceOsm:
@@ -996,6 +1008,19 @@ class SliceOsm:
 
     API = "https://slice.openstreetmap.us/api/"
     FILES = "https://slice.openstreetmap.us/files/"
+
+    def service_status(self, cancel=None):
+        """Состояние сервиса: очередь заданий и предел по узлам.
+
+        Сервис собирает вырезы по одному, поэтому очередь — это время
+        ожидания до начала работы.  Предел по узлам (NodesLimit) означает,
+        что слишком большой охват сервис не возьмёт.
+        """
+        try:
+            payload = fetch_json(self.API, cancel=cancel)
+        except ExtractError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def submit(self, bbox, cancel=None):
         """Создать вырез; возвращает идентификатор задания."""
@@ -1040,23 +1065,79 @@ class SliceOsm:
             return value
         return str(value).lower() == "true"
 
+    def size_bytes(self, payload):
+        """Размер готового выреза в байтах."""
+        try:
+            return int(payload.get("SizeBytes") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def share(self, payload):
+        """Доля собранного выреза по числу обработанных узлов."""
+        try:
+            total = int(payload.get("NodesTotal") or 0)
+            done = int(payload.get("NodesProg") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if total <= 0:
+            return 0.0
+        return min(1.0, max(0.0, done / total))
+
     def wait(self, uuid, cancel=None, progress=None, timeout=600):
-        """Дождаться готовности выреза."""
+        """Дождаться готовности выреза.
+
+        Сервис отдаёт размер выреза только когда он готов, поэтому
+        ожидание идёт по числу обработанных узлов: по нему же считается
+        оценка оставшегося времени.  Таймаут ограничивает не общее
+        время ожидания, а паузу: пока сервис продвигается, вырез
+        большой области дожидается сколько нужно.
+        """
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        started = time.monotonic()
+        step = None
+        while True:
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Вырез прерван")
             payload = self.status(uuid, cancel=cancel)
             if self.is_complete(payload):
                 return payload
+            current = self._step(payload)
+            if current != step:
+                step = current
+                deadline = time.monotonic() + timeout
             if progress:
-                elapsed = str(payload.get("Elapsed") or "")
-                progress(f"SliceOSM: сборка выреза… {elapsed}")
+                progress(self._progress_text(
+                    payload, time.monotonic() - started,
+                ))
+            if time.monotonic() > deadline:
+                raise ExtractError(
+                    "SliceOSM: вырез не готов за отведённое время"
+                )
             time.sleep(3)
-        raise ExtractError("SliceOSM: вырез не готов за отведённое время")
 
-    def download(self, uuid, destination, progress=None, cancel=None):
+    @staticmethod
+    def _step(payload):
+        """Признак продвижения сервиса: по нему продлевается ожидание."""
+        return (
+            payload.get("CellsProg"), payload.get("NodesProg"),
+            payload.get("ElemsProg"),
+        )
+
+    def _progress_text(self, payload, elapsed):
+        """Строка прогресса сборки с оценкой оставшегося времени."""
+        share = self.share(payload)
+        if share <= 0:
+            return "SliceOSM: сборка выреза…"
+        left = elapsed * (1.0 - share) / share
+        return (
+            f"SliceOSM: сборка выреза… {share * 100:.0f}%"
+            f" (осталось ~{_duration(left)})"
+        )
+
+    def download(self, uuid, destination, progress=None, cancel=None,
+                 expected_size=0):
         url = f"{self.FILES}{uuid}.osm.pbf"
         return download_file(
-            url, destination, progress=progress, cancel=cancel, label="SliceOSM",
+            url, destination, progress=progress, cancel=cancel,
+            label="SliceOSM", expected_size=expected_size,
         )

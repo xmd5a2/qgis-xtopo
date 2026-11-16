@@ -230,10 +230,11 @@ class PipelineIntegrationTest(unittest.TestCase):
             "https://overpass.private.coffee/api/interpreter",
         )
         self.assertEqual(dock.source_mode.count(), 9)
-        self.assertEqual(dock.source_mode.itemData(0), "geofabrik")
+        self.assertEqual(dock.source_mode.itemData(0), "slice")
         self.assertEqual(
-            dock.source_mode.itemText(0), "Карты с Geofabrik (предпочтительно)"
+            dock.source_mode.itemText(0), "Вырезка по охвату (SliceOSM)"
         )
+        self.assertEqual(dock.source_mode.itemData(1), "geofabrik")
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("geofabrik"))
         self.assertEqual(dock.source_label.text(), "")
         self.assertFalse(dock.source_label.isVisibleTo(dock))
@@ -1542,6 +1543,12 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("geofabrik"))
         dock._map_index_timer.stop()
         dock.show()
+        # Индекс для проверки не нужен: он грузится в фоне и переписывает
+        # статус, из-за чего проверка мигала в зависимости от скорости
+        # машины.
+        dock._map_index_timer.stop()
+        if dock.map_index_worker is not None:
+            dock.map_index_worker.cancel()
         self.app.processEvents()
 
         def list_y():

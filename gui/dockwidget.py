@@ -68,6 +68,13 @@ EXTRACT_MODES = tuple(key for key, _title in EXTRACT_PROVIDERS)
 # Режимы, где данные берутся из готовых файлов выгрузок.
 FILE_MODES = ("geofabrik",) + EXTRACT_MODES
 
+# Режимы, которыми пользуются редко: Overpass и локальные файлы.
+# Их оставляют на виду, но приглушают цветом, чтобы список читался.
+RARE_SOURCE_MODES = ("overpass", "pbf", "local", "ssh")
+
+# Цвет приглушённых пунктов списка источников.
+RARE_SOURCE_COLOR = "#7f7f7f"
+
 
 def _enum(owner, group, name):
     try:
@@ -640,7 +647,7 @@ class XtopoDockWidget(QDockWidget):
         self._pbf_probe_timer.timeout.connect(self._start_pbf_probe)
         self._servers_checked = False
         self._mode_values = {}
-        self._active_mode = "geofabrik"
+        self._active_mode = "slice"
         self._own_project_open = False
         self._own_marker = False
         self._hidden_panels = []
@@ -712,13 +719,6 @@ class XtopoDockWidget(QDockWidget):
         self._dem_sonny_tiles = set(sonny.catalogue_tiles())
         if self.bbox.text().strip():
             self._schedule_dem_availability()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        # Пока панель скрыта, статус прокси не проверяем: без настроенного
-        # прокси это бесполезно, а с недоступным — лишние сетевые попытки.
-        self._check_proxy()
-        self._proxy_timer.start()
 
     def hideEvent(self, event):
         self._proxy_timer.stop()
@@ -910,16 +910,6 @@ class XtopoDockWidget(QDockWidget):
         row.addWidget(self.projects_dir)
         row.addWidget(browse_projects)
         project_form.addRow("Каталог проектов:", row)
-        self.disk_info = WrappedLabel("")
-        self.disk_info.setWordWrap(True)
-        self.disk_info.setToolTip(
-            i18n.tr(
-                "Свободное место на диске, где хранится проект: карты OSM, "
-                "растры рельефа и слои. Для рельефа на сотни километров "
-                "нужно несколько гигабайт."
-            )
-        )
-        project_form.addRow(self.disk_info)
         self.project_name = QLineEdit("automap")
         self.project_name.setPlaceholderText("буквы, цифры, _ - +")
         self.project_name.textChanged.connect(self._project_name_changed)
@@ -933,6 +923,18 @@ class XtopoDockWidget(QDockWidget):
         self.project_name_hint.setStyleSheet("color: #b00020;")
         self.project_name_hint.setVisible(False)
         project_form.addRow(self.project_name_hint)
+        # Свободное место на диске — сразу под именем проекта: там же
+        # видно, сколько данных влезет в каталог.
+        self.disk_info = WrappedLabel("")
+        self.disk_info.setWordWrap(True)
+        self.disk_info.setToolTip(
+            i18n.tr(
+                "Свободное место на диске, где хранится проект: карты OSM, "
+                "растры рельефа и слои. Для рельефа на сотни километров "
+                "нужно несколько гигабайт."
+            )
+        )
+        project_form.addRow(self.disk_info)
 
         self.bbox = QLineEdit()
         self.bbox.textChanged.connect(self._bbox_text_changed)
@@ -951,14 +953,15 @@ class XtopoDockWidget(QDockWidget):
         source_group = QGroupBox("Источник OSM")
         source_form = QFormLayout(source_group)
         self.source_mode = QComboBox()
-        self.source_mode.addItem("Карты с Geofabrik (предпочтительно)", "geofabrik")
+        self.source_mode.addItem("Вырезка по охвату (SliceOSM)", "slice")
+        self.source_mode.addItem("Карты с Geofabrik", "geofabrik")
         for key, title in EXTRACT_PROVIDERS:
             self.source_mode.addItem(title, key)
-        self.source_mode.addItem("Вырез по рамке (SliceOSM)", "slice")
         self.source_mode.addItem("Публичный Overpass API", "overpass")
         self.source_mode.addItem("Локальный PBF/OSM экстракт", "pbf")
         self.source_mode.addItem("Локальный Overpass", "local")
         self.source_mode.addItem("Overpass по SSH", "ssh")
+        self._grey_out_rare_sources()
         self.source_mode.currentIndexChanged.connect(self._source_changed)
         source_form.addRow("Режим:", self.source_mode)
 
@@ -1419,6 +1422,20 @@ class XtopoDockWidget(QDockWidget):
             self.source_value.setText(example)
             self.source_value.setCursorPosition(0)
 
+    def _grey_out_rare_sources(self):
+        """Гасит цветом редкие режимы: Overpass и локальные файлы.
+
+        Пункты остаются видимыми и выбираемыми, но серым шрифтом: ими
+        пользуются редко, а список источников читают целиком.
+        """
+        for index in range(self.source_mode.count()):
+            key = self.source_mode.itemData(index)
+            if key not in RARE_SOURCE_MODES:
+                continue
+            self.source_mode.setItemData(
+                index, QColor(RARE_SOURCE_COLOR), Qt.ItemDataRole.ForegroundRole
+            )
+
     def _source_changed(self, _index):
         mode = self.source_mode.currentData()
         if self._active_mode != mode:
@@ -1540,14 +1557,16 @@ class XtopoDockWidget(QDockWidget):
         elif mode == "slice":
             self.source_value.setEnabled(False)
             self.source_value.setPlaceholderText(
-                i18n.tr("Вырез по охвату")
+                i18n.tr("Вырезка по охвату")
             )
             self.source_value.clear()
             self.source_hint.setText(
                 i18n.tr(
                     "Сервис SliceOSM собирает файл PBF по указанной рамке: "
                     "данные свежее минуты, но вырез готовится на стороне "
-                    "сервиса и занимает от нескольких секунд до минут."
+                    "сервиса и занимает от нескольких секунд до минут. "
+                    "Объём выреза станет известен, когда сервис соберёт файл, "
+                    "до этого показывается ход работы и оценка времени."
                 )
             )
             self.pbf_info.setVisible(False)
@@ -2397,6 +2416,12 @@ class XtopoDockWidget(QDockWidget):
             # умолчанию панель занимает минимальную ширину.
             QTimer.singleShot(0, self._collapse_to_minimum)
         QTimer.singleShot(0, self._fit_source_hint)
+        # Пока панель скрыта, статус прокси не проверяем: без настроенного
+        # прокси это бесполезно, а с недоступным — лишние сетевые попытки.
+        # Проверка при показе нужна, чтобы после перезапуска QGIS значок
+        # сразу показывал, работает ли прокси.
+        self._check_proxy()
+        self._proxy_timer.start()
         mode = self.source_mode.currentData()
         if mode == "overpass":
             self._check_servers()
@@ -2722,7 +2747,7 @@ class XtopoDockWidget(QDockWidget):
             server_index = self.overpass_server.findData(saved_value)
         self.overpass_server.setCurrentIndex(max(0, server_index))
         saved_mode = str(
-            self.settings.value("source_mode", "geofabrik") or "geofabrik"
+            self.settings.value("source_mode", "slice") or "slice"
         )
         if saved_mode == "extracts":
             # Старые настройки хранили хост отдельно от режима.

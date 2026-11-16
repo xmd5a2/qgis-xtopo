@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import extracts, geofabrik, overpass_batch, osmium_tool, pbf_source
+from . import disk_space, extracts, geofabrik, overpass_batch, osmium_tool, pbf_source
 from .overpass_client import OverpassClient, build_query
 from .resources import read_query
 
@@ -302,7 +302,7 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
         )
 
     if config.source_mode == "slice":
-        # Вырез по рамке через SliceOSM: сервис собирает файл PBF по
+        # Вырезка по охвату через SliceOSM: сервис собирает файл PBF по
         # указанной области, данные свежее минуты.
         timer = _DownloadTimer()
         query_texts = {name: read_query(name) for name in query_names}
@@ -313,14 +313,34 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
             config.geofabrik_dir.mkdir(parents=True, exist_ok=True)
             try:
                 with timer.measure():
+                    # Сервис собирает вырезы по одному: очередь — это
+                    # время ожидания до начала работы.
+                    queue = client.service_status(cancel=cancel)
+                    pending = 0
+                    try:
+                        pending = int(queue.get("QueueSize") or 0)
+                    except (TypeError, ValueError):
+                        pending = 0
+                    if progress and pending:
+                        progress(f"SliceOSM: в очереди {pending} заданий")
                     uuid = client.submit(bbox, cancel=cancel)
                     if progress:
                         progress("SliceOSM: вырез заказан")
-                    client.wait(uuid, cancel=cancel, progress=progress)
+                    payload = client.wait(
+                        uuid, cancel=cancel, progress=progress,
+                    )
+                    # Размер сервис отдаёт только для готового выреза:
+                    # до этого момента он неизвестен.
+                    size = client.size_bytes(payload)
                     if progress:
+                        progress(
+                            "SliceOSM: вырез готов, "
+                            f"{disk_space.human_size(size)}"
+                        )
                         progress("SliceOSM: скачивание выреза")
                     client.download(
                         uuid, destination, progress=progress, cancel=cancel,
+                        expected_size=size,
                     )
             except extracts.ExtractError as exc:
                 raise SourceError(str(exc)) from exc

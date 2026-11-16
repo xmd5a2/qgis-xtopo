@@ -573,7 +573,8 @@ class GeofabrikSourcesTest(unittest.TestCase):
 
 class GeofabrikConfigTest(unittest.TestCase):
     def test_default_mode(self):
-        self.assertEqual(Config().source_mode, "geofabrik")
+        # По умолчанию — вырезка по охвату: данные свежее минуты.
+        self.assertEqual(Config().source_mode, "slice")
 
     def test_validate_geofabrik(self):
         Config(
