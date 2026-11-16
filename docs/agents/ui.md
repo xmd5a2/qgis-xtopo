@@ -21,6 +21,13 @@
 - **Поток поиска — не ребёнок окна**: окно закрывается во время запроса, поток
   должен доработать и удалиться сам (родитель — `QgsApplication`); на
   `aboutToQuit` его ждёт `shutdown_nominatim_workers`.
+- **Перед очисткой проекта останавливается отрисовка карты**:
+  `XtopoDockWidget._stop_canvas_rendering` вызывает
+  `QgsMapCanvas.stopRendering()` и `waitWhileRendering()`.  Подключено к
+  `QgsProject.aboutToBeCleared` (и вызывается из кнопки «Закрыть проект»).
+  Без этого фоновый поток `QgsMapRendererCustomPainterJob` обращается к
+  выражениям проекта, пока главный поток удаляет слои через
+  `QgsProject.clear()`, и QGIS падает с SIGSEGV.
 
 ## Интерфейс
 

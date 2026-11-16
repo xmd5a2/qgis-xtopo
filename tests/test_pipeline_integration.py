@@ -1805,6 +1805,35 @@ class PipelineIntegrationTest(unittest.TestCase):
             project.clear()
             dock.deleteLater()
 
+    def test_close_project_stops_canvas_rendering(self):
+        """Очистка проекта идёт только после остановки рендера карты."""
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        calls = []
+
+        class Canvas:
+            def stopRendering(self):
+                calls.append("stop")
+
+            def waitWhileRendering(self):
+                calls.append("wait")
+
+        class Iface:
+            def mapCanvas(self):
+                return Canvas()
+
+            def newProject(self, locator):
+                calls.append(("newProject", locator))
+
+        dock = XtopoDockWidget(None)
+        dock.iface = Iface()
+        dock._own_project_open = True
+        try:
+            dock._close_project()
+        finally:
+            dock.deleteLater()
+        self.assertEqual(calls, ["stop", "wait", ("newProject", True)])
+
     def test_prepare_without_extent_asks_for_it(self):
         from unittest import mock
 

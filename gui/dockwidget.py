@@ -2807,6 +2807,7 @@ class XtopoDockWidget(QDockWidget):
     def _connect_project_signals(self):
         project = QgsProject.instance()
         for signal_name, slot in (
+            ("aboutToBeCleared", self._stop_canvas_rendering),
             ("cleared", self._project_closed),
             ("readProject", self._project_read),
         ):
@@ -3312,9 +3313,36 @@ class XtopoDockWidget(QDockWidget):
         except Exception as exc:
             QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
 
+    def _stop_canvas_rendering(self, *_args):
+        """Останавливает фоновую отрисовку карты перед очисткой проекта.
+
+        QgsMapCanvas рисует карту отдельным потоком.  Если в это время
+        вызвать QgsProject.clear(), поток обращается к выражениям проекта,
+        пока главный поток удаляет слои, и QGIS падает.  Ждём завершения
+        прерванной отрисовки до очистки проекта.
+        """
+        if self.iface is None:
+            return
+        canvas = getattr(self.iface, "mapCanvas", None)
+        if canvas is None:
+            return
+        if callable(canvas):
+            try:
+                canvas = canvas()
+            except Exception:
+                return
+        for name in ("stopRendering", "waitWhileRendering"):
+            method = getattr(canvas, name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+
     def _close_project(self):
         if not self._own_project_open:
             return
+        self._stop_canvas_rendering()
         if self.iface is not None and hasattr(self.iface, "newProject"):
             self.iface.newProject(True)
         else:
