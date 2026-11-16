@@ -179,6 +179,11 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
     stall = 0
     attempts = 0
     reported = received
+    # Прогресс пишется примерно раз в 5 % файла, но не чаще, чем раз в
+    # мегабайт: иначе на 100 МБ в журнал попадают сотни строк.
+    progress_step = (
+        max(1024 * 1024, total // 20) if total else 2 * 1024 * 1024
+    )
     open_ended = False
     while True:
         if cancel is not None and cancel.is_set():
@@ -201,6 +206,7 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                 if code == 200 and received:
                     # Сервер проигнорировал Range — начинаем заново.
                     received = 0
+                    reported = 0
                     temporary.unlink(missing_ok=True)
                 mode = "ab" if received else "wb"
                 with temporary.open(mode) as handle:
@@ -215,7 +221,7 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                             break
                         handle.write(chunk)
                         received += len(chunk)
-                        if progress and received - reported >= 262144:
+                        if progress and received - reported >= progress_step:
                             reported = received
                             progress(
                                 f"{label or url}: скачано "

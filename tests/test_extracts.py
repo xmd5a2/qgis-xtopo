@@ -446,6 +446,21 @@ class DownloadTest(unittest.TestCase):
             )
         self.assertEqual(result.read_bytes(), payload)
 
+    def test_progress_is_reported_less_often_than_every_megabyte(self):
+        payload = b"\x00" * (8 * 1024 * 1024)
+        messages = []
+        with mock.patch.object(
+            extracts, "_urlopen", return_value=_FakeResponse(payload)
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(True, len(payload), "")
+        ):
+            extracts.download_file(
+                "http://example.org/map.osm.pbf", self.destination,
+                progress=messages.append, check_pbf=False,
+            )
+        self.assertTrue(messages)
+        self.assertLessEqual(len(messages), 20)
+
 
 class SliceOsmTest(unittest.TestCase):
     """Вырез по рамке: заказ, ожидание и разбор ответа."""
