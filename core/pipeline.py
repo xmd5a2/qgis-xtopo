@@ -7,8 +7,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, gdal_log, i18n, icon_angles, label_cache, osm_convert,
-    peak_filter, poi_icons, polygon_overlaps, project, sources, terrain,
+    coastline, disk_space, gdal_log, i18n, icon_angles, label_cache,
+    osm_convert, peak_filter, poi_icons, polygon_overlaps, project, sources,
+    terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -1467,6 +1468,16 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     # Каталоги нужны и подготовке источника, которая теперь стартует
     # раньше создания проекта.
     config.ensure_directories()
+    # Места на диске может не хватить под карты, растры и слои: об этом
+    # лучше узнать в начале, а не после часа работы.
+    free = disk_space.free_bytes(config.project_dir)
+    if free is not None:
+        report(f"Свободно на диске: {disk_space.human_size(free)}")
+        if free < disk_space.GIB:
+            report(
+                "WARNING: На диске почти нет места: свободно "
+                f"{disk_space.human_size(free)}. Подготовка может прерваться."
+            )
     _use_project_temp(config)
     gdal_log.LOG.reset()
     bbox = parse_bbox(config.bbox)

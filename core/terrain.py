@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .bbox import BBox
-from . import dem_sources, i18n, sonny, terrain_cache
+from . import dem_sources, disk_space, i18n, sonny, terrain_cache
 
 CHUNK = 256 * 1024
 
@@ -989,6 +989,19 @@ def _relief_creation_options():
 RASTER_BLOCK_SIDE = 2048
 
 
+def _write_error(destination_path, exc):
+    """Понятная ошибка записи вместо сообщения GDAL о месте.
+
+    GDAL на заполненном томе пишет «TIFFAppendToStrip:Write error», из
+    чего не видно, что закончилось место.  Если места действительно
+    нет, сообщаем об этом прямо.
+    """
+    free = disk_space.free_bytes(destination_path)
+    if free is not None and free < disk_space.RESERVE:
+        return disk_space.out_of_space(Path(destination_path).name)
+    return exc
+
+
 def _transform_raster(source_path, destination_path, operation):
     """Пишет растр поблочно, применяя поэлементную функцию.
 
@@ -1003,6 +1016,14 @@ def _transform_raster(source_path, destination_path, operation):
     driver = gdal.GetDriverByName("GTiff")
     width = source.RasterXSize
     height = source.RasterYSize
+    # Места под растр может не хватить: без проверки GDAL обрывает
+    # запись посреди работы и оставляет битый файл.
+    disk_space.require_space(
+        destination_path,
+        width * height * disk_space.FILE_FLOAT_PIXEL,
+        "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+        Path(destination_path).name,
+    )
     output = driver.Create(
         str(destination_path),
         width,
@@ -1024,8 +1045,18 @@ def _transform_raster(source_path, destination_path, operation):
                 if array is None:
                     continue
                 block = operation(array.astype("float32"))
-                target_band.WriteArray(block, x, y)
+                try:
+                    target_band.WriteArray(block, x, y)
+                except RuntimeError as exc:
+                    error = _write_error(destination_path, exc)
+                    if error is exc:
+                        raise
+                    raise error from exc
         target_band.FlushCache()
+    except Exception:
+        # Незаконченный файл не оставляем: он только зря занимает место.
+        Path(destination_path).unlink(missing_ok=True)
+        raise
     finally:
         output = None
         source = None
@@ -1174,6 +1205,12 @@ def _generate_slope(config, merged, dem_width, dem_height, upscale,
         # Сначала удваиваем разрешение DEM с интерполяцией: уклон
         # получается детальнее, чем при интерполяции готового растра.
         dem_x2 = config.raster_dir / "merged_dem_x2.tif"
+        disk_space.require_space(
+            dem_x2,
+            dem_width * dem_height * 4 * disk_space.FILE_FLOAT_PIXEL,
+            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+            "укруплённый DEM",
+        )
         options = gdal.WarpOptions(
             width=dem_width * 2,
             height=dem_height * 2,
@@ -1215,6 +1252,12 @@ def _generate_slope(config, merged, dem_width, dem_height, upscale,
         )
         if progress:
             progress("Upscaling slope")
+        disk_space.require_space(
+            slope_up,
+            width * height * 9 * disk_space.FILE_FLOAT_PIXEL,
+            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+            "уклон",
+        )
         options = gdal.WarpOptions(
             width=width * 3,
             height=height * 3,
@@ -1278,6 +1321,12 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
             outputType=gdal.GDT_Float32,
             creationOptions=_relief_creation_options(),
         )
+        disk_space.require_space(
+            upscaled,
+            dem_width * dem_height * 36 * disk_space.FILE_FLOAT_PIXEL,
+            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+            "укруплённый DEM",
+        )
         result = gdal.Warp(str(upscaled), str(downscaled), options=options)
         if result is None:
             raise RuntimeError("Failed to upscale DEM")
@@ -1301,6 +1350,14 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
         zFactor=1,
         scale=111120,
         creationOptions=_relief_creation_options(),
+    )
+    factor = 6 if upscale else 1
+    disk_space.require_space(
+        hillshade,
+        dem_width * dem_height * factor * factor
+        * disk_space.FILE_BYTE_PIXEL,
+        "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+        "оттенок",
     )
     result = gdal.DEMProcessing(
         str(hillshade), str(hillshade_source), "hillshade", options=options
@@ -1333,6 +1390,16 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     dem_ds = None
     if progress and not upscale:
         progress("DEM точнее 0,9″: укрупнение растров не требуется")
+    # Уклон и отмывка в шесть раз крупнее DEM, и все производные
+    # растры лежат рядом: предупреждаем, пока расчёт не начался.
+    warning = disk_space.space_warning(
+        config.raster_dir,
+        disk_space.relief_estimate(dem_width, dem_height, upscale),
+        "Недостаточно места для рельефа: нужно ≈{}, свободно {}. "
+        "Подготовка может прерваться.",
+    )
+    if warning and progress:
+        progress(f"WARNING: {warning}")
 
     # Ветки уклона и отмывки независимы: обе читают только merged_dem.tif,
     # а пишут каждая в свои файлы.  Параллельный запуск сокращает время

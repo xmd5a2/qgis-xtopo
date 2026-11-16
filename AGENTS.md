@@ -63,7 +63,8 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `core/measure.py` — размеры рамки; `core/peak_placement.py` — правило
   проверки пиков; `core/peak_filter.py` — его применение к слою `peak`;
   `core/poi_icons.py` — вытеснение значков; `core/label_cache.py` — кэш
-  линий подписи; `core/cpu.py` — число потоков.
+  линий подписи; `core/cpu.py` — число потоков; `core/disk_space.py` —
+  свободное место на диске и предупреждения о нехватке.
 - `gui/dockwidget.py` — вкладки «Данные/Слои/Рельеф»; `gui/projectpanel.py` —
   вкладка открытого проекта, атлас и слои.
 - `automap.qgz` лежит только в корне; путь в коде — `core/resources.py:

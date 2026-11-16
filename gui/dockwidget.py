@@ -23,8 +23,8 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..core import (
-    dem_sources, extracts, geofabrik, i18n, measure, net, performance, proxy,
-    sonny, terrain_cache,
+    dem_sources, disk_space, extracts, geofabrik, i18n, measure, net,
+    performance, proxy, sonny, terrain_cache,
 )
 from ..core.bbox import parse_bbox
 from ..core.config import (
@@ -910,10 +910,23 @@ class XtopoDockWidget(QDockWidget):
         row.addWidget(self.projects_dir)
         row.addWidget(browse_projects)
         project_form.addRow("Каталог проектов:", row)
+        self.disk_info = WrappedLabel("")
+        self.disk_info.setWordWrap(True)
+        self.disk_info.setToolTip(
+            i18n.tr(
+                "Свободное место на диске, где хранится проект: карты OSM, "
+                "растры рельефа и слои. Для рельефа на сотни километров "
+                "нужно несколько гигабайт."
+            )
+        )
+        project_form.addRow(self.disk_info)
         self.project_name = QLineEdit("automap")
         self.project_name.setPlaceholderText("буквы, цифры, _ - +")
         self.project_name.textChanged.connect(self._project_name_changed)
         self.projects_dir.textChanged.connect(self._project_path_changed)
+        # Свободное место пересчитываем только при смене каталога: имя
+        # проекта на том не влияет.
+        self.projects_dir.textChanged.connect(self._update_disk_info)
         project_form.addRow("Имя проекта:", self.project_name)
         self.project_name_hint = WrappedLabel("")
         self.project_name_hint.setWordWrap(True)
@@ -1333,6 +1346,26 @@ class XtopoDockWidget(QDockWidget):
     def _project_path_changed(self, *_args):
         """Имя или каталог изменились: обновляем доступность кнопок."""
         self._update_action_buttons()
+
+    def _update_disk_info(self, *_args):
+        """Свободное место на томе, где лежат данные проекта."""
+        directory = self.projects_dir.text().strip() or default_projects_dir()
+        free = disk_space.free_bytes(directory)
+        if free is None:
+            self.disk_info.setText("")
+            self.disk_info.setVisible(False)
+            return
+        self.disk_info.setText(
+            i18n.trf("Свободно на диске: {}", disk_space.human_size(free))
+        )
+        self.disk_info.setVisible(True)
+        # Мало места — предупреждаем заранее, до долгой подготовки.
+        if free < disk_space.GIB:
+            self.disk_info.setStyleSheet("color: #b00020;")
+        elif free < 5 * disk_space.GIB:
+            self.disk_info.setStyleSheet("color: #b35c00;")
+        else:
+            self.disk_info.setStyleSheet("")
 
     def _project_file_path(self):
         """Путь к файлу проекта по указанным каталогу и имени.
@@ -2675,6 +2708,7 @@ class XtopoDockWidget(QDockWidget):
         self.projects_dir.setText(
             self.settings.value("projects_dir", default_projects_dir())
         )
+        self._update_disk_info()
         self.project_name.setText(self.settings.value("project_name", "automap"))
         self.bbox.setText(self.settings.value("bbox", ""))
         saved_value = self.settings.value("source_value", "")
@@ -3025,6 +3059,8 @@ class XtopoDockWidget(QDockWidget):
         self._render_pbf_info()
         self._update_dem_info()
         self._update_dem_warning()
+        # Размеры пересобираются заново: единицы измерения переводятся.
+        self._update_disk_info()
         plan = self._map_index_plan
         if plan is None:
             return
@@ -3261,6 +3297,8 @@ class XtopoDockWidget(QDockWidget):
         self.progress.setValue(100)
         self._set_running(False)
         self._append_log(f"Готово: {path}")
+        # После подготовки на диске осталось меньше места.
+        self._update_disk_info()
         # В строке статуса путь не помещается: показываем короткий текст,
         # полный остаётся в журнале и в подсказке.
         self._set_status("Готово")

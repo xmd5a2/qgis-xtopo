@@ -199,6 +199,160 @@ class HillshadeStyleTest(unittest.TestCase):
             self.assertGreater(float(array.max()), 235.0)
 
 
+class DiskSpaceGuardTest(unittest.TestCase):
+    """Без свободного места подготовка объясняет это понятной ошибкой."""
+
+    def test_transform_raster_reports_missing_space(self):
+        from osgeo import gdal, osr
+        import numpy as np
+        from unittest import mock
+
+        from qgis_xtopo.core import disk_space, terrain
+
+        gdal.UseExceptions()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.tif"
+            destination_path = root / "destination.tif"
+            driver = gdal.GetDriverByName("GTiff")
+            source = driver.Create(str(source_path), 8, 8, 1, gdal.GDT_Float32)
+            source.SetGeoTransform((0, 0.01, 0, 0, 0, -0.01))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            source.SetProjection(srs.ExportToWkt())
+            source.GetRasterBand(1).WriteArray(
+                np.zeros((8, 8), dtype="float32")
+            )
+            source = None
+
+            with mock.patch.object(disk_space, "free_bytes", return_value=0):
+                with self.assertRaises(
+                    disk_space.InsufficientSpace
+                ) as context:
+                    terrain._transform_raster(
+                        source_path, destination_path, lambda array: array
+                    )
+            self.assertIn("Недостаточно места", str(context.exception))
+            # Битый файл на забитом диске только зря занимает место.
+            self.assertFalse(destination_path.exists())
+
+    def test_write_error_is_reported_as_missing_space(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import disk_space, terrain
+
+        with mock.patch.object(disk_space, "free_bytes", return_value=0):
+            error = terrain._write_error(
+                "slope.tif", RuntimeError("TIFFAppendToStrip:Write error")
+            )
+        self.assertIsInstance(error, disk_space.InsufficientSpace)
+        self.assertIn("slope.tif", str(error))
+
+    def test_transform_raster_cleans_up_after_write_error(self):
+        """Ошибка записи на заполненном диске понятна, битый файл убран."""
+        import numpy as np
+        from unittest import mock
+
+        from qgis_xtopo.core import disk_space, terrain
+
+        class Band:
+            def ReadAsArray(self, x, y, columns, rows):
+                return np.zeros((rows, columns), dtype="float32")
+
+            def WriteArray(self, block, x, y):
+                raise RuntimeError(
+                    "TIFFAppendToStrip:Write error at scanline 13262"
+                )
+
+            def FlushCache(self):
+                pass
+
+        class Dataset:
+            RasterXSize = 8
+            RasterYSize = 8
+
+            def GetGeoTransform(self):
+                return (0, 0.01, 0, 0, 0, -0.01)
+
+            def GetProjection(self):
+                return ""
+
+            def GetRasterBand(self, index):
+                return Band()
+
+        class Driver:
+            def Create(self, path, *args, **kwargs):
+                Path(path).write_bytes(b"partial raster")
+                return Dataset()
+
+        gdal = mock.Mock()
+        gdal.GetDriverByName.return_value = Driver()
+        gdal.Open.return_value = Dataset()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "destination.tif"
+            with mock.patch.object(
+                terrain, "_gdal", return_value=(gdal, None, None)
+            ), mock.patch.object(disk_space, "free_bytes", return_value=0):
+                with self.assertRaises(
+                    disk_space.InsufficientSpace
+                ) as context:
+                    terrain._transform_raster(
+                        root / "source.tif", destination,
+                        lambda array: array,
+                    )
+            self.assertIn("Недостаточно места", str(context.exception))
+            self.assertFalse(destination.exists())
+
+    def test_relief_stage_warns_about_missing_space(self):
+        from osgeo import gdal, osr
+        import numpy as np
+        from unittest import mock
+
+        from qgis_xtopo.core import disk_space
+        from qgis_xtopo.core.terrain import generate_hillshade_slope
+
+        gdal.UseExceptions()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = type("Config", (), {})()
+            config.raster_dir = root
+            config.temp_dir = root / "tmp"
+            config.temp_dir.mkdir()
+            config.terrain_resample_method = "cubicspline"
+
+            dem_path = root / "merged_dem.tif"
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(dem_path), 20, 20, 1, gdal.GDT_Float32
+            )
+            dataset.SetGeoTransform((0, 0.01, 0, 0, 0, -0.01))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset.SetProjection(srs.ExportToWkt())
+            dataset.GetRasterBand(1).WriteArray(
+                np.zeros((20, 20), dtype="float32")
+            )
+            dataset = None
+
+            messages = []
+            with mock.patch.object(
+                disk_space,
+                "space_warning",
+                return_value=(
+                    "Недостаточно места для рельефа: нужно ≈1 ГБ, "
+                    "свободно 0 ГБ."
+                ),
+            ):
+                generate_hillshade_slope(
+                    config, None, progress=messages.append
+                )
+            self.assertTrue(
+                any(message.startswith("WARNING:") for message in messages),
+                "предупреждение о месте должно попасть в журнал",
+            )
+
+
 class BarrierRecipeTest(unittest.TestCase):
     def test_barrier_polygons_become_lines(self):
         self.assertIn("barrier", RECIPES)

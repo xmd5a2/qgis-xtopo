@@ -1415,6 +1415,35 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_free_disk_space_is_shown(self):
+        """В панели видно, сколько места осталось на диске проекта."""
+        from unittest import mock
+
+        from qgis_xtopo.core import disk_space
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                dock.projects_dir.setText(directory)
+                with mock.patch.object(
+                    disk_space, "free_bytes", return_value=3 * disk_space.GIB
+                ):
+                    dock._update_disk_info()
+                self.assertIn(
+                    disk_space.human_size(3 * disk_space.GIB),
+                    dock.disk_info.text(),
+                )
+                # Мало места — строка предупреждает об этом цветом.
+                self.assertIn("#b35c00", dock.disk_info.styleSheet())
+                with mock.patch.object(
+                    disk_space, "free_bytes", return_value=0
+                ):
+                    dock._update_disk_info()
+                self.assertIn("#b00020", dock.disk_info.styleSheet())
+        finally:
+            dock.deleteLater()
+
     def test_dem_refresh_button_rechecks(self):
         from unittest import mock
 

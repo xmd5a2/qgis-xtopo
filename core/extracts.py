@@ -24,7 +24,7 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsRectangle
 
-from . import geofabrik
+from . import disk_space, geofabrik
 
 
 USER_AGENT = "QGIS-xtopo/0.7 (+https://github.com/xmd5a2/qgis-xtopo)"
@@ -175,6 +175,17 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
     if total and received >= total:
         received = 0
         temporary.unlink(missing_ok=True)
+    if total:
+        # Скачивать файл, для которого нет места, бессмысленно: обрыв
+        # на середине оставляет обрывки и то же сообщение о месте.
+        try:
+            disk_space.require_space(
+                destination, max(0, total - received),
+                "Недостаточно места для файла {}: нужно ≈{}, свободно {}.",
+                destination.name,
+            )
+        except disk_space.InsufficientSpace as exc:
+            raise ExtractError(str(exc)) from exc
     idle = IDLE_TIMEOUT
     stall = 0
     attempts = 0

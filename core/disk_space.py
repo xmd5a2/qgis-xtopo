@@ -1,0 +1,137 @@
+"""Свободное место на диске и оценка потребности в нём.
+
+Рельеф на области в сотни километров требует десятки гигабайт: уклон и
+отмывка считаются в шесть раз крупнее DEM, и все производные растры
+лежат рядом.  Без проверки запись обрывается сообщением GDAL
+«На устройстве не осталось свободного места», из которого не видно,
+что именно закончилось и сколько места нужно было.
+
+Оценка всего этапа завышена намеренно: лучше предупредить о нехватке
+места заранее, чем дождаться ошибки записи посреди многочасовой
+подготовки.  Оценка отдельного файла, наоборот, близка к замеру:
+завышенная отказала бы там, где файл на самом деле поместился бы.
+
+Сообщения собираются из шаблонов: значения подставляются через
+``str.format``, поэтому строки переводятся в ``resources/lang/en.json``
+как обычно (см. ``core/i18n.py``).
+"""
+
+import shutil
+from pathlib import Path
+
+from . import i18n
+
+MIB = 1024 * 1024
+GIB = 1024 * MIB
+
+# Запас на временные файлы и служебные данные проекта.
+RESERVE = 256 * MIB
+
+# Сжатый LZW float32 занимает на диске около двух байт на пиксель,
+# байтовый растр оттенков — не больше байта на пиксель.  Это завышенная
+# оценка: она нужна, чтобы предупредить о нехватке места заранее.
+FLOAT_PIXEL = 2
+BYTE_PIXEL = 1
+
+# Размер одного файла считаем по замерам: LZW жмёт высоты примерно
+# вдвое (около 1.1 байта на пиксель), а оттенки — вчетверо (0.4 байта).
+# Завышать здесь нельзя: проверка идёт перед записью и завышенная оценка
+# откажет там, где файл на самом деле поместился бы.
+FILE_FLOAT_PIXEL = 1.2
+FILE_BYTE_PIXEL = 0.5
+
+
+class InsufficientSpace(RuntimeError):
+    """На томе, куда пишутся данные, не хватило места."""
+
+
+def free_bytes(path):
+    """Свободное место на томе, где лежит path; None — узнать не удалось."""
+    try:
+        return int(shutil.disk_usage(str(path)).free)
+    except OSError:
+        pass
+    # Каталога может ещё не быть: ищем ближайший существующий родитель.
+    for parent in Path(str(path)).parents:
+        try:
+            return int(shutil.disk_usage(str(parent)).free)
+        except OSError:
+            continue
+    return None
+
+
+def human_size(size):
+    """Размер словами: «12.3 ГБ»."""
+    if size is None:
+        return "?"
+    if size >= GIB:
+        return f"{size / GIB:.1f} {i18n.tr('ГБ')}"
+    if size >= MIB:
+        return f"{size / MIB:.0f} {i18n.tr('МБ')}"
+    return f"{max(1, size // 1024)} {i18n.tr('КБ')}"
+
+
+def relief_estimate(width, height, upscale):
+    """Оценка места под уклон, отмывку и промежуточные растры.
+
+    Ветки считаются параллельно, поэтому берём пик, когда крупные файлы
+    лежат рядом: укрупнённый DEM, оттенок и его итоговая копия.  Без
+    укрупнения (точный DEM) файлы остаются нативного размера.
+    """
+    pixels = max(0, int(width)) * max(0, int(height))
+    if not upscale:
+        # DEM, его копия в 3857, уклон и итоговый уклон, оттенок и его
+        # итоговая копия.
+        return pixels * (
+            3 * FLOAT_PIXEL + FLOAT_PIXEL + 2 * BYTE_PIXEL
+        )
+    big = pixels * 36
+    return (
+        # Укрупнённый DEM, оттенок и его итоговая копия.
+        big * (FLOAT_PIXEL + 2 * BYTE_PIXEL)
+        # Итоговый уклон.
+        + big * FLOAT_PIXEL
+        # Промежуточные файлы ветки уклона: DEM вдвое крупнее, уклон
+        # и его обрезка.
+        + pixels * 4 * 2 * FLOAT_PIXEL
+        # Сам DEM и его копия в EPSG:3857.
+        + pixels * 2 * FLOAT_PIXEL
+    )
+
+
+def space_warning(directory, needed, template):
+    """Текст предупреждения о нехватке места; None — места хватает.
+
+    Шаблон принимает два значения: сколько нужно и сколько свободно.
+    """
+    free = free_bytes(directory)
+    if free is None:
+        return None
+    if free >= needed + RESERVE:
+        return None
+    return template.format(human_size(needed), human_size(free))
+
+
+def require_space(directory, needed, template, subject=None):
+    """Проверяет, что места хватает; иначе бросает InsufficientSpace.
+
+    Места должно хватать заведомо, без запаса: иначе подготовка
+    обрывается ошибкой записи в самый неподходящий момент.  Шаблон
+    принимает размеры, а ``subject`` (имя файла) — первым значением.
+    """
+    free = free_bytes(directory)
+    if free is None or free >= needed:
+        return
+    values = [human_size(needed), human_size(free)]
+    if subject is not None:
+        values.insert(0, subject)
+    raise InsufficientSpace(template.format(*values))
+
+
+def out_of_space(path):
+    """Ошибка о закончившемся месте вместо сообщения GDAL."""
+    free = free_bytes(path)
+    return InsufficientSpace(
+        f"Недостаточно места на диске при записи {path}: "
+        f"свободно {human_size(free)}"
+    )

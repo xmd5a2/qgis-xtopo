@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 HAS_QGIS = importlib.util.find_spec("qgis") is not None
 
-from qgis_xtopo.core import extracts
+from qgis_xtopo.core import disk_space, extracts
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config
 
@@ -460,6 +460,22 @@ class DownloadTest(unittest.TestCase):
             )
         self.assertTrue(messages)
         self.assertLessEqual(len(messages), 20)
+
+    def test_download_is_refused_without_free_space(self):
+        """Скачивать файл, для которого нет места, бессмысленно."""
+        payload = self._pbf(40000)
+        with mock.patch.object(
+            extracts, "_urlopen", return_value=_FakeResponse(payload)
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(True, len(payload), "")
+        ), mock.patch.object(
+            disk_space, "free_bytes", return_value=1024
+        ):
+            with self.assertRaises(extracts.ExtractError) as context:
+                extracts.download_file(
+                    "http://example.org/map.osm.pbf", self.destination
+                )
+        self.assertIn("Недостаточно места", str(context.exception))
 
 
 class SliceOsmTest(unittest.TestCase):
