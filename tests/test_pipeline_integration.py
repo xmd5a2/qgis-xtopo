@@ -196,6 +196,24 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertFalse(dock.map_index_group.isVisibleTo(dock))
         self.assertFalse(dock.source_value.isVisibleTo(dock))
 
+    def test_source_hint_height_follows_wrapping(self):
+        """Последняя строка подсказки не обрезается после переноса."""
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("pbf"))
+        dock.resize(460, 620)
+        dock.show()
+        for _ in range(3):
+            self.app.processEvents()
+        hint = dock.source_hint
+        self.assertGreater(hint.width(), 0)
+        self.assertGreaterEqual(
+            hint.height(), hint.heightForWidth(hint.width())
+        )
+        dock.close()
+        dock.deleteLater()
+
     def test_dock_is_compact(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 

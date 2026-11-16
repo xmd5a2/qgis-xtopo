@@ -909,7 +909,7 @@ class XtopoDockWidget(QDockWidget):
         self.project_name.textChanged.connect(self._project_name_changed)
         self.projects_dir.textChanged.connect(self._project_path_changed)
         project_form.addRow("Имя проекта:", self.project_name)
-        self.project_name_hint = QLabel("")
+        self.project_name_hint = WrappedLabel("")
         self.project_name_hint.setWordWrap(True)
         self.project_name_hint.setStyleSheet("color: #b00020;")
         self.project_name_hint.setVisible(False)
@@ -978,7 +978,7 @@ class XtopoDockWidget(QDockWidget):
         row.addWidget(self.download_pbf_button)
         source_form.addRow("Адрес/файл:", row)
         self.source_label = source_form.labelForField(row)
-        self.source_hint = QLabel("")
+        self.source_hint = WrappedLabel("")
         self.source_hint.setWordWrap(True)
         source_form.addRow(self.source_hint)
         self.map_index_group = QGroupBox("")
@@ -1021,12 +1021,12 @@ class XtopoDockWidget(QDockWidget):
         )
         self.map_index_list.itemChanged.connect(self._map_selection_changed)
         maps_layout.addWidget(self.map_index_list)
-        self.map_index_summary = QLabel("")
+        self.map_index_summary = WrappedLabel("")
         self.map_index_summary.setWordWrap(True)
         maps_layout.addWidget(self.map_index_summary)
         self.map_index_group.setVisible(False)
         source_form.addRow(self.map_index_group)
-        self.pbf_info = QLabel("")
+        self.pbf_info = WrappedLabel("")
         self.pbf_info.setWordWrap(True)
         self.pbf_info.setVisible(False)
         source_form.addRow(self.pbf_info)
@@ -1536,6 +1536,18 @@ class XtopoDockWidget(QDockWidget):
                     "передаётся через stdin."
                 )
             )
+        # Высота подсказки зависит от переносов: после смены текста
+        # заставляем QFormLayout пересчитать строку, иначе последняя
+        # строка остаётся обрезанной до следующего изменения размера.
+        self._fit_source_hint()
+
+    def _fit_source_hint(self):
+        """Пересчитывает высоту подсказок после смены текста."""
+        for label in (self.source_hint, self.pbf_info):
+            label.updateGeometry()
+        parent = self.source_hint.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().activate()
 
     def _source_path_changed(self, _text):
         if self.source_mode.currentData() == "pbf":
@@ -2345,6 +2357,7 @@ class XtopoDockWidget(QDockWidget):
             # После показа панели известна её естественная ширина: по
             # умолчанию панель занимает минимальную ширину.
             QTimer.singleShot(0, self._collapse_to_minimum)
+        QTimer.singleShot(0, self._fit_source_hint)
         mode = self.source_mode.currentData()
         if mode == "overpass":
             self._check_servers()
