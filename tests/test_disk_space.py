@@ -34,21 +34,21 @@ class DiskSpaceTest(unittest.TestCase):
         )
 
     def test_relief_estimate_grows_with_upscale(self):
-        """Укрупнённый рельеф в разы тяжелее нативного."""
+        """Укрупнённый рельеф в несколько раз тяжелее нативного."""
         plain = disk_space.relief_estimate(1000, 1000, False)
         upscaled = disk_space.relief_estimate(1000, 1000, True)
-        self.assertGreater(upscaled, plain * 10)
+        self.assertGreater(upscaled, plain * 3)
 
     def test_relief_estimate_covers_measured_files(self):
         """Оценка должна покрывать реальные файлы с запасом.
 
-        Замер на проекте Камчатки: DEM 2357×1198 (2.8 млн пикселей), на
-        диске укрупнённый DEM 108 МБ, уклон 113 МБ, оттенок 38 МБ — и
-        около 100 МБ промежуточных файлов.
+        Замер на DEM 16346×6674 (109 млн пикселей): укрупнённый DEM
+        занимает 1,7 ГБ, уклон — 1,4 ГБ, оттенок — 0,4 ГБ, а пик
+        подготовки — около 6,3 ГБ.
         """
-        estimate = disk_space.relief_estimate(2357, 1198, True)
-        self.assertGreater(estimate, 250 * 1024 * 1024)
-        self.assertLess(estimate, 1024 * 1024 * 1024)
+        estimate = disk_space.relief_estimate(16346, 6674, True)
+        self.assertGreater(estimate, 6 * disk_space.GIB)
+        self.assertLess(estimate, 12 * disk_space.GIB)
 
     def test_warning_is_absent_when_space_is_enough(self):
         template = "Недостаточно места для рельефа: нужно ≈{}, свободно {}."

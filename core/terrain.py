@@ -976,14 +976,11 @@ def _clear_terrain_input(config):
 def _relief_creation_options():
     """Параметры GTiff для растров рельефа.
 
-    Уклон и отмывка считаются параллельно, поэтому каждой ветке
-    достаётся половина обычного числа потоков: сжатие LZW делит ядра
-    между ветками, а не забирает их все.
+    Многопоточное сжатие (NUM_THREADS) в GDAL 3.8 портит крупные файлы:
+    полосы данных ложатся не по своим смещениям, файл раздувается в
+    несколько раз и читается с ошибкой.  Растры рельефа пишем однопоточно.
     """
-    from .cpu import cpu_workers
-
-    threads = max(1, cpu_workers() // 2)
-    return ["COMPRESS=LZW", "BIGTIFF=YES", f"NUM_THREADS={threads}"]
+    return ["COMPRESS=LZW", "BIGTIFF=YES"]
 
 
 RASTER_BLOCK_SIDE = 2048
@@ -1005,9 +1002,9 @@ def _write_error(destination_path, exc):
 def _transform_raster(source_path, destination_path, operation):
     """Пишет растр поблочно, применяя поэлементную функцию.
 
-    Читать весь растр в numpy нельзя: уклон и отмывка в шесть раз
-    крупнее DEM, и на области 300 км массив занимает больше десяти
-    гигабайт.  Блок 2048×2048 — это около 16 МБ на float32.
+    Читать весь растр в numpy нельзя: уклон и отмывка вдвое крупнее DEM,
+    и на области 300 км массив занимает больше четырёх гигабайт.
+    Блок 2048×2048 — это около 16 МБ на float32.
     """
     gdal, _, _ = _gdal()
     source = gdal.Open(str(source_path))
@@ -1185,7 +1182,7 @@ def _needs_upscale(dataset):
     """Нужно ли искусственное укрупнение DEM.
 
     DEM точнее 0,9″ (3DEP 1/3″, ручные LiDAR-модели) уже достаточно
-    подробен: шестикратное укрупнение даёт гигабайты на ровном месте.
+    подробен: двукратное укрупнение даёт гигабайты на ровном месте.
     """
     resolution = _dem_resolution_arcseconds(dataset)
     if resolution is None:
@@ -1196,7 +1193,7 @@ def _needs_upscale(dataset):
 
 def _generate_slope(config, merged, dem_width, dem_height, upscale,
                     progress=None):
-    """Ветка уклона: для грубого DEM — в шесть раз детальнее исходного."""
+    """Ветка уклона: для грубого DEM — вдвое детальнее исходного."""
     gdal, _, _ = _gdal()
     if progress:
         progress("Generating slope")
@@ -1223,10 +1220,8 @@ def _generate_slope(config, merged, dem_width, dem_height, upscale,
             raise RuntimeError("Failed to upscale DEM for slope")
         result = None
         slope_source = dem_x2
-        width, height = dem_width * 2, dem_height * 2
     else:
         slope_source = merged
-        width, height = dem_width, dem_height
 
     slope = config.raster_dir / "slope.tif"
     options = gdal.DEMProcessingOptions(
@@ -1244,38 +1239,15 @@ def _generate_slope(config, merged, dem_width, dem_height, upscale,
     if dem_x2 is not None:
         dem_x2.unlink(missing_ok=True)
 
+    # Отсечение пологих склонов пишется сразу в итоговый растр: отдельный
+    # файл с обрезкой и последующее укрупнение только раздували бы
+    # подготовку (лишний растр вчетверо больше DEM).
+    if progress:
+        progress("Writing slope")
     slope_up = config.raster_dir / "slope_upscaled.tif"
-    if upscale:
-        slope_cut_path = config.raster_dir / "slope_cut.tif"
-        _transform_raster(
-            slope, slope_cut_path, lambda array: array * (array > 1.04)
-        )
-        if progress:
-            progress("Upscaling slope")
-        disk_space.require_space(
-            slope_up,
-            width * height * 9 * disk_space.FILE_FLOAT_PIXEL,
-            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
-            "уклон",
-        )
-        options = gdal.WarpOptions(
-            width=width * 3,
-            height=height * 3,
-            resampleAlg=config.terrain_resample_method,
-            outputType=gdal.GDT_Float32,
-            creationOptions=_relief_creation_options(),
-        )
-        result = gdal.Warp(str(slope_up), str(slope_cut_path), options=options)
-        if result is None:
-            raise RuntimeError("Failed to upscale slope")
-        result = None
-        slope_cut_path.unlink(missing_ok=True)
-    else:
-        if progress:
-            progress("Writing slope")
-        _transform_raster(
-            slope, slope_up, lambda array: array * (array > 1.04)
-        )
+    _transform_raster(
+        slope, slope_up, lambda array: array * (array > 1.04)
+    )
     slope.unlink(missing_ok=True)
 
 
@@ -1290,10 +1262,10 @@ def _link_or_copy(source, destination):
 
 def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
                         progress=None):
-    """Ветка отмывки: для грубого DEM — уменьшение, укрупнение и затенение.
+    """Ветка отмывки: для грубого DEM — вдвое детальнее и затенение.
 
-    Мелкие формы рельефа при этом сглаживаются, а на итоговом растре
-    остаются только крупные склоны — так отмывка не рябит.
+    DEM укрупняется вдвое, и оттенок считается по нему же: грубая сетка
+    даёт плоское полотно, на котором рельеф не читается.
     """
     gdal, _, _ = _gdal()
     numpy = _numpy()
@@ -1301,37 +1273,25 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
         progress("Generating hillshade")
     upscaled = config.raster_dir / "merged_dem_upscaled.tif"
     if upscale:
-        downscaled = config.raster_dir / "merged_dem_downscaled.tif"
+        # Двукратное укрупшение DEM: оттенок считается по нему же, а сам
+        # растр нужен шаблону и выражениям склонов.
         options = gdal.WarpOptions(
-            width=dem_width,
-            height=dem_height,
-            resampleAlg=config.terrain_resample_method,
-            outputType=gdal.GDT_Float32,
-            creationOptions=_relief_creation_options(),
-        )
-        result = gdal.Warp(str(downscaled), str(merged), options=options)
-        if result is None:
-            raise RuntimeError("Failed to downscale DEM")
-        result = None
-
-        options = gdal.WarpOptions(
-            width=dem_width * 6,
-            height=dem_height * 6,
+            width=dem_width * 2,
+            height=dem_height * 2,
             resampleAlg=config.terrain_resample_method,
             outputType=gdal.GDT_Float32,
             creationOptions=_relief_creation_options(),
         )
         disk_space.require_space(
             upscaled,
-            dem_width * dem_height * 36 * disk_space.FILE_FLOAT_PIXEL,
+            dem_width * dem_height * 4 * disk_space.FILE_FLOAT_PIXEL,
             "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
             "укруплённый DEM",
         )
-        result = gdal.Warp(str(upscaled), str(downscaled), options=options)
+        result = gdal.Warp(str(upscaled), str(merged), options=options)
         if result is None:
             raise RuntimeError("Failed to upscale DEM")
         result = None
-        downscaled.unlink(missing_ok=True)
         hillshade_source = upscaled
     else:
         # Шаблон проекта и выражения склонов ссылаются на
@@ -1351,7 +1311,7 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
         scale=111120,
         creationOptions=_relief_creation_options(),
     )
-    factor = 6 if upscale else 1
+    factor = 2 if upscale else 1
     disk_space.require_space(
         hillshade,
         dem_width * dem_height * factor * factor
@@ -1390,7 +1350,7 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     dem_ds = None
     if progress and not upscale:
         progress("DEM точнее 0,9″: укрупнение растров не требуется")
-    # Уклон и отмывка в шесть раз крупнее DEM, и все производные
+    # Уклон и отмывка вдвое крупнее DEM, и все производные
     # растры лежат рядом: предупреждаем, пока расчёт не начался.
     warning = disk_space.space_warning(
         config.raster_dir,

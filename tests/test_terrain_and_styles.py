@@ -12,8 +12,12 @@ HAS_QGIS = importlib.util.find_spec("qgis") is not None
 
 class SlopeResolutionTest(unittest.TestCase):
     def test_slope_upsampled_dem(self):
-        """Уклон считается по удвоенному DEM, а финальный растр — в 6 раз
-        больше исходного (вдвое больше, чем раньше)."""
+        """Уклон и оттенок считаются по DEM, укрупнённому вдвое.
+
+        Растры в шесть раз крупнее исходного занимали десятки гигабайт
+        на области в несколько градусов, поэтому укрупнение уменьшено
+        до двух.
+        """
         from osgeo import gdal, osr
         import numpy as np
         from qgis_xtopo.core.terrain import generate_hillshade_slope
@@ -35,16 +39,40 @@ class SlopeResolutionTest(unittest.TestCase):
             srs.ImportFromEPSG(4326)
             ds.SetProjection(srs.ExportToWkt())
             band = ds.GetRasterBand(1)
-            x = np.linspace(0, 100, 40, dtype=np.float32)
+            x = np.linspace(0, 100, 40, dtype="float32")
             band.WriteArray(np.tile(x, (40, 1)))
             ds = None
 
             generate_hillshade_slope(config, None)
-            slope_up = gdal.Open(str(root / "slope_upscaled.tif"))
-            self.assertEqual(slope_up.RasterXSize, 40 * 2 * 3)
-            self.assertEqual(slope_up.RasterYSize, 40 * 2 * 3)
-            slope_up = None
+            for name in (
+                "slope_upscaled.tif",
+                "merged_dem_upscaled.tif",
+                "hillshade_composite.tif",
+            ):
+                raster = gdal.Open(str(root / name))
+                self.assertEqual(raster.RasterXSize, 40 * 2, name)
+                self.assertEqual(raster.RasterYSize, 40 * 2, name)
+                raster = None
             self.assertFalse((root / "merged_dem_x2.tif").exists())
+            # Промежуточных файлов больше нет: отсечение уклона пишется
+            # сразу в итоговый растр.
+            self.assertFalse((root / "slope_cut.tif").exists())
+            self.assertFalse((root / "merged_dem_downscaled.tif").exists())
+
+    def test_relief_rasters_are_written_single_threaded(self):
+        """Растры рельефа пишутся без многопоточного сжатия.
+
+        В GDAL 3.8 `NUM_THREADS` приводит к тому, что полосы данных
+        крупного файла ложатся не по своим смещениям: файл раздувается
+        в разы и читается с ошибкой.
+        """
+        from qgis_xtopo.core.terrain import _relief_creation_options
+
+        options = _relief_creation_options()
+        self.assertFalse(
+            [option for option in options if option.startswith("NUM_THREADS")]
+        )
+        self.assertIn("BIGTIFF=YES", options)
 
 
 class HighResolutionTerrainTest(unittest.TestCase):
