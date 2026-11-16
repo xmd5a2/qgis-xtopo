@@ -374,7 +374,7 @@
   "Обновить индекс Geofabrik": "Refresh the Geofabrik index",
   "Обновить индекс выгрузок": "Refresh the extract index",
   "Обновление индекса…": "Refreshing the index…",
-  "Найдено карт: {}": "Maps found: {}",
+  "Ошибка загрузки индекса": "Index loading error",
   "Обновление индекса Geofabrik…": "Refreshing the Geofabrik index…",
   "Не удалось обновить индекс: {}": "Could not refresh the index: {}",
   "Terrain resample method: влияет на детальность затенения рельефа и уклонов.\ncubicspline — мягче, меньше деталей; lanczos — резче, возможны артефакты": "Terrain resample method: affects the detail of hillshade and slopes.\ncubicspline — smoother, less detail; lanczos — sharper, possible artefacts",

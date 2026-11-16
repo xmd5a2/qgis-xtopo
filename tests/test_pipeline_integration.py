@@ -1476,7 +1476,6 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(dock._selected_map_ids(), ["bayern"])
         self.assertIn("20.10.2026", dock.map_index_title.text())
         self.assertNotIn("Индекс Geofabrik", dock.map_index_status.text())
-        self.assertIn("Найдено карт: 1", dock.map_index_status.text())
         self.assertIn("100.0 МБ", dock.map_index_summary.text())
         estimate = dock._map_download_estimate(50 * 1048576, 100 * 1048576)
         self.assertIn("Скачивание", estimate)
@@ -1506,7 +1505,8 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock._set_map_index_busy(True)
         self.app.processEvents()
         loading = list_y()
-        self.assertTrue(dock.map_index_progress.isVisible())
+        self.assertIn("Обновление индекса", dock.map_index_status.text())
+        self.assertGreater(dock.map_index_status.width(), 0)
         dock._set_map_index_busy(False)
 
         state = geofabrik.IndexState(geofabrik.GeofabrikIndex(), 0, "")
@@ -1527,7 +1527,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         dock._apply_map_index_plan(plan)
         self.app.processEvents()
         found_y = list_y()
-        self.assertIn("Найдено карт: 1", dock.map_index_status.text())
+        self.assertEqual(dock.map_index_status.text(), "")
 
         self.assertEqual(
             {start, loading, empty_y, found_y}, {start}

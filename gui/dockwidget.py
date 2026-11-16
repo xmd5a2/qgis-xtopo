@@ -988,7 +988,15 @@ class XtopoDockWidget(QDockWidget):
         maps_header = QHBoxLayout()
         self.map_index_title = QLabel(i18n.tr("Карты Geofabrik"))
         maps_header.addWidget(self.map_index_title)
-        maps_header.addStretch(1)
+        # Статус занимает свободное место в строке заголовка: отдельная
+        # строка добавляла бы вертикальный промежуток перед списком.
+        self.map_index_status = QLabel("")
+        self.map_index_status.setWordWrap(False)
+        self.map_index_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.map_index_status.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        maps_header.addWidget(self.map_index_status, 1)
         self.map_index_refresh = QToolButton()
         self.map_index_refresh.setIcon(
             QgsApplication.getThemeIcon("mActionReload.svg")
@@ -1002,26 +1010,6 @@ class XtopoDockWidget(QDockWidget):
         self.map_index_refresh.clicked.connect(self._refresh_map_index)
         maps_header.addWidget(self.map_index_refresh)
         maps_layout.addLayout(maps_header)
-        # Статус и полоса прогресса занимают постоянное место: иначе при
-        # смене сообщений список карт подпрыгивал вверх.
-        status_row = QWidget()
-        status_layout = QVBoxLayout(status_row)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(0)
-        self.map_index_status = QLabel("")
-        self.map_index_status.setWordWrap(True)
-        self.map_index_status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        line_height = self.fontMetrics().lineSpacing()
-        self.map_index_status.setFixedHeight(2 * line_height)
-        status_layout.addWidget(self.map_index_status)
-        self.map_index_progress = QProgressBar()
-        self.map_index_progress.setRange(0, 0)
-        self.map_index_progress.setTextVisible(False)
-        self.map_index_progress.setFixedHeight(4)
-        self.map_index_progress.setVisible(False)
-        status_layout.addWidget(self.map_index_progress)
-        status_row.setFixedHeight(2 * line_height + 4)
-        maps_layout.addWidget(status_row)
         self.map_index_list = QListWidget()
         self.map_index_list.setMaximumHeight(150)
         # Элементы всегда по ширине окна списка: иначе длинные названия
@@ -1610,7 +1598,6 @@ class XtopoDockWidget(QDockWidget):
         """Пока индекс обновляется, список и кнопка обновления недоступны."""
         self.map_index_refresh.setEnabled(not busy)
         self.map_index_list.setEnabled(not busy)
-        self.map_index_progress.setVisible(busy)
 
     def _schedule_map_index(self):
         self._clear_map_index_view(i18n.tr("Определение карт по охвату…"))
@@ -1669,9 +1656,9 @@ class XtopoDockWidget(QDockWidget):
         worker.deleteLater()
 
     def _map_index_progress(self, message):
-        text = i18n.tr(message)
-        self.map_index_status.setText(text)
-        self.map_index_status.setToolTip(text)
+        # Подробности (сколько мегабайт, сколько каталогов) уходят в
+        # подсказку: в заголовке для них слишком мало места.
+        self.map_index_status.setToolTip(i18n.tr(message))
 
     def _map_index_ready(self, worker, plan):
         if worker is not self.map_index_worker:
@@ -1700,7 +1687,7 @@ class XtopoDockWidget(QDockWidget):
             return
         self._map_index_plan = None
         text = i18n.trf("Не удалось определить карты: {}", message)
-        self.map_index_status.setText(text)
+        self.map_index_status.setText(i18n.tr("Ошибка загрузки индекса"))
         self.map_index_status.setToolTip(text)
 
     def _apply_map_index_plan(self, plan, provider="geofabrik"):
@@ -1726,9 +1713,6 @@ class XtopoDockWidget(QDockWidget):
                     )
                 )
         else:
-            base.append(
-                i18n.trf("Найдено карт: {}", len(plan.maps))
-            )
             total = 0
             for item, status in plan.items():
                 size = (
