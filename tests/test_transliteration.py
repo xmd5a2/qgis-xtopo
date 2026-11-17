@@ -193,6 +193,32 @@ class PickNamePartTest(unittest.TestCase):
     def test_type_word_is_dropped(self):
         self.assertEqual(pick_name_part("მთა ენჩო - Энчо", "cyrl"), "Энчо")
 
+    def test_name_list_takes_first_for_local(self):
+        name = "العكر الكبير;العكار الكبير;العقر الكبير;العقار الكبير"
+        self.assertEqual(pick_name_part(name, "local"), "العكر الكبير")
+
+    def test_name_list_prefers_map_script(self):
+        name = "Москва;Moscow"
+        self.assertEqual(pick_name_part(name, "cyrl"), "Москва")
+        self.assertEqual(pick_name_part(name, "latin"), "Moscow")
+        self.assertEqual(pick_name_part(name, "local"), "Москва")
+
+    def test_arabic_semicolon_is_a_list_separator(self):
+        self.assertEqual(
+            pick_name_part("بغداد؛Baghdad", "ara"), "بغداد"
+        )
+
+    def test_name_list_skips_empty_alternatives(self):
+        self.assertEqual(pick_name_part(";A;;B", "local"), "A")
+
+    def test_commas_are_not_name_list_separators(self):
+        for name in (
+            "Washington, D.C.",
+            "Москва, Кремль",
+            "بغداد، العراق",
+        ):
+            self.assertEqual(pick_name_part(name, "local"), name)
+
     def test_empty_and_missing(self):
         self.assertEqual(pick_name_part("", "cyrl"), "")
         self.assertIsNone(pick_name_part(None, "cyrl"))

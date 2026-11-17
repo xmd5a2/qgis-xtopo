@@ -381,6 +381,52 @@ def _name_parts(name):
     return parts
 
 
+_NAME_LIST_SEPARATORS = frozenset(";؛")
+_NAME_OPENERS = "([{"
+_NAME_CLOSERS = ")]}"
+
+
+def _name_list_parts(text):
+    """Варианты названия через `;` вне скобок.
+
+    В OSM точка с запятой разделяет несколько значений тега, поэтому
+    `name=Москва;Moscow` — это список вариантов, а не одно название.
+    Запятые не делятся: они бывают частью имени («Washington, D.C.»).
+    Скобки сохраняются целиком: `ზედა (ru: A; B)` — одна часть.
+    """
+    parts = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(text):
+        if char in _NAME_OPENERS:
+            depth += 1
+        elif char in _NAME_CLOSERS:
+            if depth:
+                depth -= 1
+        elif char in _NAME_LIST_SEPARATORS and depth == 0:
+            part = text[start:index].strip()
+            if part:
+                parts.append(part)
+            start = index + 1
+    part = text[start:].strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
+def _pick_name_list_part(text, script=None):
+    """Один вариант из списка OSM: подходящий языку карты или первый."""
+    alternatives = _name_list_parts(text)
+    if len(alternatives) <= 1:
+        return alternatives[0] if alternatives else text
+    if script == LOCAL or script is None:
+        return alternatives[0]
+    for alternative in alternatives:
+        if _has_script(alternative, script):
+            return alternative
+    return alternatives[0]
+
+
 def _from_first_cyrillic(text):
     """Текст с первого слова на кириллице, когда разделителя нет.
 
@@ -507,6 +553,9 @@ def pick_name_part(name, script=None, translit=False):
     text = str(name).strip()
     if not text:
         return text
+    # `name` может содержать несколько вариантов через `;`.  Для местных
+    # названий берём первый, для остальных — вариант в письменности карты.
+    text = _pick_name_list_part(text, script)
     if script == LOCAL:
         return text
     parts = _name_parts(text)
@@ -525,6 +574,8 @@ def pick_name_part(name, script=None, translit=False):
         base = _PARENTHESIS.sub(" ", chosen).strip()
         if base:
             chosen = base
+    # В скобках тоже мог быть список: `ზედა (ru: A; B)` → `A`.
+    chosen = _pick_name_list_part(chosen, script)
     if not translit or _has_script(chosen, CYRL):
         return chosen
     return transliterate_text(chosen) or chosen
