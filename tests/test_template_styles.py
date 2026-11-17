@@ -9,6 +9,7 @@
 import re
 import unittest
 import zipfile
+from collections import Counter
 from xml.etree import ElementTree
 
 from qgis_xtopo.core import poi_icons
@@ -416,7 +417,7 @@ class SettlementScaleTest(unittest.TestCase):
             value = float(rule.get(name) or 0)
             # scalemindenom=1 в шаблоне означает отсутствие нижней границы.
             return 0.0 if value <= 1.0 else value
-        return number("scaleminendenom"), number("scalemaxdenom")
+        return number("scalemindenom"), number("scalemaxdenom")
 
     def _visible_at(self, leaves, scale):
         result = []
@@ -469,12 +470,50 @@ class SettlementScaleTest(unittest.TestCase):
 
     def test_population_branch_excludes_them_at_200k(self):
         expected = (
-            "NOT (place IN ('hamlet','isolated_dwelling') "
+            "population IS NOT NULL AND to_real(population)!='' "
+            "AND @level_of_detail < 6 "
+            "AND NOT (place IN ('hamlet','isolated_dwelling') "
             "AND @map_scale >= 200000)"
         )
         for container in ("renderer-v2/rules", "labeling/rules"):
             group = self._branch(container, ["else", "by population"])
             self.assertIn(expected, group.get("filter") or "", container)
+
+
+class RuleIntegrityTest(unittest.TestCase):
+    """Правила, которые QGIS не сможет прочитать целиком."""
+
+    def test_symbols_are_not_shared(self):
+        """QGIS забирает символ из карты по индексу: второй такое правило
+        остаётся без символа и не рисуется."""
+        for layer in _template_root().iter("maplayer"):
+            name = layer.findtext("layername")
+            for renderer in layer.iter("renderer-v2"):
+                if renderer.get("type") != "RuleRenderer":
+                    continue
+                symbols = {
+                    symbol.get("name")
+                    for symbol in renderer.findall("symbols/symbol")
+                }
+                rules = renderer.find("rules")
+                if rules is None:
+                    continue
+                refs = Counter(
+                    rule.get("symbol")
+                    for rule in rules.iter("rule")
+                    if rule.get("symbol")
+                )
+                shared = {ref: count for ref, count in refs.items() if count > 1}
+                self.assertFalse(shared, (name, shared))
+                self.assertEqual(sorted(set(refs) - symbols), [], name)
+
+    def test_scale_attributes_are_spelled_correctly(self):
+        """scaleminendenom — опечатка, значение QGIS не читает."""
+        for rule in _template_root().iter("rule"):
+            self.assertNotIn(
+                "scaleminendenom", rule.attrib,
+                rule.get("description") or rule.get("label"),
+            )
 
 
 class TrackScaleTest(unittest.TestCase):
