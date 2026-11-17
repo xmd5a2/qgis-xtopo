@@ -462,11 +462,14 @@ class SettlementScaleTest(unittest.TestCase):
                         self.assertLess(lower, 500000, (lower, upper))
 
     def test_place_density_is_gone(self):
-        for rule in self.layer.iter("rule"):
-            self.assertNotIn(
-                "place_density", rule.get("filter") or "",
-                rule.get("description") or rule.get("label"),
-            )
+        """Плотность расселения убрана из всех слоёв, а не только places main."""
+        for layer in _template_root().iter("maplayer"):
+            name = layer.findtext("layername") or ""
+            for rule in layer.iter("rule"):
+                self.assertNotIn(
+                    "place_density", rule.get("filter") or "",
+                    (name, rule.get("description") or rule.get("label")),
+                )
 
     def test_population_branch_excludes_them_at_200k(self):
         expected = (
