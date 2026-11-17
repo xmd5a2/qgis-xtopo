@@ -1749,6 +1749,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertIn("font-weight:bold", critical)
 
     def test_pbf_info_colors_long_preparation(self):
+        from qgis.PyQt.QtCore import Qt
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget
 
         dock = XtopoDockWidget(None)
@@ -1757,6 +1758,10 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock._render_pbf_info()
             self.assertIn("color:#e74c3c", dock.pbf_info.text())
             self.assertIn("font-weight:bold", dock.pbf_info.text())
+            # Без rich text теги span видны в подписи буквально.
+            self.assertEqual(
+                dock.pbf_info.textFormat(), Qt.TextFormat.RichText
+            )
         finally:
             dock.deleteLater()
 

@@ -423,6 +423,8 @@ class SourceModeTest(unittest.TestCase):
         self.assertNotIn("скачивание", text)
 
     def test_slice_limit_warning_is_visible(self):
+        from qgis.PyQt.QtCore import Qt
+
         dock = self._dock()
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
         dock._slice_estimate_timer.stop()
@@ -431,7 +433,15 @@ class SourceModeTest(unittest.TestCase):
             self._slice_estimate(nodes=120_000_000, nodes_limit=100_000_000),
         )
         dock._render_slice_estimate()
-        self.assertIn("Предел SliceOSM", dock.pbf_info.text())
+        text = dock.pbf_info.text()
+        self.assertIn("Предел SliceOSM", text)
+        # Предупреждение о превышении предела — красное и жирное.
+        self.assertIn("color:#e74c3c", text)
+        self.assertIn("font-weight:bold", text)
+        # Разметка должна разбираться, а не показываться тегами.
+        self.assertEqual(
+            dock.pbf_info.textFormat(), Qt.TextFormat.RichText
+        )
 
     def test_slice_estimate_failure_does_not_hide_mode(self):
         dock = self._dock()
@@ -441,6 +451,16 @@ class SourceModeTest(unittest.TestCase):
         dock._render_slice_estimate()
         self.assertFalse(dock.pbf_info.isHidden())
         self.assertIn("недоступна", dock.pbf_info.text())
+
+    def test_slice_estimate_error_text_is_escaped(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        dock._slice_estimate_state = ("error", "нет <сети> и &")
+        dock._render_slice_estimate()
+        text = dock.pbf_info.text()
+        self.assertIn("&lt;сети&gt;", text)
+        self.assertIn("&amp;", text)
 
     def test_rare_modes_start_with_public_overpass(self):
         from qgis_xtopo.gui.dockwidget import RARE_SOURCE_MODES

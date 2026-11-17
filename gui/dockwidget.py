@@ -1,3 +1,4 @@
+import html
 import json
 import threading
 import time
@@ -1138,6 +1139,13 @@ class XtopoDockWidget(QDockWidget):
         source_form.addRow(self.map_index_group)
         self.pbf_info = WrappedLabel("")
         self.pbf_info.setWordWrap(True)
+        # Оценка подсвечивает отдельные значения тегами span, поэтому
+        # подпись должна разбирать разметку: по умолчанию QLabel решает
+        # это по началу строки и показывает теги как обычный текст.
+        try:
+            self.pbf_info.setTextFormat(Qt.TextFormat.RichText)
+        except AttributeError:
+            self.pbf_info.setTextFormat(Qt.RichText)
         self.pbf_info.setVisible(False)
         source_form.addRow(self.pbf_info)
         data_layout.addWidget(source_group)
@@ -2196,7 +2204,8 @@ class XtopoDockWidget(QDockWidget):
         if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
             return
         self._pbf_info_state = None
-        self.pbf_info.setText(i18n.tr(message))
+        # Текст разбирается как HTML: имена файлов могут содержать & или <.
+        self.pbf_info.setText(html.escape(i18n.tr(message), quote=False))
 
     def _pbf_probed(self, total, in_bbox, matched, elapsed, approximate,
                     sampled, total_blobs, file_count, extended_ratio=0.0,
@@ -2434,7 +2443,10 @@ class XtopoDockWidget(QDockWidget):
             return
         self._pbf_info_state = None
         self.pbf_info.setText(
-            i18n.trf("Не удалось оценить PBF: {}", message)
+            i18n.trf(
+                "Не удалось оценить PBF: {}",
+                html.escape(str(message), quote=False),
+            )
         )
 
     def _slice_config(self, bbox):
@@ -2553,10 +2565,11 @@ class XtopoDockWidget(QDockWidget):
             self.pbf_info.setToolTip("")
             return
         if kind == "error":
+            message = html.escape(str(state[1]), quote=False)
             self.pbf_info.setText(
-                i18n.trf("Оценка вырезки недоступна: {}", state[1])
+                i18n.trf("Оценка вырезки недоступна: {}", message)
             )
-            self.pbf_info.setToolTip(state[1])
+            self.pbf_info.setToolTip(str(state[1]))
             return
         estimate = state[1]
         if estimate.cached_bytes:
@@ -2593,12 +2606,20 @@ class XtopoDockWidget(QDockWidget):
                 )
                 text = prefix + text
             if estimate.over_limit:
-                text = i18n.trf(
-                    "Предел SliceOSM превышен: ≈ {} узлов при пределе {}. "
-                    "Уменьшите охват или выберите Geofabrik.",
-                    _spaced(estimate.nodes),
-                    _spaced(estimate.nodes_limit),
-                ) + "\n" + text
+                warning = html.escape(
+                    i18n.trf(
+                        "Предел SliceOSM превышен: ≈ {} узлов при пределе {}. "
+                        "Уменьшите охват или выберите Geofabrik.",
+                        _spaced(estimate.nodes),
+                        _spaced(estimate.nodes_limit),
+                    ),
+                    quote=False,
+                )
+                text = (
+                    f'<span style="color:{ESTIMATE_CRITICAL_COLOR}; '
+                    f'font-weight:bold;">{warning}</span>'
+                    f"<br>{text}"
+                )
             self.pbf_info.setText(text)
         if estimate.cached_bytes:
             self.pbf_info.setToolTip(
