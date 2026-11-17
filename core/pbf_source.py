@@ -250,15 +250,15 @@ class QueryIndex:
         self.specs = []
         self.by_key = {}
         self.other = []
-        self.warnings = []
+        # Запросы, которым нужны члены отношений: драйвер PBF их не
+        # отдаёт.  Это ограничение режима, а не ошибка данных, поэтому
+        # список попадает в информационные заметки.
+        self.unsupported = []
         for name, text in query_texts.items():
             filters = [item for item in parse_query(text) if not item.special]
             if not filters:
                 if "r.relations" in text:
-                    self.warnings.append(
-                        f"{name}: relation-member queries are not supported in PBF mode; "
-                        "use online Overpass for this layer."
-                    )
+                    self.unsupported.append(name)
                 continue
             spec = QuerySpec(name, filters)
             self.specs.append(spec)
@@ -1001,13 +1001,20 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
             path.unlink(missing_ok=True)
             del feature_files[name]
 
-    warnings = list(index.warnings)
+    warnings = []
     notes = [
         "PBF: чтение идёт с грубым фильтром по области, "
         "остальные объекты файла пропускаются."
     ]
     if total_files > 1:
         notes.append("PBF: выгрузки объединены в один источник.")
+    if index.unsupported:
+        notes.append(
+            "PBF: запросы по членам отношений не поддерживаются и "
+            "пропущены: "
+            + ", ".join(sorted(index.unsupported))
+            + ". Для этих слоёв нужен источник Overpass."
+        )
     if progress:
         progress(f"PBF: {features_seen} objects, {features_written} feature matches")
     return PbfDataset(

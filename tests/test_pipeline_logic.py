@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from osgeo import ogr, osr
 
@@ -853,6 +854,129 @@ class GeometryRepairRecipeTest(unittest.TestCase):
             steps = [operation for operation, _ in recipe_for(name).steps]
             self.assertEqual(steps[0], "fix", name)
             self.assertEqual(steps[1], "polygonstolines", name)
+
+
+class PolygonToLinesFallbackTest(unittest.TestCase):
+    """Слой из одних линий не должен теряться на polygonstolines."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = Config(
+            qgis_projects_dir=self.directory.name, project_name="logic"
+        )
+        self.config.ensure_directories()
+
+    def _layer(self, geometry_type, coordinates, name="lines.geojson"):
+        path = self.config.temp_dir / name
+        path.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"id": 1},
+                    "geometry": {
+                        "type": geometry_type,
+                        "coordinates": coordinates,
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_line_only_layer_keeps_lines(self):
+        path = self._layer("LineString", [[1, 2], [1.1, 2.1]])
+        calls = []
+
+        def run(parameters):
+            calls.append(parameters)
+            return {"OUTPUT": parameters["OUTPUT"]}
+
+        pipeline = Pipeline(
+            self.config, BBox(1, 2, 3, 4), _FakeRunner(run)
+        )
+        result = pipeline._step(
+            "admin_level_2", str(path), "polygonstolines", {}
+        )
+        self.assertEqual(result, str(path))
+        self.assertEqual(calls, [])
+
+    def test_polygon_layer_is_converted(self):
+        path = self._layer(
+            "Polygon", [[[1, 2], [1, 2.1], [1.1, 2.1], [1, 2]]],
+            name="areas.geojson",
+        )
+        calls = []
+
+        def run(parameters):
+            calls.append(parameters)
+            _feature_collection(parameters["OUTPUT"])
+            return {"OUTPUT": parameters["OUTPUT"]}
+
+        pipeline = Pipeline(
+            self.config, BBox(1, 2, 3, 4), _FakeRunner(run)
+        )
+        result = pipeline._step(
+            "admin_level_2", str(path), "polygonstolines", {}
+        )
+        self.assertNotEqual(result, str(path))
+        self.assertEqual(len(calls), 1)
+
+
+class EmptySourceOutputsTest(unittest.TestCase):
+    """Пустой источник не считается пропавшей зависимостью."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = Config(
+            qgis_projects_dir=self.directory.name, project_name="logic"
+        )
+        self.config.ensure_directories()
+        self.pipeline = Pipeline(
+            self.config, BBox(1, 2, 3, 4), _FakeRunner(None)
+        )
+
+    def test_empty_source_marks_recipe_outputs(self):
+        source = SimpleNamespace(
+            dataset=SimpleNamespace(feature_files={}), files={}
+        )
+        self.assertTrue(
+            self.pipeline._run_layer("monastery_christian", source, 0, 0)
+        )
+        self.assertIn(
+            "monastery_christian_centroids_buffered",
+            self.pipeline.empty_outputs,
+        )
+        self.assertEqual(self.pipeline.warnings, [])
+
+    def test_empty_overlay_is_silent_and_ignores_stale_file(self):
+        stale = (
+            self.config.vector_dir
+            / "monastery_christian_centroids_buffered.sqlite"
+        )
+        stale.write_bytes(b"")
+        self.pipeline.empty_outputs.add(
+            "monastery_christian_centroids_buffered"
+        )
+        self.pipeline._missing_layer(
+            "place_of_worship_christian",
+            "monastery_christian_centroids_buffered",
+        )
+        self.assertEqual(self.pipeline.warnings, [])
+        self.assertIsNone(
+            self.pipeline._overlay_path(
+                "monastery_christian_centroids_buffered"
+            )
+        )
+
+    def test_missing_overlay_still_warns(self):
+        self.pipeline._missing_layer(
+            "place_of_worship_christian", "monastery_christian"
+        )
+        self.assertEqual(len(self.pipeline.warnings), 1)
+        self.assertIn("не найден", self.pipeline.warnings[0])
 
 
 class DissolveFieldsTest(unittest.TestCase):

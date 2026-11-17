@@ -505,7 +505,8 @@ class MultiFileDatasetTest(unittest.TestCase):
 
     BBOX = BBox(43.8127, 41.7225, 44.2264, 41.9738)
 
-    def _prepare(self, features, covering_names=()):
+    def _prepare(self, features, covering_names=(), queries=None):
+        queries = queries or {"peak": 'way["natural"="peak"];'}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = Config(qgis_projects_dir=str(root / "projects"))
@@ -534,8 +535,8 @@ class MultiFileDatasetTest(unittest.TestCase):
                 return_value=(files, [], covering),
             ):
                 dataset = prepare_dataset(
-                    config, self.BBOX, ["peak"],
-                    query_texts={"peak": 'way["natural"="peak"];'},
+                    config, self.BBOX, list(queries),
+                    query_texts=queries,
                     sources=files,
                 )
             content = {
@@ -595,4 +596,24 @@ class MultiFileDatasetTest(unittest.TestCase):
         )
         self.assertFalse(
             any("один источник" in warning for warning in dataset.warnings)
+        )
+
+    def test_relation_member_queries_are_reported_as_notes(self):
+        """Неподдерживаемые в PBF запросы — заметка, а не ошибка."""
+        _content, _opened, dataset = self._prepare(
+            {"extract.osm.pbf": [[]]},
+            queries={
+                "water": 'way["natural"="water"];',
+                "place_admin_centre_2": (
+                    'rel["admin_level"="2"]->.relations;\n'
+                    'node(r.relations:"label")["place"="city"];'
+                ),
+            },
+        )
+        note = next(
+            item for item in dataset.notes if "place_admin_centre_2" in item
+        )
+        self.assertIn("Overpass", note)
+        self.assertFalse(
+            any("relation-member" in warning for warning in dataset.warnings)
         )

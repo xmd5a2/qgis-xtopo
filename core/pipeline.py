@@ -503,6 +503,45 @@ def _layer_has_features(path):
         return True
 
 
+def _layer_has_polygons(path):
+    """Есть ли в слое площадные объекты.
+
+    ``native:polygonstolines`` рассчитан на полигоны; линии он
+    превращает в пустые геометрии.  Для слоя из одних линий шаг нужно
+    пропустить, иначе следующие операции теряют весь слой.
+    """
+    try:
+        from osgeo import ogr
+    except ImportError:
+        return True
+    try:
+        dataset = ogr.Open(str(path))
+    except Exception:
+        dataset = None
+    if dataset is None:
+        return True
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return True
+        flatten = getattr(ogr, "wkbFlatten", None) or ogr.GT_Flatten
+        polygon_types = (ogr.wkbPolygon, ogr.wkbMultiPolygon)
+        # Заголовок слоя бывает неточным: после fixgeometries слой с
+        # одной площадью и линиями объявляется линейным.  Поэтому
+        # смотрим сами объекты, а не только GetGeomType().
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty():
+                continue
+            if flatten(geometry.GetGeometryType()) in polygon_types:
+                return True
+        return False
+    except Exception:
+        return True
+    finally:
+        dataset = None
+
+
 def _recipe_outputs(name):
     """Файлы, которые производит рецепт слоя.
 
@@ -623,7 +662,7 @@ class _GpkgWriter:
 
 class Pipeline:
     def __init__(self, config, bbox, runner, progress=None, cancel=None,
-                 fraction=None, timings=None):
+                 fraction=None, timings=None, empty_outputs=None):
         self.config = config
         self.bbox = bbox
         self.runner = runner
@@ -633,6 +672,12 @@ class Pipeline:
         self.warnings = []
         self.counter = 0
         self.timings = timings or Timings()
+        # Выходы слоёв, у которых не оказалось исходных объектов.  Общий
+        # набор для последовательной и параллельной обработки: если
+        # зависимость пуста, предупреждать о её отсутствии не нужно.
+        self.empty_outputs = (
+            empty_outputs if empty_outputs is not None else set()
+        )
 
     def run(self, source, query_names):
         if not query_names:
@@ -737,6 +782,7 @@ class Pipeline:
         try:
             geojson = self._source_geojson(name, source)
             if geojson is None:
+                self.empty_outputs.update(_recipe_outputs(name))
                 self.progress(f"{name}: no objects, skipped")
                 return True
             current = geojson
@@ -814,6 +860,7 @@ class Pipeline:
                         self.config, self.bbox, self.runner.clone(),
                         progress=report, cancel=self.cancel,
                         fraction=self.fraction, timings=self.timings,
+                        empty_outputs=self.empty_outputs,
                     )
                     future = pool.submit(
                         self._run_parallel_layer, task, name, source,
@@ -1001,6 +1048,12 @@ class Pipeline:
                 "OUTPUT": self._temp_path(name, "centroids"),
             })
         if operation == "polygonstolines":
+            if not _layer_has_polygons(current):
+                # В вырезе PBF у границ остаются только пограничные
+                # линии, без полигонов.  Превращать в линии нечего:
+                # алгоритм вернул бы пустые геометрии, и слой пропал бы
+                # на следующем шаге.
+                return current
             return self._algorithm("native:polygonstolines", {
                 "INPUT": current,
                 "OUTPUT": self._temp_path(name, "lines"),
@@ -1102,8 +1155,11 @@ class Pipeline:
 
         Шаг без источника не отменяет слой, но и молчать о нём нельзя:
         невычтенная вода или необъединённые потоки выглядят как обычные
-        данные.
+        данные.  Если источник пуст законно — в нём не было объектов, —
+        вычитать нечего, и предупреждения нет.
         """
+        if reference in self.empty_outputs:
+            return
         message = (
             f"{name}: слой {reference} не найден, шаг пропущен — "
             "данные могут быть неполными"
@@ -1112,6 +1168,10 @@ class Pipeline:
         self.progress(f"WARNING: {message}")
 
     def _overlay_path(self, name):
+        if name in self.empty_outputs:
+            # Не подхватывать файл от прошлой сборки: источник пуст, и
+            # вычитать старые данные нельзя.
+            return None
         candidates = [
             self.config.vector_dir / f"{name}.sqlite",
             self.config.vector_dir / f"{name}.geojson",
