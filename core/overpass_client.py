@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import urllib.error
@@ -18,22 +19,65 @@ def build_query(query_text, bbox):
     return f"{header};{query_text.strip()}\nout body;>;out skel qt;"
 
 
-def _valid_osm(path):
+def _has_error_remark(data):
+    """Есть ли в документе замечание об ошибке Overpass.
+
+    Ответ с ошибкой приходит с кодом 200 и снаружи выглядит как обычный
+    OSM: ``<osm ...><remark> runtime error: ...</remark></osm>``.  Это
+    не данные, а отказ сервера.  Обычное примечание ``<note>`` данными
+    не считается и отвергать его нельзя.
+    """
+    return b"<remark" in data
+
+
+def valid_osm(path):
+    """Похож ли файл на ответ Overpass с данными."""
     path = Path(path)
-    if not path.exists() or path.stat().st_size < 100:
+    if not path.exists():
+        return False
+    size = path.stat().st_size
+    if size < 100:
         return False
     with path.open("rb") as handle:
-        head = handle.read(2048)
-    if b"<osm" not in head:
-        return False
-    with path.open("rb") as handle:
-        handle.seek(max(0, path.stat().st_size - 4096))
+        if size <= 65536:
+            data = handle.read()
+            return (
+                b"<osm" in data
+                and not _has_error_remark(data)
+                and b"</osm>" in data
+            )
+        head = handle.read(8192)
+        if b"<osm" not in head or _has_error_remark(head):
+            return False
+        handle.seek(max(0, size - 4096))
         tail = handle.read()
-    return b"</osm>" in tail
+    return b"</osm>" in tail and not _has_error_remark(tail)
+
+
+def _has_elements(data):
+    """Есть ли в ответе объекты, а не пустой документ или отказ."""
+    if b'"remark"' in data or b"<remark" in data:
+        return False
+    if b'"elements"' in data:
+        try:
+            payload = json.loads(data.decode("utf-8", "replace"))
+        except ValueError:
+            return False
+        elements = payload.get("elements") if isinstance(payload, dict) else None
+        return bool(elements) if isinstance(elements, list) else False
+    if b"<osm" in data:
+        return b"<node" in data or b"<way" in data or b"<relation" in data
+    return False
 
 
 class OverpassClient:
-    TEST_QUERY = "[out:json][timeout:10];node(1);out;"
+    # Проверка сервера: запрос в Берлине.  Региональные зеркала (например,
+    # overpass.osm.ch) на такой запрос отвечают пустым, но валидным
+    # документом: такой сервер для других областей бесполезен, и
+    # принимать его за рабочий нельзя.
+    TEST_QUERY = (
+        "[out:json][timeout:25];node(52.51,13.38,52.53,13.42);out 1;"
+    )
 
     def __init__(self, endpoints, timeout=180, retries=1, user_agent=None):
         self.endpoints = [endpoint for endpoint in endpoints if endpoint]
@@ -68,21 +112,31 @@ class OverpassClient:
             raise
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
             raise OverpassError(f"{endpoint}: {exc}") from exc
-        if b'"elements"' in data or b'"osm3s"' in data or b"<osm" in data:
+        if _has_elements(data):
             return True
-        raise OverpassError(f"{endpoint}: unexpected response to the test query")
-
-    def fetch(self, query_name, query_text, bbox, destination, cancel=None, progress=None):
-        return self.fetch_raw(
-            query_name, build_query(query_text, bbox), destination,
-            cancel=cancel, progress=progress,
+        raise OverpassError(
+            f"{endpoint}: сервер не вернул объектов по тестовому запросу "
+            "(региональное зеркало?)"
         )
 
-    def fetch_raw(self, query_name, full_query, destination, cancel=None, progress=None):
-        """Скачивает готовый запрос Overpass (заголовок уже собран)."""
+    def fetch(self, query_name, query_text, bbox, destination, cancel=None,
+              progress=None, use_cache=True):
+        return self.fetch_raw(
+            query_name, build_query(query_text, bbox), destination,
+            cancel=cancel, progress=progress, use_cache=use_cache,
+        )
+
+    def fetch_raw(self, query_name, full_query, destination, cancel=None,
+                  progress=None, use_cache=True):
+        """Скачивает готовый запрос Overpass (заголовок уже собран).
+
+        ``use_cache=False`` запрещает возвращать ранее скачанный файл:
+        он нужен, когда текст запроса изменился и старый ответ больше
+        не подходит.
+        """
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if _valid_osm(destination):
+        if use_cache and valid_osm(destination):
             if progress:
                 progress(f"{query_name}: cached")
             return destination
@@ -115,7 +169,7 @@ class OverpassClient:
                                 if not chunk:
                                     break
                                 handle.write(chunk)
-                    if _valid_osm(temporary):
+                    if valid_osm(temporary):
                         os.replace(temporary, destination)
                         if progress:
                             progress(f"{query_name}: downloaded")

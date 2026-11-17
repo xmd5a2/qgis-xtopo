@@ -188,6 +188,88 @@ class ProxyConfigTest(unittest.TestCase):
         self.assertFalse(loaded.enabled)
         self.assertEqual(loaded.ptype, "socks5")
 
+    def test_http_url_escapes_credentials(self):
+        """Пароль с «@» или «:» ломает URL прокси."""
+        config = proxy.ProxyConfig(
+            enabled=True, ptype="http", host="proxy.local", port=3128,
+            login="user@example.com", password="p@ss:word/x",
+        )
+        url = config.http_url()
+        self.assertIn("user%40example.com", url)
+        self.assertIn("p%40ss%3Aword%2Fx", url)
+        self.assertTrue(url.startswith("http://"))
+
+    def test_gdal_proxy_url(self):
+        config = proxy.ProxyConfig(
+            enabled=True, ptype="http", host="proxy.local", port=3128
+        )
+        self.assertEqual(
+            proxy.gdal_proxy_url(config), "http://proxy.local:3128"
+        )
+        config.ptype = "socks5"
+        config.port = 1080
+        self.assertEqual(
+            proxy.gdal_proxy_url(config), "socks5://proxy.local:1080"
+        )
+        self.assertEqual(proxy.gdal_proxy_url(proxy.ProxyConfig()), "")
+
+    def test_gdal_proxy_is_set_for_dem_downloads(self):
+        """DEM читается через /vsicurl/ — там нужен свой адрес прокси."""
+        config = proxy.ProxyConfig(
+            enabled=True, ptype="http", host="proxy.local", port=3128
+        )
+        try:
+            proxy._apply_gdal_proxy(config)
+            self.assertEqual(
+                os.environ.get("GDAL_HTTP_PROXY"), "http://proxy.local:3128"
+            )
+        finally:
+            proxy._apply_gdal_proxy(proxy.ProxyConfig())
+        self.assertIsNone(os.environ.get("GDAL_HTTP_PROXY"))
+
+    def test_proxy_handler_goes_before_multi_address(self):
+        """SOCKS5 должен применяться к HTTPS.
+
+        urllib берёт первый подходящий обработчик, поэтому обработчик
+        прокси должен стоять раньше мультиадресного.
+        """
+        from qgis.PyQt.QtNetwork import QNetworkProxy
+
+        from qgis_xtopo.core import dem_sources
+
+        config = proxy.ProxyConfig(
+            enabled=True, ptype="socks5", host="127.0.0.1", port=1080
+        )
+        try:
+            proxy.apply(config)
+            chain = [
+                type(item).__name__
+                for item in dem_sources._OPENER._opener.handle_open.get(
+                    "https", []
+                )
+            ]
+        finally:
+            proxy.apply(proxy.ProxyConfig())
+            # Прокси Qt возвращаем к штатному: выключенный прокси его
+            # больше не сбрасывает.
+            QNetworkProxy.setApplicationProxy(QNetworkProxy())
+        self.assertIn("_Socks5Handler", chain)
+        self.assertIn("_MultiAddressHTTPSHandler", chain)
+        self.assertLess(
+            chain.index("_Socks5Handler"),
+            chain.index("_MultiAddressHTTPSHandler"),
+        )
+
+    def test_disabled_proxy_keeps_qt_settings(self):
+        """Выключенный прокси не должен сбрасывать прокси QGIS."""
+        from qgis.PyQt.QtNetwork import QNetworkProxy
+
+        before = QNetworkProxy.applicationProxy()
+        proxy.apply(proxy.ProxyConfig())
+        after = QNetworkProxy.applicationProxy()
+        self.assertEqual(before.hostName(), after.hostName())
+        self.assertEqual(before.port(), after.port())
+
 
 class ProxyProbeTest(unittest.TestCase):
     def test_disabled_config_is_not_reachable(self):

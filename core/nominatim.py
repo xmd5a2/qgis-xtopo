@@ -3,7 +3,9 @@
 Запросы идут по HTTP к nominatim.openstreetmap.org.  Сервис требует
 заголовок User-Agent и просит обращаться не чаще одного раза в секунду,
 поэтому между запросами выдерживается пауза, а ответы кэшируются по строке
-запроса: повторный поиск того же текста сеть не дёргает.
+запроса: повторный поиск того же текста сеть не дёргает.  Ответ «слишком
+много запросов» (429) обрабатывается отдельно: сервис сам говорит, сколько
+ждать.
 
 Модуль ничего не знает про интерфейс — он только возвращает список мест.
 """
@@ -24,11 +26,27 @@ REQUEST_TIMEOUT = 20
 REQUEST_INTERVAL = 1.0
 # Сколько ответов держим в кэше.
 CACHE_LIMIT = 50
+# Сколько живёт запись кэша, секунды: данные Nominatim меняются медленно,
+# но и вечно держать их нельзя.
+CACHE_TTL = 3600.0
+# Сколько раз повторяем запрос после ответа 429.
+RETRY_LIMIT = 3
+# Пауза перед повтором, если сервер не назвал свою (Retry-After).
+RETRY_DELAY = 5.0
+# Больше этой паузы не ждём: запрос лучше прервать, чем висеть.
+MAX_RETRY_DELAY = 60.0
+
+_lock = threading.Lock()
+# Отдельный замок для паузы между запросами: спящий поток не должен
+# закрывать доступ к кэшу.
+_turn_lock = threading.Lock()
+_last_request = 0.0
+# Кэш: ключ → (время, список мест).
+_cache = {}
+# Запросы, которые уже выполняются: ключ → событие окончания.
+_inflight = {}
 
 _urlopen = urllib.request.urlopen
-_lock = threading.Lock()
-_last_request = 0.0
-_cache = {}
 
 
 class NominatimError(RuntimeError):
@@ -69,15 +87,27 @@ class Place:
 def _wait_turn():
     """Выдержать паузу между запросами."""
     global _last_request
-    with _lock:
+    with _turn_lock:
         wait = REQUEST_INTERVAL - (time.monotonic() - _last_request)
         if wait > 0:
             time.sleep(wait)
         _last_request = time.monotonic()
 
 
+def _retry_after(exc, attempt):
+    """Пауза перед повтором: из Retry-After или по умолчанию."""
+    headers = getattr(exc, "headers", None)
+    value = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if value:
+        try:
+            return min(MAX_RETRY_DELAY, max(0.0, float(value)))
+        except (TypeError, ValueError):
+            pass
+    return min(MAX_RETRY_DELAY, RETRY_DELAY * (attempt + 1))
+
+
 def _fetch(query, limit, timeout):
-    """Ответ сервира по строке запроса (список словарей)."""
+    """Ответ сервиса по строке запроса (список словарей)."""
     params = urllib.parse.urlencode(
         {
             "q": query,
@@ -89,13 +119,21 @@ def _fetch(query, limit, timeout):
     request = urllib.request.Request(
         f"{SEARCH_URL}?{params}", headers={"User-Agent": USER_AGENT}
     )
-    try:
-        with _urlopen(request, timeout=timeout) as response:
-            payload = response.read()
-    except urllib.error.HTTPError as exc:
-        raise NominatimError(f"HTTP {exc.code}") from exc
-    except Exception as exc:
-        raise NominatimError(str(exc)) from exc
+    payload = b""
+    for attempt in range(RETRY_LIMIT + 1):
+        try:
+            with _urlopen(request, timeout=timeout) as response:
+                payload = response.read()
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < RETRY_LIMIT:
+                # Сервис просит подождать: ждём столько, сколько он
+                # назвал, и повторяем запрос.
+                time.sleep(_retry_after(exc, attempt))
+                continue
+            raise NominatimError(f"HTTP {exc.code}") from exc
+        except Exception as exc:
+            raise NominatimError(str(exc)) from exc
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -141,34 +179,68 @@ def _place(item):
     )
 
 
+def _cached(key):
+    """Запись кэша, если она ещё не устарела."""
+    with _lock:
+        entry = _cache.get(key)
+    if entry is None:
+        return None
+    stored, places = entry
+    if time.time() - stored > CACHE_TTL:
+        return None
+    return places
+
+
 def search(query, limit=RESULT_LIMIT, timeout=REQUEST_TIMEOUT):
     """Места по строке запроса.
 
-    Повторный запрос с тем же текстом берётся из кэша.  Ошибка сети
-    поднимается как :class:`NominatimError`.
+    Повторный запрос с тем же текстом берётся из кэша.  Одинаковые
+    параллельные запросы выполняются один раз: второй ждёт результат
+    первого и берёт его из кэша.  Ошибка сети поднимается как
+    :class:`NominatimError`.
     """
     text = str(query or "").strip()
     if not text:
         return []
     key = (text.lower(), limit)
-    with _lock:
-        cached = _cache.get(key)
-    if cached is not None:
-        return list(cached)
-    _wait_turn()
-    items = _fetch(text, limit, timeout)
-    places = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        place = _place(item)
-        if place is not None and place.name:
-            places.append(place)
-    with _lock:
-        if len(_cache) >= CACHE_LIMIT:
-            _cache.clear()
-        _cache[key] = list(places)
-    return places
+    while True:
+        places = _cached(key)
+        if places is not None:
+            return list(places)
+        with _lock:
+            event = _inflight.get(key)
+            owner = event is None
+            if owner:
+                event = threading.Event()
+                _inflight[key] = event
+        if owner:
+            break
+        # Такой же запрос уже выполняется: ждём его результат.
+        event.wait(timeout)
+        places = _cached(key)
+        if places is not None:
+            return list(places)
+        # Первый запрос не удался: следующий по очереди становится
+        # исполнителем.
+    try:
+        _wait_turn()
+        items = _fetch(text, limit, timeout)
+        found = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            place = _place(item)
+            if place is not None and place.name:
+                found.append(place)
+        with _lock:
+            if len(_cache) >= CACHE_LIMIT:
+                _cache.clear()
+            _cache[key] = (time.time(), list(found))
+        return found
+    finally:
+        with _lock:
+            _inflight.pop(key, None)
+        event.set()
 
 
 def clear_cache():
@@ -176,4 +248,6 @@ def clear_cache():
     global _last_request
     with _lock:
         _cache.clear()
+        _inflight.clear()
+    with _turn_lock:
         _last_request = 0.0

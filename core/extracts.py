@@ -15,10 +15,12 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -162,6 +164,9 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
     продолжается с места, где он остановился.  Обычные хосты отдают файл
     целиком с первого запроса.  ``check_pbf=False`` позволяет скачать так
     же индекс (JSON), а не только PBF.
+
+    Принятый объём сверяется с тем, что обещал сервер: оборванный файл
+    не публикуется, иначе вырез считался бы готовым.
     """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +216,8 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
             headers["Range"] = (
                 f"bytes={received}-" if open_ended else f"bytes={received}-{end}"
             )
+        body_read = 0
+        body_expected = 0
         try:
             with _open(url, headers=headers, timeout=idle) as response:
                 code = getattr(response, "status", 200)
@@ -219,6 +226,12 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                     received = 0
                     reported = 0
                     temporary.unlink(missing_ok=True)
+                body_expected = _expected_body(response, code)
+                whole = _response_total(response)
+                if whole:
+                    # Размер файла из ответа сервера точнее, чем из
+                    # проверки HEAD: тот мог устареть.
+                    total = whole
                 mode = "ab" if received else "wb"
                 with temporary.open(mode) as handle:
                     while True:
@@ -231,6 +244,7 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                         if not chunk:
                             break
                         handle.write(chunk)
+                        body_read += len(chunk)
                         received += len(chunk)
                         if progress and received - reported >= progress_step:
                             reported = received
@@ -255,6 +269,13 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                 raise ExtractError(f"{url}: загрузка прерывается ({exc})") from exc
             idle = IDLE_TIMEOUT_SHORT
             continue
+        if body_expected and body_read < body_expected:
+            # Сервер обещал больше, чем прислал: файл неполный.
+            stall += 1
+            if stall > 20:
+                raise ExtractError(f"{url}: загрузка прерывается")
+            idle = IDLE_TIMEOUT_SHORT
+            continue
         if total and received >= total:
             break
         if received == 0:
@@ -266,24 +287,66 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
         # Данных меньше, чем просили: сервер отдаёт ответ частями.
         stall += 1
         idle = IDLE_TIMEOUT_SHORT
-    if check_pbf and not _looks_like_pbf(temporary):
+    if check_pbf and not looks_like_pbf(temporary):
         temporary.unlink(missing_ok=True)
         raise ExtractError(f"{url}: полученный файл не похож на PBF")
     os.replace(temporary, destination)
     return destination
 
 
-def _looks_like_pbf(path):
+def _response_total(response):
+    """Общий размер файла из Content-Range (0 — сервер его не назвал)."""
+    headers = getattr(response, "headers", None) or {}
+    content_range = headers.get("Content-Range") or ""
+    if "/" not in content_range:
+        return 0
+    try:
+        return int(content_range.rsplit("/", 1)[-1])
+    except ValueError:
+        return 0
+
+
+def _expected_body(response, code):
+    """Сколько байт сервер обещал прислать в этом ответе."""
+    headers = getattr(response, "headers", None) or {}
+    content_range = headers.get("Content-Range") or ""
+    if code == 206 and "/" in content_range:
+        span, _, _whole = content_range.partition("/")
+        first, _, last = span.partition("-")
+        try:
+            return int(last) - int(first) + 1
+        except ValueError:
+            return 0
+    length = headers.get("Content-Length")
+    if length:
+        try:
+            return int(length)
+        except ValueError:
+            return 0
+    return 0
+
+
+def looks_like_pbf(path):
+    """Похож ли файл на PBF: блок заголовка и данные после него."""
     path = Path(path)
     try:
+        size = path.stat().st_size
         with path.open("rb") as handle:
             raw = handle.read(4)
             if len(raw) < 4:
                 return False
-            size = int.from_bytes(raw, "big")
-            if not 0 < size < 1000000:
+            length = int.from_bytes(raw, "big")
+            if not 0 < length < 1000000:
                 return False
-            return b"OSMHeader" in handle.read(size)[:200]
+            header = handle.read(length)
+            if len(header) < length or b"OSMHeader" not in header[:200]:
+                return False
+            if size < 4 + length + 4:
+                return False
+            raw = handle.read(4)
+            if len(raw) < 4:
+                return False
+            return int.from_bytes(raw, "big") > 0
     except OSError:
         return False
 
@@ -425,41 +488,72 @@ class Boundaries:
         self.config = config
         self._regions = {}
         self._loaded = False
-        self._lock = None
+        # Индекс качается один раз: без замка восемь потоков
+        # одновременно писали бы в один временный файл.
+        self._lock = threading.Lock()
 
     def _index(self, progress=None, cancel=None):
-        if self._loaded:
+        with self._lock:
+            if self._loaded:
+                return self._regions
+            cache = _cache_file(self.config, "boundaries", "regions.json")
+            meta = _read_meta(cache)
+            now = time.time()
+            payload = None
+            if cache.exists() and meta.get("fetched_at", 0) + INDEX_TTL > now:
+                payload = _read_json(cache)
+            else:
+                try:
+                    payload = fetch_json(self.INDEX_URL, cancel=cancel)
+                    _write_json(cache, payload)
+                    _write_meta(cache, {"fetched_at": now, "warning": ""})
+                except ExtractError:
+                    payload = _read_json(cache) if cache.exists() else {}
+            self._regions = {}
+            for region in payload.get("regions") or []:
+                slug = str(region.get("slug") or "")
+                if not slug:
+                    continue
+                self._regions[slug] = region
+            self._loaded = True
             return self._regions
-        cache = _cache_file(self.config, "boundaries", "regions.json")
-        meta = _read_meta(cache)
-        now = time.time()
-        payload = None
-        if cache.exists() and meta.get("fetched_at", 0) + INDEX_TTL > now:
-            payload = _read_json(cache)
-        else:
-            try:
-                payload = fetch_json(self.INDEX_URL, cancel=cancel)
-                _write_json(cache, payload)
-                _write_meta(cache, {"fetched_at": now, "warning": ""})
-            except ExtractError:
-                payload = _read_json(cache) if cache.exists() else {}
-        self._regions = {}
-        for region in payload.get("regions") or []:
-            slug = str(region.get("slug") or "")
-            if not slug:
-                continue
-            self._regions[slug] = region
-        self._loaded = True
-        return self._regions
 
     def region(self, name_key):
-        """Регион по имени без учёта регистра и подчёркиваний."""
+        """Регион по имени без учёта регистра и подчёркиваний.
+
+        Сначала ищется полное совпадение слага, затем — последний
+        сегмент.  Имя вроде «georgia» есть и в Азии, и в Европе, и в
+        США: такое совпадение неоднозначно, и вместо чужой границы
+        возвращается None.
+        """
         regions = self._index()
         if not regions:
             return None
-        for slug, region in regions.items():
-            if normalize_name(slug.split("/")[-1]) == name_key:
-                return region
+        exact = [
+            region for slug, region in regions.items()
+            if normalize_name(slug) == name_key
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            warnings.warn(
+                f"Регион {name_key}: подходит несколько регионов, "
+                "граница не выбрана",
+                stacklevel=2,
+            )
+            return None
+        matches = [
+            region for slug, region in regions.items()
+            if normalize_name(slug.split("/")[-1]) == name_key
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            warnings.warn(
+                f"Регион {name_key}: имя неоднозначно "
+                f"({len(matches)} совпадений), граница не выбрана",
+                stacklevel=2,
+            )
         return None
 
     def geometry(self, name_key, progress=None, cancel=None):
@@ -888,16 +982,25 @@ def _statuses(config, maps, catalogue):
     if unknown:
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {
-                pool.submit(head_size, item.url): item for item in unknown[:MAX_HEAD_CHECKS]
+                pool.submit(head_size, item.url): item
+                for item in unknown[:MAX_HEAD_CHECKS]
             }
-            for future, item in futures.items():
+            for future in as_completed(futures):
+                item = futures[future]
                 try:
                     checked[item.id] = future.result()
-                except Exception:
-                    checked[item.id] = (False, 0, "")
+                except Exception as exc:  # noqa: BLE001 - сеть не должна ломать план
+                    checked[item.id] = (False, 0, str(exc))
     statuses = []
     for item in maps:
-        available, size, error = checked.get(item.id, (True, sizes.get(item.id, 0), ""))
+        if item.id in sizes:
+            available, size, error = True, sizes[item.id], ""
+        elif item.id in checked:
+            available, size, error = checked[item.id]
+        else:
+            # Проверка не дошла до этой выгрузки: сказать «доступна»
+            # без проверки нельзя.
+            available, size, error = False, 0, "не проверено"
         statuses.append(
             geofabrik.MapStatus(
                 map=item,
@@ -925,6 +1028,18 @@ def _safe_name(value):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "x"))[:120]
 
 
+def _temp_path(path):
+    """Уникальное имя временного файла.
+
+    Потоки не должны делить один .part: два записывающих потока
+    перемешали бы содержимое, и ``os.replace`` опубликовал бы мусор.
+    """
+    path = Path(path)
+    return path.with_name(
+        f"{path.name}.part-{os.getpid()}-{threading.get_ident()}"
+    )
+
+
 def _read_json(path):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -934,7 +1049,7 @@ def _read_json(path):
 
 def _write_json(path, payload):
     path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".part")
+    temporary = _temp_path(path)
     temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, path)
 
@@ -950,7 +1065,7 @@ def _read_meta(path):
 
 def _write_meta(path, meta):
     meta_path = Path(str(path) + ".meta")
-    temporary = meta_path.with_suffix(meta_path.suffix + ".part")
+    temporary = _temp_path(meta_path)
     temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, meta_path)
 

@@ -176,10 +176,20 @@ def slice_cache_path(config, bbox):
 
 
 def cached_slice_size(config, bbox):
+    """Размер готового выреза в кэше.
+
+    Битый или оборванный вырез не считается готовым: по одному
+    ``st_size > 0`` пользователь увидит «карта скачана» при пустой
+    области.
+    """
+    path = slice_cache_path(config, bbox)
     try:
-        return slice_cache_path(config, bbox).stat().st_size
+        size = path.stat().st_size
     except OSError:
         return 0
+    if size <= 0 or not extracts.looks_like_pbf(path):
+        return 0
+    return size
 
 
 def _tile_x(lon, zoom):
@@ -214,15 +224,19 @@ def _tile_count(bounds):
 
 
 def _covering(bbox):
-    """Уровень и диапазон тайлов — как в веб-интерфейсе SliceOSM."""
-    zoom = 14
-    bounds = _tile_bounds(bbox, zoom)
+    """Уровень и диапазон тайлов — как в веб-интерфейсе SliceOSM.
+
+    Берётся самый подробный зум, у которого тайлов не больше лимита:
+    на уровне выше лимита тайлов уже больше, чем нужно для оценки.
+    """
+    zoom = 0
+    bounds = _tile_bounds(bbox, 0)
     for candidate in range(0, 15):
         candidate_bounds = _tile_bounds(bbox, candidate)
         if _tile_count(candidate_bounds) > MAX_TILES:
-            zoom = candidate
-            bounds = candidate_bounds
             break
+        zoom = candidate
+        bounds = candidate_bounds
     return zoom, bounds
 
 

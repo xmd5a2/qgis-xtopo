@@ -5,10 +5,12 @@ import json
 import math
 import os
 import socket
+import struct
 import tempfile
 import time
 import unittest
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -364,12 +366,12 @@ class BuildIndexTest(unittest.TestCase):
 class _FakeResponse:
     """Ответ сервера, который отдаёт данные кусками и обрывается."""
 
-    def __init__(self, payload, status=200, cut=False):
+    def __init__(self, payload, status=200, cut=False, headers=None):
         self.payload = payload
         self.status = status
         self.cut = cut
         self.offset = 0
-        self.headers = {"Content-Length": str(len(payload))}
+        self.headers = headers or {"Content-Length": str(len(payload))}
 
     def read1(self, size):
         if self.offset >= len(self.payload):
@@ -399,9 +401,13 @@ class DownloadTest(unittest.TestCase):
         self.destination = Path(self.temporary.name) / "map.osm.pbf"
 
     def _pbf(self, size):
-        header = b"\x00\x00\x00\x0d\x0a\x09OSMHeader"
-        body = b"\x00" * max(0, size - len(header))
-        return header + body
+        """PBF с блоком заголовка и блоком данных."""
+        header = b"\x0a\x09OSMHeader"
+        body = b"\x00" * max(0, size - len(header) - 4)
+        return (
+            struct.pack(">I", len(header)) + header
+            + struct.pack(">I", len(body)) + body
+        )
 
     def test_resumes_after_partial_response(self):
         payload = self._pbf(40000)
@@ -480,6 +486,114 @@ class DownloadTest(unittest.TestCase):
                     "http://example.org/map.osm.pbf", self.destination
                 )
         self.assertIn("Недостаточно места", str(context.exception))
+
+    def test_truncated_download_is_not_published(self):
+        """Сервер обещал больше, чем прислал: файл не публикуется."""
+        payload = self._pbf(40000)
+
+        def fake_urlopen(request, timeout=None):
+            return _FakeResponse(
+                payload[:100],
+                headers={"Content-Length": str(len(payload))},
+            )
+
+        with mock.patch.object(
+            extracts, "_urlopen", side_effect=fake_urlopen
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(True, len(payload), "")
+        ):
+            with self.assertRaises(extracts.ExtractError):
+                extracts.download_file(
+                    "http://example.org/map.osm.pbf", self.destination
+                )
+        self.assertFalse(self.destination.exists())
+
+    def test_pbf_without_data_block_is_rejected(self):
+        """Только заголовка мало: это оборванная загрузка."""
+        header = b"\x0a\x09OSMHeader"
+        broken = Path(self.temporary.name) / "broken.osm.pbf"
+        broken.write_bytes(struct.pack(">I", len(header)) + header)
+        self.assertFalse(extracts.looks_like_pbf(broken))
+
+
+class BoundariesTest(unittest.TestCase):
+    """Границы регионов: неоднозначные имена и гонка за индексом."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.config = Config(
+            qgis_projects_dir=self.temporary.name, project_name="test"
+        )
+
+    def _boundaries(self, slugs):
+        boundaries = extracts.Boundaries(self.config)
+        boundaries._regions = {
+            slug: {"slug": slug} for slug in slugs
+        }
+        boundaries._loaded = True
+        return boundaries
+
+    def test_full_slug_match_wins(self):
+        boundaries = self._boundaries(["europe/georgia", "asia/georgia"])
+        region = boundaries.region("europegeorgia")
+        self.assertEqual(region["slug"], "europe/georgia")
+
+    def test_ambiguous_name_is_not_chosen(self):
+        """Имя «georgia» есть и в Азии, и в Европе: чужую границу
+        подставлять нельзя."""
+        boundaries = self._boundaries(["europe/georgia", "asia/georgia"])
+        with self.assertWarns(UserWarning):
+            self.assertIsNone(boundaries.region("georgia"))
+
+    def test_unique_last_segment_is_found(self):
+        boundaries = self._boundaries(["europe/georgia"])
+        region = boundaries.region("georgia")
+        self.assertEqual(region["slug"], "europe/georgia")
+
+    def test_index_is_loaded_once(self):
+        """Восемь потоков не должны качать индекс и писать в один файл."""
+        calls = []
+
+        def fake_fetch(url, **kwargs):
+            calls.append(url)
+            time.sleep(0.05)
+            return {"regions": [{"slug": "europe/france"}]}
+
+        with mock.patch.object(extracts, "fetch_json", side_effect=fake_fetch):
+            boundaries = extracts.Boundaries(self.config)
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(lambda _index: boundaries._index(), range(4)))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(results), 4)
+
+
+class StatusesTest(unittest.TestCase):
+    """Состояние выгрузок: непроверенная не значит доступная."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.config = Config(
+            qgis_projects_dir=self.temporary.name, project_name="test"
+        )
+
+    def test_unchecked_maps_are_not_available(self):
+        maps = [
+            extracts.ExtractMap(
+                id=f"m{index}", name="M", parent="",
+                url=f"http://example.org/m{index}",
+            )
+            for index in range(extracts.MAX_HEAD_CHECKS + 3)
+        ]
+        catalogue = extracts.Catalogue(maps=maps)
+        with mock.patch.object(
+            extracts, "head_size", return_value=(True, 10, "")
+        ):
+            statuses = extracts._statuses(self.config, maps, catalogue)
+        self.assertTrue(statuses[0].available)
+        self.assertFalse(statuses[-1].available)
+        self.assertIn("не проверено", statuses[-1].error)
 
 
 class SliceOsmTest(unittest.TestCase):
@@ -626,8 +740,17 @@ class SliceEstimateTest(unittest.TestCase):
         bbox = BBox(-180.0, -85.0, 180.0, 85.0)
         self.assertEqual(slice_estimate._tile_bounds(bbox, 0), (0, 0, 0, 0))
         zoom, bounds = slice_estimate._covering(bbox)
-        self.assertEqual(zoom, 5)
-        self.assertEqual(slice_estimate._tile_count(bounds), 1024)
+        self.assertEqual(zoom, 4)
+        self.assertEqual(slice_estimate._tile_count(bounds), 256)
+
+    def test_covering_stays_within_tile_limit(self):
+        """Берётся самый подробный зум, у которого тайлов не больше лимита."""
+        bbox = BBox(13.0, 52.0, 14.0, 53.0)
+        zoom, bounds = slice_estimate._covering(bbox)
+        self.assertLessEqual(
+            slice_estimate._tile_count(bounds), slice_estimate.MAX_TILES
+        )
+        self.assertEqual(zoom, 12)
 
     def test_estimate_size_and_build_time_match_measurements(self):
         # Замер сервиса для этой рамки: 2 973 537 узлов, 23,9 МБ, 38,1 с.

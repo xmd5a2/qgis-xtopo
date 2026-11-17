@@ -15,6 +15,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -153,21 +154,48 @@ def _find_osmium(temp_dir):
     return None
 
 
-def run(executable, arguments, timeout=DEFAULT_TIMEOUT, cancel=None):
-    """Запускает osmium и возвращает его stdout.
+def _drain(stream, chunks):
+    """Читает поток процесса до конца."""
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
 
-    ``InterruptedError`` пробрасывается наружу: отмена обработки не
-    должна превращаться в ошибку источника данных.
+
+def run_process(command, timeout=None, cancel=None):
+    """Запускает команду и читает её вывод.
+
+    Вывод читается отдельными потоками: пока процесс жив, никто не
+    читает канал, и при выводе больше размера буфера (~64 КБ) процесс
+    встаёт на записи.  Возвращает тройку (код возврата, stdout, stderr).
     """
-    command = [str(executable)] + [str(item) for item in arguments]
     try:
         process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
     except OSError as exc:
-        raise OsmiumError(f"Не удалось запустить osmium: {exc}") from exc
+        raise OsmiumError(f"Не удалось запустить команду: {exc}") from exc
+    stdout_chunks = []
+    stderr_chunks = []
+    readers = [
+        threading.Thread(
+            target=_drain, args=(process.stdout, stdout_chunks), daemon=True
+        ),
+        threading.Thread(
+            target=_drain, args=(process.stderr, stderr_chunks), daemon=True
+        ),
+    ]
+    for reader in readers:
+        reader.start()
     deadline = None if timeout is None else time.monotonic() + timeout
     try:
         while process.poll() is None:
@@ -183,8 +211,24 @@ def run(executable, arguments, timeout=DEFAULT_TIMEOUT, cancel=None):
                 raise OsmiumError("osmium не уложился в отведённое время")
             time.sleep(0.2)
     finally:
-        stdout, stderr = process.communicate()
-    if process.returncode != 0:
+        for reader in readers:
+            reader.join(timeout=10)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    return process.returncode, b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+
+def run(executable, arguments, timeout=DEFAULT_TIMEOUT, cancel=None):
+    """Запускает osmium и возвращает его stdout.
+
+    ``InterruptedError`` пробрасывается наружу: отмена обработки не
+    должна превращаться в ошибку источника данных.
+    """
+    command = [str(executable)] + [str(item) for item in arguments]
+    code, stdout, stderr = run_process(command, timeout=timeout, cancel=cancel)
+    if code != 0:
         message = stderr.decode("utf-8", "replace").strip()
         raise OsmiumError(f"osmium завершился с ошибкой: {message}")
     return stdout.decode("utf-8", "replace")

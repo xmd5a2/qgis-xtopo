@@ -1,4 +1,5 @@
 import json
+import threading
 import unittest
 import urllib.error
 from unittest import mock
@@ -123,6 +124,82 @@ class NominatimTest(unittest.TestCase):
         with mock.patch.object(self.nominatim, "_urlopen", fake_urlopen):
             with self.assertRaises(self.nominatim.NominatimError):
                 self.nominatim.search("Кисловодск")
+
+    def test_too_many_requests_is_retried(self):
+        """Ответ 429 с Retry-After: ждём и повторяем запрос."""
+        calls = []
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url, 429, "Too Many Requests",
+                    {"Retry-After": "0"}, None
+                )
+            return FakeResponse(
+                json.dumps(
+                    [{"display_name": "Дом", "lat": "10.5", "lon": "20.25"}]
+                ).encode()
+            )
+
+        with mock.patch.object(self.nominatim, "_urlopen", fake_urlopen):
+            places = self.nominatim.search("Дом")
+        self.assertEqual(len(places), 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_retry_after_is_read_from_header(self):
+        error = urllib.error.HTTPError(
+            "u", 429, "Too Many Requests", {"Retry-After": "7"}, None
+        )
+        self.assertEqual(self.nominatim._retry_after(error, 0), 7.0)
+        # Без заголовка пауза считается по номеру попытки.
+        plain = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+        self.assertGreater(self.nominatim._retry_after(plain, 1), 0)
+
+    def test_parallel_requests_are_deduplicated(self):
+        """Одинаковые параллельные запросы выполняются один раз."""
+        calls = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request.full_url)
+            started.set()
+            release.wait(timeout=5)
+            return FakeResponse(
+                json.dumps(
+                    [{"display_name": "Дом", "lat": "10.5", "lon": "20.25"}]
+                ).encode()
+            )
+
+        def worker():
+            try:
+                self.nominatim.search("Дом")
+            except Exception:
+                pass
+
+        with mock.patch.object(self.nominatim, "_urlopen", fake_urlopen):
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            started.wait(timeout=5)
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertEqual(len(calls), 1)
+
+    def test_cache_entry_expires(self):
+        payload = json.dumps(
+            [{"display_name": "Дом", "lat": "10.5", "lon": "20.25"}]
+        ).encode()
+        fake_urlopen, calls = self._response(payload)
+        with mock.patch.object(self.nominatim, "_urlopen", fake_urlopen):
+            self.nominatim.search("Дом")
+            self.nominatim.search("Дом")
+            self.assertEqual(len(calls), 1)
+            with mock.patch.object(self.nominatim, "CACHE_TTL", 0):
+                self.nominatim.search("Дом")
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

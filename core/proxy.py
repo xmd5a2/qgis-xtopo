@@ -8,14 +8,16 @@
 """
 
 import http.client
+import os
 import socket
 import struct
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
 from qgis.PyQt.QtCore import QSettings
 
-from . import net
+from . import i18n, net
 
 TYPES = ("socks5", "http")
 
@@ -40,15 +42,15 @@ class ProxyConfig:
         """URL для ProxyHandler HTTP-прокси."""
         auth = ""
         if self.login:
-            auth = self.login
+            auth = urllib.parse.quote(self.login, safe="")
             if self.password:
-                auth += f":{self.password}"
+                auth += f":{urllib.parse.quote(self.password, safe='')}"
             auth += "@"
         return f"http://{auth}{self.host}:{self.port}"
 
 
 def _settings(store=None):
-    return store if store is not None else QSettings("qgis-xtopo", "qgis-xtopo")
+    return store if store is not None else QSettings(*i18n.SETTINGS_GROUP)
 
 
 def load(store=None):
@@ -239,17 +241,54 @@ def _handlers(config):
 def _apply_qt_proxy(config):
     """Тот же прокси для сокетов Qt (слои WMS и прочие запросы QGIS)."""
     from qgis.PyQt.QtNetwork import QNetworkProxy
-    proxy = QNetworkProxy()
-    if config.enabled:
-        kinds = {
-            "http": QNetworkProxy.HttpProxy,
-            "socks5": QNetworkProxy.Socks5Proxy,
-        }
-        kind = kinds.get(config.ptype)
-        if kind is not None:
-            proxy = QNetworkProxy(kind, config.host, int(config.port),
-                                  config.login, config.password)
+    if not config.enabled:
+        # Штатную настройку прокси QGIS не трогаем: иначе плагин сбросил
+        # бы её у всего приложения, а при выгрузке плагина её не
+        # вернуть.
+        return
+    kinds = {
+        "http": QNetworkProxy.HttpProxy,
+        "socks5": QNetworkProxy.Socks5Proxy,
+    }
+    kind = kinds.get(config.ptype)
+    if kind is None:
+        return
+    proxy = QNetworkProxy(kind, config.host, int(config.port),
+                          config.login, config.password)
     QNetworkProxy.setApplicationProxy(proxy)
+
+
+def gdal_proxy_url(config):
+    """Адрес прокси для GDAL (его /vsicurl/ не знает про urllib)."""
+    if not config.enabled or not config.host:
+        return ""
+    scheme = "socks5" if config.ptype == "socks5" else "http"
+    auth = ""
+    if config.login:
+        auth = urllib.parse.quote(config.login, safe="")
+        if config.password:
+            auth += f":{urllib.parse.quote(config.password, safe='')}"
+        auth += "@"
+    return f"{scheme}://{auth}{config.host}:{config.port}"
+
+
+def _apply_gdal_proxy(config):
+    """Прокси для GDAL: DEM читается через /vsicurl/ мимо urllib.
+
+    Без этой настройки чтение DEM идёт напрямую, и при выходе только
+    через прокси скачивание рельефа падает.
+    """
+    url = gdal_proxy_url(config)
+    if url:
+        os.environ["GDAL_HTTP_PROXY"] = url
+    else:
+        os.environ.pop("GDAL_HTTP_PROXY", None)
+    try:
+        from osgeo import gdal
+
+        gdal.SetConfigOption("GDAL_HTTP_PROXY", url or None)
+    except Exception:  # noqa: BLE001 - GDAL может быть недоступен
+        pass
 
 
 def apply(config=None):
@@ -261,12 +300,25 @@ def apply(config=None):
     # dem_sources держит собственный opener (мультиадресный HTTPS).
     try:
         from . import dem_sources
+
+        # Обработчик прокси должен идти раньше мультиадресного:
+        # urllib берёт первый подходящий обработчик, иначе SOCKS5
+        # для HTTPS не применяется.
         dem_sources._OPENER = net.guard(urllib.request.build_opener(
-            dem_sources._MultiAddressHTTPSHandler(), *handlers))
+            *handlers, dem_sources._MultiAddressHTTPSHandler()))
     except Exception:  # noqa: BLE001 - без QGIS/Qt модуля не будет
         pass
+    _apply_gdal_proxy(config)
     # Смена прокси — повод попробовать сеть заново.
     net.reset()
+    try:
+        from . import geofabrik
+
+        # Размеры карт из кэша брались без прокси: после смены прокси
+        # они могут быть другими.
+        geofabrik.clear_size_cache()
+    except Exception:  # noqa: BLE001 - без QGIS/Qt модуля не будет
+        pass
     try:
         _apply_qt_proxy(config)
     except Exception:  # noqa: BLE001 - Qt-сокеты необязательны для тестов

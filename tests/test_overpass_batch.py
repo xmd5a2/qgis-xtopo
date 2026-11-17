@@ -82,6 +82,57 @@ class OverpassBatchTest(unittest.TestCase):
         self.assertIn('way["aerialway"="chair_lift"];', query)
         self.assertTrue(query.rstrip().endswith("out body;>;out skel qt;"))
 
+    def test_split_batch_stops_on_cancel(self):
+        """Отмена прерывает разбор ответа."""
+        import tempfile
+        import threading
+        from pathlib import Path
+
+        combined = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="1" lat="45.0" lon="9.0"><tag k="railway" v="station"/></node>
+</osm>
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batch.osm"
+            path.write_text(combined, encoding="utf-8")
+            cancel = threading.Event()
+            cancel.set()
+            layers = {
+                "stations": [overpass_batch.Selector(
+                    "node", [("railway", "=", "station")])],
+            }
+            with self.assertRaises(InterruptedError):
+                overpass_batch.split_batch(path, layers, cancel=cancel)
+
+    def test_split_batch_releases_objects(self):
+        """Объекты, не нужные следующим слоям, освобождаются."""
+        import tempfile
+        from pathlib import Path
+
+        combined = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="1" lat="45.0" lon="9.0"><tag k="railway" v="station"/></node>
+  <node id="2" lat="45.1" lon="9.1"><tag k="aerialway" v="station"/></node>
+</osm>
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batch.osm"
+            path.write_text(combined, encoding="utf-8")
+            layers = {
+                "stations": [overpass_batch.Selector(
+                    "node", [("railway", "=", "station")])],
+                "lifts": [overpass_batch.Selector(
+                    "node", [("aerialway", "=", "station")])],
+            }
+            result = overpass_batch.split_batch(path, layers)
+            stations = Path(result["stations"][0]).read_text(encoding="utf-8")
+            lifts = Path(result["lifts"][0]).read_text(encoding="utf-8")
+        self.assertIn('id="1"', stations)
+        self.assertNotIn('id="2"', stations)
+        self.assertIn('id="2"', lifts)
+        self.assertNotIn('id="1"', lifts)
+
 
 if __name__ == "__main__":
     unittest.main()

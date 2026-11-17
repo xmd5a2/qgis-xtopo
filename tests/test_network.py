@@ -42,6 +42,26 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(guarded._opener.calls, 1)
         self.assertTrue(net.offline())
 
+    def test_failure_blocks_only_its_host(self):
+        """Сбой одного сервера не должен останавливать остальные."""
+        guarded = net.guard(_FakeOpener(error=urllib.error.URLError("offline")))
+        with self.assertRaises(urllib.error.URLError):
+            guarded.open("http://example.org/")
+        self.assertTrue(net.offline("http://example.org/"))
+        self.assertFalse(net.offline("http://localhost:8080/"))
+        # Другой хост запрос проходит нормально.
+        other = net.guard(_FakeOpener(result=object()))
+        other.open("http://localhost:8080/")
+        self.assertEqual(other._opener.calls, 1)
+
+    def test_unknown_scheme_is_not_network_failure(self):
+        error = urllib.error.URLError("unknown url type: 'ftp'")
+        self.assertFalse(net.is_network_error(error))
+        guarded = net.guard(_FakeOpener(error=error))
+        with self.assertRaises(urllib.error.URLError):
+            guarded.open("ftp://example.org/")
+        self.assertFalse(net.offline())
+
     def test_offline_state_can_be_cleared(self):
         net.mark_offline()
         self.assertTrue(net.offline())

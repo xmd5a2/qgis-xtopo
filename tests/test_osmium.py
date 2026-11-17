@@ -155,6 +155,44 @@ class OsmiumToolTest(unittest.TestCase):
             self.assertIsNone(osmium_tool.find_osmium())
         osmium_tool._cache.clear()
 
+    def _script(self, directory, text):
+        path = Path(directory) / "script.sh"
+        path.write_text(f"#!/bin/sh\n{text}\n")
+        path.chmod(0o755)
+        return path
+
+    def test_run_process_reads_large_output(self):
+        """Вывод больше буфера канала не должен вводить процесс в тупик."""
+        with tempfile.TemporaryDirectory() as directory:
+            script = self._script(
+                directory, "head -c 200000 /dev/zero | tr '\\0' 'x'"
+            )
+            code, stdout, stderr = osmium_tool.run_process(
+                [str(script)], timeout=60
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(stdout), 200000)
+        self.assertEqual(stderr, b"")
+
+    def test_run_process_reports_error_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = self._script(directory, "echo broken >&2; exit 3")
+            code, _stdout, stderr = osmium_tool.run_process(
+                [str(script)], timeout=60
+            )
+        self.assertEqual(code, 3)
+        self.assertIn("broken", stderr.decode("utf-8"))
+
+    def test_run_process_can_be_cancelled(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = self._script(directory, "sleep 30")
+            cancel = threading.Event()
+            cancel.set()
+            with self.assertRaises(InterruptedError):
+                osmium_tool.run_process([str(script)], cancel=cancel)
+
 
 class OsmiumPrefilterTest(unittest.TestCase):
     def _make_pbf(self, directory):

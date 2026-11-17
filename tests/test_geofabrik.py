@@ -59,10 +59,19 @@ NESTED_PAYLOAD = {
 }
 
 
-def _dummy_pbf(path):
+def _pbf_bytes(body_size=32):
+    """Минимальный корректный PBF: блок заголовка и блок данных."""
     header = b"\x0a\x09OSMHeader"
+    body = b"\x00" * body_size
+    return (
+        struct.pack(">I", len(header)) + header
+        + struct.pack(">I", len(body)) + body
+    )
+
+
+def _dummy_pbf(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_bytes(struct.pack(">I", len(header)) + header + b"\x00" * 32)
+    Path(path).write_bytes(_pbf_bytes())
 
 
 class _Response:
@@ -289,7 +298,7 @@ class GeofabrikDownloadTest(unittest.TestCase):
             geofabrik.ensure_maps(self.config, [self.first], statuses=[status])
 
     def test_download_writes_file(self):
-        body = struct.pack(">I", 11) + b"\x0a\x09OSMHeader" + b"\x00" * 16
+        body = _pbf_bytes()
         response = _Response(200, body, {"Content-Length": str(len(body))})
         status = geofabrik.MapStatus(map=self.first, available=True, size=len(body))
         transfer = geofabrik._Transfer(len(body), 1)
@@ -301,6 +310,70 @@ class GeofabrikDownloadTest(unittest.TestCase):
         self.assertTrue(geofabrik._looks_like_pbf(path))
         self.assertEqual(transfer.done, len(body))
         self.assertEqual(transfer.maps, 1)
+
+    def test_truncated_download_is_not_published(self):
+        """Оборванный файл не становится картой: он не публикуется."""
+        body = _pbf_bytes()
+        response = _Response(200, body[:10], {"Content-Length": str(len(body))})
+        status = geofabrik.MapStatus(map=self.first, available=True, size=len(body))
+        transfer = geofabrik._Transfer(len(body), 1)
+        with mock.patch.object(geofabrik, "_urlopen", return_value=response):
+            with self.assertRaises(geofabrik.GeofabrikError):
+                geofabrik._download_one(
+                    self.config, self.first, status, transfer, None, None
+                )
+        self.assertFalse(geofabrik.local_path(self.config, self.first).exists())
+
+    def test_pbf_without_data_block_is_rejected(self):
+        """Только заголовка мало: это оборванная загрузка."""
+        path = Path(self.directory.name) / "broken.osm.pbf"
+        header = b"\x0a\x09OSMHeader"
+        path.write_bytes(struct.pack(">I", len(header)) + header)
+        self.assertFalse(geofabrik._looks_like_pbf(path))
+        self.assertFalse(geofabrik.local_ready(self.config, self.first))
+
+    def test_size_cache_keeps_success(self):
+        calls = []
+
+        def head(url):
+            calls.append(url)
+            return True, 1234, ""
+
+        url = "https://example.org/first.osm.pbf"
+        with mock.patch.object(geofabrik, "_head_size", side_effect=head):
+            geofabrik._cached_head(url)
+            geofabrik._cached_head(url)
+        self.assertEqual(len(calls), 1)
+
+    def test_size_cache_keeps_failures_briefly(self):
+        """Сетевой сбой не должен держаться в кэше десять минут."""
+        calls = []
+
+        def head(url):
+            calls.append(url)
+            return False, 0, "offline"
+
+        url = "https://example.org/first.osm.pbf"
+        with mock.patch.object(geofabrik, "_head_size", side_effect=head):
+            first = geofabrik._cached_head(url)
+            geofabrik._cached_head(url)
+            self.assertFalse(first[0])
+            self.assertEqual(len(calls), 1)
+            with mock.patch.object(geofabrik, "ERROR_CHECK_TTL", 0):
+                geofabrik._cached_head(url)
+        self.assertEqual(len(calls), 2)
+
+    def test_head_size_keeps_first_error(self):
+        def fail(request, timeout=None):
+            raise urllib.error.URLError("первая ошибка")
+
+        with mock.patch.object(geofabrik, "_urlopen", side_effect=fail):
+            available, size, error = geofabrik._head_size(
+                "https://example.org/first.osm.pbf"
+            )
+        self.assertFalse(available)
+        self.assertEqual(size, 0)
+        self.assertIn("первая ошибка", error)
 
     def test_transfer_reports_aggregate_progress(self):
         values = []

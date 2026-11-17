@@ -67,6 +67,10 @@ WORLD_MAP_LAYER = "countries"
 SRTM_AVERAGE_BYTES = 15 * 1024 * 1024
 SRTM_HEAD_LIMIT = 32
 
+# Сколько тайлов набора без каталога STAC проверяется HEAD-запросами.
+# Больше — проверка не идёт: для большого охвата это сотни запросов.
+DIRECT_HEAD_LIMIT = 64
+
 # FABDEM: глобальный DEM без леса и построек — Copernicus GLO-30 с
 # вычтенными высотами растительности и построек. Файлы лежат в открытом
 # бакете Hugging Face, каждый тайл — COG, поэтому читается по частям.
@@ -76,6 +80,7 @@ FABDEM_VERSION = "V1-2"
 # Подпись SAS кэшируется: сервис отвечает 429, если подписывать подряд.
 _SIGN_LOCK = threading.Lock()
 _SIGN_CACHE = {}
+# Момент последнего запланированного запроса подписи (монотонное время).
 _SIGN_LAST = [0.0]
 _SIGN_INTERVAL = 0.3
 
@@ -659,35 +664,50 @@ def stac_items(collection, bbox, timeout=30, limit=STAC_LIMIT,
     return items[:STAC_MAX_ITEMS]
 
 
+def _reserve_sign_slot():
+    """Момент, на который запланирован следующий запрос подписи."""
+    with _SIGN_LOCK:
+        now = time.monotonic()
+        start = max(now, _SIGN_LAST[0])
+        _SIGN_LAST[0] = start + _SIGN_INTERVAL
+        return start
+
+
 def sign_pc(href, timeout=60):
     """Подписанная ссылка Planetary Computer (SAS).
 
     Подпись — сетевой запрос с ограничением частоты, поэтому результаты
     кэшируются, а запросы выполняются по одному с небольшой паузой.
+    Замок держится только на обновлении кэша и на резервировании паузы:
+    сам сетевой запрос идёт вне замка, иначе при обрыве связи или
+    ответе 429 все потоки рельефа встали бы на несколько минут.
     """
     now = time.time()
     with _SIGN_LOCK:
         cached = _SIGN_CACHE.get(href)
         if cached and cached[0] > now + 120:
             return cached[1]
-        wait = _SIGN_INTERVAL - (now - _SIGN_LAST[0])
-        if wait > 0:
-            time.sleep(wait)
-        url = SIGN_API + "?href=" + urllib.parse.quote(href, safe="")
-        signed = _http_json(url, timeout=timeout, retries=6, delay=3.0)["href"]
-        _SIGN_LAST[0] = time.time()
-        expiry = _SIGN_LAST[0] + 1800
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(signed).query)
-        stamp = query.get("se", [""])[0]
-        if stamp:
-            try:
-                expiry = calendar.timegm(
-                    time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
-                )
-            except (ValueError, OverflowError):
-                pass
+    # Пауза между запросами резервируется под замком, но ждать можно
+    # и без него: другие потоки не должны стоять из-за чужой подписи.
+    start = _reserve_sign_slot()
+    wait = start - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    url = SIGN_API + "?href=" + urllib.parse.quote(href, safe="")
+    signed = _http_json(url, timeout=timeout, retries=6, delay=3.0)["href"]
+    expiry = time.time() + 1800
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(signed).query)
+    stamp = query.get("se", [""])[0]
+    if stamp:
+        try:
+            expiry = calendar.timegm(
+                time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+            )
+        except (ValueError, OverflowError):
+            pass
+    with _SIGN_LOCK:
         _SIGN_CACHE[href] = (expiry, signed)
-        return signed
+    return signed
 
 
 @dataclass(frozen=True)
@@ -979,6 +999,16 @@ def _direct_availability(item, bbox, timeout=15):
         )
     clipped_bbox = BBox(*clipped)
     required = set(tiles_for_bbox(clipped_bbox))
+    if len(required) > DIRECT_HEAD_LIMIT:
+        # Проверять каждый тайл по HEAD слишком долго: для охвата
+        # 30×20° это сотни запросов.  Честнее сказать, что покрытие
+        # не проверено (как у Copernicus), чем считать тайлы доступными
+        # без проверки.
+        return _check_failed(RuntimeError(
+            i18n.trf(
+                "слишком много тайлов для проверки: {}", len(required)
+            )
+        ))
     states = tile_statuses(item, required, timeout=timeout)
     covered = {tile for tile, state in states.items() if state == "ok"}
     missing = required - covered

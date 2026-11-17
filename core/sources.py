@@ -1,4 +1,5 @@
 import hashlib
+import os
 import shlex
 import subprocess
 import threading
@@ -12,7 +13,7 @@ from . import (
     disk_space, extracts, geofabrik, overpass_batch, osmium_tool, pbf_source,
     slice_estimate,
 )
-from .overpass_client import OverpassClient, build_query
+from .overpass_client import OverpassClient, build_query, valid_osm
 from .resources import read_query
 
 
@@ -20,7 +21,12 @@ from .resources import read_query
 OVERPASS_WORKERS = 6
 
 # Сколько простых запросов объединяем в один пакетный запрос.
-OVERPASS_BATCH_SIZE = 40
+# Пакет меньше: ответ держится в памяти целиком (узлы, линии,
+# отношения), и на стране один пакет — сотни мегабайт.
+OVERPASS_BATCH_SIZE = 20
+
+# Сколько ждать локальный Overpass и ssh-туннель, секунды.
+OVERPASS_PROCESS_TIMEOUT = 3600
 
 
 class SourceError(RuntimeError):
@@ -107,14 +113,13 @@ def _store_query_signature(cache, name, query_text):
 
 
 def _validate_osm(path):
-    path = Path(path)
-    if not path.exists() or path.stat().st_size < 100:
-        return False
-    with path.open("rb") as handle:
-        head = handle.read(2048)
-        handle.seek(max(0, path.stat().st_size - 4096))
-        tail = handle.read()
-    return b"<osm" in head and b"</osm>" in tail
+    """Похож ли файл на ответ Overpass с данными.
+
+    Ответ с ошибкой (``<remark> runtime error: ...``) данными не
+    считается: иначе он попадёт в кэш, и слой навсегда останется
+    пустым.
+    """
+    return valid_osm(path)
 
 
 def _fetch_local(config, query_name, query_text, destination, cancel):
@@ -123,19 +128,34 @@ def _fetch_local(config, query_name, query_text, destination, cancel):
         raise SourceError("overpass_endpoint_local is empty")
     if cancel is not None and cancel.is_set():
         raise InterruptedError("Download cancelled")
-    with destination.open("wb") as handle:
-        process = subprocess.run(
-            command,
-            input=query_text.encode("utf-8"),
-            stdout=handle,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    with temporary.open("wb") as handle:
+        try:
+            process = subprocess.run(
+                command,
+                input=query_text.encode("utf-8"),
+                stdout=handle,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=OVERPASS_PROCESS_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            temporary.unlink(missing_ok=True)
+            raise SourceError(
+                f"{query_name}: локальный Overpass не ответил за "
+                f"{OVERPASS_PROCESS_TIMEOUT} с"
+            ) from exc
+    if cancel is not None and cancel.is_set():
+        temporary.unlink(missing_ok=True)
+        raise InterruptedError("Download cancelled")
     if process.returncode != 0:
+        temporary.unlink(missing_ok=True)
         message = process.stderr.decode("utf-8", errors="replace").strip()
         raise SourceError(f"{query_name}: local Overpass failed: {message}")
-    if not _validate_osm(destination):
+    if not _validate_osm(temporary):
+        temporary.unlink(missing_ok=True)
         raise SourceError(f"{query_name}: local Overpass returned an empty or incomplete response")
+    os.replace(temporary, destination)
 
 
 def _fetch_ssh(config, query_name, query_text, destination, cancel):
@@ -143,20 +163,35 @@ def _fetch_ssh(config, query_name, query_text, destination, cancel):
         raise SourceError("overpass_endpoint_ssh is empty")
     if cancel is not None and cancel.is_set():
         raise InterruptedError("Download cancelled")
-    with destination.open("wb") as handle:
-        process = subprocess.run(
-            config.overpass_endpoint_ssh,
-            input=query_text.encode("utf-8"),
-            stdout=handle,
-            stderr=subprocess.PIPE,
-            shell=True,
-            check=False,
-        )
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    with temporary.open("wb") as handle:
+        try:
+            process = subprocess.run(
+                config.overpass_endpoint_ssh,
+                input=query_text.encode("utf-8"),
+                stdout=handle,
+                stderr=subprocess.PIPE,
+                shell=True,
+                check=False,
+                timeout=OVERPASS_PROCESS_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            temporary.unlink(missing_ok=True)
+            raise SourceError(
+                f"{query_name}: SSH Overpass не ответил за "
+                f"{OVERPASS_PROCESS_TIMEOUT} с"
+            ) from exc
+    if cancel is not None and cancel.is_set():
+        temporary.unlink(missing_ok=True)
+        raise InterruptedError("Download cancelled")
     if process.returncode != 0:
+        temporary.unlink(missing_ok=True)
         message = process.stderr.decode("utf-8", errors="replace").strip()
         raise SourceError(f"{query_name}: SSH Overpass failed: {message}")
-    if not _validate_osm(destination):
+    if not _validate_osm(temporary):
+        temporary.unlink(missing_ok=True)
         raise SourceError(f"{query_name}: SSH Overpass returned an empty or incomplete response")
+    os.replace(temporary, destination)
 
 
 def _selected_maps(index, config, bbox):
@@ -177,6 +212,28 @@ def _selected_maps(index, config, bbox):
         if item not in maps:
             maps.append(item)
     return maps
+
+
+def _extracted_paths(config, paths):
+    """Вырезанные osmium файлы прошлого прохода.
+
+    Имена те же, что у ``osmium_prefilter``.  После ошибки чтения они
+    остаются на диске, и читать их вместо сырой выгрузки страны
+    намного быстрее: часы вместо минут.
+    """
+    directory = Path(config.temp_dir) / "osmium"
+    if not directory.is_dir():
+        return []
+    found = []
+    for position, source in enumerate(paths, 1):
+        stem = Path(source).stem.replace(".", "_")
+        candidate = directory / f"{stem}_{position}_extract.osm.pbf"
+        try:
+            if candidate.stat().st_size > 0:
+                found.append(candidate)
+        except OSError:
+            continue
+    return found
 
 
 def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
@@ -232,7 +289,14 @@ def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
         # одинаковым id уйдут в один слой при разборе.  Даже если
         # paths уже отдельные (osmium склеил их внутри себя), повтор
         # с use_osmium=False обязателен — иначе откат не сработает.
-        separate = geofabrik.local_maps(config, maps)
+        if osmium_ready:
+            # Повтор читает вырезанные osmium файлы прошлого прохода:
+            # сырую выгрузку страны читать часами.
+            separate = _extracted_paths(config, paths)
+            if not separate:
+                separate = geofabrik.local_maps(config, maps)
+        else:
+            separate = geofabrik.local_maps(config, maps)
         if (not osmium_ready
                 and [str(item) for item in separate]
                 == [str(item) for item in paths]):
@@ -311,7 +375,9 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
         query_texts = {name: read_query(name) for name in query_names}
         client = extracts.SliceOsm()
         destination = slice_estimate.slice_cache_path(config, bbox)
-        if not (destination.exists() and destination.stat().st_size > 0):
+        # Готовым считается только целый вырез: оборванный файл по
+        # одному признаку «непустой» выглядит как скачанная карта.
+        if not extracts.looks_like_pbf(destination):
             config.geofabrik_dir.mkdir(parents=True, exist_ok=True)
             try:
                 with timer.measure():
@@ -450,10 +516,15 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
 
         def fetch(name):
             destination = cache / f"{name}.osm"
+            # Кэш берётся только пока текст запроса не менялся: иначе
+            # старый ответ помечается актуальным, и слой навсегда
+            # остаётся со старыми данными.
+            current = _cache_is_current(cache, name, texts[name])
             with timer.measure():
                 path = client.fetch(
                     name, texts[name], bbox, destination,
                     cancel=cancel_proxy, progress=progress,
+                    use_cache=current,
                 )
             _store_query_signature(cache, name, texts[name])
             return name, path
@@ -515,6 +586,9 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
                         path = client.fetch(
                             name, texts[name], bbox, destination,
                             cancel=cancel_proxy, progress=progress,
+                            use_cache=_cache_is_current(
+                                cache, name, texts[name]
+                            ),
                         )
                 except Exception as exc:
                     if progress:

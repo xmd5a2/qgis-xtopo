@@ -4,7 +4,6 @@ import os
 import re
 import shutil
 import struct
-import subprocess
 import threading
 import time
 import urllib.error
@@ -25,6 +24,9 @@ INDEX_TIMEOUT = 30
 HEAD_TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 30
 CHECK_TTL = 10 * 60
+# Сетевой сбой кэшируется ненадолго: после обрыва связи проверку
+# надо повторить сразу, а не через десять минут.
+ERROR_CHECK_TTL = 30
 CHUNK = 1024 * 1024
 MAX_DOWNLOADS = 4
 # Карты крупнее этого размера не предлагаются к скачиванию.
@@ -415,6 +417,9 @@ def _head_size(url):
             size = int(response.headers.get("Content-Length") or 0)
             return True, size, ""
     except Exception as exc:
+        # Ошибка первого запроса — основная: второй (Range) может
+        # не сказать ничего нового.
+        first_error = str(exc)
         try:
             request = urllib.request.Request(
                 url,
@@ -424,22 +429,35 @@ def _head_size(url):
                 content_range = response.headers.get("Content-Range") or ""
                 size = int(content_range.rsplit("/", 1)[-1]) if "/" in content_range else 0
                 return True, size, ""
-        except Exception:
-            return False, 0, str(exc)
+        except Exception as range_exc:
+            return False, 0, f"{first_error} ({range_exc})"
 
 
 def _cached_head(url):
+    """Размер файла по сети; ответ кэшируется.
+
+    Успешный ответ живёт долго, ошибка — недолго: после обрыва связи
+    повторять проверку надо сразу, а не через десять минут.
+    """
     cached = _size_cache.get(url)
     now = time.time()
-    if cached is not None and now - cached[0] < CHECK_TTL:
-        return cached[1:]
+    if cached is not None:
+        stored, available, size, error = cached
+        ttl = CHECK_TTL if available else ERROR_CHECK_TTL
+        if now - stored < ttl:
+            return available, size, error
     result = _head_size(url)
     _size_cache[url] = (now, *result)
     return result
 
 
-def clear_caches():
+def clear_size_cache():
+    """Сбрасывает кэш размеров карт (смена прокси, ручная проверка)."""
     _size_cache.clear()
+
+
+def clear_caches():
+    clear_size_cache()
     _index_cache.clear()
 
 
@@ -509,17 +527,30 @@ def local_maps(config, maps):
 
 
 def _looks_like_pbf(path):
+    """Похож ли файл на PBF: блок заголовка и данные после него.
+
+    Одного заголовка мало: файл из 13 байт с одним заголовком без
+    данных — это оборванная загрузка, а не карта.
+    """
     path = Path(path)
     try:
+        size = path.stat().st_size
         with path.open("rb") as handle:
             raw = handle.read(4)
             if len(raw) < 4:
                 return False
-            size = struct.unpack(">I", raw)[0]
-            if not 0 < size < 1000000:
+            length = struct.unpack(">I", raw)[0]
+            if not 0 < length < 1000000:
                 return False
-            header = handle.read(size)
-            return b"OSMHeader" in header[:200]
+            header = handle.read(length)
+            if len(header) < length or b"OSMHeader" not in header[:200]:
+                return False
+            if size < 4 + length + 4:
+                return False
+            raw = handle.read(4)
+            if len(raw) < 4:
+                return False
+            return struct.unpack(">I", raw)[0] > 0
     except OSError:
         return False
 
@@ -619,6 +650,27 @@ class _Transfer:
         self.percent(value, " · ".join(parts))
 
 
+def _expected_size(headers, code, status):
+    """Ожидаемый размер файла по ответу сервера.
+
+    Для частичного ответа (206) берётся общий размер из Content-Range,
+    иначе — Content-Length, и только потом размер из проверки карты.
+    """
+    content_range = headers.get("Content-Range") or ""
+    if code == 206 and "/" in content_range:
+        try:
+            return int(content_range.rsplit("/", 1)[-1])
+        except ValueError:
+            pass
+    length = headers.get("Content-Length")
+    if length:
+        try:
+            return int(length)
+        except ValueError:
+            pass
+    return status.size if status is not None else 0
+
+
 def _download_one(config, item, status, transfer, progress, cancel):
     destination = local_path(config, item)
     temporary = destination.with_suffix(destination.suffix + ".part")
@@ -640,6 +692,7 @@ def _download_one(config, item, status, transfer, progress, cancel):
             temporary.unlink(missing_ok=True)
         elif start:
             transfer.add(start)
+        expected = _expected_size(response.headers, code, status)
         mode = "ab" if start else "wb"
         with temporary.open(mode) as handle:
             while True:
@@ -650,6 +703,15 @@ def _download_one(config, item, status, transfer, progress, cancel):
                     break
                 handle.write(chunk)
                 transfer.add(len(chunk))
+    received = temporary.stat().st_size
+    if expected and received != expected:
+        # Файл неполный: публиковать его нельзя, иначе карта будет
+        # считаться готовой навсегда.
+        temporary.unlink(missing_ok=True)
+        raise GeofabrikError(
+            f"Файл {item.id} скачан не полностью: "
+            f"{received} из {expected} байт"
+        )
     if not _looks_like_pbf(temporary):
         temporary.unlink(missing_ok=True)
         raise GeofabrikError(f"Файл {item.id} не похож на PBF")
@@ -772,18 +834,17 @@ def merge_if_available(config, maps, paths, progress=None, cancel=None):
         progress(f"Склейка карт osmium ({len(paths)} шт.)…")
     command = [executable, "merge", "--overwrite", "-o", str(temporary)]
     command.extend(str(path) for path in paths)
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
     try:
-        while process.poll() is None:
-            if cancel is not None and cancel.is_set():
-                process.terminate()
-                raise InterruptedError("osmium merge cancelled")
-            time.sleep(0.5)
-    finally:
-        stdout, stderr = process.communicate()
-    if process.returncode != 0:
+        code, _stdout, stderr = osmium_tool.run_process(
+            command, timeout=osmium_tool.DEFAULT_TIMEOUT, cancel=cancel
+        )
+    except InterruptedError:
+        temporary.unlink(missing_ok=True)
+        raise
+    except osmium_tool.OsmiumError as exc:
+        temporary.unlink(missing_ok=True)
+        raise GeofabrikError(f"osmium merge failed: {exc}") from exc
+    if code != 0:
         temporary.unlink(missing_ok=True)
         message = stderr.decode("utf-8", "replace").strip()
         raise GeofabrikError(f"osmium merge failed: {message}")
