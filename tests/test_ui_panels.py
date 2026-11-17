@@ -395,6 +395,42 @@ class SourceModeTest(unittest.TestCase):
         values.update(overrides)
         return slice_estimate.SliceEstimate(**values)
 
+    def test_slice_refresh_button_refreshes_index(self):
+        """Кнопка перекачивает карту узлов и пересчитывает оценку."""
+        from unittest import mock
+
+        from qgis_xtopo.core import net
+
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        with mock.patch.object(net, "reset") as reset, \
+                mock.patch.object(dock, "_start_slice_estimate") as start:
+            dock._refresh_slice_estimate()
+        reset.assert_called_once_with()
+        start.assert_called_once_with(refresh=True)
+
+    def test_slice_refresh_button_is_only_in_slice_mode(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        self.assertTrue(dock.slice_header.isVisibleTo(dock))
+        self.assertEqual(
+            dock.slice_refresh.toolTip(),
+            "Обновить индекс выгрузок SliceOSM",
+        )
+        dock.source_mode.setCurrentIndex(
+            dock.source_mode.findData("geofabrik")
+        )
+        self.assertFalse(dock.slice_header.isVisibleTo(dock))
+
+    def test_slice_refreshing_state_shows_progress(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        dock._slice_estimate_state = ("refreshing",)
+        dock._render_slice_estimate()
+        self.assertIn("Обновление индекса", dock.pbf_info.text())
+
     def test_slice_mode_shows_volume_and_time(self):
         dock = self._dock()
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))

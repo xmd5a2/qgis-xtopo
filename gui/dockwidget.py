@@ -632,7 +632,7 @@ class SliceEstimateWorker(QThread):
     progress = pyqtSignal(str)
 
     def __init__(self, config, bbox, cached_bytes, cpu, workers,
-                 terrain_seconds, parent=None):
+                 terrain_seconds, parent=None, refresh=False):
         super().__init__(parent)
         self.config = config
         self.bbox = bbox
@@ -640,6 +640,7 @@ class SliceEstimateWorker(QThread):
         self.cpu = cpu
         self.workers = workers
         self.terrain_seconds = terrain_seconds
+        self.refresh = refresh
         self.cancel_event = threading.Event()
 
     def run(self):
@@ -651,7 +652,7 @@ class SliceEstimateWorker(QThread):
                 service = client.service_status(cancel=self.cancel_event)
                 path = slice_estimate.ensure_nodes_image(
                     self.config, cancel=self.cancel_event,
-                    progress=self.progress.emit,
+                    progress=self.progress.emit, force=self.refresh,
                 )
                 if self.cancel_event.is_set():
                     return
@@ -1195,6 +1196,29 @@ class XtopoDockWidget(QDockWidget):
         self.source_hint = WrappedLabel("")
         self.source_hint.setWordWrap(True)
         source_form.addRow(self.source_hint)
+        # Заголовок оценки выреза с кнопкой обновления индекса.  Карта
+        # плотности узлов кэшируется на месяц, а статус сервиса читается
+        # при каждом расчёте, поэтому кнопка нужна, когда данные устарели.
+        self.slice_header = QWidget()
+        slice_header_layout = QHBoxLayout(self.slice_header)
+        slice_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.slice_title = QLabel(i18n.tr("Оценка выреза SliceOSM"))
+        slice_header_layout.addWidget(self.slice_title)
+        slice_header_layout.addStretch(1)
+        self.slice_refresh = QToolButton()
+        self.slice_refresh.setIcon(
+            QgsApplication.getThemeIcon("mActionReload.svg")
+        )
+        self.slice_refresh.setAutoRaise(True)
+        self.slice_refresh.setFixedSize(QSize(18, 18))
+        self.slice_refresh.setIconSize(QSize(14, 14))
+        self.slice_refresh.setToolTip(
+            i18n.tr("Обновить индекс выгрузок SliceOSM")
+        )
+        self.slice_refresh.clicked.connect(self._refresh_slice_estimate)
+        slice_header_layout.addWidget(self.slice_refresh)
+        self.slice_header.setVisible(False)
+        source_form.addRow(self.slice_header)
         self.map_index_group = QGroupBox("")
         maps_layout = QVBoxLayout(self.map_index_group)
         maps_layout.setContentsMargins(4, 4, 4, 4)
@@ -1697,6 +1721,7 @@ class XtopoDockWidget(QDockWidget):
             i18n.tr("Выбрать файл .pbf или .osm") if mode == "pbf" else ""
         )
         self.map_index_group.setVisible(is_file)
+        self.slice_header.setVisible(mode == "slice")
         if not is_file:
             self._map_index_timer.stop()
             self._map_index_plan = None
@@ -2679,7 +2704,7 @@ class XtopoDockWidget(QDockWidget):
                 # Объект уже удалён QThread.
                 pass
 
-    def _start_slice_estimate(self):
+    def _start_slice_estimate(self, refresh=False):
         self._slice_estimate_timer.stop()
         if self.source_mode.currentData() != "slice" or not self.isVisible():
             return
@@ -2687,6 +2712,7 @@ class XtopoDockWidget(QDockWidget):
         if not text:
             self._slice_estimate_state = None
             self.pbf_info.clear()
+            self._set_slice_busy(False)
             return
         try:
             bbox = parse_bbox(text)
@@ -2705,6 +2731,7 @@ class XtopoDockWidget(QDockWidget):
         self._cancel_slice_estimate()
         worker = SliceEstimateWorker(
             config, bbox, cached, cpu, workers, terrain_seconds, parent=self,
+            refresh=refresh,
         )
         worker.result.connect(
             lambda result, w=worker: self._slice_estimate_ready(w, result)
@@ -2717,9 +2744,28 @@ class XtopoDockWidget(QDockWidget):
         )
         self.slice_estimate_workers.append(worker)
         self.slice_estimate_worker = worker
-        self._slice_estimate_state = ("loading",)
+        self._slice_estimate_state = (
+            ("refreshing",) if refresh else ("loading",)
+        )
+        self._set_slice_busy(True)
         self._render_slice_estimate()
         worker.start()
+
+    def _set_slice_busy(self, busy):
+        """Пока идёт расчёт, повторное обновление индекса не запускается."""
+        try:
+            self.slice_refresh.setEnabled(not busy)
+        except RuntimeError:
+            pass
+
+    def _refresh_slice_estimate(self):
+        """Перекачать карту плотности узлов и пересчитать оценку."""
+        if self.source_mode.currentData() != "slice":
+            return
+        # Кнопка — повод попробовать сеть заново: после недавней ошибки
+        # предохранитель иначе сразу отклонит запрос.
+        net.reset()
+        self._start_slice_estimate(refresh=True)
 
     def _slice_estimate_finished(self, worker):
         try:
@@ -2728,6 +2774,8 @@ class XtopoDockWidget(QDockWidget):
             pass
         if self.slice_estimate_worker is worker:
             self.slice_estimate_worker = None
+        if self.slice_estimate_worker is None:
+            self._set_slice_busy(False)
         worker.deleteLater()
 
     def _slice_estimate_ready(self, worker, estimate):
@@ -2758,8 +2806,13 @@ class XtopoDockWidget(QDockWidget):
         if state is None:
             return
         kind = state[0]
-        if kind == "loading":
-            self.pbf_info.setText(i18n.tr("Оценка вырезки…"))
+        if kind in ("loading", "refreshing"):
+            if kind == "refreshing":
+                self.pbf_info.setText(
+                    i18n.tr("Обновление индекса выгрузок SliceOSM…")
+                )
+            else:
+                self.pbf_info.setText(i18n.tr("Оценка вырезки…"))
             self.pbf_info.setToolTip("")
             return
         if kind == "error":

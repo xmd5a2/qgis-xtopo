@@ -821,6 +821,10 @@ class SliceEstimateTest(unittest.TestCase):
                 slice_estimate.ensure_nodes_image(config)
                 self.assertEqual(download.call_count, 1)
 
+                # Принудительное обновление не ждёт конца срока кэша.
+                slice_estimate.ensure_nodes_image(config, force=True)
+                self.assertEqual(download.call_count, 2)
+
                 old = time.time() - 7200
                 os.utime(path, (old, old))
                 with mock.patch.object(

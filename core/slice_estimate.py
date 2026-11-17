@@ -127,18 +127,19 @@ def _valid_png(path):
         return False
 
 
-def ensure_nodes_image(config, cancel=None, progress=None):
+def ensure_nodes_image(config, cancel=None, progress=None, force=False):
     """Карта плотности узлов; при необходимости скачивает и кэширует.
 
     Файл небольшой (3,1 МБ), поэтому качается целиком одним ответом:
     ``download_file`` рассчитан на большие выгрузки, а этот хост не
-    поддерживает HEAD и отдаёт ответ частями.  Старая карта лучше
+    поддерживает HEAD и отдаёт ответ частями.  ``force`` обновляет карту
+    по кнопке, не дожидаясь конца срока кэша.  Старая карта лучше
     отсутствия: если обновление не удалось, но прежний файл цел,
     возвращается он.
     """
     path = nodes_image_path(config)
     valid = _valid_png(path)
-    if valid:
+    if valid and not force:
         try:
             age = time.time() - path.stat().st_mtime
         except OSError:

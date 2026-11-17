@@ -608,5 +608,8 @@
   "60° ю.ш. – 80° с.ш.": "60° S – 80° N",
   "Для каждого тайла выбирается лучший доступный набор: USGS 3DEP, затем Sonny DTM, в горах ALOS, затем FABDEM; фоном — Copernicus GLO-30, в крайнем случае SRTM.": "For each tile the best available dataset is picked: USGS 3DEP, then Sonny DTM, ALOS in the mountains, then FABDEM; Copernicus GLO-30 as the background, and SRTM as a last resort.",
   "Copernicus GLO-30 с вычтенными высотами леса и построек: земная поверхность без растительности. Файлы — COG в бакете LINKS, читаются по частям. Лицензия CC BY-NC-SA 4.0: только некоммерческое использование. Данные: data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn": "Copernicus GLO-30 with forest and building heights subtracted: the ground surface without vegetation. The files are COGs in the LINKS bucket, read in parts. Licence CC BY-NC-SA 4.0: non-commercial use only. Data: data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn",
-  "FABDEM — University of Bristol (CC BY-NC-SA 4.0)": "FABDEM — University of Bristol (CC BY-NC-SA 4.0)"
+  "FABDEM — University of Bristol (CC BY-NC-SA 4.0)": "FABDEM — University of Bristol (CC BY-NC-SA 4.0)",
+  "Оценка выреза SliceOSM": "SliceOSM cutout estimate",
+  "Обновить индекс выгрузок SliceOSM": "Refresh the SliceOSM extracts index",
+  "Обновление индекса выгрузок SliceOSM…": "Refreshing the SliceOSM extracts index…"
 }
