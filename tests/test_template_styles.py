@@ -371,10 +371,12 @@ class LabelPriorityTest(unittest.TestCase):
 
 
 class SettlementScaleTest(unittest.TestCase):
-    """Хутора и отдельные дворы не показываются с 1:200000 и мельче."""
+    """Видимость хуторов зависит от масштаба и уровня детализации."""
 
-    LIMIT = 200000
     NAMES = ("hamlet", "isolated dwelling")
+    FINE = ("", "")  # 0-100k и 50k-100k: любой LOD
+    MIDDLE = "@level_of_detail >= 3"
+    COARSE = "@level_of_detail >= 6"
 
     @classmethod
     def setUpClass(cls):
@@ -408,21 +410,62 @@ class SettlementScaleTest(unittest.TestCase):
         self.assertIsNotNone(branch, path)
         return branch
 
-    def test_type_rules_stop_at_200k(self):
+    @staticmethod
+    def _bounds(rule):
+        def number(name):
+            value = float(rule.get(name) or 0)
+            # scalemindenom=1 в шаблоне означает отсутствие нижней границы.
+            return 0.0 if value <= 1.0 else value
+        return number("scaleminendenom"), number("scalemaxdenom")
+
+    def _visible_at(self, leaves, scale):
+        result = []
+        for rule in leaves:
+            lower, upper = self._bounds(rule)
+            if lower <= scale and (upper == 0 or scale < upper):
+                result.append(rule)
+        return result
+
+    def test_visibility_matrix_for_both_containers(self):
+        checks = (
+            (25000, self.FINE[0]),
+            (75000, self.FINE[1]),
+            (150000, self.MIDDLE),
+            (300000, self.COARSE),
+        )
         for container in ("renderer-v2/rules", "labeling/rules"):
             for name in self.NAMES:
                 with self.subTest(container=container, name=name):
-                    branch = self._branch(
-                        container, ["else", "else", name],
+                    leaves = self._leaves(
+                        self._branch(container, ["else", "else", name])
                     )
-                    for rule in self._leaves(branch):
-                        minimum = float(rule.get("scalemindenom") or 0)
-                        maximum = float(rule.get("scalemaxdenom") or 0)
-                        self.assertGreater(maximum, 0, (minimum, maximum))
-                        self.assertLessEqual(
-                            maximum, self.LIMIT, (minimum, maximum),
+                    for scale, expected in checks:
+                        visible = self._visible_at(leaves, scale)
+                        self.assertEqual(len(visible), 1, (scale, visible))
+                        self.assertEqual(
+                            visible[0].get("filter") or "", expected, scale
                         )
-                        self.assertLess(minimum, self.LIMIT)
+                    # Дальше 1:500000 правил нет.
+                    self.assertFalse(self._visible_at(leaves, 600000))
+
+    def test_coarse_scale_stops_at_500k(self):
+        for container in ("renderer-v2/rules", "labeling/rules"):
+            for name in self.NAMES:
+                with self.subTest(container=container, name=name):
+                    leaves = self._leaves(
+                        self._branch(container, ["else", "else", name])
+                    )
+                    for rule in leaves:
+                        lower, upper = self._bounds(rule)
+                        self.assertLessEqual(upper, 500000, (lower, upper))
+                        self.assertLess(lower, 500000, (lower, upper))
+
+    def test_place_density_is_gone(self):
+        for rule in self.layer.iter("rule"):
+            self.assertNotIn(
+                "place_density", rule.get("filter") or "",
+                rule.get("description") or rule.get("label"),
+            )
 
     def test_population_branch_excludes_them_at_200k(self):
         expected = (

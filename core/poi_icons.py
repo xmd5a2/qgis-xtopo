@@ -78,7 +78,7 @@ _TEMPLATE_ROOTS = {}
 # Переменные проекта из шаблона: тоже читаются один раз за сеанс.
 _TEMPLATE_VARIABLES = {}
 
-LOD_LEVELS = (3, 4, 5, 6)
+LOD_LEVELS = (2, 3, 4, 5, 6)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
 # точек, скрытых текущим уровнем детализации.
 NEVER_RANK = 99999
@@ -852,7 +852,7 @@ def restore_base_filters(layers, bands):
 
 
 def template_variables(path=None):
-    """Переменные проекта из шаблона (place_density и прочие)."""
+    """Переменные проекта из шаблона (уровень детализации и прочие)."""
     path = Path(path or template_path())
     cached = _TEMPLATE_VARIABLES.get(path)
     if cached is not None:

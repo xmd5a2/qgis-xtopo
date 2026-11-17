@@ -788,12 +788,13 @@ class DockLanguageTest(unittest.TestCase):
     def test_detail_labels_follow_interface_language(self):
         dock = self._dock()
         combo = dock.project_panel.detail_combo
-        self.assertTrue(combo.itemText(0).startswith("3"))
+        self.assertTrue(combo.itemText(0).startswith("2"))
         dock._switch_language()
         self.app.processEvents()
         self.assertEqual(dock.project_panel.detail_label.text(), "Detail")
-        self.assertIn("main", combo.itemText(0))
-        self.assertIn("everything", combo.itemText(3))
+        self.assertIn("minimum", combo.itemText(0))
+        self.assertIn("main", combo.itemText(1))
+        self.assertIn("everything", combo.itemText(4))
 
     def test_text_size_combo_offers_percents(self):
         dock = self._dock()

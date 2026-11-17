@@ -3331,6 +3331,8 @@ class PipelineIntegrationTest(unittest.TestCase):
  <node id="2" lat="42.86" lon="44.96"><tag k="natural" v="peak"/></node>
  <node id="3" lat="42.86" lon="44.96"/>
  <node id="4" lat="42.86" lon="44.98"/>
+ <node id="5" lat="42.90" lon="45.02"><tag k="place" v="hamlet"/></node>
+ <node id="6" lat="42.90" lon="45.02002"><tag k="place" v="hamlet"/></node>
 </osm>
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -3364,6 +3366,43 @@ class PipelineIntegrationTest(unittest.TestCase):
                         definition.GetFieldDefn(position).GetName()
                         for position in range(definition.GetFieldCount())
                     )
+
+                # LOD хутора: 2 на 0-100k, 3 на 100-200k, 6 на 200-500k,
+                # на 500k+ правила нет.
+                layers = poi_icons.read_template_poi()
+                bands = poi_icons.canonical_bands(layers)
+                for index, (lower, upper) in enumerate(bands):
+                    if lower >= 500000:
+                        expected = None
+                    elif upper and upper <= 100000:
+                        expected = 2
+                    elif upper and upper <= 200000:
+                        expected = 3
+                    else:
+                        expected = 6
+                    layer = dataset.GetLayerByName(
+                        poi_icons.aux_table_name(index)
+                    )
+                    if layer is None:
+                        self.assertIsNone(expected, (index, lower, upper))
+                        continue
+                    found = []
+                    for feature in layer:
+                        geometry = feature.GetGeometryRef()
+                        if geometry is None:
+                            continue
+                        if (
+                            abs(geometry.GetX() - 45.02) < 1e-6
+                            and abs(geometry.GetY() - 42.90) < 1e-6
+                        ):
+                            found.append(feature.GetField("lod"))
+                    if expected is None:
+                        self.assertEqual(found, [], (index, lower, upper))
+                    else:
+                        self.assertTrue(found, (index, lower, upper))
+                        self.assertEqual(
+                            set(found), {expected}, (index, lower, upper)
+                        )
             finally:
                 dataset = None
             self.assertGreater(total, 0)
