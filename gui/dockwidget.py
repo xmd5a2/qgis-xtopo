@@ -813,6 +813,13 @@ class XtopoDockWidget(QDockWidget):
         if self._shutting_down:
             return
         self._shutting_down = True
+        if final and getattr(self, "settings", None) is not None:
+            # При выходе из QGIS панель может не получить closeEvent:
+            # сохраняем настройки здесь, пока виджеты ещё живы.
+            try:
+                self._save_settings()
+            except (RuntimeError, AttributeError):
+                pass
         for timer in (
                 self._pbf_probe_timer, self._map_index_timer,
                 self._slice_estimate_timer, self._dem_check_timer,
@@ -1521,6 +1528,11 @@ class XtopoDockWidget(QDockWidget):
 
     def _source_changed(self, _index):
         mode = self.source_mode.currentData()
+        # QGIS может завершиться, не вызвав closeEvent панели, поэтому
+        # выбранный режим сохраняем сразу, а не только при закрытии.
+        if getattr(self, "settings", None) is not None:
+            self.settings.setValue("source_mode", mode)
+            self.settings.sync()
         if self._active_mode != mode:
             if self._active_mode not in FILE_MODES:
                 current = self.source_value.text()

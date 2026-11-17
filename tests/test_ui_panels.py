@@ -339,6 +339,29 @@ class SourceModeTest(unittest.TestCase):
         self.assertEqual(dock.source_mode.itemData(0), "slice")
         self.assertEqual(dock.source_mode.itemData(1), "geofabrik")
 
+    def test_source_mode_is_saved_on_selection(self):
+        """Режим сохраняется сразу: QGIS может не вызвать closeEvent."""
+        from qgis.PyQt.QtCore import QSettings
+
+        settings = QSettings("qgis-xtopo", "qgis-xtopo")
+        saved = settings.value("source_mode")
+        dock = self._dock()
+        try:
+            dock.source_mode.setCurrentIndex(
+                dock.source_mode.findData("pbf")
+            )
+            dock.source_mode.setCurrentIndex(
+                dock.source_mode.findData("slice")
+            )
+            settings.sync()
+            self.assertEqual(settings.value("source_mode"), "slice")
+        finally:
+            if saved is None:
+                settings.remove("source_mode")
+            else:
+                settings.setValue("source_mode", saved)
+            settings.sync()
+
     def test_rare_modes_are_greyed_out(self):
         from qgis.PyQt.QtCore import Qt
 
