@@ -7,11 +7,18 @@
 """
 
 import importlib.util
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 PACKAGE_NAME = "qgis_xtopo"
 ROOT = Path(__file__).resolve().parent.parent
+
+# Тесты создают панель и переключают режимы источника; теперь режим
+# сохраняется сразу, поэтому настройки должны уходить во временный
+# каталог, а не в конфиг реального пользователя.
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="qgis-xtopo-tests-")
 
 
 def register_package(name=PACKAGE_NAME):
