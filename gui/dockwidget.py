@@ -143,6 +143,26 @@ def _log_expand_icon(style):
     return QStyle.StandardPixmap.SP_DialogOpenButton
 
 
+def _application_proxy():
+    """Прокси приложения QGIS до того, как его сменил плагин."""
+    try:
+        from qgis.PyQt.QtNetwork import QNetworkProxy
+        return QNetworkProxy.applicationProxy()
+    except Exception:
+        return None
+
+
+def _restore_application_proxy(saved):
+    """Возвращает прокси приложения, заданный до загрузки плагина."""
+    if saved is None:
+        return
+    try:
+        from qgis.PyQt.QtNetwork import QNetworkProxy
+        QNetworkProxy.setApplicationProxy(saved)
+    except Exception:
+        pass
+
+
 def _short_status(text, limit=58):
     """Сокращает длинный текст статуса, оставляя конец пути.
 
@@ -390,13 +410,16 @@ class PbfProbeWorker(QThread):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, config, bbox, names, texts, paths=None, parent=None):
+    def __init__(self, config, bbox, names, texts, paths=None, generation=0,
+                 parent=None):
         super().__init__(parent)
         self.config = config
         self.bbox = bbox
         self.names = names
         self.texts = texts
         self.paths = [Path(path) for path in (paths or [config.pbf_path])]
+        # Номер поколения: результат устаревшего работника отбрасывается.
+        self.generation = generation
         self.cancel_event = threading.Event()
 
     def run(self):
@@ -528,9 +551,18 @@ class ProxyCheckWorker(QThread):
         super().__init__(parent)
         self.config = config
         self.generation = generation
+        self.cancel_event = threading.Event()
 
     def run(self):
-        self.checked.emit(self.generation, proxy.probe(self.config))
+        if self.cancel_event.is_set():
+            return
+        ok = proxy.probe(self.config)
+        if self.cancel_event.is_set():
+            return
+        self.checked.emit(self.generation, ok)
+
+    def cancel(self):
+        self.cancel_event.set()
 
 
 class MapIndexWorker(QThread):
@@ -538,11 +570,14 @@ class MapIndexWorker(QThread):
     failed = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, config, bbox, parent=None, provider="geofabrik"):
+    def __init__(self, config, bbox, parent=None, provider="geofabrik",
+                 generation=0):
         super().__init__(parent)
         self.config = config
         self.bbox = bbox
         self.provider = provider
+        # Номер поколения: результат устаревшего работника отбрасывается.
+        self.generation = generation
         self.cancel_event = threading.Event()
 
     def run(self):
@@ -681,6 +716,9 @@ class WrappedLabel(QLabel):
 
 
 class XtopoDockWidget(QDockWidget):
+    # Сколько ждём остановки фоновых потоков при закрытии панели, мс.
+    SHUTDOWN_WAIT_MS = 20000
+
     def __init__(self, iface, parent=None):
         details = " ".join(
             part for part in (plugin_version(), plugin_build_date()) if part
@@ -691,7 +729,13 @@ class XtopoDockWidget(QDockWidget):
         self.worker = None
         self.server_workers = []
         self.pbf_probe = None
+        # Все живые работники пробы: отменённый не удаляется сразу, и
+        # его надо остановить при закрытии панели.
+        self._pbf_probe_workers = []
+        self._pbf_probe_generation = 0
         self.map_index_worker = None
+        self._map_index_workers = []
+        self._map_index_generation = 0
         self.dem_availability_worker = None
         self._dem_availability = {}
         self._dem_bbox = None
@@ -745,7 +789,24 @@ class XtopoDockWidget(QDockWidget):
         self._proxy_timer = QTimer(self)
         self._proxy_timer.setInterval(30_000)
         self._proxy_timer.timeout.connect(self._check_proxy)
-        self.settings = QSettings("qgis-xtopo", "qgis-xtopo")
+        # Свободное место на диске пересчитываем не на каждый символ:
+        # запрос к диску на сетевом каталоге заметно тормозит ввод.
+        self._disk_info_timer = QTimer(self)
+        self._disk_info_timer.setSingleShot(True)
+        self._disk_info_timer.setInterval(400)
+        self._disk_info_timer.timeout.connect(self._update_disk_info)
+        # Существование файла проекта проверяется после паузы в наборе
+        # имени: проверка ходит на диск.
+        self._exists_timer = QTimer(self)
+        self._exists_timer.setSingleShot(True)
+        self._exists_timer.setInterval(400)
+        self._exists_timer.timeout.connect(self._refresh_project_exists)
+        self._exists_path = None
+        self._exists_result = False
+        self.settings = QSettings(*i18n.SETTINGS_GROUP)
+        # Прокси приложения до изменений плагина: при выгрузке плагина
+        # настройку QGIS надо вернуть как было.
+        self._application_proxy = _application_proxy()
         proxy.apply()
         i18n.add_listener(self._language_changed)
         self.destroyed.connect(self.detach_language_listener)
@@ -756,6 +817,9 @@ class XtopoDockWidget(QDockWidget):
         self.setObjectName("QgisXtopoDockWidget")
         self._build_ui()
         self._restore_settings()
+        # Первая проверка файла проекта — сразу: дальше она откладывается
+        # до паузы в наборе имени.
+        self._refresh_project_exists()
         self._connect_project_signals()
         self._refresh_project_state()
         self.retranslate()
@@ -807,9 +871,11 @@ class XtopoDockWidget(QDockWidget):
         QThread нельзя уничтожать, пока он работает: QGIS падает с
         «QThread: Destroyed while thread is still running».  Поэтому при
         закрытии, выгрузке плагина и завершении QGIS сначала отменяем
-        все задачи, затем ждём потоки; не оставшиеся — принудительно
-        завершаем.  ``final=False`` — панель прячется, но может снова
-        открыться и запускать проверки.
+        все задачи, затем коротко ждём потоки; не оставшиеся —
+        принудительно завершаем с предупреждением в журнал.  Ждать
+        долго нельзя: интерфейс (и выход из QGIS) замирает на минуты.
+        ``final=False`` — панель прячется, но может снова открыться и
+        запускать проверки.
         """
         if self._shutting_down:
             return
@@ -824,7 +890,8 @@ class XtopoDockWidget(QDockWidget):
         for timer in (
                 self._pbf_probe_timer, self._map_index_timer,
                 self._slice_estimate_timer, self._dem_check_timer,
-                self._project_timer, self._proxy_timer):
+                self._project_timer, self._proxy_timer,
+                self._disk_info_timer, self._exists_timer):
             try:
                 timer.stop()
             except RuntimeError:
@@ -837,6 +904,10 @@ class XtopoDockWidget(QDockWidget):
             worker = getattr(self, name, None)
             if worker is not None:
                 workers.append((name, worker))
+        for worker in list(getattr(self, "_pbf_probe_workers", [])):
+            workers.append(("pbf_probe", worker))
+        for worker in list(getattr(self, "_map_index_workers", [])):
+            workers.append(("map_index_worker", worker))
         for worker in list(getattr(self, "slice_estimate_workers", [])):
             workers.append(("slice_estimate_worker", worker))
         for worker in list(self.server_workers):
@@ -848,28 +919,52 @@ class XtopoDockWidget(QDockWidget):
                     cancel()
             except RuntimeError:
                 pass
+        if self.server_workers:
+            # Проверка серверов не закончилась: статусы возвращаются в
+            # исходное состояние, иначе они навсегда остаются «проверка…»
+            # и повторная проверка больше не запускается.
+            self._reset_server_status()
+        # Ждём потоки в общем пределе времени: иначе закрытие панели
+        # растягивается на полторы минуты.
+        deadline = time.monotonic() + self.SHUTDOWN_WAIT_MS / 1000.0
         timeouts = {
-            "worker": 30000,
-            "pbf_probe": 10000,
-            "map_index_worker": 15000,
-            "slice_estimate_worker": 35000,
-            "dem_availability_worker": 15000,
-            "sonny_catalogue_worker": 30000,
-            "proxy_check": 5000,
-            "server": 15000,
+            # Поток подготовки дописывает файлы проекта: ему отдаём
+            # больше времени, остальным хватает проверки отмены.
+            "worker": 12000,
+            "pbf_probe": 1500,
+            "map_index_worker": 1500,
+            "slice_estimate_worker": 2000,
+            "dem_availability_worker": 1500,
+            "sonny_catalogue_worker": 1500,
+            "proxy_check": 1000,
+            "server": 1500,
         }
         for name, worker in workers:
             try:
                 if not worker.isRunning():
                     continue
-                if not worker.wait(timeouts.get(name, 5000)):
-                    worker.terminate()
-                    worker.wait(2000)
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    timeout = int(
+                        min(timeouts.get(name, 2000) / 1000.0, remaining) * 1000
+                    )
+                    if worker.wait(timeout):
+                        continue
+                # Поток не остановился: это последний резерв, о нём
+                # пишем в журнал.
+                self._append_log(
+                    f"WARNING: поток {name} не остановился — "
+                    "принудительное завершение"
+                )
+                worker.terminate()
+                worker.wait(1000)
             except RuntimeError:
                 pass
         self.server_workers = []
         self.slice_estimate_workers = []
         self.slice_estimate_worker = None
+        self._pbf_probe_workers = []
+        self._map_index_workers = []
         for name in (
                 "worker", "pbf_probe", "map_index_worker",
                 "dem_availability_worker", "sonny_catalogue_worker",
@@ -888,6 +983,14 @@ class XtopoDockWidget(QDockWidget):
                 pass
             self._application = None
         i18n.remove_listener(self._language_changed)
+
+    def restore_proxy_settings(self):
+        """Возвращает прокси приложения, заданный до загрузки плагина.
+
+        Плагин включает прокси глобально (QNetworkProxy.setApplicationProxy),
+        поэтому при выгрузке настройку QGIS надо вернуть как было.
+        """
+        _restore_application_proxy(self._application_proxy)
 
     def _fit_language_button(self):
         """Высота угловых кнопок — по строке заголовков вкладок.
@@ -1005,7 +1108,7 @@ class XtopoDockWidget(QDockWidget):
         self.projects_dir.textChanged.connect(self._project_path_changed)
         # Свободное место пересчитываем только при смене каталога: имя
         # проекта на том не влияет.
-        self.projects_dir.textChanged.connect(self._update_disk_info)
+        self.projects_dir.textChanged.connect(self._schedule_disk_info)
         project_form.addRow("Имя проекта:", self.project_name)
         self.project_name_hint = WrappedLabel("")
         self.project_name_hint.setWordWrap(True)
@@ -1448,6 +1551,14 @@ class XtopoDockWidget(QDockWidget):
         if self.source_mode.currentData() == "slice":
             self._schedule_slice_estimate()
 
+    def _schedule_disk_info(self, *_args):
+        """Откладывает пересчёт свободного места.
+
+        Запрос к диску на каждый символ тормозит ввод, особенно на
+        сетевом каталоге.
+        """
+        self._disk_info_timer.start()
+
     def _update_disk_info(self, *_args):
         """Свободное место на томе, где лежат данные проекта."""
         directory = self.projects_dir.text().strip() or default_projects_dir()
@@ -1509,8 +1620,16 @@ class XtopoDockWidget(QDockWidget):
         """Открывает окно выбора охвата. True, если охват выбран."""
         dialog = ExtentDialog(self.bbox.text().strip(), self)
         translate_tree(dialog)
-        if dialog.exec():
-            self.bbox.setText(dialog.bbox_csv())
+        try:
+            accepted = dialog.exec()
+            bbox = dialog.bbox_csv() if accepted else ""
+        finally:
+            # Окно держит полноценный холст с подложкой и модель поиска:
+            # после закрытия его надо удалить, иначе оно живёт до конца
+            # сессии.
+            dialog.deleteLater()
+        if accepted:
+            self.bbox.setText(bbox)
             return True
         return False
 
@@ -1797,6 +1916,24 @@ class XtopoDockWidget(QDockWidget):
             extract_provider=provider if provider != "geofabrik" else "geo2day",
         )
 
+    def _cancel_map_index(self):
+        """Отменяет текущий запрос индекса карт.
+
+        Ждать поток в GUI нельзя: интерфейс замирает на секунды.  Старый
+        работник отменяется, а его результат отбрасывается: текущим он
+        больше не считается.
+        """
+        worker = self.map_index_worker
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+        except RuntimeError:
+            pass
+        self.map_index_worker = None
+        self._set_map_index_busy(False)
+
     def _start_map_index(self, refreshing=False):
         self._map_index_timer.stop()
         if self.source_mode.currentData() not in FILE_MODES or not self.isVisible():
@@ -1809,17 +1946,21 @@ class XtopoDockWidget(QDockWidget):
                 i18n.trf("Определение карт недоступно: {}", exc)
             )
             return
-        if self.map_index_worker is not None and self.map_index_worker.isRunning():
-            self.map_index_worker.cancel()
-            self.map_index_worker.wait(1000)
+        self._cancel_map_index()
         config = self._maps_config(bbox)
         provider = self._file_provider()
-        worker = MapIndexWorker(config, bbox, self, provider=provider)
+        self._map_index_generation += 1
+        worker = MapIndexWorker(
+            config, bbox, self, provider=provider,
+            generation=self._map_index_generation,
+        )
         self.map_index_worker = worker
+        self._map_index_workers.append(worker)
         worker.progress.connect(self._map_index_progress)
         worker.result.connect(lambda plan, w=worker: self._map_index_ready(w, plan))
         worker.failed.connect(lambda message, w=worker: self._map_index_failed(w, message))
         worker.finished.connect(lambda w=worker: self._map_index_done(w))
+        worker.finished.connect(worker.deleteLater)
         if refreshing:
             message = i18n.tr("Обновление индекса…")
         elif provider == "geofabrik":
@@ -1835,6 +1976,10 @@ class XtopoDockWidget(QDockWidget):
         if worker is self.map_index_worker:
             self.map_index_worker = None
             self._set_map_index_busy(False)
+        try:
+            self._map_index_workers.remove(worker)
+        except ValueError:
+            pass
         worker.deleteLater()
 
     def _map_index_progress(self, message):
@@ -1844,6 +1989,8 @@ class XtopoDockWidget(QDockWidget):
 
     def _map_index_ready(self, worker, plan):
         if worker is not self.map_index_worker:
+            return
+        if worker.generation != self._map_index_generation:
             return
         if worker.provider != self._file_provider():
             return
@@ -1864,6 +2011,8 @@ class XtopoDockWidget(QDockWidget):
 
     def _map_index_failed(self, worker, message):
         if worker is not self.map_index_worker:
+            return
+        if worker.generation != self._map_index_generation:
             return
         if self.worker is not None and self.worker.isRunning():
             return
@@ -2118,18 +2267,58 @@ class XtopoDockWidget(QDockWidget):
             return
         names = self._selected_queries()
         texts = {name: read_query(name) for name in names}
-        if self.pbf_probe is not None and self.pbf_probe.isRunning():
-            self.pbf_probe.cancel()
-            self.pbf_probe.wait(2000)
+        self._cancel_pbf_probe()
         self._pbf_info_state = None
         self.pbf_info.setText(i18n.tr("Оценка объединённой карты…"))
-        self.pbf_probe = PbfProbeWorker(
-            config, bbox, names, texts, paths=paths, parent=self
+        self._start_pbf_probe_worker(config, bbox, names, texts, paths)
+
+    def _cancel_pbf_probe(self):
+        """Отменяет текущую пробу PBF.
+
+        Ждать поток в GUI нельзя: интерфейс замирает.  Старый работник
+        отменяется, а его результат отбрасывается: текущей пробой он
+        больше не считается.
+        """
+        worker = self.pbf_probe
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+        except RuntimeError:
+            pass
+        self.pbf_probe = None
+
+    def _start_pbf_probe_worker(self, config, bbox, names, texts, paths):
+        """Запускает пробу PBF и связывает её сигналы с панелью."""
+        self._pbf_probe_generation += 1
+        worker = PbfProbeWorker(
+            config, bbox, names, texts, paths=paths,
+            generation=self._pbf_probe_generation, parent=self,
         )
-        self.pbf_probe.result.connect(self._pbf_probed)
-        self.pbf_probe.failed.connect(self._pbf_probe_failed)
-        self.pbf_probe.progress.connect(self._pbf_probe_progress)
-        self.pbf_probe.start()
+        self.pbf_probe = worker
+        self._pbf_probe_workers.append(worker)
+        worker.result.connect(
+            lambda *args, w=worker: self._pbf_probed(w, *args)
+        )
+        worker.failed.connect(
+            lambda message, w=worker: self._pbf_probe_failed(w, message)
+        )
+        worker.progress.connect(
+            lambda message, w=worker: self._pbf_probe_progress(w, message)
+        )
+        worker.finished.connect(lambda w=worker: self._pbf_probe_done(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _pbf_probe_done(self, worker):
+        """Проба закончена: чистим состояние панели."""
+        if worker is self.pbf_probe:
+            self.pbf_probe = None
+        try:
+            self._pbf_probe_workers.remove(worker)
+        except ValueError:
+            pass
 
     def _start_pbf_probe(self):
         self._pbf_probe_timer.stop()
@@ -2185,31 +2374,36 @@ class XtopoDockWidget(QDockWidget):
                 source_mode="pbf",
                 pbf_path=str(path),
             )
-        if self.pbf_probe is not None and self.pbf_probe.isRunning():
-            self.pbf_probe.cancel()
-            self.pbf_probe.wait(2000)
+        self._cancel_pbf_probe()
         names = self._selected_queries()
         texts = {name: read_query(name) for name in names}
         self._pbf_info_state = None
         self.pbf_info.setText(i18n.tr("Быстрая оценка PBF…"))
-        self.pbf_probe = PbfProbeWorker(
-            source_config, bbox, names, texts, paths=paths, parent=self
+        self._start_pbf_probe_worker(
+            source_config, bbox, names, texts, paths
         )
-        self.pbf_probe.result.connect(self._pbf_probed)
-        self.pbf_probe.failed.connect(self._pbf_probe_failed)
-        self.pbf_probe.progress.connect(self._pbf_probe_progress)
-        self.pbf_probe.start()
 
-    def _pbf_probe_progress(self, message):
+    def _pbf_probe_progress(self, worker, message):
+        if not self._is_current_pbf_probe(worker):
+            return
         if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
             return
         self._pbf_info_state = None
         # Текст разбирается как HTML: имена файлов могут содержать & или <.
         self.pbf_info.setText(html.escape(i18n.tr(message), quote=False))
 
-    def _pbf_probed(self, total, in_bbox, matched, elapsed, approximate,
-                    sampled, total_blobs, file_count, extended_ratio=0.0,
-                    bytes_per_second=0.0):
+    def _is_current_pbf_probe(self, worker):
+        """Актуальна ли проба: иначе результат затирает свежий."""
+        if worker is not self.pbf_probe:
+            return False
+        return worker.generation == self._pbf_probe_generation
+
+    def _pbf_probed(self, worker, total, in_bbox, matched, elapsed,
+                    approximate, sampled, total_blobs, file_count,
+                    extended_ratio=0.0, bytes_per_second=0.0):
+        if not self._is_current_pbf_probe(worker):
+            # Проба устарела: её результат больше не подходит.
+            return
         if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
             # Пока проба работала, режим могли переключить на SliceOSM.
             return
@@ -2413,7 +2607,8 @@ class XtopoDockWidget(QDockWidget):
             # на эталонной машине, с поправкой на процессор и параллелизм.
             cpu = performance.cpu_score(self.settings)
             workers = performance.layer_worker_count(
-                len(self.queries) if hasattr(self, "queries") else 0
+                len(self.queries) if hasattr(self, "queries") else 0,
+                terrain=self.generate_terrain.isChecked(),
             )
             parts.append(
                 i18n.trf(
@@ -2438,7 +2633,9 @@ class XtopoDockWidget(QDockWidget):
             f"{text[0].upper()}{text[1:]}",
         )
 
-    def _pbf_probe_failed(self, message):
+    def _pbf_probe_failed(self, worker, message):
+        if not self._is_current_pbf_probe(worker):
+            return
         if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
             return
         self._pbf_info_state = None
@@ -2501,7 +2698,8 @@ class XtopoDockWidget(QDockWidget):
         cached = slice_estimate.cached_slice_size(config, bbox)
         cpu = performance.cpu_score(self.settings)
         workers = performance.layer_worker_count(
-            len(self.queries) if hasattr(self, "queries") else 0
+            len(self.queries) if hasattr(self, "queries") else 0,
+            terrain=self.generate_terrain.isChecked(),
         )
         terrain_seconds = self._terrain_estimate_seconds(cpu=cpu)
         self._cancel_slice_estimate()
@@ -2685,6 +2883,18 @@ class XtopoDockWidget(QDockWidget):
         worker.deleteLater()
         if not self.server_workers:
             self.recheck_servers.setEnabled(True)
+
+    def _reset_server_status(self):
+        """Возвращает статусы серверов в исходное состояние.
+
+        Проверка серверов не успела закончиться: без сброса статусы
+        навсегда остаются «проверка…», а повторная проверка больше не
+        запускается.
+        """
+        self._servers_checked = False
+        for server in DEFAULT_OVERPASS_SERVERS:
+            self._set_server_status(server.url, i18n.tr("не проверен"))
+        self.recheck_servers.setEnabled(True)
 
     def _set_server_status(self, url, status):
         index = self.overpass_server.findData(url)
@@ -3312,9 +3522,15 @@ class XtopoDockWidget(QDockWidget):
 
     def _open_proxy_dialog(self):
         dialog = ProxyDialog(self)
-        if dialog.exec_() != ProxyDialog.Accepted:
+        try:
+            accepted = dialog.exec_() == ProxyDialog.Accepted
+            config = dialog.config() if accepted else None
+        finally:
+            # Диалог удаляется сразу: иначе он остаётся висеть до конца
+            # сессии QGIS.
+            dialog.deleteLater()
+        if config is None:
             return
-        config = dialog.config()
         proxy.save(config)
         proxy.apply(config)
         # Прошлый результат проверки относился к прежней конфигурации.
@@ -3425,14 +3641,45 @@ class XtopoDockWidget(QDockWidget):
             widget.blockSignals(False)
         self._update_map_summary()
 
+    def _project_file_exists(self):
+        """Существует ли файл проекта.
+
+        Проверка ходит на диск, поэтому она отложена: пока пользователь
+        печатает имя, кнопка «Открыть» ждёт результата.  Иначе на
+        сетевом каталоге каждый символ даёт запрос к диску.
+        """
+        path = self._project_file_path()
+        if path is None:
+            return False
+        if path == self._exists_path:
+            return self._exists_result
+        # Путь изменился: результат пока неизвестен, проверка отложена.
+        self._exists_path = path
+        self._exists_result = False
+        self._exists_timer.start()
+        return False
+
+    def _refresh_project_exists(self):
+        """Проверяет файл проекта после паузы в наборе имени."""
+        path = self._project_file_path()
+        if path is None:
+            self._exists_path = None
+            self._exists_result = False
+            return
+        try:
+            self._exists_result = path.exists()
+        except OSError:
+            self._exists_result = False
+        self._exists_path = path
+        self._update_action_buttons()
+
     def _update_action_buttons(self):
         can_create = not self._running and not self._own_project_open
         self.prepare_button.setEnabled(can_create)
         # Открыть можно только существующий проект: путь берётся из полей
         # «Каталог проектов» и «Имя проекта».
-        path = self._project_file_path()
         self.open_button.setEnabled(
-            can_create and path is not None and path.exists()
+            can_create and self._project_file_exists()
         )
         self.close_button.setEnabled(self._own_project_open and not self._running)
         self.choose_extent.setEnabled(can_create)
@@ -3535,13 +3782,11 @@ class XtopoDockWidget(QDockWidget):
             QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
             return
         self._pbf_probe_timer.stop()
-        if self.pbf_probe is not None and self.pbf_probe.isRunning():
-            self.pbf_probe.cancel()
-            self.pbf_probe.wait(5000)
+        # Оценки отменяются без ожидания: потоки проверяют отмену сами,
+        # а ждать их в GUI-потоке нельзя.
+        self._cancel_pbf_probe()
         self._map_index_timer.stop()
-        if self.map_index_worker is not None and self.map_index_worker.isRunning():
-            self.map_index_worker.cancel()
-            self.map_index_worker.wait(1000)
+        self._cancel_map_index()
         self._save_settings()
         # Новая обработка — прошлое сообщение о замене тайлов неактуально.
         self._terrain_fallback = ""

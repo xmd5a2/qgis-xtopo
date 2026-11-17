@@ -1030,4 +1030,9 @@ class ExtentDialog(QDialog):
         self._draw_tool.clear()
         self.canvas.stopRendering()
         self.canvas.setLayers([])
+        # Поиск и подсказки больше не нужны: окно закрывается, а модель
+        # поиска иначе остаётся висеть до конца сессии.
+        self._search_timer.stop()
+        self._search_model.clear()
+        self._places.clear()
         super().done(result)

@@ -288,12 +288,11 @@ RECIPES = {
 }
 
 
+# Слои, из которых берётся центр площади: значок рисуется в центре.
 POINT_CENTROID = {
     "camp_site", "attraction", "ruins", "track_bridge", "aerodrome", "castle",
     "archaeological_site", "observatory", "picnic_site", "tower_cooling",
     "power_plant", "power_substation",
-}
-POINT_CENTROID_EXTRA = {
     "place_of_worship_muslim", "place_of_worship_hindu", "place_of_worship_buddhist",
     "place_of_worship_shinto", "place_of_worship_jewish", "place_of_worship_taoist",
     "place_of_worship_sikh", "place_of_worship_other", "sinkhole_polygon",
@@ -305,7 +304,7 @@ POINT_ONLY = {
     "peak", "hill", "spring", "water_point", "cave_entrance", "places_main",
     "place_admin_centre_6", "place_admin_centre_4", "place_admin_centre_2",
     "hunting_stand", "lighthouse", "power_pole", "power_tower", "aerialway_pylon",
-    "survey_point", "tree", "stone", "rock", "sinkhole", "bay_point", "cape",
+    "survey_point", "tree", "stone", "rock", "sinkhole", "bay_point",
 }
 
 
@@ -313,8 +312,6 @@ def recipe_for(name):
     if name in RECIPES:
         return RECIPES[name]
     if name in POINT_CENTROID:
-        return Recipe([save(), centroid(), save("_centroids")])
-    if name in POINT_CENTROID_EXTRA:
         return Recipe([save(), centroid(), save("_centroids")])
     if name in POINT_ONLY:
         return Recipe([save()])

@@ -424,41 +424,6 @@ def _squashed(text):
 def _is_transliteration(source, translation):
     """Пишется ли `translation` тем же названием, что `source`, но своей азбукой.
 
-    «ზესხო» ↔ «Zeskho» — одно и то же название: транслитерация одной
-    строки в латиницу совпадает с другой строкой по буквам. «грузовой»
-    ↔ «Mersedes Benc» — нет: это уточнение, а не перевод названия.
-    """
-    squashed = _squashed(translation)
-    if not squashed or not source:
-        return False
-    source_script = script_of(source)
-    target_script = script_of(translation)
-    if source_script is None or target_script is None:
-        return False
-    if source_script == target_script:
-        return _squashed(source) == squashed
-    if target_script != LATIN:
-        # Киррилическая или грузинская запись латинского названия
-        # обратной таблицей не получается, такие пары не считаем переводом.
-        return False
-    return _squashed(transliterate_text(source, source_script)) == squashed
-
-
-def _unlabel(part):
-    """Убирает метку языка: «ru: Монастыри» → «Монастыри»."""
-    return _LANG_PREFIX.sub("", part).strip()
-
-
-def _squashed(text):
-    """Только буквы и цифры в нижнем регистре — для сравнения названий."""
-    return "".join(
-        char.lower() for char in text if char.isalnum()
-    )
-
-
-def _is_transliteration(source, translation):
-    """Пишется ли `translation` тем же названием, что `source`, но своей азбукой.
-
     «Тойота Центр» ↔ «Toyota Center», «ზესხო» ↔ «Zeskho» — одно и то же
     название: транслитерация одной строки в другую совпадает с ней по
     буквам (порядок перевода не важен). «грузовой» ↔ «Mersedes Benc» —
@@ -484,36 +449,6 @@ def _is_transliteration(source, translation):
         return False
     if source_script == target_script:
         return _squashed(source) == squashed
-    return False
-
-
-def _is_translation(chosen, local):
-    """Считать ли часть переводом, а не уточнением или вторым названием.
-
-    «ზედა (ru: Монастыри)», «ru: Монастыри» — перевод с меткой языка,
-    выбирается всегда. Скобки без метки выбираются, только если это та же
-    самая запись другой азбукой: «Тойота Центр (Toyota Center)»,
-    «ზესხო (Zeskho)». Уточнение в скобках остаётся уточнением:
-    «Mersedes Benc (грузовой)», «Torex (двери)», «Flora (живые цветы
-    и подарки)». «სუვენირები Souvenirs Сувениры» — перечисление:
-    кириллица стоит последней и отделена латиницей.
-    """
-    if _LANG_PREFIX.match(chosen):
-        return True
-    if _has_script(chosen, CYRL) and _has_script(chosen, LATIN):
-        head = chosen.split()[0]
-        if _has_script(head, LATIN):
-            return False
-    for match in _PARENTHESIS.finditer(chosen):
-        inside = match.group(1)
-        rest = (chosen[:match.start()] + " " + chosen[match.end():]).strip()
-        if not rest:
-            continue
-        translated = script_of(rest) if local else CYRL
-        if translated and _has_script(inside, translated):
-            return _is_transliteration(rest, inside) or _is_transliteration(
-                inside, rest
-            )
     return False
 
 
@@ -607,6 +542,16 @@ def pick_name(name, script=None, translit=False):
     return pick_name_part(name, script, bool(translit))
 
 
+# В шаблоне имя берётся функцией pick_name_part: она выбирает часть
+# составного названия на языке карты.
+def _tag_call(tag):
+    """Обращение к названию по номеру тега."""
+    return (
+        "pick_name_part(attribute(@name_tag_%d), @name_script, @name_translit)"
+        % tag
+    )
+
+
 # Форма выражения подписи: запасное название приводится к читаемому виду.
 TRANS_TAG1 = (
     "IF(@name_translit='1' AND @name_local='1',"
@@ -631,14 +576,40 @@ _OLD_TAG2 = (
 
 _MARKER = "readable_name"
 
-_PATTERN = re.compile(
-    r"(WHEN attribute\(@name_tag_1\) IS NOT NULL THEN )"
-    r"(.*?)"
-    r"(\n\tWHEN attribute\(@name_tag_2\) IS NOT NULL THEN )"
-    r"(.*?)"
-    r"(\n\tWHEN attribute\(@name_tag_3\) IS NOT NULL THEN )",
+# Ветка CASE: условие на одной строке, значение — до следующей ветки.
+_BRANCH = re.compile(
+    r"WHEN\s+(?P<condition>[^\n]*?)\s+IS\s+NOT\s+NULL\s+THEN\s+",
     re.DOTALL,
 )
+
+
+def _readable_if(argument, tag):
+    """Ветка транслитерации вокруг обращения к названию.
+
+    Для первого тега учитывается и «местные названия»: при них
+    название остаётся как записано.
+    """
+    if tag == 1:
+        condition = "@name_translit='1' AND @name_local='1'"
+    else:
+        condition = "@name_translit='1'"
+    return (
+        f"IF({condition},readable_name({argument}, @name_script),{argument})"
+    )
+
+
+def _wrap_value(value, condition):
+    """Оборачивает название в значении ветки CASE в ветку транслитерации."""
+    for tag in (1, 2):
+        if f"@name_tag_{tag}" not in condition:
+            continue
+        call = _tag_call(tag)
+        if call in value:
+            return value.replace(call, _readable_if(call, tag))
+        plain = f"attribute(@name_tag_{tag})"
+        if plain in value:
+            return value.replace(plain, _readable_if(plain, tag))
+    return value
 
 
 def add_transliteration(expression):
@@ -649,19 +620,20 @@ def add_transliteration(expression):
     text = text.replace(_OLD_TAG2, "attribute(@name_tag_2)")
     if _MARKER in text:
         return text
-
-    def replace(match):
-        first = match.group(2).replace(
-            "attribute(@name_tag_1)", TRANS_TAG1
+    matches = list(_BRANCH.finditer(text))
+    if not matches:
+        return text
+    result = []
+    position = 0
+    for index, match in enumerate(matches):
+        result.append(text[position:match.end()])
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        result.append(
+            _wrap_value(text[match.end():end], match.group("condition"))
         )
-        second = match.group(4).replace(
-            "attribute(@name_tag_2)", TRANS_TAG2
-        )
-        return (
-            match.group(1) + first + match.group(3) + second + match.group(5)
-        )
-
-    return _PATTERN.sub(replace, text)
+        position = end
+    result.append(text[position:])
+    return "".join(result)
 
 
 def _rule_settings(labeling):
@@ -699,11 +671,30 @@ def functions_available():
 
 
 def strip_transliteration(expression):
-    """Убирает ветку транслитерации из выражения подписи."""
+    """Убирает ветку транслитерации из выражения подписи.
+
+    Форма выражения берётся из шаблона: имя выбирается функцией
+    pick_name_part, а ветка транслитерации — это IF вокруг того же
+    обращения.  Раньше искались старые полные формы, и аварийная
+    ветка «убрать транслитерацию, если функция readable_name не
+    зарегистрирована» не срабатывала: подписи просто не рисувались.
+    """
     if not expression:
         return expression
-    text = expression.replace(TRANS_TAG1, "attribute(@name_tag_1)")
-    text = text.replace(TRANS_TAG2, "attribute(@name_tag_2)")
+    text = expression
+    for tag in (1, 2, 3):
+        for argument in (
+            _tag_call(tag), f"attribute(@name_tag_{tag})"
+        ):
+            for condition in (
+                "@name_translit='1' AND @name_local='1'",
+                "@name_translit='1'",
+            ):
+                text = text.replace(
+                    f"IF({condition},readable_name({argument}, @name_script),"
+                    f"{argument})",
+                    argument,
+                )
     text = text.replace(_OLD_TAG1, "attribute(@name_tag_1)")
     text = text.replace(_OLD_TAG2, "attribute(@name_tag_2)")
     return text

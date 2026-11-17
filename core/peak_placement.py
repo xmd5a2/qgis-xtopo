@@ -805,10 +805,14 @@ def measure(peak, dem, radii, thresholds):
 
     # Расхождение высоты из OSM с рельефом.  У настоящей вершины оно
     # невелико; если же ele совсем не совпадает с DEM, пик поставлен
-    # не на ту вершину.
+    # не на ту вершину.  Проценты считаются от модуля высоты: при
+    # отрицательной высоте (Мёртвое море, Прикаспий) знак «выше
+    # рельефа» иначе переворачивался бы.
     if peak.ele:
-        metrics.ele_diff = abs(peak.ele - metrics.dem) / peak.ele * 100.0
-        metrics.ele_below = (peak.ele - metrics.dem) / peak.ele * 100.0
+        base = abs(peak.ele)
+        if base > 0:
+            metrics.ele_diff = abs(peak.ele - metrics.dem) / base * 100.0
+            metrics.ele_below = (peak.ele - metrics.dem) / base * 100.0
 
     summit = find_summit(window, peak.lat, metrics.dem)
     if summit is not None:

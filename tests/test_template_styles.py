@@ -1555,7 +1555,8 @@ class BridgeIconHideTest(unittest.TestCase):
                 geometry="Line",
             )
             config = SimpleNamespace(
-                project_dir=str(root), vector_dir=str(vector))
+                project_dir=str(root), layers_dir=str(root),
+                vector_dir=str(vector))
             poi_icons._write_icon_hide(
                 config, [source],
                 [self._point(6.9000, 46.05, fid=1),

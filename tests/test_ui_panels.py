@@ -552,5 +552,420 @@ class LogScrollTest(unittest.TestCase):
         self.assertEqual(view.font().pointSizeF(), zoom)
 
 
+class AtlasSheetLabelsTest(unittest.TestCase):
+    """Подписи размеров листа атласа должны быть рядом с листом."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _labels(self):
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+
+        from qgis_xtopo.gui.atlas import SheetSizeLabels
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        canvas.resize(640, 480)
+        canvas.setExtent(QgsRectangle(-10000, -10000, 10000, 10000))
+        labels = SheetSizeLabels(canvas)
+        sheet = QgsRectangle(0, 0, 5000, 5000)
+        labels.set_rectangle(
+            sheet, QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        return canvas, labels, sheet
+
+    def test_sheet_rect_is_drawn_where_the_sheet_is(self):
+        """Размеры листа считаются в координатах холста, а не элемента."""
+        from qgis.core import QgsPointXY
+
+        canvas, labels, sheet = self._labels()
+        transform = canvas.mapSettings().mapToPixel()
+        center = sheet.center()
+        left = transform.transform(
+            QgsPointXY(sheet.xMinimum(), center.y())
+        )
+        right = transform.transform(
+            QgsPointXY(sheet.xMaximum(), center.y())
+        )
+        top = transform.transform(
+            QgsPointXY(center.x(), sheet.yMaximum())
+        )
+        bottom = transform.transform(
+            QgsPointXY(center.x(), sheet.yMinimum())
+        )
+        # Прямоугольник подписей в координатах холста совпадает с листом.
+        scene = labels._size.translated(labels.pos().x(), labels.pos().y())
+        self.assertAlmostEqual(scene.left(), left.x(), delta=1.0)
+        self.assertAlmostEqual(scene.top(), top.y(), delta=1.0)
+        self.assertAlmostEqual(scene.width(), right.x() - left.x(), delta=1.0)
+        self.assertAlmostEqual(scene.height(), bottom.y() - top.y(), delta=1.0)
+
+    def test_width_label_stays_below_the_sheet(self):
+        """Нижняя подпись не уезжает за пределы холста."""
+        canvas, labels, _sheet = self._labels()
+        gap = 3.0
+        label_bottom = labels._size.bottom() + gap
+        scene_bottom = label_bottom + labels.pos().y()
+        # Подпись ширины идёт под нижней стороной листа и помещается
+        # в холст: раньше она уезжала на вектор центра листа.
+        self.assertGreater(scene_bottom, labels.pos().y())
+        self.assertLess(scene_bottom, canvas.height())
+        self.assertLess(labels.sceneBoundingRect().bottom(), canvas.height())
+
+
+class PanelProjectStateTest(unittest.TestCase):
+    """Панель проекта не должна оставлять проект изменённым."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_refresh_does_not_mark_project_dirty(self):
+        """Старый проект без переменных не должен казаться изменённым."""
+        from unittest import mock
+
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        QgsExpressionContextUtils.removeProjectVariable(
+            project, "level_of_detail"
+        )
+        QgsExpressionContextUtils.removeProjectVariable(
+            project, "text_size_mult"
+        )
+        project.setDirty(False)
+        try:
+            panel = projectpanel.ProjectPanel(None)
+            try:
+                with mock.patch.object(
+                    projectpanel.ProjectPanel,
+                    "is_xtopo_project",
+                    staticmethod(lambda *args, **kwargs: True),
+                ):
+                    panel.refresh()
+                self.assertFalse(project.isDirty())
+            finally:
+                panel.deleteLater()
+        finally:
+            QgsExpressionContextUtils.removeProjectVariable(
+                project, "level_of_detail"
+            )
+            QgsExpressionContextUtils.removeProjectVariable(
+                project, "text_size_mult"
+            )
+            project.setDirty(False)
+
+    def test_detail_change_marks_project_dirty(self):
+        """Смена уровня детализации — явное действие, проект меняется."""
+        from unittest import mock
+
+        from qgis.core import QgsProject
+
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        project.setDirty(False)
+        panel = projectpanel.ProjectPanel(None)
+        try:
+            combo = panel.detail_combo
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                combo.setCurrentIndex(combo.findData(5))
+                self.app.processEvents()
+            self.assertTrue(project.isDirty())
+        finally:
+            panel.deleteLater()
+            project.setDirty(False)
+
+
+class DockWorkerStateTest(unittest.TestCase):
+    """Устаревшие результаты фоновых потоков не должны затирать свежие."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _dock(self):
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+
+        class Iface:
+            def mainWindow(self):
+                return window
+
+        dock = XtopoDockWidget(Iface())
+        self.addCleanup(dock.deleteLater)
+        return dock
+
+    def test_stale_pbf_probe_result_is_ignored(self):
+        """Результат старой пробы не затирает оценку текущей."""
+        from unittest import mock
+
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("pbf"))
+        stale = mock.Mock()
+        stale.generation = 1
+        current = mock.Mock()
+        current.generation = 2
+        dock.pbf_probe = current
+        dock._pbf_probe_generation = 2
+        self.assertFalse(dock._is_current_pbf_probe(stale))
+        self.assertTrue(dock._is_current_pbf_probe(current))
+
+    def test_cancelled_pbf_probe_is_not_current(self):
+        """Отменённая проба больше не считается текущей."""
+        from unittest import mock
+
+        from qgis_xtopo.gui import dockwidget
+
+        dock = self._dock()
+        worker = mock.Mock()
+        worker.generation = 1
+        dock.pbf_probe = worker
+        dock._pbf_probe_generation = 1
+        self.assertTrue(dock._is_current_pbf_probe(worker))
+        dock._cancel_pbf_probe()
+        self.assertIsNone(dock.pbf_probe)
+
+    def test_server_check_is_repeated_after_cancel(self):
+        """Отменённая проверка серверов не блокирует повторную."""
+        dock = self._dock()
+        dock._servers_checked = True
+        dock.server_workers = [object()]
+        dock._reset_server_status()
+        self.assertFalse(dock._servers_checked)
+        self.assertTrue(dock.recheck_servers.isEnabled())
+
+    def test_disk_info_is_debounced(self):
+        """Свободное место пересчитывается по таймеру, а не на символ."""
+        from unittest import mock
+
+        from qgis_xtopo.core import disk_space
+        from qgis_xtopo.gui import dockwidget
+
+        dock = self._dock()
+        dock._disk_info_timer.stop()
+        with mock.patch.object(
+            disk_space, "free_bytes", return_value=3 * disk_space.GIB
+        ) as free:
+            dock.projects_dir.setText("/tmp")
+            # Проверки на каждый символ не было: таймер ждёт паузы.
+            free.assert_not_called()
+            dock._disk_info_timer.setInterval(0)
+            dock._update_disk_info()
+            free.assert_called()
+
+
+class ProxyRestoreTest(unittest.TestCase):
+    """Прокси приложения возвращается при выгрузке плагина."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_unload_restores_application_proxy(self):
+        from unittest import mock
+
+        from qgis.PyQt.QtNetwork import QNetworkProxy
+        from qgis.PyQt.QtWidgets import QMainWindow
+
+        from qgis_xtopo.plugin import QgisXtopoPlugin
+
+        window = QMainWindow()
+        self.addCleanup(window.deleteLater)
+        iface = mock.Mock()
+        iface.mainWindow.return_value = window
+        before = QNetworkProxy.applicationProxy()
+        plugin = QgisXtopoPlugin(iface)
+        plugin.initGui()
+        try:
+            self.assertIsNotNone(plugin.dock._application_proxy)
+            plugin.unload()
+            after = QNetworkProxy.applicationProxy()
+            self.assertEqual(after.type(), before.type())
+            self.assertEqual(after.hostName(), before.hostName())
+            self.assertEqual(after.port(), before.port())
+        finally:
+            if plugin.dock is not None:
+                plugin.unload()
+
+
+class ProjectPanelLanguageTest(unittest.TestCase):
+    """Панель проекта переводит меню и действия."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_measure_menu_follows_interface_language(self):
+        from qgis_xtopo.core import i18n
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        saved = i18n.language()
+        panel = ProjectPanel(None)
+        try:
+            i18n.set_language("en", save=False)
+            panel.retranslate()
+            menu = panel.measure_action.menu()
+            self.assertEqual(
+                [action.text() for action in menu.actions()],
+                ["Distance", "Area", "Angle", "Bearing"],
+            )
+            i18n.set_language("ru", save=False)
+            panel.retranslate()
+            self.assertEqual(
+                [action.text() for action in menu.actions()],
+                ["Расстояние", "Площадь", "Угол", "Азимут"],
+            )
+        finally:
+            i18n.set_language(saved, save=False)
+            panel.deleteLater()
+
+
+class IsolinesRuleTest(unittest.TestCase):
+    """Уровни изолиний ищутся фильтром провайдера, а не обходом слоя."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _layer(self, filters, elevations):
+        from qgis.core import (
+            QgsFeature, QgsGeometry, QgsRuleBasedRenderer, QgsVectorLayer,
+        )
+
+        layer = QgsVectorLayer(
+            "LineString?crs=EPSG:4326&field=ELEV:integer",
+            "[TERRAIN] isolines regular",
+            "memory",
+        )
+        root = QgsRuleBasedRenderer.Rule(None)
+        for value in sorted(filters, reverse=True):
+            rule = QgsRuleBasedRenderer.Rule(None)
+            rule.setLabel(str(value))
+            rule.setFilterExpression(filters[value])
+            root.appendChild(rule)
+        layer.setRenderer(QgsRuleBasedRenderer(root))
+        for elevation in elevations:
+            feature = QgsFeature(layer.fields())
+            feature.setAttribute("ELEV", elevation)
+            feature.setGeometry(QgsGeometry.fromWkt("LINESTRING (0 0, 1 1)"))
+            layer.dataProvider().addFeature(feature)
+        return layer
+
+    def test_available_levels_are_detected(self):
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        filters = {
+            1000: '"ELEV" % 1000 = 0 AND "ELEV" != 0',
+            100: '"ELEV" % 1000 != 0 AND "ELEV" % 100 = 0',
+            50: '"ELEV" % 100 != 0 AND "ELEV" % 50 = 0',
+        }
+        layer = self._layer(filters, (100, 200, 1000))
+        panel = ProjectPanel(None)
+        try:
+            rules = [(value, str(value), True) for value in sorted(filters)]
+            available = panel._available_rule_labels(layer, rules)
+        finally:
+            panel.deleteLater()
+        self.assertTrue(available["1000"])
+        self.assertTrue(available["100"])
+        # Уровня 50 в данных нет: галка недоступна.
+        self.assertFalse(available["50"])
+
+    def test_level_search_goes_through_the_provider(self):
+        """Фильтр отдаётся провайдеру: слой не читается целиком в Python."""
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        filters = {1000: '"ELEV" % 1000 = 0 AND "ELEV" != 0'}
+        layer = self._layer(filters, (100, 200, 1000))
+        requests = []
+        original = layer.getFeatures
+
+        def getFeatures(request=None):
+            requests.append(request)
+            return original(request)
+
+        layer.getFeatures = getFeatures
+        panel = ProjectPanel(None)
+        try:
+            rules = [(1000, "1000", True)]
+            available = panel._available_rule_labels(layer, rules)
+        finally:
+            panel.deleteLater()
+        self.assertTrue(available["1000"])
+        self.assertTrue(requests)
+        for request in requests:
+            self.assertTrue(request.filterExpression())
+            # Одного объекта достаточно: уровень есть в данных или нет.
+            self.assertEqual(request.limit(), 1)
+
+
+class VariantMenuTest(unittest.TestCase):
+    """Меню вариантов окраски пересобирается только при смене слоёв."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def test_menu_is_kept_when_layers_do_not_change(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        project = QgsProject.instance()
+        project.clear()
+        project.addMapLayer(QgsVectorLayer(
+            "Point?crs=EPSG:4326", "[TERRAIN] slope (steep) var1", "memory",
+        ))
+        panel = ProjectPanel(None)
+        try:
+            panel._update_steep_variants()
+            actions = [id(action)
+                       for action in panel.steep_variant_menu.actions()]
+            self.assertTrue(actions)
+            # Переключение видимости слоя не должно пересобирать меню.
+            panel._sync_from_project()
+            self.assertEqual(
+                [id(action)
+                 for action in panel.steep_variant_menu.actions()],
+                actions,
+            )
+            # А новый слой — уже другое дело.
+            project.addMapLayer(QgsVectorLayer(
+                "Point?crs=EPSG:4326", "[TERRAIN] slope (steep) var2", "memory",
+            ))
+            panel._sync_from_project()
+            self.assertEqual(len(panel.steep_variant_menu.actions()), 2)
+        finally:
+            panel.deleteLater()
+            project.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,84 @@ def _max_turn(line):
     return float(angles.max())
 
 
+class RasterizeTest(unittest.TestCase):
+    """Растеризация контура: блоками, но с тем же результатом."""
+
+    def _circle(self, count, radius=1.0):
+        return np.array([
+            [radius * math.cos(2 * math.pi * index / count),
+             radius * math.sin(2 * math.pi * index / count)]
+            for index in range(count)
+        ])
+
+    @staticmethod
+    def _inside(ring, x, y):
+        """Точка внутри кольца — пересечение лучей."""
+        inside = False
+        count = len(ring)
+        for index in range(count):
+            x1, y1 = ring[index]
+            x2, y2 = ring[(index + 1) % count]
+            if (y1 > y) != (y2 > y):
+                cut = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+                if x < cut:
+                    inside = not inside
+        return inside
+
+    def test_mask_matches_point_in_polygon(self):
+        points = self._circle(200)
+        nx = ny = 32
+        x0, y0, x1, y1 = -1.2, -1.2, 1.2, 1.2
+        mask = label_line._rasterize([points], x0, y0, x1, y1, nx, ny)
+        self.assertTrue(mask.any())
+        cell_x = (x1 - x0) / nx
+        cell_y = (y1 - y0) / ny
+        for row in range(ny):
+            for column in range(nx):
+                x = x0 + (column + 0.5) * cell_x
+                y = y1 - (row + 0.5) * cell_y
+                self.assertEqual(
+                    bool(mask[row][column]), self._inside(points, x, y),
+                    (row, column),
+                )
+
+    def test_detailed_contour_is_rasterized_in_blocks(self):
+        """Подробный контур не строит массив ny×число_вершин."""
+        points = self._circle(20000)
+        arguments = (-1.2, -1.2, 1.2, 1.2, 40, 40)
+        mask = label_line._rasterize([points], *arguments)
+        original = label_line.RASTER_BLOCK
+        try:
+            label_line.RASTER_BLOCK = 13
+            blocked = label_line._rasterize([points], *arguments)
+        finally:
+            label_line.RASTER_BLOCK = original
+        self.assertTrue(mask.any())
+        self.assertTrue(np.array_equal(mask, blocked))
+
+    def test_block_size_does_not_change_the_mask(self):
+        points = self._circle(3000)
+        arguments = (-1.2, -1.2, 1.2, 1.2, 40, 40)
+        whole = label_line._rasterize([points], *arguments)
+        original = label_line.RASTER_BLOCK
+        try:
+            label_line.RASTER_BLOCK = 7
+            blocked = label_line._rasterize([points], *arguments)
+        finally:
+            label_line.RASTER_BLOCK = original
+        self.assertTrue(np.array_equal(whole, blocked))
+
+    def test_hole_is_not_filled(self):
+        outer = self._circle(200, 1.0)
+        inner = self._circle(100, 0.4)
+        mask = label_line._rasterize(
+            [outer, inner], -1.2, -1.2, 1.2, 1.2, 40, 40,
+        )
+        # Центр — дырка, а кольцо вокруг неё залито.
+        self.assertFalse(mask[20][20])
+        self.assertTrue(mask[20][31])
+
+
 class LabelLineShapeTest(unittest.TestCase):
     def test_banana_follows_the_curve(self):
         geometry = banana()

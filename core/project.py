@@ -82,7 +82,7 @@ def resolve_label_font():
 
 
 def project_file(config):
-    return config.project_dir / f"{config.project_name}.qgz"
+    return config.layers_dir / f"{config.project_name}.qgz"
 
 
 def project_file_path(projects_dir, project_name):
@@ -98,15 +98,93 @@ def project_file_path(projects_dir, project_name):
     return Path(projects_dir).expanduser() / name / f"{name}.qgz"
 
 
+# Каталог, в который собираются слои текущей подготовки.  Прежние слои
+# остаются на месте до самого конца: сбой или отмена не оставляют проект
+# без данных.
+STAGE_DIRNAME = ".xtopo_stage"
+
+# Каталог прежних слоёв, пока их заменяют готовыми.
+OLD_DIRNAME = ".xtopo_old"
+
+
+def staging_dir(config):
+    return config.project_dir / STAGE_DIRNAME
+
+
+def begin_staging(config):
+    """Готовит отдельный каталог для слоёв новой сборки.
+
+    Пути слоёв в файле проекта относительные, поэтому собранный набор
+    переносится в каталог проекта как есть.  Пока сборка идёт, прежний
+    проект остаётся целым и открывается.
+    """
+    stage = staging_dir(config)
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+    (stage / "vector").mkdir(parents=True, exist_ok=True)
+    (stage / "raster").mkdir(parents=True, exist_ok=True)
+    config.stage_dir = str(stage)
+    return stage
+
+
+def discard_staging(config):
+    """Убирает каталог подготовки; прежние слои не трогает."""
+    stage = staging_dir(config)
+    config.stage_dir = ""
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _swap(source, destination):
+    """Подменяет файл или каталог, прежний убирает в корзину."""
+    trash = destination.with_name(f"{OLD_DIRNAME}_{destination.name}")
+    if trash.exists():
+        if trash.is_dir():
+            shutil.rmtree(trash, ignore_errors=True)
+        else:
+            trash.unlink(missing_ok=True)
+    if destination.exists():
+        os.replace(destination, trash)
+    try:
+        os.replace(source, destination)
+    except OSError:
+        # Не перенелось — возвращаем прежнее на место.
+        if trash.exists() and not destination.exists():
+            os.replace(trash, destination)
+        raise
+    if trash.is_dir():
+        shutil.rmtree(trash, ignore_errors=True)
+    else:
+        trash.unlink(missing_ok=True)
+
+
+def commit_staging(config):
+    """Подменяет прежние слои и файл проекта подготовленными."""
+    stage = staging_dir(config)
+    config.stage_dir = ""
+    if not stage.exists():
+        return None
+    project_dir = config.project_dir
+    for name in ("vector", "raster"):
+        source = stage / name
+        if source.exists():
+            _swap(source, project_dir / name)
+    for name in (f"{config.project_name}.qgz", "crop.geojson"):
+        source = stage / name
+        if source.exists():
+            _swap(source, project_dir / name)
+    shutil.rmtree(stage, ignore_errors=True)
+    return project_file(config)
+
+
 def prepare_project(config):
     config.ensure_directories()
+    # Иконки нужны проекту (шаблон ссылается на них относительным путём),
+    # но обновлять их при каждой подготовке незачем: копируются только
+    # новые и устаревшие файлы.
     _copy_missing(
         Path(resource_path("icons")), config.projects_dir / "icons",
-        overwrite=True,
-    )
-    _copy_missing(
-        Path(resource_path("queries")), config.config_dir / "queries",
-        overwrite=True,
+        overwrite=False, newer=True,
     )
     _write_crop(config)
     path = project_file(config)
@@ -122,23 +200,30 @@ def prepare_project(config):
             if config.generate_terrain else ""
         ),
     )
-    config.to_file(config.config_dir / "config.ini")
+    # config.ini читает только tools/check_pbf_coverage.py, поэтому
+    # пользовательская правка не должна затираться каждой подготовкой.
+    settings = config.config_dir / "config.ini"
+    if not settings.exists():
+        config.to_file(settings)
     return path
 
 
-def _copy_missing(source, destination, overwrite=False):
+def _copy_missing(source, destination, overwrite=False, newer=False):
     destination.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
         target = destination / item.name
         if item.is_dir():
-            _copy_missing(item, target, overwrite=overwrite)
-        elif overwrite or not target.exists():
+            _copy_missing(item, target, overwrite=overwrite, newer=newer)
+        elif overwrite or not target.exists() or (
+            newer and target.stat().st_mtime < item.stat().st_mtime
+        ):
             shutil.copy2(item, target)
 
 
 def _write_crop(config):
     bbox = parse_bbox(config.bbox)
-    path = config.project_dir / "crop.geojson"
+    path = config.crop_path
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(bbox.polygon_geojson(), ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
@@ -303,12 +388,15 @@ def _rewrite_archive(path, transform):
     return changed
 
 
-def clean_project_layers(path):
+def clean_project_layers(path, dem_attribution=None):
     """Remove layers whose data source is missing or contains no features.
 
     The project template references every layer of the full recipe.  A
     prepared project only has files for the selected layers, so the rest
     would trigger the "unavailable layers" prompt on open.
+
+    ``dem_attribution`` — атрибуция наборов DEM.  Она пишется здесь же,
+    вторую перезапись архива проекта делать не нужно.
     """
     path = Path(path)
     if not path.exists():
@@ -320,6 +408,10 @@ def clean_project_layers(path):
             return data
         text = data.decode("utf-8")
         updated, _removed = _remove_empty_layers(text, base_dir)
+        if dem_attribution:
+            updated = _set_project_variable(
+                updated, "dem_attribution", dem_attribution
+            )
         return updated.encode("utf-8") if updated != text else data
 
     return _rewrite_archive(path, transform)

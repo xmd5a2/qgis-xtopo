@@ -73,6 +73,9 @@ class QgisXtopoPlugin:
             # Возвращаем панели QGIS, скрытые плагином.
             self.dock.detach_language_listener()
             self.dock.restore_panels()
+            # Прокси плагин задаёт глобально: возвращаем настройку QGIS,
+            # иначе выгруженный плагин оставит QGIS без прокси.
+            self.dock.restore_proxy_settings()
             self.iface.removeDockWidget(self.dock)
             self.dock.deleteLater()
             self.dock = None

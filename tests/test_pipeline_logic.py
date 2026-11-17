@@ -10,8 +10,11 @@ from osgeo import ogr, osr
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
-    Pipeline, PipelineError, _ProgressTracker, _clean_layers,
+    Pipeline, PipelineError, _ProgressTracker,
     _report_terrain_stage, progress_stages,
+)
+from qgis_xtopo.core.project import (
+    begin_staging, commit_staging, discard_staging,
 )
 from qgis_xtopo.core.query_recipes import RECIPES
 from qgis_xtopo.core.resources import query_names
@@ -157,6 +160,9 @@ class SaveVectorTest(unittest.TestCase):
 
             def fake_translate(destination, src, options=None):
                 recorded["options"] = list(options or [])
+                # Настоящий перенос создаёт файл: запись идёт во временный
+                # файл, который потом подменяет готовый.
+                Path(destination).write_bytes(b"")
                 return object()
 
             with mock.patch.object(gdal, "VectorTranslate", fake_translate):
@@ -180,6 +186,7 @@ class SaveVectorTest(unittest.TestCase):
 
             def fake_translate(destination, src, options=None):
                 recorded["options"] = list(options or [])
+                Path(destination).write_bytes(b"")
                 return object()
 
             with mock.patch.object(gdal, "VectorTranslate", fake_translate):
@@ -718,6 +725,62 @@ class LabelCacheTest(unittest.TestCase):
             )
 
 
+class LabelCacheFileTest(unittest.TestCase):
+    """Кэш линий подписи: запись целиком, чистка только своих файлов."""
+
+    class _Config:
+        def __init__(self, root):
+            self.label_cache_dir = Path(root)
+
+    def test_restore_writes_the_whole_file(self):
+        from qgis_xtopo.core import label_cache
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._Config(root / "cache")
+            key = "0123456789abcdef"
+            source = root / "lines.gpkg"
+            source.write_bytes(b"lines")
+            label_cache.store(config, key, source)
+            target = root / "out" / "lines.gpkg"
+            self.assertTrue(label_cache.restore(config, key, target))
+            self.assertEqual(target.read_bytes(), b"lines")
+            # Временного файла не осталось.
+            self.assertFalse(
+                target.with_name(target.name + ".part").exists()
+            )
+
+    def test_prune_keeps_foreign_files(self):
+        from qgis_xtopo.core import label_cache
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._Config(root / "cache")
+            key = "0123456789abcdef"
+            source = root / "lines.gpkg"
+            source.write_bytes(b"lines")
+            label_cache.store(config, key, source)
+            foreign = root / "cache" / "readme.txt"
+            foreign.write_text("x", encoding="utf-8")
+            part = root / "cache" / "0123456789abcdef.gpkg.part"
+            part.write_bytes(b"part")
+            label_cache._prune(root / "cache")
+            self.assertTrue(foreign.exists())
+            self.assertTrue(part.exists())
+
+    def test_missing_cache_is_reported(self):
+        from qgis_xtopo.core import label_cache
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._Config(root / "cache")
+            target = root / "out" / "lines.gpkg"
+            self.assertFalse(
+                label_cache.restore(config, "0123456789abcdef", target)
+            )
+            self.assertFalse(target.exists())
+
+
 class LabelAxisRecipeTest(unittest.TestCase):
     """Рецепт подписи не должен заранее сглаживать контур."""
 
@@ -855,8 +918,8 @@ class DissolveFieldsTest(unittest.TestCase):
         self.assertEqual(self.pipeline._dissolve_fields(path, []), [])
 
 
-class CleanLayersTest(unittest.TestCase):
-    """Перед подготовкой удаляются прежние слои проекта."""
+class StagingTest(unittest.TestCase):
+    """Слои готовятся отдельно: прежний проект переживает сбой."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -866,34 +929,37 @@ class CleanLayersTest(unittest.TestCase):
         )
         self.config.ensure_directories()
         self.vector = self.config.vector_dir / "roads.sqlite"
-        self.raster = self.config.raster_dir / "hillshade.tif"
-        self.dem = self.config.raster_dir / "merged_dem.tif"
-        self.dem3857 = self.config.raster_dir / "merged_dem_3857.tif"
-        self.marker = self.config.raster_dir / "merged_dem_3857.tif.sha256"
-        for path in (
-            self.vector, self.raster, self.dem, self.dem3857, self.marker,
-        ):
-            path.write_text("data", encoding="utf-8")
+        self.vector.write_text("old", encoding="utf-8")
+        self.project = self.config.project_dir / "demo.qgz"
+        self.project.write_text("old", encoding="utf-8")
 
-    def test_layers_are_removed(self):
-        removed = _clean_layers(self.config)
-        self.assertEqual(removed, 3)
+    def test_staging_keeps_previous_layers(self):
+        stage = begin_staging(self.config)
+        self.assertTrue(stage.exists())
+        self.assertTrue(self.vector.exists())
+        self.assertTrue(self.project.exists())
+        self.assertNotEqual(self.config.vector_dir, self.config.project_dir / "vector")
+
+    def test_commit_replaces_layers(self):
+        stage = begin_staging(self.config)
+        (stage / "vector" / "rivers.sqlite").write_text("new", encoding="utf-8")
+        (stage / "demo.qgz").write_text("new", encoding="utf-8")
+        commit_staging(self.config)
         self.assertFalse(self.vector.exists())
-        self.assertFalse(self.raster.exists())
-        # Промежуточный DEM пересчитывается или берётся из кэша.
-        self.assertFalse(self.dem.exists())
-
-    def test_reprojected_dem_is_kept(self):
-        """Проекция DEM в EPSG:3857 дорогая — её результат переживает очистку."""
-        _clean_layers(self.config)
-        self.assertTrue(self.dem3857.exists())
-        self.assertTrue(self.marker.exists())
-
-    def test_missing_directories_are_ok(self):
-        empty = Config(
-            qgis_projects_dir=self.directory.name, project_name="empty"
+        self.assertTrue(
+            (self.config.vector_dir / "rivers.sqlite").exists()
         )
-        self.assertEqual(_clean_layers(empty), 0)
+        self.assertEqual(
+            self.project.read_text(encoding="utf-8"), "new"
+        )
+
+    def test_discard_keeps_previous_layers(self):
+        stage = begin_staging(self.config)
+        (stage / "vector" / "rivers.sqlite").write_text("new", encoding="utf-8")
+        discard_staging(self.config)
+        self.assertFalse(stage.exists())
+        self.assertTrue(self.vector.exists())
+        self.assertEqual(self.project.read_text(encoding="utf-8"), "old")
 
 
 class _PeakConfig:
@@ -906,6 +972,20 @@ class _PeakConfig:
 
     def resolved_terrain_source(self):
         return self._source
+
+
+class _FlatDem:
+    """Рельеф: ровная поверхность на заданной высоте."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def window(self, lon, lat, half_x, half_y):
+        import numpy as np
+
+        return np.full(
+            (2 * half_y + 1, 2 * half_x + 1), self.value, dtype="float32",
+        )
 
 
 class PeakFilterTest(unittest.TestCase):
@@ -1107,6 +1187,72 @@ class PeakFilterTest(unittest.TestCase):
             ele = database.execute("select ele from peak").fetchone()[0]
             self.assertEqual(ele, "1000")
             database.close()
+
+    def test_srtm_check_runs_in_several_threads(self):
+        """Проверка пиков на SRTM идёт в несколько потоков.
+
+        Раньше общий доступ был только у растра проекта, и весь перебор
+        на SRTM (источник по умолчанию) шёл в один поток.
+        """
+        import time
+        from unittest import mock
+
+        from qgis_xtopo.core import peak_filter, peak_placement
+        from qgis_xtopo.core.cpu import cpu_workers
+
+        if cpu_workers(limit=4) < 2:
+            self.skipTest("нужно несколько ядер")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._root(directory)
+            self._write_dem(root / "raster" / "merged_dem.tif")
+            self._write_layer(root / "vector" / "peak.sqlite", [
+                {
+                    "id": f"node/{index}", "ele": 900,
+                    "lon": 30.005 + index * 0.001, "lat": 35.995,
+                }
+                for index in range(8)
+            ])
+            threads = set()
+            lock = threading.Lock()
+
+            def fake_measure(_peak, _dem, _radii, _thresholds):
+                with lock:
+                    threads.add(threading.get_ident())
+                time.sleep(0.05)
+                return type("Metrics", (), {"dem": 1000.0})()
+
+            def fake_classify(_peak, _metrics, _thresholds, neighbour=None):
+                return "ok", [], None
+
+            with mock.patch.object(
+                    peak_placement, "measure", fake_measure,
+            ), mock.patch.object(
+                    peak_placement, "classify", fake_classify,
+            ):
+                stats = peak_filter.filter_peak_layer(
+                    _PeakConfig(root), self.BBOX
+                )
+
+        self.assertEqual(stats["checked"], 8)
+        self.assertGreater(len(threads), 1)
+
+    def test_negative_ele_keeps_the_sign_of_the_difference(self):
+        """Высота ниже нуля не переворачивает знак процента."""
+        from qgis_xtopo.core import peak_placement
+
+        metrics = peak_placement.Metrics()
+        metrics.dem = -420.0
+        peak = peak_placement.PeakPoint(
+            osm_id="node/1", lon=35.5, lat=31.5, ele=-400.0,
+        )
+        result = peak_placement.measure(
+            peak, _FlatDem(-420.0), [1500], peak_placement.thresholds_for_source(
+                "srtm"
+            ),
+        )
+        self.assertTrue(result.ele_below > 0)
+        self.assertAlmostEqual(result.ele_below, 5.0, places=6)
 
     def test_no_terrain_skips(self):
         from qgis_xtopo.core import peak_filter
@@ -1618,6 +1764,183 @@ class IconAngleTest(unittest.TestCase):
             feature = layer.GetNextFeature()
             self.assertTrue(feature.IsFieldNull(index))
             dataset = None
+
+
+class PoiSuppressionTest(unittest.TestCase):
+    """Вытеснение значков: расстояние и диапазоны масштаба."""
+
+    @staticmethod
+    def _point(lon, lat, rank, size=2.8, band=0):
+        from qgis_xtopo.core.poi_icons import _Point
+
+        return _Point(
+            rank=rank,
+            lon=lon,
+            lat=lat,
+            bands={band: 3},
+            sizes={band: size},
+        )
+
+    def test_high_latitude_neighbour_is_not_lost(self):
+        """Расстояние считается с cos(широты), как в выражении шаблона.
+
+        На 70° с.ш. градус долготы короче почти втрое, и без cos
+        служебный слой терял точки-подавители: значки накладывались.
+        """
+        from qgis_xtopo.core.poi_icons import _prune_band
+
+        scale = 178571.0
+        top = self._point(10.0, 70.0, rank=3)
+        bottom = self._point(10.008, 70.0, rank=9)
+        kept = _prune_band([top, bottom], 0, scale, 70.0)
+        # Расстояние между точками около 300 м: подавитель должен уцелеть.
+        self.assertIn(top, kept)
+        self.assertNotIn(bottom, kept)
+
+    def test_far_neighbour_is_still_dropped(self):
+        from qgis_xtopo.core.poi_icons import _prune_band
+
+        top = self._point(10.0, 70.0, rank=3)
+        far = self._point(10.2, 70.0, rank=9)
+        self.assertEqual(_prune_band([top, far], 0, 178571.0, 70.0), [])
+
+
+class PoiRuleScaleTest(unittest.TestCase):
+    """Диапазон масштаба проверяется до вычисления фильтра."""
+
+    class _Expression:
+        def __init__(self, text):
+            self.text = text
+
+        def evaluate(self, context):
+            context.calls.append(self.text)
+            return context.values.get(self.text, False)
+
+        def hasEvalError(self):
+            return False
+
+    class _Context:
+        def __init__(self, values, calls):
+            self.values = values
+            self.calls = calls
+
+        def setFeature(self, feature):
+            pass
+
+    def _evaluator(self, values):
+        from qgis_xtopo.core import poi_icons
+
+        evaluator = poi_icons._RuleEvaluator.__new__(poi_icons._RuleEvaluator)
+        calls = []
+        evaluator._expression_class = self._Expression
+        evaluator._expressions = {}
+        evaluator._contexts = {
+            level: self._Context(values, calls)
+            for level in poi_icons.LOD_LEVELS
+        }
+        evaluator.calls = calls
+        return evaluator
+
+    @staticmethod
+    def _tree():
+        """Группа: ветка вне масштаба, обычное правило и ELSE."""
+        from qgis_xtopo.core.poi_icons import PoiRule
+
+        return PoiRule(children=[
+            PoiRule(filter="far", minimum=0.0, maximum=1000.0),
+            PoiRule(filter="near", minimum=0.0, maximum=0.0, size=3.0),
+            PoiRule(filter="ELSE", minimum=0.0, maximum=0.0, size=5.0),
+        ])
+
+    @staticmethod
+    def _old_descend(evaluator, rule, feature, level, scale):
+        """Прежний порядок: фильтр считается раньше проверки масштаба."""
+        if rule.children:
+            matched = False
+            best = 0.0
+            for child in rule.children:
+                if child.filter.strip().upper() == "ELSE":
+                    allowed = not matched
+                else:
+                    allowed = evaluator._matches(child, feature, level)
+                    if allowed:
+                        matched = True
+                if allowed:
+                    size = PoiRuleScaleTest._old_descend(
+                        evaluator, child, feature, level, scale
+                    )
+                    if size > best:
+                        best = size
+            return best
+        if rule.size <= 0:
+            return 0.0
+        if rule.minimum and scale < rule.minimum:
+            return 0.0
+        if rule.maximum and scale > rule.maximum:
+            return 0.0
+        return rule.size
+
+    def test_filter_out_of_scale_is_not_evaluated(self):
+        evaluator = self._evaluator({"near": True})
+        size = evaluator.icon_size(self._tree(), None, 3, 5000.0)
+        self.assertEqual(size, 3.0)
+        self.assertNotIn("far", evaluator.calls)
+        self.assertIn("near", evaluator.calls)
+
+    def test_out_of_scale_branch_does_not_block_else(self):
+        evaluator = self._evaluator({})
+        size = evaluator.icon_size(self._tree(), None, 3, 5000.0)
+        self.assertEqual(size, 5.0)
+
+    def test_result_is_the_same_when_all_branches_are_in_scale(self):
+        """В пределах масштаба результат не изменился."""
+        from qgis_xtopo.core.poi_icons import PoiRule
+
+        tree = PoiRule(children=[
+            PoiRule(filter="first", minimum=0.0, maximum=0.0, size=2.0),
+            PoiRule(filter="second", minimum=0.0, maximum=0.0, size=4.0),
+            PoiRule(filter="ELSE", minimum=0.0, maximum=0.0, size=6.0),
+        ])
+        for values in ({"first": True}, {"second": True}, {}):
+            evaluator = self._evaluator(values)
+            new = evaluator.icon_size(tree, None, 3, 5000.0)
+            old = self._old_descend(evaluator, tree, None, 3, 5000.0)
+            self.assertEqual(new, old)
+
+
+class MemoryLimiterTest(unittest.TestCase):
+    """Ожидание бюджета памяти прерываемо."""
+
+    def test_wait_is_cancelled(self):
+        from qgis_xtopo.core.memory import MemoryLimiter
+
+        limiter = MemoryLimiter(100)
+        limiter.acquire(80)
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(InterruptedError):
+            limiter.acquire(50, cancel=cancel)
+
+    def test_wait_times_out(self):
+        from qgis_xtopo.core.memory import MemoryLimiter
+
+        limiter = MemoryLimiter(100)
+        limiter.acquire(80)
+        with self.assertRaises(TimeoutError):
+            limiter.acquire(50, timeout=0.05)
+
+    def test_reservation_passes_cancellation(self):
+        from qgis_xtopo.core.memory import MemoryLimiter
+
+        limiter = MemoryLimiter(100)
+        limiter.acquire(80)
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(InterruptedError):
+            with limiter.reservation(50, cancel=cancel):
+                pass
+        # Место не занималось: acquire не дошёл до броска.
+        self.assertEqual(limiter.used, 80)
 
 
 class RouteHikingTest(unittest.TestCase):

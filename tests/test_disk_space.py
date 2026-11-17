@@ -34,10 +34,40 @@ class DiskSpaceTest(unittest.TestCase):
         )
 
     def test_relief_estimate_grows_with_upscale(self):
-        """Укрупнённый рельеф в несколько раз тяжелее нативного."""
+        """Укрупнённый рельеф заметно тяжелее нативного.
+
+        Укрупнение вдвое по стороне — это вчетверо больше пикселей и
+        вдвое больше файлов: оценка вырастает почти втрое.
+        """
         plain = disk_space.relief_estimate(1000, 1000, False)
         upscaled = disk_space.relief_estimate(1000, 1000, True)
-        self.assertGreater(upscaled, plain * 3)
+        self.assertGreater(upscaled, plain * 2)
+
+    def test_relief_estimate_counts_real_file_types(self):
+        """Оценка считает настоящие размеры файлов.
+
+        DEM и уклон — float32 (четыре байта на пиксель), оттенок и его
+        итоговая копия — байт на пиксель.  Раньше итоговая копия
+        оттенка считалась байтовой, а записывалась как float32: оценка
+        была вчетверо ниже реальности.
+        """
+        pixels = 1000 * 1000
+        estimate = disk_space.relief_estimate(1000, 1000, False)
+        # DEM, его копия в 3857 и ссылка на него же, уклон и его
+        # итоговый растр, оттенок и его итоговая копия.
+        self.assertEqual(
+            estimate,
+            pixels * (5 * disk_space.FLOAT_PIXEL + 2 * disk_space.BYTE_PIXEL),
+        )
+        # Укрупнённый DEM, оттенок и его копия, DEM вдвое крупнее и
+        # уклон, сам DEM и его копия в 3857.
+        big = pixels * 4
+        self.assertEqual(
+            disk_space.relief_estimate(1000, 1000, True),
+            pixels * 2 * disk_space.FLOAT_PIXEL
+            + big * (disk_space.FLOAT_PIXEL + 2 * disk_space.BYTE_PIXEL)
+            + big * 2 * disk_space.FLOAT_PIXEL,
+        )
 
     def test_relief_estimate_covers_measured_files(self):
         """Оценка должна покрывать реальные файлы с запасом.

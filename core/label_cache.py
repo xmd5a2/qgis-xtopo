@@ -46,15 +46,26 @@ def cache_path(config, key):
 
 
 def restore(config, key, target):
-    """Копирует готовые линии подписи; False — кэша нет."""
+    """Копирует готовые линии подписи; False — кэша нет.
+
+    Копирование идёт через временный файл: оборванная копия не должна
+    выдавать битый слой за готовый.  Размер копии сверяется с размером
+    записи кэша.
+    """
     source = cache_path(config, key)
     if source is None or not source.exists():
         return False
+    target = Path(target)
+    temporary = target.with_name(target.name + ".part")
     try:
-        target = Path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
+        shutil.copyfile(source, temporary)
+        if temporary.stat().st_size != source.stat().st_size:
+            _remove(temporary)
+            return False
+        temporary.replace(target)
     except OSError:
+        _remove(temporary)
         return False
     return True
 
@@ -74,10 +85,38 @@ def store(config, key, source):
     _prune(target.parent)
 
 
+def _remove(path):
+    """Убирает временный файл, не мешая основной ошибке."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _is_entry(path):
+    """Похоже ли имя файла на запись кэша.
+
+    Запись — шестнадцать знаков ключа и расширение ``.gpkg``.  Чужие
+    файлы в общем каталоге и временные файлы другого процесса не
+    трогаются.
+    """
+    name = path.name
+    suffix = ".gpkg"
+    if not name.endswith(suffix):
+        return False
+    key = name[:-len(suffix)]
+    if len(key) != 16:
+        return False
+    return all(char in "0123456789abcdef" for char in key)
+
+
 def _prune(directory):
     """В кэше остаётся несколько последних записей."""
     try:
-        entries = [item for item in directory.iterdir() if item.is_file()]
+        entries = [
+            item for item in directory.iterdir()
+            if item.is_file() and _is_entry(item)
+        ]
     except OSError:
         return
     entries.sort(key=lambda item: item.stat().st_mtime, reverse=True)

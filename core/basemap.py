@@ -181,6 +181,28 @@ def _restore_osm(project, flags):
         _set_layer_visible(project, layer, flag == "1")
 
 
+def _store_style(manager, name, layer):
+    """Сохраняет текущий стиль слоя в менеджере стилей под именем name.
+
+    ``manager.style(name)`` возвращает копию сохранённого стиля: правка
+    копии ничего не меняет, поэтому готовый стиль заменяется целиком.
+    """
+    style = manager.style(name)
+    style.readFromLayer(layer)
+    current = manager.currentStyle()
+    if name not in manager.styles():
+        manager.addStyle(name, style)
+        return
+    manager.removeStyle(name)
+    manager.addStyle(name, style)
+    if current == name:
+        # Удаление сбросило текущий стиль на первый в списке: возвращаем
+        # обновлённый, иначе слой получит чужой рендерер.
+        manager.setCurrentStyle(name)
+    elif manager.currentStyle() != current and current in manager.styles():
+        manager.setCurrentStyle(current)
+
+
 def _apply_labels_only(project):
     """Переключает площадные слои на стиль без символов, но с подписями."""
     for layer in area_layers(project):
@@ -192,14 +214,14 @@ def _apply_labels_only(project):
             continue
         if FULL_STYLE in manager.styles():
             if manager.currentStyle() != LABELS_STYLE:
-                manager.style(FULL_STYLE).readFromLayer(layer)
+                _store_style(manager, FULL_STYLE, layer)
         else:
             manager.addStyleFromLayer(FULL_STYLE)
         original = layer.renderer().clone()
         layer.setRenderer(QgsNullSymbolRenderer())
         try:
             if LABELS_STYLE in manager.styles():
-                manager.style(LABELS_STYLE).readFromLayer(layer)
+                _store_style(manager, LABELS_STYLE, layer)
             else:
                 manager.addStyleFromLayer(LABELS_STYLE)
         finally:

@@ -36,6 +36,26 @@ OLD_EXPRESSION = (
     "END"
 )
 
+# Выражение подписи из шаблона automap.qgz: имя выбирается функцией
+# pick_name_part, а ветка транслитерации оборачивает то же обращение.
+TEMPLATE_EXPRESSION = (
+    "CASE\n"
+    "\tWHEN pick_name_part(attribute(@name_tag_1), @name_script, "
+    "@name_translit) IS NOT NULL THEN "
+    "IF(@name_translit='1' AND @name_local='1',"
+    "readable_name(pick_name_part(attribute(@name_tag_1), @name_script, "
+    "@name_translit), @name_script),"
+    "pick_name_part(attribute(@name_tag_1), @name_script, @name_translit))\n"
+    "\tWHEN pick_name_part(attribute(@name_tag_2), @name_script, "
+    "@name_translit) IS NOT NULL THEN "
+    "IF(@name_translit='1',"
+    "readable_name(pick_name_part(attribute(@name_tag_2), @name_script, "
+    "@name_translit), @name_script),"
+    "pick_name_part(attribute(@name_tag_2), @name_script, @name_translit))\n"
+    "\tWHEN attribute(@name_tag_3) IS NOT NULL THEN attribute(@name_tag_3)\n"
+    "END"
+)
+
 
 class TransliterationTest(unittest.TestCase):
     def test_russian_is_transliterated(self):
@@ -204,6 +224,36 @@ class ExpressionTest(unittest.TestCase):
         updated = add_transliteration(EXPRESSION)
         self.assertIn("@name_translit", updated)
         self.assertIn("@name_script", updated)
+
+
+class TemplateExpressionTest(unittest.TestCase):
+    """Выражения подписи в фактической форме шаблона."""
+
+    def test_branch_is_removed_from_template_expression(self):
+        """Аварийная ветка должна убирать readable_name из шаблона."""
+        stripped = strip_transliteration(TEMPLATE_EXPRESSION)
+        self.assertNotIn("readable_name", stripped)
+        self.assertIn(
+            "pick_name_part(attribute(@name_tag_1), @name_script, "
+            "@name_translit)",
+            stripped,
+        )
+        self.assertIn("attribute(@name_tag_3)", stripped)
+
+    def test_round_trip(self):
+        """Добавление и убирание ветки возвращают исходное выражение."""
+        plain = strip_transliteration(TEMPLATE_EXPRESSION)
+        self.assertEqual(strip_transliteration(add_transliteration(plain)), plain)
+
+    def test_template_expression_is_restored(self):
+        plain = strip_transliteration(TEMPLATE_EXPRESSION)
+        self.assertEqual(add_transliteration(plain), TEMPLATE_EXPRESSION)
+
+    def test_patch_is_idempotent(self):
+        once = add_transliteration(TEMPLATE_EXPRESSION)
+        self.assertEqual(add_transliteration(once), once)
+        stripped = strip_transliteration(once)
+        self.assertEqual(strip_transliteration(stripped), stripped)
 
 
 class StripTest(unittest.TestCase):

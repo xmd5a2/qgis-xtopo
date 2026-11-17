@@ -3,33 +3,25 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-AREA_NATURAL = {
-    "water", "wood", "scrub", "grass", "wetland", "bare_rock", "scree",
-    "sand", "beach", "glacier", "shingle", "reef", "shoal", "tundra",
-    "desert", "crevasse_zone", "stone", "spring", "sinkhole",
-}
-AREA_LANDUSE = {
-    "residential", "farmyard", "farmland", "vineyard", "cemetery", "orchard",
-    "industrial", "quarry", "spoil_heap", "plant_nursery", "greenhouse_horticulture",
-    "military", "allotments", "landfill", "logging", "prison", "resort",
-    "marketplace", "railway", "forest", "meadow", "basin", "reservoir",
-}
-AREA_AMENITY = {
-    "parking", "school", "university", "hospital", "place_of_worship",
-    "grave_yard", "marketplace", "fuel", "camp_site", "picnic_site",
-}
-AREA_LEISURE = {
-    "park", "garden", "playground", "sports_centre", "pitch", "golf_course",
-    "nature_reserve", "common", "recreation_ground",
-}
+# Площадными считаются замкнутые way с ключами из списка GDAL
+# (osmconf.ini, closed_ways_are_polygons).  Тот же список применяет
+# драйвер GDAL в режиме PBF, поэтому один и тот же объект приходит
+# площадью в обоих режимах: остров, граница региона, площадка спорта.
+AREA_KEYS = frozenset({
+    "aeroway", "amenity", "boundary", "building", "craft", "geological",
+    "historic", "landuse", "leisure", "military", "natural", "office",
+    "place", "shop", "sport", "tourism",
+})
+# Точные пары «ключ=значение» из того же списка GDAL.
+AREA_PAIRS = frozenset({"highway=platform", "public_transport=platform"})
+
+# Расширения списка GDAL: эти way в GDAL остаются линиями, но слой
+# строит по ним площади.
 AREA_MAN_MADE = {
     "pier", "breakwater", "bridge", "tower", "water_tower", "reservoir_covered",
     "wastewater_plant", "works", "lighthouse",
 }
 AREA_POWER = {"plant", "substation", "generator"}
-AREA_AEROWAY = {"aerodrome", "apron", "terminal", "hangar"}
-AREA_TOURISM = {"zoo", "theme_park", "attraction", "camp_site", "hotel", "museum"}
-AREA_HISTORIC = {"archaeological_site", "castle", "ruins", "fort", "monument", "memorial"}
 
 
 def _tags(element):
@@ -84,6 +76,13 @@ class FieldNames:
 
 
 def _is_area(tags):
+    """Площадной ли замкнутый way.
+
+    Правило — как в драйвере GDAL: площадью считается замкнутый way с
+    любым из ключей ``AREA_KEYS`` или с точной парой «ключ=значение» из
+    ``AREA_PAIRS``.  Тег ``area`` решает всё сам: ``area=no`` запрещает
+    площадь, ``area=yes`` — требует.
+    """
     if tags.get("area") == "yes":
         return True
     if tags.get("area") == "no":
@@ -92,23 +91,14 @@ def _is_area(tags):
         return True
     if "building" in tags or "building:part" in tags:
         return True
-    if tags.get("landuse") in AREA_LANDUSE:
-        return True
-    if tags.get("natural") in AREA_NATURAL:
-        return True
-    if tags.get("amenity") in AREA_AMENITY:
-        return True
-    if tags.get("leisure") in AREA_LEISURE:
-        return True
+    for key, value in tags.items():
+        if key in AREA_KEYS:
+            return True
+        if f"{key}={value}" in AREA_PAIRS:
+            return True
     if tags.get("man_made") in AREA_MAN_MADE:
         return True
     if tags.get("power") in AREA_POWER:
-        return True
-    if tags.get("aeroway") in AREA_AEROWAY:
-        return True
-    if tags.get("tourism") in AREA_TOURISM:
-        return True
-    if tags.get("historic") in AREA_HISTORIC:
         return True
     if tags.get("waterway") in ("riverbank", "dock"):
         return True
@@ -130,6 +120,13 @@ def _ring_is_closed(ring):
 
 
 def _assemble_rings(way_ids, ways, nodes):
+    """Кольца мультиполигона из его way.
+
+    Продолжение кольца ищется по индексу «конец отрезка → кандидаты»,
+    поэтому сборка линейна по числу way.  Раньше кандидаты перебирались
+    по всему списку, и мультиполигон в несколько тысяч way собирался
+    квадратично.
+    """
     pending = []
     for way_id in way_ids:
         way = ways.get(way_id)
@@ -138,24 +135,33 @@ def _assemble_rings(way_ids, ways, nodes):
         coords = _coords(way["refs"], nodes)
         if coords and len(coords) >= 2:
             pending.append(coords)
+    # Конец отрезка → кандидаты, у которых этот конец началом или концом.
+    index = {}
+    for position, coords in enumerate(pending):
+        index.setdefault(tuple(coords[0]), []).append(position)
+        index.setdefault(tuple(coords[-1]), []).append(position)
+    used = [False] * len(pending)
     rings = []
-    while pending:
-        ring = pending.pop(0)
+    for position, coords in enumerate(pending):
+        if used[position]:
+            continue
+        used[position] = True
+        ring = list(coords)
         while not _ring_is_closed(ring):
-            last = ring[-1]
-            matched = False
-            for index, candidate in enumerate(pending):
-                if candidate[0] == last:
-                    ring.extend(candidate[1:])
-                    pending.pop(index)
-                    matched = True
-                    break
-                if candidate[-1] == last:
-                    ring.extend(reversed(candidate[:-1]))
-                    pending.pop(index)
-                    matched = True
-                    break
-            if not matched:
+            last = tuple(ring[-1])
+            for candidate in index.get(last, ()):
+                if used[candidate]:
+                    continue
+                other = pending[candidate]
+                if other[0] == ring[-1]:
+                    ring.extend(other[1:])
+                elif other[-1] == ring[-1]:
+                    ring.extend(reversed(other[:-1]))
+                else:
+                    continue
+                used[candidate] = True
+                break
+            else:
                 break
         if _ring_is_closed(ring):
             rings.append(ring)
@@ -244,7 +250,13 @@ def _feature(osm_type, osm_id, tags, geometry, field_names=None):
     }
 
 
-def convert_osm_to_features(source, progress=None, cancel=None, field_names=None):
+def _iter_features(source, progress=None, cancel=None, field_names=None):
+    """Объекты OSM по одному.
+
+    Объекты отдаются по мере готовности, а не списком: на большой
+    выгрузке список из сотен тысяч признаков занимал больше памяти,
+    чем сами данные.  Порядок тот же: узлы, затем way, затем отношения.
+    """
     nodes = {}
     node_tags = {}
     ways = {}
@@ -281,19 +293,18 @@ def convert_osm_to_features(source, progress=None, cancel=None, field_names=None
         if progress is not None and count % 10000 == 0:
             progress(f"Parsed {count} objects")
 
-    features = []
     for node_id, tags in node_tags.items():
         lon, lat = nodes[node_id]
-        features.append(
-            _feature(
-                "node", node_id, tags,
-                {"type": "Point", "coordinates": [lon, lat]},
-                field_names,
-            )
+        yield _feature(
+            "node", node_id, tags,
+            {"type": "Point", "coordinates": [lon, lat]},
+            field_names,
         )
+    node_tags.clear()
 
     for way_id, way in ways.items():
-        tags = way["tags"]
+        # Теги way отношениям не нужны — освобождаем их сразу.
+        tags = way.pop("tags", None)
         if not tags:
             continue
         coords = _coords(way["refs"], nodes)
@@ -303,31 +314,44 @@ def convert_osm_to_features(source, progress=None, cancel=None, field_names=None
             geometry = {"type": "Polygon", "coordinates": [coords]}
         else:
             geometry = {"type": "LineString", "coordinates": coords}
-        features.append(_feature("way", way_id, tags, geometry, field_names))
+        yield _feature("way", way_id, tags, geometry, field_names)
 
     for relation_id, members, tags in relations:
         if not tags:
             continue
         geometry = _relation_geometry(members, ways, nodes, tags)
         if geometry is not None:
-            features.append(
-                _feature("relation", relation_id, tags, geometry, field_names)
+            yield _feature(
+                "relation", relation_id, tags, geometry, field_names
             )
 
-    return features
+
+def convert_osm_to_features(source, progress=None, cancel=None, field_names=None):
+    """Все объекты OSM списком."""
+    return list(
+        _iter_features(
+            source, progress=progress, cancel=cancel,
+            field_names=field_names,
+        )
+    )
 
 
 def convert_osm_xml(source, destination, progress=None, cancel=None):
-    features = convert_osm_to_features(
-        source, progress=progress, cancel=cancel, field_names=FieldNames()
-    )
+    """Пишет объекты OSM в GeoJSON, не держа их всех в памяти."""
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
     with destination.open("w", encoding="utf-8") as handle:
-        json.dump(
-            {"type": "FeatureCollection", "features": features},
-            handle,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    return len(features)
+        handle.write('{"type":"FeatureCollection","features":[')
+        for feature in _iter_features(
+            source, progress=progress, cancel=cancel,
+            field_names=FieldNames(),
+        ):
+            if count:
+                handle.write(",")
+            json.dump(
+                feature, handle, ensure_ascii=False, separators=(",", ":")
+            )
+            count += 1
+        handle.write("]}")
+    return count

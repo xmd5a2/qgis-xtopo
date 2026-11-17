@@ -32,13 +32,18 @@ DEM_FILES = (
 # на месте: связать их с кэшем жёсткой ссылкой нельзя, запись прошла бы
 # в кэш.  Остальные файлы удаляются перед каждой подготовкой, поэтому
 # ссылка безопасна и копия не нужна.
-COPY_ONLY_FILES = ("merged_dem_3857.tif",)
+COPY_ONLY_FILES = (
+    "merged_dem.tif",
+    "merged_dem_3857.tif",
+    "slope_upscaled.tif",
+    "hillshade_composite.tif",
+)
 
 # Версия расчёта рельефа (формат растров, сборка мозаики, репроекция).
 # Меняя результат, поднимайте число: иначе старый кэш отдаст устаревший
 # рельеф даже после обновления плагина.  Версия плагина сюда намеренно не
 # входит — обновление интерфейса или стиля не должно пересчитывать DEM.
-DEM_VERSION = 2
+DEM_VERSION = 3
 
 # Версия параметров отмывки (core/terrain.py: generate_hillshade_slope).
 # Меняя направление света, преувеличение, подсветку теней или правило
@@ -48,7 +53,7 @@ HILLSHADE_STYLE_VERSION = 4
 
 # Версия расчёта изолиний: 2 — DEM режется на тайлы с нахлёстом,
 # контуры считаются параллельно, в результат попадает середина тайла.
-ISOLINES_VERSION = 3
+ISOLINES_VERSION = 4
 # Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
 DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
@@ -100,6 +105,20 @@ def _file_sha256(path):
     return digest.hexdigest()
 
 
+def _file_stat(path):
+    """Быстрый отпечаток файла: имя, размер и время изменения.
+
+    Хеш содержимого на крупных охватах — это гигабайты чтения на
+    каждой подготовке, а для кэша достаточно отпечатка файла.
+    """
+    path = Path(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return f"{path.name}:missing"
+    return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
 def _layer_digest(path):
     """Хест содержимого слоя (геометрия и атрибуты).
 
@@ -146,10 +165,13 @@ def layer_digest(path):
 
 
 def dem_source_digest(config):
-    """Хест исходных тайлов DEM.
+    """Отпечаток исходных тайлов DEM.
 
     Считается по файлам `.hgt` (как скачаны) — их содержимое стабильно от
     запуска к запуску, в отличие от результата конвертации в `.tif`.
+    Хеш содержимого не нужен: на крупном охвате это гигабайты чтения
+    на каждой подготовке, поэтому достаточно имени, размера и времени
+    изменения файла.
     """
     parts = []
     try:
@@ -161,8 +183,7 @@ def dem_source_digest(config):
             continue
         if path.suffix.lower() not in (".hgt", ".tif"):
             continue
-        parts.append(path.name)
-        parts.append(_file_sha256(path))
+        parts.append(_file_stat(path))
     return _digest(parts)
 
 
@@ -307,11 +328,13 @@ def isolines_signature(config, bbox, dem_key):
         config.isolines_step,
         config.smooth_isolines,
         bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
-        _layer_digest(config.vector_dir / "water_dissolved.sqlite"),
-        _layer_digest(config.vector_dir / "water.sqlite"),
-        _layer_digest(config.vector_dir / "water_intermittent_dissolved.sqlite"),
-        _layer_digest(config.vector_dir / "water_intermittent.sqlite"),
-        _layer_digest(config.vector_dir / "glacier.sqlite"),
+        # Слои, по которым режутся изолинии: отпечаток файла вместо
+        # полного обхода геометрии и атрибутов.
+        _file_stat(config.vector_dir / "water_dissolved.sqlite"),
+        _file_stat(config.vector_dir / "water.sqlite"),
+        _file_stat(config.vector_dir / "water_intermittent_dissolved.sqlite"),
+        _file_stat(config.vector_dir / "water_intermittent.sqlite"),
+        _file_stat(config.vector_dir / "glacier.sqlite"),
         # Нарезка DEM на тайлы изменилась: старые изолинии считались
         # одним проходом и переиспользовать их нельзя.
         ISOLINES_VERSION,
@@ -382,7 +405,18 @@ def _restore(config, group, signature, names, target_dir, required):
         item = source / name
         if item.exists():
             _restore_item(item, target_dir / name)
+    # Запись только что использована: время изменения обновляется, иначе
+    # вытеснение по mtime удаляло бы её первой.
+    _touch(source)
     return True
+
+
+def _touch(directory):
+    """Обновляет время изменения каталога записи кэша."""
+    try:
+        os.utime(directory, None)
+    except OSError:
+        pass
 
 
 def _store(config, group, signature, names, source_dir):

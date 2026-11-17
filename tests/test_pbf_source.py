@@ -164,6 +164,58 @@ class CleanGeometryTest(unittest.TestCase):
         self.assertIs(_clean_geometry(geometry), geometry)
 
 
+class GdalVersionTest(unittest.TestCase):
+    """На старом GDAL нужна явная ошибка, а не тихая потеря объектов."""
+
+    def test_old_gdal_gives_a_clear_error(self):
+        from qgis_xtopo.core import pbf_source
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "extract.osm.pbf"
+            source.write_bytes(b"not a real pbf")
+            config = Config(qgis_projects_dir=str(root / "projects"))
+            config.ensure_directories()
+            with mock.patch.object(
+                pbf_source, "_dataset_reading_supported", return_value=False,
+            ):
+                with self.assertRaises(pbf_source.PbfError) as context:
+                    pbf_source.prepare_dataset(
+                        config, BBox(43.8, 41.7, 44.2, 42.0), ["peak"],
+                        query_texts={"peak": 'node["natural"="peak"];'},
+                        sources=[str(source)],
+                    )
+        self.assertIn("3.6", str(context.exception))
+
+
+class PbfFastBoundsTest(unittest.TestCase):
+    """Разбор protobuf проверяет границы буфера."""
+
+    def test_truncated_varint(self):
+        from qgis_xtopo.core.pbf_fast import UnsupportedPbf, _varint
+
+        with self.assertRaises(UnsupportedPbf):
+            _varint(b"\x80", 0)
+
+    def test_truncated_field(self):
+        from qgis_xtopo.core.pbf_fast import UnsupportedPbf, _fields
+
+        with self.assertRaises(UnsupportedPbf):
+            list(_fields(b"\x12\x05ab"))
+
+    def test_implausible_block_header(self):
+        import struct
+
+        from qgis_xtopo.core.pbf_fast import UnsupportedPbf, _blobs
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "broken.osm.pbf"
+            path.write_bytes(struct.pack(">I", 0xFFFFFFFF) + b"junk")
+            with path.open("rb") as handle:
+                with self.assertRaises(UnsupportedPbf):
+                    list(_blobs(handle))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -265,6 +317,15 @@ class _FakeDataset:
 
     def GetLayerByName(self, name):
         return self._layer if name == self._layer.GetName() else None
+
+    def GetNextFeature(self, include_layer=False):
+        """Датасетное чтение GDAL 3.6+: объект и слой."""
+        feature = self._layer.GetNextFeature()
+        if feature is None:
+            return (None, None) if include_layer else None
+        if include_layer:
+            return feature, self._layer
+        return feature
 
 
 class BrokenSpatialFilterTest(unittest.TestCase):
@@ -418,7 +479,7 @@ class IndexingFallbackTest(unittest.TestCase):
                 calls.append(custom_indexing)
                 if custom_indexing:
                     raise RuntimeError("Non increasing node id")
-                return None
+                raise RuntimeError("could not open")
 
             with mock.patch(
                 "qgis_xtopo.core.pbf_source._open_dataset",

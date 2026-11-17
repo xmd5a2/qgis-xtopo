@@ -38,6 +38,9 @@ HOLE_SHARE = 0.02
 # Шаг прореживания готовой линии, в ячейках растра.
 FINAL_CELLS = 3.0
 MAX_POINTS = 200
+# Сколько отрезков контура растеризуются за раз: плотный массив
+# ny×число_вершин на подробном контуре занимал сотни мегабайт.
+RASTER_BLOCK = 2048
 # Ледники: концы ищем по расстоянию вдоль фигуры, а сетка не грубее
 # этого — иначе узкие ветки и дыры теряются и линия идёт не по главному
 # потоку.
@@ -151,7 +154,12 @@ def fill_small_holes(part, min_area):
 
 
 def _rasterize(rings, x0, y0, x1, y1, nx, ny):
-    """Маска полигона в сетке nx×ny (пиксель в центре ячейки)."""
+    """Маска полигона в сетке nx×ny (пиксель в центре ячейки).
+
+    Отрезки контура обрабатываются блоками: раньше для каждого кольца
+    строился плотный массив ny×число_вершин, и на подробном контуре
+    ледника это десятки сотен мегабайт.
+    """
     cell_x = (x1 - x0) / nx
     cell_y = (y1 - y0) / ny
     rows = np.arange(ny)
@@ -162,29 +170,53 @@ def _rasterize(rings, x0, y0, x1, y1, nx, ny):
         py = (y1 - ring[:, 1]) / cell_y
         px = np.append(px, px[0])
         py = np.append(py, py[0])
-        ax, ay = px[:-1][None, :], py[:-1][None, :]
-        bx, by = px[1:][None, :], py[1:][None, :]
-        yc = (rows + 0.5)[:, None]
-        crosses = (ay <= yc) != (by <= yc)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            xs = ax + (yc - ay) * (bx - ax) / (by - ay)
-        xs = np.where(crosses, xs, np.inf)
-        xs.sort(axis=1)
-        starts, ends = xs[:, 0::2], xs[:, 1::2]
-        pairs = min(starts.shape[1], ends.shape[1])
-        for k in range(pairs):
-            start, end = starts[:, k], ends[:, k]
-            valid = np.isfinite(start) & np.isfinite(end)
-            if not valid.any():
+        # Пересечения отрезков с горизонталями строк.
+        row_numbers = []
+        crossing_x = []
+        for start in range(0, len(px) - 1, RASTER_BLOCK):
+            stop = min(start + RASTER_BLOCK, len(px) - 1)
+            ax, ay = px[start:stop][None, :], py[start:stop][None, :]
+            bx, by = (
+                px[start + 1:stop + 1][None, :], py[start + 1:stop + 1][None, :]
+            )
+            yc = (rows + 0.5)[:, None]
+            crosses = (ay <= yc) != (by <= yc)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                xs = ax + (yc - ay) * (bx - ax) / (by - ay)
+            xs = np.where(crosses, xs, np.inf)
+            finite = np.isfinite(xs)
+            if not finite.any():
                 continue
-            i0 = np.clip(np.ceil(start - 0.5), 0, nx - 1).astype("int64")
-            i1 = np.clip(np.floor(end - 0.5), 0, nx - 1).astype("int64")
-            valid &= i1 >= i0
-            if not valid.any():
-                continue
-            base = rows[valid] * (nx + 1)
-            starts_all.append(base + i0[valid])
-            ends_all.append(base + i1[valid] + 1)
+            row_numbers.append(np.nonzero(finite)[0])
+            crossing_x.append(xs[finite])
+        if not row_numbers:
+            continue
+        row_values = np.concatenate(row_numbers)
+        x_values = np.concatenate(crossing_x)
+        # Внутри строки пересечения идут по возрастанию x: пары (0,1),
+        # (2,3) — участки внутри кольца.
+        order = np.lexsort((x_values, row_values))
+        row_values = row_values[order]
+        x_values = x_values[order]
+        first = np.searchsorted(row_values, row_values, side="left")
+        position = np.arange(len(row_values)) - first
+        starts_index = np.nonzero(position % 2 == 0)[0]
+        ends_index = starts_index + 1
+        # Непарное пересечение (последнее в строке) отбрасывается.
+        paired = (
+            (ends_index < len(row_values))
+            & (row_values[ends_index] == row_values[starts_index])
+        )
+        starts_index = starts_index[paired]
+        ends_index = ends_index[paired]
+        start_x = x_values[starts_index]
+        end_x = x_values[ends_index]
+        i0 = np.clip(np.ceil(start_x - 0.5), 0, nx - 1).astype("int64")
+        i1 = np.clip(np.floor(end_x - 0.5), 0, nx - 1).astype("int64")
+        good = i1 >= i0
+        base = row_values[starts_index][good] * (nx + 1)
+        starts_all.append(base + i0[good])
+        ends_all.append(base + i1[good] + 1)
     if not starts_all:
         return np.zeros((ny, nx), dtype=bool)
     size = ny * (nx + 1)
@@ -699,20 +731,6 @@ def _clearance_stats(geom, points, step=3):
     return (0.0 if low is None else low), total / max(count, 1)
 
 
-def _mean_clearance(geom, points, step=2):
-    boundary = geom.GetBoundary()
-    if boundary is None or boundary.IsEmpty():
-        return 0.0
-    probe = ogr.Geometry(ogr.wkbPoint)
-    total = 0.0
-    count = 0
-    for x, y in points[::step]:
-        probe.SetPoint_2D(0, x, y)
-        total += boundary.Distance(probe)
-        count += 1
-    return total / max(count, 1)
-
-
 def _min_clearance(geom, points, step=2):
     boundary = geom.GetBoundary()
     if boundary is None or boundary.IsEmpty():
@@ -885,10 +903,3 @@ def _axis_attempt(part, cells, main_flow=False):
     if len(line) > MAX_POINTS:
         line = line[np.linspace(0, len(line) - 1, MAX_POINTS).astype(int)]
     return [tuple(point) for point in line]
-
-
-def _length(points):
-    total = 0.0
-    for a, b in zip(points, points[1:]):
-        total += ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
-    return total

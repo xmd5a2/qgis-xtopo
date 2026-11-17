@@ -244,17 +244,27 @@ def set_project_detail(value, project=None):
     значении 4 показываются подробности 1–4, при 3 — только до 3,
     при 5 — все, включая мелкие. Без переменной правила ложны, и модель
     карты (дороги, тропы, родники) не рисуется вовсе.
-    """
-    from qgis.core import QgsExpressionContextUtils, QgsProject, QgsVectorLayer
 
+    Флаг изменений проекта восстанавливается: функцию вызывает и панель
+    при открытии проекта (там переменной может ещё не быть), и сам
+    пользователь. О своём намерении панель помечает проект отдельно.
+    """
     project = project or QgsProject.instance()
     value = normalize_detail(value)
+    try:
+        was_dirty = project.isDirty()
+    except Exception:
+        was_dirty = False
     QgsExpressionContextUtils.setProjectVariable(
         project, DETAIL_VARIABLE, str(value)
     )
     for layer in project.mapLayers().values():
         if isinstance(layer, QgsVectorLayer):
             layer.triggerRepaint()
+    try:
+        project.setDirty(was_dirty)
+    except Exception:
+        pass
     return value
 
 

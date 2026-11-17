@@ -191,6 +191,23 @@ class TerrainCacheTest(unittest.TestCase):
                 terrain_cache.KEEP_ENTRIES,
             )
 
+    def test_restore_updates_the_time_of_the_entry(self):
+        """Часто используемая запись не должна вытесняться первой."""
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            for name in terrain_cache.DEM_FILES:
+                (config.raster_dir / name).write_bytes(b"raster")
+            key = terrain_cache.dem_signature(config, BBox(43.0, 42.0, 43.1, 42.1))
+            terrain_cache.store_dem(config, key)
+            entry = terrain_cache._group_dir(config, "dem", key)
+            # Делаем вид, что запись давно не использовалась.
+            stale = entry.stat().st_mtime_ns - 10 ** 9
+            os.utime(entry, (stale, stale))
+            for name in terrain_cache.DEM_FILES:
+                (config.raster_dir / name).unlink()
+            self.assertTrue(terrain_cache.restore_dem(config, key))
+            self.assertGreater(entry.stat().st_mtime_ns, stale)
+
     def test_plugin_version_is_read(self):
         version = terrain_cache.plugin_version()
         self.assertRegex(version, r"^\d+\.\d+")

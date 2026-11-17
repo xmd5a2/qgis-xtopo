@@ -21,7 +21,10 @@
 import time
 
 from .cpu import cpu_workers
-from .memory import LAYER_WORKER_BYTES, worker_cap
+from .i18n import SETTINGS_GROUP
+from .memory import (
+    LAYER_WORKER_BYTES, TERRAIN_RESERVE_BYTES, memory_budget, worker_cap,
+)
 from .pbf_source import parse_tags
 
 # Эталонные значения прежней формулы (калибровка по реальным выгрузкам).
@@ -63,7 +66,6 @@ CPU_ROUNDS = 5_000
 CPU_REPEATS = 3
 CPU_MAX_AGE = 30 * 24 * 60 * 60
 
-SETTINGS_GROUP = ("qgis-xtopo", "qgis-xtopo")
 SETTINGS_CPU = "performance/cpu_score"
 SETTINGS_CPU_TIME = "performance/cpu_checked"
 
@@ -128,12 +130,26 @@ def cpu_score(store=None):
     return score
 
 
-def layer_worker_count(layers):
-    """Сколько слоёв реально пойдёт одновременно на этой машине."""
+def layer_worker_count(layers, terrain=False):
+    """Сколько слоёв реально пойдёт одновременно на этой машине.
+
+    ``terrain`` — параллельно слоям работает поток рельефа: его память
+    вычитается из бюджета, иначе на 8 ГБ слоёв запускается больше, чем
+    помещается вместе с варпами DEM.
+    """
     total = max(1, int(layers or 1))
     requested = max(1, min(cpu_workers(limit=8), total))
+    budget = memory_budget(
+        extra_reserve=TERRAIN_RESERVE_BYTES if terrain else 0
+    )
     return max(
-        1, min(requested, worker_cap(LAYER_WORKER_BYTES, cpu_limit=requested))
+        1,
+        min(
+            requested,
+            worker_cap(
+                LAYER_WORKER_BYTES, cpu_limit=requested, budget=budget
+            ),
+        ),
     )
 
 

@@ -882,7 +882,7 @@ def _source_path(config, source_text):
         return None
     path = Path(relative)
     if not path.is_absolute():
-        path = Path(config.project_dir) / relative
+        path = Path(config.layers_dir) / relative
     return path if path.exists() else None
 
 
@@ -946,6 +946,19 @@ def _evaluation_context(project, layer, level):
     return context
 
 
+def _in_scale(rule, scale):
+    """Попадает ли масштаб в диапазон правила.
+
+    Границы наследуются от ветки: у группы они уже учтены, поэтому
+    правило вне диапазона не может дать ни совпадения, ни размера.
+    """
+    if rule.minimum and scale < rule.minimum:
+        return False
+    if rule.maximum and scale > rule.maximum:
+        return False
+    return True
+
+
 class _RuleEvaluator:
     """Вычисление видимости точки по дереву правил слоя.
 
@@ -999,6 +1012,13 @@ class _RuleEvaluator:
             matched = False
             best = 0.0
             for child in rule.children:
+                # Ветка вне масштаба не может дать совпадения: границы
+                # группы наследуются детьми.  Проверка идёт до вычисления
+                # фильтра — иначе на каждый слой считались выражения
+                # заведомо пустых диапазонов.  Пропущенный сосед не
+                # считается «подошедшим», поэтому ELSE может сработать.
+                if not _in_scale(child, scale):
+                    continue
                 if child.filter.strip().upper() == "ELSE":
                     allowed = not matched
                 else:
@@ -1013,9 +1033,7 @@ class _RuleEvaluator:
         if rule.size <= 0:
             return 0.0
         # Диапазон масштаба листа уже включает ограничения веток и слоя.
-        if rule.minimum and scale < rule.minimum:
-            return 0.0
-        if rule.maximum and scale > rule.maximum:
+        if not _in_scale(rule, scale):
             return 0.0
         return rule.size
 
@@ -1166,11 +1184,13 @@ def _prune_band(points, index, scale, latitude_max):
                     if other == position:
                         continue
                     neighbour = entries[other]
-                    # Расстояние между точками в градусах, переведённое
-                    # в метры.  Метрика завышена (cos не учитывается),
-                    # поэтому лишние точки в служебном слое не мешают.
+                    # Расстояние между точками в метрах: та же метрика,
+                    # что и в выражении шаблона, — с cos(широты).  Без
+                    # него расстояние завышалось, и служебный слой терял
+                    # точки-подавители: значки накладывались.
                     distance = math.hypot(
-                        neighbour.lon - point.lon,
+                        (neighbour.lon - point.lon)
+                        * math.cos(math.radians(point.lat)),
                         neighbour.lat - point.lat,
                     ) * 111320.0
                     if distance > limit(neighbour):

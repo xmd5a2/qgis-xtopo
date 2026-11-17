@@ -284,6 +284,12 @@ class DiskSpaceGuardTest(unittest.TestCase):
         from qgis_xtopo.core import disk_space, terrain
 
         class Band:
+            def GetNoDataValue(self):
+                return None
+
+            def SetNoDataValue(self, value):
+                pass
+
             def ReadAsArray(self, x, y, columns, rows):
                 return np.zeros((rows, columns), dtype="float32")
 

@@ -87,20 +87,22 @@ class GdalLogTest(unittest.TestCase):
             self.log.restore()
         self.assertEqual(sum(self.log.counts().values()), 1)
 
-    def test_warning_stops_handler_chain(self):
-        """GDAL вызывает все обработчики в стеке: нужен CE_Fatal."""
+    def test_warning_is_counted(self):
         from osgeo import gdal
 
-        self.log._handle(gdal.CE_Warning, 1, "Non closed ring detected.")
-        self.assertEqual(
-            self.log._last_return, gdal.CE_Fatal
+        result = self.log._handle(
+            gdal.CE_Warning, 1, "Non closed ring detected."
         )
+        # Возвращаемое значение обработчика GDAL не использует.
+        self.assertEqual(result, gdal.CE_None)
+        self.assertEqual(sum(self.log.counts().values()), 1)
 
     def test_failure_is_not_suppressed(self):
         from osgeo import gdal
 
-        self.log._handle(gdal.CE_Failure, 1, "broken")
-        self.assertEqual(self.log._last_return, gdal.CE_None)
+        result = self.log._handle(gdal.CE_Failure, 1, "broken")
+        self.assertEqual(result, gdal.CE_None)
+        self.assertEqual(sum(self.log.error_counts().values()), 1)
 
 
 if __name__ == "__main__":

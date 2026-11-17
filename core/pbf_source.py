@@ -12,8 +12,6 @@ from . import osmium_prefilter
 from .osm_convert import FieldNames
 
 
-LAYER_NAMES = ("points", "lines", "multipolygons", "multilinestrings", "other_relations")
-
 # Порядок слоёв драйвера OSM: драйвер читает файл потоково
 # (nodes -> ways -> relations) и раскладывает объекты по этим слоям.
 INTERLEAVED_LAYER_ORDER = (
@@ -34,6 +32,10 @@ HSTORE_PATTERN = re.compile(r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"')
 
 class PbfError(RuntimeError):
     pass
+
+
+# Год GDAL, в котором появилось датасетное чтение с указанием слоя.
+MINIMAL_GDAL = 3060000
 
 
 def _gdal():
@@ -495,6 +497,9 @@ def _open_dataset(gdal, source, temp_dir, custom_indexing=True):
     пограничных объектах версии выгрузок различаются), и на таких файлах
     индекс падает с «Non increasing node id» — чтение прерывается.
     Тогда файл открывают заново без индекса.
+
+    С включёнными исключениями GDAL бросает ошибку вместо ``None``,
+    поэтому ошибка открытия переводится в понятное сообщение.
     """
     gdal.SetConfigOption("CPL_TMPDIR", str(temp_dir))
     options = [
@@ -503,11 +508,25 @@ def _open_dataset(gdal, source, temp_dir, custom_indexing=True):
         "MAX_TMPFILE_SIZE=100",
         "TAGS_FORMAT=JSON",
     ]
-    dataset = gdal.OpenEx(str(source), gdal.OF_VECTOR, open_options=options)
+    dataset, error = _open_with_options(gdal, source, options)
     if dataset is not None:
         return dataset
     options = [option for option in options if not option.startswith("TAGS_FORMAT")]
-    return gdal.OpenEx(str(source), gdal.OF_VECTOR, open_options=options)
+    dataset, error = _open_with_options(gdal, source, options)
+    if dataset is None:
+        raise PbfError(
+            f"GDAL could not open {Path(source).name}: {error}. "
+            "Make sure the OSM/PBF driver is available in this QGIS build."
+        )
+    return dataset
+
+
+def _open_with_options(gdal, source, options):
+    """Открывает файл драйвером OSM; (None, причина) — открыть не удалось."""
+    try:
+        return gdal.OpenEx(str(source), gdal.OF_VECTOR, open_options=options), ""
+    except Exception as exc:  # noqa: BLE001 - причина идёт в сообщение
+        return None, str(exc).strip() or type(exc).__name__
 
 
 def _filter_extent(bbox):
@@ -606,9 +625,23 @@ def _dataset_reading_supported():
     try:
         from osgeo import gdal
 
-        return int(gdal.VersionInfo("VERSION_NUM")) >= 3060000
+        return int(gdal.VersionInfo("VERSION_NUM")) >= MINIMAL_GDAL
     except Exception:
         return False
+
+
+def _require_dataset_reading():
+    """Проверка версии GDAL перед чтением PBF.
+
+    В GDAL старше 3.6 объекты приходится брать опросом слоёв по кругу:
+    очередь слоя переполняется, чтение обрывается, и часть объектов
+    теряется молча.  Лучше явная ошибка, чем тихая потеря данных.
+    """
+    if not _dataset_reading_supported():
+        raise PbfError(
+            "Чтение PBF требует GDAL 3.6 или новее: в старой версии "
+            "опрос слоёв по кругу теряет объекты."
+        )
 
 
 def _iter_features(dataset, cancel=None):
@@ -624,24 +657,10 @@ def _iter_features(dataset, cancel=None):
     """
     getter = getattr(dataset, "GetNextFeature", None)
     if getter is None or not _dataset_reading_supported():
-        # Старый GDAL без датасетного API: опрашиваем слои по кругу.
-        layers = []
-        for name in INTERLEAVED_LAYER_ORDER:
-            layer = dataset.GetLayerByName(name)
-            if layer is not None:
-                layers.append(layer)
-        while True:
-            any_feature = False
-            for layer in layers:
-                if cancel is not None and cancel.is_set():
-                    raise InterruptedError("PBF processing cancelled")
-                feature = layer.GetNextFeature()
-                if feature is None:
-                    continue
-                any_feature = True
-                yield feature, layer.GetName()
-            if not any_feature:
-                return
+        raise PbfError(
+            "Чтение PBF требует GDAL 3.6 или новее: в старой версии "
+            "опрос слоёв по кругу теряет объекты."
+        )
     count = 0
     last_layer = ""
     while True:
@@ -704,6 +723,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
     """
     from osgeo import gdal
 
+    _require_dataset_reading()
     previous = gdal.GetConfigOption("OSM_CONFIG_FILE")
     osm_config = ensure_osm_config(config)
     if osm_config is not None:
@@ -810,11 +830,6 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         gdal, source, config.temp_dir,
                         custom_indexing=_custom_indexing,
                     )
-                    if dataset is None:
-                        raise PbfError(
-                            f"GDAL could not open {source.name}. "
-                            "Make sure the OSM/PBF driver is available in this QGIS build."
-                        )
                     layers = [
                         layer for layer in (
                             dataset.GetLayerByName(name)
@@ -991,11 +1006,6 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
         "PBF: чтение идёт с грубым фильтром по области, "
         "остальные объекты файла пропускаются."
     ]
-    if not _dataset_reading_supported():
-        warnings.append(
-            "GDAL старше 3.6: чтение идёт опросом слоёв по кругу, "
-            "на больших выгрузках часть объектов может потеряться."
-        )
     if total_files > 1:
         notes.append("PBF: выгрузки объединены в один источник.")
     if progress:
@@ -1008,9 +1018,110 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
     )
 
 
+def _probe_source(gdal, source, temp_dir, index, bbox_geometry, bbox, cancel,
+                  progress, seen):
+    """Считает объекты одного файла: всего, в области и подходящих.
+
+    Читается так же, как при подготовке: собственным индексом GDAL, а
+    при отказе — без него; с грубым фильтром по области, а если фильтр
+    не отдал нужную область — файл целиком.
+    """
+    error = ""
+    for custom_indexing in (True, False):
+        for use_filter in (True, False):
+            dataset = None
+            try:
+                dataset = _open_dataset(
+                    gdal, source, temp_dir, custom_indexing=custom_indexing
+                )
+                layers = [
+                    layer for layer in (
+                        dataset.GetLayerByName(name)
+                        for name in INTERLEAVED_LAYER_ORDER
+                    )
+                    if layer is not None
+                ]
+                definitions = {
+                    layer.GetName(): layer.GetLayerDefn() for layer in layers
+                }
+                filtered = use_filter and _apply_spatial_filter(
+                    layers, source, bbox
+                )
+                # Свой набор идентификаторов на попытку: при откате от
+                # фильтра файл читается заново, и объекты не должны
+                # считаться дважды.
+                local = set()
+                counts = _count_features(
+                    dataset, definitions, index, bbox_geometry, cancel,
+                    progress, filtered, local,
+                )
+                if filtered and not counts["delivered"]:
+                    # Фильтр драйвера не доставил нужную область: файл
+                    # читается заново целиком.
+                    continue
+                seen.update(local)
+                return counts["total"], counts["in_bbox"], counts["matched"]
+            except RuntimeError as exc:
+                error = str(exc).strip() or type(exc).__name__
+                continue
+            finally:
+                dataset = None
+    raise PbfError(
+        f"GDAL could not read {Path(source).name}: {error}. "
+        "Make sure the OSM/PBF driver is available in this QGIS build."
+    )
+
+
+def _count_features(dataset, definitions, index, bbox_geometry, cancel,
+                    progress, filtered, seen):
+    """Счётчики объектов файла и признак, что фильтр отдал область."""
+    total = 0
+    in_bbox = 0
+    matched = 0
+    read_box = None
+    for feature, layer_name in _iter_features(dataset, cancel):
+        total += 1
+        if total % 50000 == 0 and progress:
+            progress(f"PBF: проверено {total} объектов")
+        geometry = feature.GetGeometryRef()
+        if geometry is None or geometry.IsEmpty():
+            continue
+        if filtered:
+            try:
+                read_box = _extend_box(read_box, *geometry.GetEnvelope())
+            except Exception:
+                pass
+        try:
+            if not geometry.Intersects(bbox_geometry):
+                continue
+        except Exception:
+            continue
+        in_bbox += 1
+        kind = _kind_for_layer(layer_name, feature)
+        definition = definitions.get(layer_name)
+        if definition is None:
+            continue
+        properties = _feature_properties(feature, definition, kind)
+        if properties and index.matching_names(kind, properties):
+            identity = (layer_name, properties.get("@id"))
+            if identity[1]:
+                if identity in seen:
+                    continue
+                seen.add(identity)
+            matched += 1
+    area = (bbox.lon_min, bbox.lon_max, bbox.lat_min, bbox.lat_max)
+    return {
+        "total": total,
+        "in_bbox": in_bbox,
+        "matched": matched,
+        "delivered": _filter_delivered(read_box, area) if filtered else True,
+    }
+
+
 def probe_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                   progress=None, sources=None):
     gdal, ogr = _gdal()
+    _require_dataset_reading()
     paths = [Path(item).expanduser() for item in (sources or [config.pbf_path])]
     for source in paths:
         if not source.exists():
@@ -1031,54 +1142,16 @@ def probe_dataset(config, bbox, query_names, query_texts=None, cancel=None,
         source, temporary = _decompress(
             original, config.temp_dir, stem=stem, cancel=cancel
         )
-        dataset = _open_dataset(gdal, source, config.temp_dir)
-        if dataset is None:
-            for path in temporary:
-                Path(path).unlink(missing_ok=True)
-            raise PbfError(f"GDAL could not open {source.name}")
-
         try:
-            layers = [
-                layer for layer in (
-                    dataset.GetLayerByName(name)
-                    for name in INTERLEAVED_LAYER_ORDER
-                )
-                if layer is not None
-            ]
-            definitions = {
-                layer.GetName(): layer.GetLayerDefn() for layer in layers
-            }
-            # Тот же грубый фильтр, что и при подготовке: оценка не должна
-            # перебирать весь файл.  Чтение — тем же датасетным API.
-            _apply_spatial_filter(layers, source, bbox)
-            for feature, layer_name in _iter_features(dataset, cancel):
-                total += 1
-                if total % 50000 == 0 and progress:
-                    progress(f"PBF: проверено {total} объектов")
-                geometry = feature.GetGeometryRef()
-                if geometry is None or geometry.IsEmpty():
-                    continue
-                try:
-                    if not geometry.Intersects(bbox_geometry):
-                        continue
-                except Exception:
-                    continue
-                in_bbox += 1
-                kind = _kind_for_layer(layer_name, feature)
-                definition = definitions.get(layer_name)
-                if definition is None:
-                    continue
-                properties = _feature_properties(feature, definition, kind)
-                if properties and index.matching_names(kind, properties):
-                    identity = (layer_name, properties.get("@id"))
-                    if identity[1]:
-                        if identity in seen:
-                            continue
-                        seen.add(identity)
-                    matched += 1
+            counts = _probe_source(
+                gdal, source, config.temp_dir, index, bbox_geometry, bbox,
+                cancel, progress, seen,
+            )
         finally:
-            dataset = None
             for path in temporary:
                 Path(path).unlink(missing_ok=True)
+        total += counts[0]
+        in_bbox += counts[1]
+        matched += counts[2]
 
     return PbfProbe(total, in_bbox, matched, time.monotonic() - started)

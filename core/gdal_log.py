@@ -58,7 +58,6 @@ class GdalLog:
         self._lock = threading.Lock()
         self._counts = Counter()
         self._errors = Counter()
-        self._last_return = None
 
     def _handle(self, err_class, err_no, message):
         try:
@@ -75,13 +74,10 @@ class GdalLog:
             # Настоящая ошибка не должна молчать: GDAL превратит её в
             # исключение, но текст полезно иметь и в консоли.
             sys.stderr.write(f"GDAL ERROR {err_no}: {message.strip()}\n")
-            self._last_return = gdal.CE_None
-            return self._last_return
-        # GDAL вызывает все обработчики в стеке, поэтому сообщение уходит и
-        # в консоль QGIS. CE_Fatal обрывает цепочку: текст остаётся только в
-        # сводке журнала.
-        self._last_return = gdal.CE_Fatal
-        return self._last_return
+        # GDAL вызывает только верхний обработчик стека, поэтому до
+        # стандартного обработчика сообщение не доходит: предупреждения
+        # остаются в сводке журнала.  Возвращаемое значение не используется.
+        return gdal.CE_None if gdal is not None else 0
 
     def counts(self):
         with self._lock:

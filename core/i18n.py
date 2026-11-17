@@ -18,6 +18,8 @@ from qgis.PyQt.QtCore import QSettings
 
 LANGUAGES = ("ru", "en")
 DEFAULT_LANGUAGE = "ru"
+# Группа настроек плагина: ею пользуются все его части (язык интерфейса,
+# язык подписей, размер текста, прокси, оценка производительности).
 SETTINGS_GROUP = ("qgis-xtopo", "qgis-xtopo")
 SETTINGS_KEY = "language"
 
@@ -86,6 +88,41 @@ def _fill(template, values):
 _LOOKUPS = {}
 
 
+def _reverse_variants(pairs):
+    """Английский перевод → список русских вариантов.
+
+    Одному английскому тексту иногда соответствуют несколько русских
+    строк: «Затенение» и «Затенение рельефа» переводятся одинаково.
+    Варианты хранятся списком — при обратном переводе выбирается один,
+    и выбор не должен зависеть от порядка ключей каталога.
+    """
+    variants = {}
+    for source, target in pairs.items():
+        variants.setdefault(target, []).append(source)
+    return variants
+
+
+def _reverse_choice(variants, text):
+    """Русский вариант для английской строки.
+
+    Приоритет: совпадение регистра первой буквы, затем совпадение числа
+    слов, затем порядок каталога.  Так «OSM source» превращается в
+    «Источник OSM», а не в «источник OSM», «Hillshade» — в «Затенение»,
+    а не в «Затенение рельефа», и результат не зависит от того, какой
+    вариант попал в каталог первым.
+    """
+    candidates = variants.get(text)
+    if not candidates:
+        return None
+    upper = text[:1].isupper()
+    same_case = [item for item in candidates if item[:1].isupper() == upper]
+    pool = same_case or candidates
+    words = len(text.split())
+    same_words = [item for item in pool if len(item.split()) == words]
+    pool = same_words or pool
+    return pool[0]
+
+
 def _lookup_data(direction):
     """Словарь и шаблоны для направления перевода."""
     key = "en" if direction == "en" else "ru"
@@ -97,9 +134,7 @@ def _lookup_data(direction):
         exact = dict(pairs)
         source_targets = pairs.items()
     else:
-        exact = {}
-        for source, target in pairs.items():
-            exact.setdefault(target, source)
+        exact = _reverse_variants(pairs)
         source_targets = ((target, source) for source, target in pairs.items())
     templates = []
     for source, target in source_targets:
@@ -117,8 +152,12 @@ def tr(text):
     """Перевод строки на текущий язык; неизвестные строки не меняются."""
     if not isinstance(text, str) or not text:
         return text
-    exact, templates = _lookup_data(_language)
-    translated = exact.get(text)
+    if _language == "en":
+        exact, templates = _lookup_data("en")
+        translated = exact.get(text)
+    else:
+        exact, templates = _lookup_data("ru")
+        translated = _reverse_choice(exact, text)
     if translated is not None:
         return translated
     for pattern, target in templates:

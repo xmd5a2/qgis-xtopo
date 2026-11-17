@@ -133,6 +133,76 @@ class TranslateTest(unittest.TestCase):
             else:
                 settings.setValue(self.i18n.SETTINGS_KEY, saved)
 
+    def test_reverse_translation_picks_one_variant(self):
+        """Одному английскому тексту отвечают разные русские строки.
+
+        Обратный перевод не должен подставлять вариант «не того
+        регистра» или другую по смыслу строку.
+        """
+        i18n = self.i18n
+        i18n.set_language("ru", save=False)
+        self.assertEqual(i18n.tr("OSM source"), "Источник OSM")
+        self.assertEqual(i18n.tr("Geofabrik maps"), "Карты Geofabrik")
+        self.assertEqual(i18n.tr("Hillshade"), "Затенение")
+
+    def test_reverse_translation_is_deterministic(self):
+        """Выбор варианта не зависит от порядка ключей каталога."""
+        from qgis_xtopo.core import i18n as module
+
+        pairs = {
+            "Затенение рельефа": "Hillshade",
+            "Затенение": "Hillshade",
+        }
+        variants = module._reverse_variants(pairs)
+        self.assertEqual(
+            module._reverse_choice(variants, "Hillshade"), "Затенение"
+        )
+        pairs = {
+            "Затенение": "Hillshade",
+            "Затенение рельефа": "Hillshade",
+        }
+        variants = module._reverse_variants(pairs)
+        self.assertEqual(
+            module._reverse_choice(variants, "Hillshade"), "Затенение"
+        )
+
+
+class CatalogCoverageTest(unittest.TestCase):
+    """Все строки, которые видит пользователь, есть в каталоге."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _catalog(self):
+        return json.loads(CATALOG.read_text(encoding="utf-8"))
+
+    def test_user_strings_are_translated(self):
+        import ast
+
+        catalog = self._catalog()
+        missing = []
+        for folder in ("gui", "core"):
+            for path in sorted((self.ROOT / folder).glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    if not isinstance(func, ast.Attribute):
+                        continue
+                    if func.attr not in ("tr", "trf"):
+                        continue
+                    if not isinstance(func.value, ast.Name):
+                        continue
+                    if func.value.id != "i18n" or not node.args:
+                        continue
+                    first = node.args[0]
+                    if not isinstance(first, ast.Constant):
+                        continue
+                    text = first.value
+                    if isinstance(text, str) and text and text not in catalog:
+                        missing.append(f"{path.name}:{first.lineno} {text}")
+        self.assertEqual(missing, [])
+
 
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
 class TranslateTreeTest(unittest.TestCase):
@@ -201,6 +271,37 @@ class TranslateTreeTest(unittest.TestCase):
         self.assertEqual(combo.itemText(0), "Все")
         self.assertEqual(combo.itemText(1), "Ничего")
         self.assertEqual(tabs.tabText(0), "Проект")
+
+    def test_actions_and_menus_are_translated(self):
+        """Действия и меню — не виджеты, их обход не находит."""
+        from qgis.PyQt.QtWidgets import QMenu, QVBoxLayout, QWidget
+
+        from qgis_xtopo.gui.translation import translate_tree
+
+        try:
+            from qgis.PyQt.QtWidgets import QAction
+        except ImportError:  # QGIS 4 / Qt 6
+            from qgis.PyQt.QtGui import QAction
+
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        menu = QMenu("Атлас", root)
+        action = QAction("Расстояние", menu)
+        menu.addAction(action)
+        toolbar_action = QAction("Прокрутка карты", root)
+        layout.addWidget(menu)
+
+        self.i18n.set_language("en", save=False)
+        translate_tree(root)
+        self.assertEqual(action.text(), "Distance")
+        self.assertEqual(menu.title(), "Atlas")
+        self.assertEqual(toolbar_action.text(), "Pan map")
+
+        self.i18n.set_language("ru", save=False)
+        translate_tree(root)
+        self.assertEqual(action.text(), "Расстояние")
+        self.assertEqual(menu.title(), "Атлас")
+        self.assertEqual(toolbar_action.text(), "Прокрутка карты")
 
 
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")

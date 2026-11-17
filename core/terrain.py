@@ -35,6 +35,11 @@ MAX_COG_PREFETCH_PIXELS = 30_000_000
 # расчёт: число не зависит от количества ядер и ограничено каналом.
 COG_PREFETCH_WORKERS = 6
 
+# Сколько частей одного набора можно заранее положить на диск: каждая
+# часть — это полная сетка мозаики, и без ограничения их число растёт
+# вместе с числом тайлов набора.
+MAX_COG_PREFETCH_PARTS = 8
+
 # Запас вокруг тайла при нарезке DEM на изолинии.  Алгоритм GDAL считает
 # контур по соседним ячейкам, и без запаса линия у края тайла обрывается
 # и загибается.  В результат попадает только ядро тайла, поэтому куски
@@ -48,6 +53,10 @@ CONTOUR_TILE_PIXELS = 4_000_000
 # Сколько пикселей должно приходиться на один тайл: окно держится в
 # памяти, а нахлёст тайла съедает часть выигрыша от параллельности.
 CONTOUR_TILE_MAX_PIXELS = 6_000_000
+
+# Сколько метров в одном градусе: столько метров в шаге растра
+# географической СК.  Для проекционной СК масштаб берётся из неё самой.
+GEOGRAPHIC_SCALE = 111120.0
 
 # Сколько долей ядер можно занять расчётом контуров: больше потоков —
 # быстрее, но дальше потолок, GEOS держит GIL, и лишние потоки мешают.
@@ -260,6 +269,21 @@ def _item_overlaps(item, bbox):
     )
 
 
+def _signed_pc_url(href, label, progress=None):
+    """Подписанная ссылка Planetary Computer; None — подпись не удалась.
+
+    Подпись — сетевой запрос с ретраями: исчерпание их не должно
+    валить всю стадию рельефа.  Источник пропускается, недостающие
+    тайлы добираются SRTM.
+    """
+    try:
+        return dem_sources.sign_pc(href)
+    except Exception as exc:  # noqa: BLE001 - сеть или лимит подписей
+        if progress:
+            progress(f"WARNING: не удалось подписать ссылку {label}: {exc}")
+        return None
+
+
 def _cog_sources(source_key, bbox, progress=None, cancel=None):
     """Ссылки на растровые источники набора для области."""
     item = dem_sources.source(source_key)
@@ -300,7 +324,9 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
             if tile in existing:
                 url = dem_sources.aws_tile_url("cop30", *tile)
             elif href:
-                url = dem_sources.sign_pc(href)
+                url = _signed_pc_url(href, item.short, progress)
+                if url is None:
+                    continue
             else:
                 continue
             sources.append("/vsicurl/" + url)
@@ -332,7 +358,9 @@ def _cog_sources(source_key, bbox, progress=None, cancel=None):
         href = dem_sources.item_asset_href(entry)
         if not href:
             continue
-        url = dem_sources.sign_pc(href)
+        url = _signed_pc_url(href, item.short, progress)
+        if url is None:
+            continue
         sources.append("/vsicurl/" + url)
         if progress:
             progress(
@@ -552,7 +580,7 @@ def _layer_options(gdal, bounds, width, height, cancel, status, label):
 
 
 def _write_layer(gdal, sources, bounds, width, height, destination, name,
-                 cancel, status, label):
+                 cancel, status, label, progress=None):
     """Приводит набор источников к общей сетке и пишет слой мозаики.
 
     Источники, которые не открылись (отсутствующий тайл набора),
@@ -565,6 +593,7 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
     if len(sources) > 1:
         local = _fetch_cog_windows(
             gdal, sources, bounds, width, height, destination, name, cancel,
+            progress=progress,
         )
         if local is not None:
             sources = local
@@ -612,13 +641,17 @@ def _warp_sources(gdal, sources, bounds, width, height, destination, name,
 
 
 def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
-                       name, cancel):
+                       name, cancel, progress=None):
     """Готовит удалённые COG локально, параллельно.
 
     Каждый источник приводится к общей сетке мозаики отдельным warp'ом:
     области вне тайла получают nodata, поэтому при финальной сборке
     источники не перекрывают друг друга нулями.  Возвращает список
     локальных путей или None, если скачивать нечего.
+
+    Часть источников остаётся удалённой: каждая локальная копия —
+    это целая сетка мозаики, и без ограничения их число растёт вместе
+    с числом тайлов, а место на диске никто не проверял.
     """
     remote = [
         index for index, source in enumerate(sources)
@@ -626,6 +659,29 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
     ]
     if len(remote) < 2:
         return None
+    remote = remote[:MAX_COG_PREFETCH_PARTS]
+    # Места под части может не хватить: каждая часть — это сетка
+    # мозаики целиком (высоты int16, два байта на пиксель).
+    per_part = width * height * 2
+    free = disk_space.free_bytes(destination)
+    if free is not None:
+        available = free - disk_space.RESERVE
+        if available < per_part:
+            if progress:
+                progress(
+                    "WARNING: мало места для предзагрузки рельефа — "
+                    "тайлы читаются по сети"
+                )
+            return None
+        limit = min(len(remote), int(available // per_part))
+        if limit < 2:
+            if progress:
+                progress(
+                    "WARNING: мало места для предзагрузки рельефа — "
+                    "тайлы читаются по сети"
+                )
+            return None
+        remote = remote[:limit]
     parts_dir = Path(destination) / f"{name}.parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
     local = list(sources)
@@ -694,11 +750,12 @@ def _cog_layer(source_key, cells, bounds, width, height, destination,
     return _write_layer(
         gdal, sources, bounds, width, height, destination,
         f"layer_{source_key}.tif", cancel, status, item.short,
+        progress=progress,
     )
 
 
 def _srtm_layer(cells, bounds, width, height, destination, cache_dir=None,
-                 progress=None, cancel=None, status=None):
+                 progress=None, cancel=None, status=None, name="layer_srtm.tif"):
     """Слой мозаики из тайлов SRTM."""
     gdal, _, _ = _gdal()
     names = [dem_sources.tile_name(*cell) for cell in sorted(cells)]
@@ -708,13 +765,13 @@ def _srtm_layer(cells, bounds, width, height, destination, cache_dir=None,
         None, destination, progress=progress, cancel=cancel,
         cache_dir=cache_dir, status=status, tiles=names,
     )
-    files = [str(Path(destination) / f"{name}.hgt") for name in names]
-    files = [name for name in files if Path(name).exists()]
+    files = [str(Path(destination) / f"{tile}.hgt") for tile in names]
+    files = [item for item in files if Path(item).exists()]
     if not files:
         return None
     return _write_layer(
         gdal, files, bounds, width, height, destination,
-        "layer_srtm.tif", cancel, status, "SRTM v3",
+        name, cancel, status, "SRTM v3", progress=progress,
     )
 
 
@@ -745,7 +802,7 @@ def _sonny_layers(cells, catalogue, tile_dir, bounds, width, height,
         layer = _write_layer(
             gdal, files, bounds, width, height, destination,
             f"layer_sonny_{dataset.key}.tif", cancel, status,
-            i18n.tr(dataset.title),
+            i18n.tr(dataset.title), progress=progress,
         )
         if layer is not None:
             layers.append(layer)
@@ -866,21 +923,29 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
 
     # Набор не удалось получить (каталог STAC недоступен, тайла нет в
     # зеркале): его тайлы добираются SRTM.  Слой ставится в начало —
-    # приоритет у SRTM самый низкий.
+    # приоритет у SRTM самый низкий.  Если SRTM уже в мозаике, для
+    # недостающих ячеек делается отдельный слой: иначе в DEM остаются
+    # дырки на месте упавшего набора.
     failed = set(groups) - built
-    if failed and "srtm" not in built:
+    if failed:
         cells = set()
         for key in failed:
             cells |= groups[key]
+        fill = "layer_srtm.tif" if "srtm" not in built else "layer_srtm_fill.tif"
         layer = _srtm_layer(
             cells, padded, width, height, layers_dir, cache_dir=cache_dir,
-            progress=progress, cancel=cancel, status=status,
+            progress=progress, cancel=cancel, status=status, name=fill,
         )
         if layer:
             layers.insert(0, layer)
             built.add("srtm")
             if used is not None and "srtm" not in used:
                 used.append("srtm")
+            if counts is not None:
+                # Набор не дал ни одного тайла, SRTM закрыл их все.
+                for key in failed:
+                    counts[key] = 0
+                counts["srtm"] = counts.get("srtm", 0) + len(cells)
 
     if not layers:
         raise RuntimeError("Нет данных рельефа для выбранного охвата")
@@ -976,6 +1041,9 @@ def _write_dem_attribution(config, used):
 
     Проект создаётся до рельефа, поэтому атрибуция сначала общая; после
     сборки мозаики известно, какие наборы действительно вошли.
+
+    Вызывается в конце сборки проекта: переписывание архива проекта
+    из потока рельефа замедляло подготовку и дёргало Qt вне GUI-потока.
     """
     from . import project
 
@@ -1027,25 +1095,43 @@ def _write_error(destination_path, exc):
     return exc
 
 
-def _transform_raster(source_path, destination_path, operation):
+def _transform_raster(source_path, destination_path, operation, dtype=None,
+                      nodata=None):
     """Пишет растр поблочно, применяя поэлементную функцию.
 
     Читать весь растр в numpy нельзя: уклон и отмывка вдвое крупнее DEM,
     и на области 300 км массив занимает больше четырёх гигабайт.
     Блок 2048×2048 — это около 16 МБ на float32.
+
+    ``dtype`` — тип данных выхода (по умолчанию float32); для значений
+    0…255 достаточно байта на пиксель.  ``nodata`` — значение nodata на
+    выходе (по умолчанию берётся из источника): пиксели с nodata
+    источника остаются nodata, иначе маска ``useSrcNoData`` в шаблоне
+    не работает.
     """
     gdal, _, _ = _gdal()
+    numpy = _numpy()
     source = gdal.Open(str(source_path))
     if source is None:
         raise RuntimeError(f"Cannot open raster: {source_path}")
     driver = gdal.GetDriverByName("GTiff")
     width = source.RasterXSize
     height = source.RasterYSize
+    source_band = source.GetRasterBand(1)
+    source_nodata = source_band.GetNoDataValue()
+    if nodata is None:
+        nodata = source_nodata
+    if dtype is None:
+        dtype = gdal.GDT_Float32
+    byte_output = dtype == gdal.GDT_Byte
     # Места под растр может не хватить: без проверки GDAL обрывает
     # запись посреди работы и оставляет битый файл.
     disk_space.require_space(
         destination_path,
-        width * height * disk_space.FILE_FLOAT_PIXEL,
+        width * height * (
+            disk_space.FILE_BYTE_PIXEL if byte_output
+            else disk_space.FILE_FLOAT_PIXEL
+        ),
         "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
         Path(destination_path).name,
     )
@@ -1054,13 +1140,14 @@ def _transform_raster(source_path, destination_path, operation):
         width,
         height,
         1,
-        gdal.GDT_Float32,
+        dtype,
         options=_relief_creation_options(),
     )
     output.SetGeoTransform(source.GetGeoTransform())
     output.SetProjection(source.GetProjection())
-    source_band = source.GetRasterBand(1)
     target_band = output.GetRasterBand(1)
+    if nodata is not None:
+        target_band.SetNoDataValue(nodata)
     try:
         for y in range(0, height, RASTER_BLOCK_SIDE):
             rows = min(RASTER_BLOCK_SIDE, height - y)
@@ -1070,6 +1157,12 @@ def _transform_raster(source_path, destination_path, operation):
                 if array is None:
                     continue
                 block = operation(array.astype("float32"))
+                if nodata is not None and source_nodata is not None:
+                    invalid = array == source_nodata
+                    if invalid.any():
+                        block[invalid] = nodata
+                if byte_output:
+                    block = numpy.clip(numpy.rint(block), 0, 255).astype("uint8")
                 try:
                     target_band.WriteArray(block, x, y)
                 except RuntimeError as exc:
@@ -1095,6 +1188,37 @@ def _file_sha256(path):
     return digest.hexdigest()
 
 
+def _stat_digest(path):
+    """Быстрый отпечаток файла или каталога: размер и время изменения.
+
+    Полный хеш содержимого читает весь файл: на крупном охвате это
+    сотни мегабайт только ради ключа кэша.  Для каталога учитываются
+    имена, размеры и время изменения всех файлов (как в
+    ``core/terrain_cache.py``).
+    """
+    target = Path(path)
+    if target.is_dir():
+        parts = []
+        try:
+            entries = sorted(target.iterdir())
+        except OSError:
+            return "missing"
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            try:
+                stat = entry.stat()
+            except OSError:
+                continue
+            parts.append(f"{entry.name}:{stat.st_size}:{stat.st_mtime_ns}")
+        return hashlib.sha1(":".join(parts).encode("utf-8")).hexdigest()
+    try:
+        stat = target.stat()
+    except OSError:
+        return "missing"
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
 def build_dem(config, bbox, progress=None, cancel=None):
     gdal, _, _ = _gdal()
     tiles = sorted(
@@ -1114,7 +1238,7 @@ def build_dem(config, bbox, progress=None, cancel=None):
         source = gdal.BuildVRT(str(vrt_path), [str(path) for path in tiles])
         if source is None:
             raise RuntimeError("Failed to build a VRT from DEM tiles")
-    crop = config.project_dir / "crop.geojson"
+    crop = config.crop_path
     merged = config.raster_dir / "merged_dem.tif"
     options = gdal.WarpOptions(
         format="GTiff",
@@ -1132,7 +1256,13 @@ def build_dem(config, bbox, progress=None, cancel=None):
 
     merged_3857 = config.raster_dir / "merged_dem_3857.tif"
     cache_marker = merged_3857.with_suffix(merged_3857.suffix + ".sha256")
-    source_hash = _file_sha256(merged)
+    # Ключ кэша репроекции — отпечаток входов слияния, а не хеш
+    # содержимого merged_dem.tif: тот читает весь растр (гигабайты)
+    # только ради ключа.  Слияние детерминировано тайлами и маской
+    # охвата, поэтому отпечатка достаточно.
+    source_hash = (
+        _stat_digest(config.terrain_input_dir) + "/" + _stat_digest(crop)
+    )
     cache_key = f"EPSG:3857:{source_hash}"
     cached_key = None
     if merged_3857.exists() and cache_marker.exists():
@@ -1206,6 +1336,37 @@ def _dem_resolution_arcseconds(dataset):
     return max(longitude, latitude)
 
 
+def _dem_vertical_scale(path):
+    """Во сколько метров один шаг растра по горизонтали.
+
+    gdaldem считает уклон как разницу высот, делённую на расстояние
+    между пикселями, и умножает разницу на ``scale`` — это перевод
+    единицы длины СК в метры.  Для географической СК шаг задан в
+    градусах, поэтому нужен 111120 (доля градуса в метрах).  Для
+    проекционной СК в метрах масштаб равен единице: с зашитым 111120
+    уклон занижался в сотни тысяч раз, а отмывка получалась плоской.
+    """
+    gdal, _, osr = _gdal()
+    dataset = gdal.Open(str(path))
+    if dataset is None:
+        return GEOGRAPHIC_SCALE
+    try:
+        projection = dataset.GetProjection()
+        if not projection:
+            return GEOGRAPHIC_SCALE
+        srs = osr.SpatialReference()
+        srs.ImportFromWkt(projection)
+        if srs.IsGeographic():
+            return GEOGRAPHIC_SCALE
+        # Проекционная СК: сколько метров в одной единице длины.
+        units = srs.GetLinearUnits()
+        if units and units > 0:
+            return units
+        return 1.0
+    finally:
+        dataset = None
+
+
 def _needs_upscale(dataset):
     """Нужно ли искусственное укрупнение DEM.
 
@@ -1255,7 +1416,7 @@ def _generate_slope(config, merged, dem_width, dem_height, upscale,
     options = gdal.DEMProcessingOptions(
         computeEdges=True,
         slopeFormat="degree",
-        scale=111120,
+        scale=_dem_vertical_scale(slope_source),
         creationOptions=_relief_creation_options(),
     )
     result = gdal.DEMProcessing(
@@ -1336,7 +1497,7 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
         azimuth=315,
         altitude=45,
         zFactor=1,
-        scale=111120,
+        scale=_dem_vertical_scale(hillshade_source),
         creationOptions=_relief_creation_options(),
     )
     factor = 2 if upscale else 1
@@ -1355,6 +1516,8 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
     result = None
 
     # 10 % подсветки: самые глубокие тени не проваливаются в чёрный.
+    # Значения 0…255 помещаются в байт: растр вчетверо легче, а кэш
+    # GDAL и память QGIS не растут вчетверо.
     composite_path = config.raster_dir / "hillshade_composite.tif"
     _transform_raster(
         hillshade,
@@ -1362,6 +1525,7 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
         lambda array: numpy.clip(
             255.0 * (0.10 + 0.90 * (array / 255.0)), 0, 255
         ),
+        dtype=gdal.GDT_Byte,
     )
     hillshade.unlink(missing_ok=True)
 
@@ -1635,6 +1799,97 @@ def _contour_workers(tiles):
     return max(1, min(tiles, limit, worker_cap(CONTOUR_WORKER_BYTES, cpu_limit=limit)))
 
 
+def _build_water_mask(source_path, destination, water_paths):
+    """Общий растр-маска воды в сетке DEM.
+
+    Один проход по water-слоям на весь DEM вместо растеризации по
+    каждому тайлу: на охвате в 9–25 тайлов это было столько же полных
+    проходов по слоям воды.  None — построить маску не удалось, тогда
+    работает запасной путь с маской по каждому тайлу.
+    """
+    gdal, ogr, osr = _gdal()
+    source = gdal.Open(str(source_path))
+    if source is None:
+        return None
+    width = source.RasterXSize
+    height = source.RasterYSize
+    transform = source.GetGeoTransform()
+    projection = source.GetProjection()
+    source = None
+    if not projection:
+        return None
+    raster_srs = osr.SpatialReference()
+    raster_srs.ImportFromWkt(projection)
+    raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    mask = None
+    try:
+        driver = gdal.GetDriverByName("GTiff")
+        mask = driver.Create(
+            str(destination), width, height, 1, gdal.GDT_Byte,
+            options=["COMPRESS=LZW", "BIGTIFF=YES"],
+        )
+        mask.SetGeoTransform(transform)
+        mask.SetProjection(projection)
+        mask.GetRasterBand(1).Fill(0)
+        for path in water_paths:
+            dataset = ogr.Open(str(path))
+            if dataset is None:
+                mask = None
+                return None
+            try:
+                for layer in dataset:
+                    layer_srs = layer.GetSpatialRef()
+                    if layer_srs is None:
+                        mask = None
+                        return None
+                    layer_srs = layer_srs.Clone()
+                    layer_srs.SetAxisMappingStrategy(
+                        osr.OAMS_TRADITIONAL_GIS_ORDER
+                    )
+                    if not layer_srs.IsSame(raster_srs):
+                        mask = None
+                        return None
+                    gdal.RasterizeLayer(
+                        mask, [1], layer, burn_values=[1],
+                        options=["ALL_TOUCHED=TRUE"],
+                    )
+            finally:
+                dataset = None
+    except Exception:  # noqa: BLE001 - запасной путь
+        mask = None
+        return None
+    finally:
+        mask = None
+    return destination
+
+
+def _apply_water_mask(memory, mask_path, window, nodata):
+    """Записывает в окно DEM воду значением nodata по общей маске.
+
+    False — маску применить не удалось и нужен запасной путь.
+    """
+    gdal, _, _ = _gdal()
+    xoff, yoff, xsize, ysize = window
+    mask = gdal.Open(str(mask_path))
+    if mask is None:
+        return False
+    try:
+        array = mask.GetRasterBand(1).ReadAsArray(xoff, yoff, xsize, ysize)
+        if array is None:
+            return False
+        band = memory.GetRasterBand(1)
+        values = band.ReadAsArray()
+        if values is None:
+            return False
+        values[array == 1] = nodata
+        band.WriteArray(values)
+    except Exception:  # noqa: BLE001 - запасной путь
+        return False
+    finally:
+        mask = None
+    return True
+
+
 def _try_mask_water(raster, water_paths):
     """Записывает полигоны воды в растр DEM значением nodata.
 
@@ -1776,12 +2031,15 @@ def _clip_to_core(geometry, box):
     return _geometry_lines(clipped) if clipped is not None else []
 
 
-def _contour_tile(task):
+def _contour_tile(task, mask_path=None):
     """Контуры одного тайла: только то, что попадает в его ядро.
 
     Тайл считается по окну с запасом, а в результат попадает только
     ядро: так линия у края получается такой же, как при расчёте по
     всему DEM, и тайлы не дублируют друг друга.
+
+    ``mask_path`` — общая маска воды в сетке DEM: без неё вода
+    растеризуется заново по каждому тайлу.
 
     Возвращает слой с отрезками: файл на тайл не пишется — создание
     GeoPackage обходится дороже самой генерации.
@@ -1802,9 +2060,18 @@ def _contour_tile(task):
         srcWin=[xoff, yoff, xsize, ysize],
     )
     memory_band = memory.GetRasterBand(1)
-    if band.GetNoDataValue() is not None:
-        memory_band.SetNoDataValue(band.GetNoDataValue())
-    masked = _try_mask_water(memory, water_paths)
+    nodata = band.GetNoDataValue()
+    if nodata is None:
+        nodata = -32768.0
+    memory_band.SetNoDataValue(nodata)
+    if mask_path:
+        masked = _apply_water_mask(
+            memory, mask_path, (xoff, yoff, xsize, ysize), nodata
+        )
+        if not masked:
+            masked = _try_mask_water(memory, water_paths)
+    else:
+        masked = _try_mask_water(memory, water_paths)
     spatial_ref = osr.SpatialReference()
     spatial_ref.ImportFromWkt(raster.GetProjection())
 
@@ -1851,23 +2118,26 @@ def _contour_tile(task):
     return result, written, masked
 
 
-def _merge_contour_tiles(target, tiles):
-    """Склеивает контуры тайлов в один слой, перенумеровывая ID."""
+def _merge_contour_tile(target, dataset, written=0):
+    """Склеивает контуры одного тайла в слой, перенумеровывая ID.
+
+    Тайл склеивается сразу, как только посчитан: держать результаты
+    всех тайлов в памяти до конца нельзя, на больших охватах это
+    гигабайты.  Возвращает число записанных линий.
+    """
     from osgeo import ogr
 
-    written = 0
+    source_layer = dataset.GetLayer(0)
     definition = target.GetLayerDefn()
-    for _index, dataset, _count in tiles:
-        source_layer = dataset.GetLayer(0)
-        for feature in source_layer:
-            item = ogr.Feature(definition)
-            for index in range(definition.GetFieldCount()):
-                item.SetField(index, feature.GetField(index))
-            item.SetField("ID", written)
-            item.SetGeometry(feature.GetGeometryRef().Clone())
-            target.CreateFeature(item)
-            item = None
-            written += 1
+    for feature in source_layer:
+        item = ogr.Feature(definition)
+        for index in range(definition.GetFieldCount()):
+            item.SetField(index, feature.GetField(index))
+        item.SetField("ID", written)
+        item.SetGeometry(feature.GetGeometryRef().Clone())
+        target.CreateFeature(item)
+        item = None
+        written += 1
     return written
 
 
@@ -1942,29 +2212,41 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
             (str(source), tile, config.isolines_step, water_paths)
             for tile in tiles
         ]
+        # Маска воды строится один раз на весь DEM: растеризация по
+        # каждому тайлу отдельно повторяла полный проход по слоям
+        # воды столько же раз, сколько тайлов.
+        mask_path = config.temp_dir / "water_mask.tif"
+        mask_path.unlink(missing_ok=True)
+        mask = None
+        if water_paths:
+            mask = _build_water_mask(str(source), mask_path, water_paths)
         workers = _contour_workers(len(tasks))
-        results = []
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_contour_tile, task): index
-                for index, task in enumerate(tasks)
-            }
-            done = 0
-            for future in as_completed(futures):
-                index, result, written, tile_masked = (
-                    futures[future], *future.result()
-                )
-                masked = masked and tile_masked
-                results.append((index, result, written))
-                done += 1
-                if progress:
-                    progress(f"Contour lines: tile {done} of {len(tasks)}")
-                if cancel is not None and cancel.is_set():
-                    for pending in futures:
-                        pending.cancel()
-                    raise InterruptedError("Preparation cancelled")
-        results.sort()
-        written = _merge_contour_tiles(layer, results)
+        written = 0
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_contour_tile, task, mask): index
+                    for index, task in enumerate(tasks)
+                }
+                done = 0
+                for future in as_completed(futures):
+                    _index, result, _count, tile_masked = (
+                        futures[future], *future.result()
+                    )
+                    masked = masked and tile_masked
+                    # Тайл склеивается сразу: держать все результаты в
+                    # памяти до конца расчёта нельзя.
+                    written = _merge_contour_tile(layer, result, written)
+                    result = None
+                    done += 1
+                    if progress:
+                        progress(f"Contour lines: tile {done} of {len(tasks)}")
+                    if cancel is not None and cancel.is_set():
+                        for pending in futures:
+                            pending.cancel()
+                        raise InterruptedError("Preparation cancelled")
+        finally:
+            mask_path.unlink(missing_ok=True)
         if progress:
             progress(f"Contour lines: {written} segments")
     dataset = None
@@ -2256,13 +2538,27 @@ def _generate_glacier_isolines(config, shape_path, progress=None):
     return _split_isolines_by_glaciers(config, shape_path, progress)
 
 
+def _extend_used(used_out, used):
+    """Дописывает ключи использованных наборов в список для атрибуции."""
+    if used_out is None:
+        return
+    for key in used:
+        if key not in used_out:
+            used_out.append(key)
+
+
 def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
-                           status=None):
+                           status=None, used_out=None):
     """Скачивание тайлов, сборка DEM и затенение (без изолиний).
 
     Не зависит от слоёв проекта, поэтому в pipeline эта стадия работает
     параллельно обработке слоёв.  Возвращает ключ кэша DEM — его ждёт
     :func:`prepare_terrain_isolines`.
+
+    В ``used_out`` дописываются ключи наборов DEM, вошедших в мозаику:
+    по ним пишется атрибуция.  Сама атрибуция пишется в конце сборки
+    проекта одним проходом — переписывать архив проекта из этого потока
+    нельзя.
     """
     if not config.generate_terrain:
         return None
@@ -2274,8 +2570,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     cached = terrain_cache.restore_dem_by_hint(config, hint)
     if cached is not None:
         used = cached.get("used") or ()
-        if used:
-            _write_dem_attribution(config, used)
+        _extend_used(used_out, used)
         config.terrain_fallback = str(cached.get("fallback") or "")
         if progress:
             progress("Использован кэш рельефа: повторная обработка не требуется")
@@ -2334,7 +2629,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
                 status=status,
             )
         if used:
-            _write_dem_attribution(config, used)
+            _extend_used(used_out, used)
 
     for archive in list(config.terrain_input_dir.glob("*.zip")):
         shutil.unpack_archive(str(archive), str(config.terrain_input_dir))

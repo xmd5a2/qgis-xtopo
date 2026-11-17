@@ -114,7 +114,8 @@ class SheetSizeLabels(QgsMapCanvasItem):
         if self.rectangle is None:
             return
         center = self.rectangle.center()
-        self.setPos(self.toCanvasCoordinates(center))
+        position = self.toCanvasCoordinates(center)
+        self.setPos(position)
         transform = self.canvas.mapSettings().mapToPixel()
         left = transform.transform(QgsPointXY(self.rectangle.xMinimum(), center.y()))
         right = transform.transform(
@@ -122,9 +123,13 @@ class SheetSizeLabels(QgsMapCanvasItem):
         )
         top = transform.transform(QgsPointXY(center.x(), self.rectangle.yMaximum()))
         bottom = transform.transform(QgsPointXY(center.x(), self.rectangle.yMinimum()))
-        self._size = QRectF(
+        # Размеры листа считаются в координатах холста, а рисуются в
+        # координатах элемента: из них вычитается позиция элемента
+        # (центр листа), иначе подписи уезжают на вектор центра.
+        rect = QRectF(
             left.x(), top.y(), right.x() - left.x(), bottom.y() - top.y()
         ).normalized()
+        self._size = rect.translated(-position.x(), -position.y())
 
     def boundingRect(self):
         return self._size.adjusted(-90, -60, 90, 60)

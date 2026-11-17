@@ -36,7 +36,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapToolPan, QgsRubberBand
 from qgis.PyQt.QtCore import (
-    QEvent, QEventLoop, QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal,
+    QEvent, QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal,
 )
 from qgis.PyQt.QtGui import (
     QColor, QFontMetrics, QIcon, QImageWriter, QPainter, QPalette, QPen,
@@ -75,6 +75,16 @@ MEMORY_BUDGET = 800 * 1024 * 1024
 
 # Сколько кратных отметок перебирается при поиске общей линии у двух правил.
 CONFLICT_SEARCH_LIMIT = 1000
+
+# Предел обхода слоя изогипс, если фильтр правила пришлось считать самим:
+# без предела слой читается целиком и панель замирает на секунды.
+RULE_SCAN_LIMIT = 20000
+RULE_SCAN_SECONDS = 1.0
+
+# Проверка «свой ли это проект» ходит по диску, поэтому результат
+# кэшируется на несколько секунд.
+XTOPO_PROJECT_TTL = 5.0
+_XTOPO_PROJECT_CACHE = {"key": None, "value": False, "time": 0.0}
 
 # Краткая подпись в поле списка: полные названия видны в раскрытом списке.
 MAP_LANGUAGE_SHORT = {
@@ -577,7 +587,6 @@ class ProjectPanel(QWidget):
         self._edit_sheet_tool = None
         self._atlas_layer = None
         self._layout_original_layers = None
-        self._layout_visible_states = None
         self._export_progress = None
         self._opacity_baseline = {}
         self._hillshade_baseline = {}
@@ -585,6 +594,9 @@ class ProjectPanel(QWidget):
         self._isoline_baseline = {}
         self._basemap_isoline_forced = False
         self._baseline_project = None
+        # Набор слоёв, для которого собраны меню вариантов окраски.
+        self._steep_variant_menu_names = None
+        self._hillshade_variant_menu_names = None
         self._build_ui()
         self._connect_root()
         self._connect_measure_dialogs()
@@ -609,18 +621,40 @@ class ProjectPanel(QWidget):
 
     @staticmethod
     def is_xtopo_project(project=None):
+        """Похож ли открытый проект на проект, собранный плагином.
+
+        Проверка ходит по диску (файл crop.geojson), поэтому результат
+        кэшируется: панель переспрашивает её при каждой смене настроек,
+        а на сетевом каталоге это заметная задержка.
+        """
         project = project or QgsProject.instance()
         try:
             layers = list(project.mapLayers().values())
         except Exception:
             return False
+        key = (
+            project.fileName(),
+            tuple(sorted(layer.id() for layer in layers)),
+        )
+        now = time.monotonic()
+        cached = _XTOPO_PROJECT_CACHE
+        if cached["key"] == key and now - cached["time"] < XTOPO_PROJECT_TTL:
+            return cached["value"]
+        value = ProjectPanel._project_files_of_plugin(layers, project.fileName())
+        cached["key"] = key
+        cached["time"] = now
+        cached["value"] = value
+        return value
+
+    @staticmethod
+    def _project_files_of_plugin(layers, file_name):
+        """Проверка по файлам проекта (без кэша)."""
         for layer in layers:
             if layer.name() != "BBOX":
                 continue
             source = (layer.source() or "").split("|", 1)[0]
             if Path(source).name == "crop.geojson" and Path(source).exists():
                 return True
-        file_name = project.fileName()
         if file_name:
             crop = Path(file_name).parent / "crop.geojson"
             names = {layer.name() for layer in layers}
@@ -1508,7 +1542,6 @@ class ProjectPanel(QWidget):
         map_item.setLayers(filtered)
 
     def _restore_map_layers(self):
-        self._layout_visible_states = None
         if self._layout_original_layers is None:
             return
         map_item, layers = self._layout_original_layers
@@ -1712,22 +1745,6 @@ class ProjectPanel(QWidget):
             return
         self._export_to(files[0], extension)
 
-    def _layout_layer_count(self, layout):
-        map_item = next(
-            (item for item in layout.items() if isinstance(item, QgsLayoutItemMap)),
-            None,
-        )
-        if map_item is not None and map_item.layers():
-            return len(map_item.layers())
-        root = QgsProject.instance().layerTreeRoot()
-        if root is None:
-            return len(QgsProject.instance().mapLayers())
-        return sum(
-            1 for layer in QgsProject.instance().mapLayers().values()
-            if root.findLayer(layer.id()) is not None
-            and root.findLayer(layer.id()).itemVisibilityChecked()
-        )
-
     def _estimate_export_memory(self, layout, dpi):
         width, height = self._page_size_mm()
         pixels = (width / 25.4 * dpi) * (height / 25.4 * dpi)
@@ -1835,7 +1852,7 @@ class ProjectPanel(QWidget):
             self._remove_atlas_layer()
             self._restore_map_layers()
             return
-        self.statusMessage.emit(f"Экспорт {extension.upper()}…")
+        self.statusMessage.emit(i18n.trf("Экспорт {}…", extension.upper()))
         self._notify(f"Экспорт {extension.upper()}…")
         started = time.monotonic()
         progress_connected = atlas.enabled()
@@ -1995,6 +2012,14 @@ class ProjectPanel(QWidget):
         return writer.errorString()
 
     def _atlas_export_feature(self, feature):
+        """Сообщает, какой лист атласа сейчас рендерится.
+
+        Обработчик вызывается из экспортера, поэтому он не должен
+        обрабатывать события Qt: `processEvents` во время рендеринга
+        выполняет таймеры и слоты панели, и состояние, которое читает
+        рендерер, может измениться на лету.  Интерфейс идёт с курсором
+        ожидания, а прогресс виден по строке статуса.
+        """
         if self._export_progress is None or not feature.isValid():
             return
         kind, total = self._export_progress
@@ -2003,9 +2028,6 @@ class ProjectPanel(QWidget):
         except (KeyError, TypeError, ValueError):
             number = feature.id()
         self._notify(f"Экспорт {kind}: лист {number} из {total}…")
-        QApplication.processEvents(
-            _enum(QEventLoop, "ProcessEventsFlag", "ExcludeUserInputEvents")
-        )
 
     def _print_atlas(self):
         canvas = self._freeze_canvas()
@@ -2101,8 +2123,8 @@ class ProjectPanel(QWidget):
         self._fill_text_size_combo()
         self._fill_basemap_combo()
         # Название варианта в кнопке и в меню зависит от языка.
-        self._update_steep_variants()
-        self._update_hillshade_variants()
+        self._update_steep_variants(force=True)
+        self._update_hillshade_variants(force=True)
 
     def _fill_map_language_combo(self):
         """Заполняет список языков подписей, сохраняя выбор."""
@@ -2229,6 +2251,12 @@ class ProjectPanel(QWidget):
         project = QgsProject.instance()
         if self.is_xtopo_project(project):
             map_language.set_project_detail(level, project)
+            # Пользователь сменил уровень: переменная проекта изменилась,
+            # проект надо сохранить.
+            try:
+                project.setDirty(True)
+            except Exception:
+                pass
             self._repaint_canvas()
 
     def _sync_detail_combo(self):
@@ -2458,17 +2486,42 @@ class ProjectPanel(QWidget):
         before = self.detail_combo.currentData()
         self._sync_detail_combo()
         if before == self.detail_combo.currentData():
-            map_language.set_project_detail(
-                self.detail_combo.currentData() or map_language.level_of_detail()
+            self._keep_project_clean(
+                lambda: map_language.set_project_detail(
+                    self.detail_combo.currentData()
+                    or map_language.level_of_detail()
+                )
             )
         # Размер текста: если переменной в проекте нет, ставим выбранный
         # в панели; существующее значение (в том числе 1.2 из старых
         # проектов) не перезаписываем.
         if not self._sync_text_size_combo():
-            text_size.set_project_text_size(
-                self.text_size_combo.currentData() or text_size.percent()
+            self._keep_project_clean(
+                lambda: text_size.set_project_text_size(
+                    self.text_size_combo.currentData() or text_size.percent()
+                )
             )
         self._sync_basemap_state()
+
+    def _keep_project_clean(self, action):
+        """Выполняет действие, не оставляя проект изменённым.
+
+        Переменные проекта добавляются и при открытии проекта: без
+        явного действия пользователя вопрос «сохранить проект?» не
+        должен появляться.
+        """
+        project = QgsProject.instance()
+        try:
+            was_dirty = project.isDirty()
+        except Exception:
+            was_dirty = False
+        try:
+            action()
+        finally:
+            try:
+                project.setDirty(was_dirty)
+            except Exception:
+                pass
 
     def focus_first(self):
         widget = self.toolbar.widgetForAction(self.fit_action)
@@ -2897,6 +2950,13 @@ class ProjectPanel(QWidget):
         self.rules_container.setVisible(True)
 
     def _available_rule_labels(self, layer, rules):
+        """Уровни изолиний, для которых в данных есть объекты.
+
+        Проверка идёт через фильтр провайдера: объекты отбираются в самом
+        слое, без обхода в Python.  Раньше слой читался целиком, если
+        какого-то уровня в данных нет (1000 м на равнине) — это секунды
+        зависания в GUI-потоке при открытии проекта.
+        """
         labels = [label for _value, label, _active in rules]
         root = layer.renderer().rootRule()
         expressions = {}
@@ -2916,47 +2976,44 @@ class ProjectPanel(QWidget):
         found = {
             label: expressions.get(label, None) is None for label in labels
         }
-        pending = {
-            label: expression
-            for label, expression in expressions.items()
-            if expression is not None
-        }
-        if not pending:
-            return found
-        request = QgsFeatureRequest()
-        geometry_needed = any(
-            "$" in expression.expression() for expression in pending.values()
-        )
-        if not geometry_needed:
-            flags = getattr(QgsFeatureRequest, "NoGeometry", None)
-            if flags is None:
-                flags = QgsFeatureRequest.Flag.NoGeometry
-            request.setFlags(flags)
-        columns = set()
-        for expression in pending.values():
-            columns.update(expression.referencedColumns())
-        fields = layer.fields()
-        indexes = [
-            fields.indexOf(name)
-            for name in columns
-            if fields.indexOf(name) >= 0
-        ]
-        if indexes:
-            request.setSubsetOfAttributes(indexes)
-        context = layer.createExpressionContext()
-        for feature in layer.getFeatures(request):
-            context.setFeature(feature)
-            for label, expression in list(pending.items()):
-                try:
-                    matches = bool(expression.evaluate(context))
-                except Exception:
-                    matches = False
-                if matches:
-                    found[label] = True
-                    del pending[label]
-            if not pending:
-                break
+        for label, expression in expressions.items():
+            if expression is None:
+                continue
+            found[label] = self._rule_has_features(layer, expression)
         return found
+
+    def _rule_has_features(self, layer, expression):
+        """Есть ли в слое объекты, подходящие под фильтр правила."""
+        request = QgsFeatureRequest()
+        request.setFilterExpression(expression.expression())
+        # Одного объекта достаточно: уровень есть в данных или нет.
+        request.setLimit(1)
+        try:
+            for _feature in layer.getFeatures(request):
+                return True
+        except Exception:
+            # Провайдер не понял выражение: ищем сами, но не дольше
+            # предела — иначе слой читается целиком.
+            return self._rule_has_features_slow(layer, expression)
+        return False
+
+    def _rule_has_features_slow(self, layer, expression):
+        """Поиск объекта по выражению в обход слоя (с пределом)."""
+        request = QgsFeatureRequest()
+        context = layer.createExpressionContext()
+        started = time.monotonic()
+        for index, feature in enumerate(layer.getFeatures(request)):
+            if index >= RULE_SCAN_LIMIT:
+                return False
+            if time.monotonic() - started > RULE_SCAN_SECONDS:
+                return False
+            context.setFeature(feature)
+            try:
+                if bool(expression.evaluate(context)):
+                    return True
+            except Exception:
+                return False
+        return False
 
     def _rule_toggled(self, label, checked):
         if self._syncing:
@@ -3279,27 +3336,37 @@ class ProjectPanel(QWidget):
         if name in self._steep_variant_names():
             self._steep_variant_name = name
 
-    def _update_steep_variants(self):
-        """Приводит список вариантов уклонов в соответствие с проектом."""
+    def _update_steep_variants(self, force=False):
+        """Приводит список вариантов уклонов в соответствие с проектом.
+
+        Меню пересобирается только при смене набора слоёв: переключение
+        видимости слоя в QGIS вызывает синхронизацию панели, и каждый раз
+        заново создавать действия с лямбдами — лишняя работа.
+        """
         names = self._steep_variant_names()
         current = self._steep_variant_name
         if current not in names:
             current = names[0] if names else None
         self._steep_variant_name = current
-        self.steep_variant_menu.clear()
-        for name in names:
-            label = self._steep_variant_label(name)
-            action = self.steep_variant_menu.addAction(i18n.tr(label))
-            action.setData(name)
-            action.setCheckable(True)
-            action.setChecked(name == current)
-            hint = self._steep_variant_hint_text(name)
-            if hint:
-                action.setToolTip(f"{i18n.tr(label)}: {hint}")
-            action.triggered.connect(
-                lambda checked=False, layer_name=name:
-                self._steep_variant_changed(layer_name)
-            )
+        if force or names != self._steep_variant_menu_names:
+            self._steep_variant_menu_names = list(names)
+            self.steep_variant_menu.clear()
+            for name in names:
+                label = self._steep_variant_label(name)
+                action = self.steep_variant_menu.addAction(i18n.tr(label))
+                action.setData(name)
+                action.setCheckable(True)
+                action.setChecked(name == current)
+                hint = self._steep_variant_hint_text(name)
+                if hint:
+                    action.setToolTip(f"{i18n.tr(label)}: {hint}")
+                action.triggered.connect(
+                    lambda checked=False, layer_name=name:
+                    self._steep_variant_changed(layer_name)
+                )
+        else:
+            for action in self.steep_variant_menu.actions():
+                action.setChecked(action.data() == current)
         self._update_steep_variant_button()
         self._update_steep_variant_state()
 
@@ -3454,24 +3521,33 @@ class ProjectPanel(QWidget):
             return self._hillshade_variant_name
         return names[0]
 
-    def _update_hillshade_variants(self):
-        """Приводит список вариантов отмывки в соответствие с проектом."""
+    def _update_hillshade_variants(self, force=False):
+        """Приводит список вариантов отмывки в соответствие с проектом.
+
+        Как и у вариантов уклонов, меню пересобирается только при смене
+        набора слоёв.
+        """
         names = self._hillshade_variant_names()
         current = self._hillshade_variant_name
         if current not in names:
             current = names[0] if names else None
         self._hillshade_variant_name = current
-        self.hillshade_variant_menu.clear()
-        for name in names:
-            label = self._hillshade_variant_label(name)
-            action = self.hillshade_variant_menu.addAction(i18n.tr(label))
-            action.setData(name)
-            action.setCheckable(True)
-            action.setChecked(name == current)
-            action.triggered.connect(
-                lambda checked=False, layer_name=name:
-                self._hillshade_variant_changed(layer_name)
-            )
+        if force or names != self._hillshade_variant_menu_names:
+            self._hillshade_variant_menu_names = list(names)
+            self.hillshade_variant_menu.clear()
+            for name in names:
+                label = self._hillshade_variant_label(name)
+                action = self.hillshade_variant_menu.addAction(i18n.tr(label))
+                action.setData(name)
+                action.setCheckable(True)
+                action.setChecked(name == current)
+                action.triggered.connect(
+                    lambda checked=False, layer_name=name:
+                    self._hillshade_variant_changed(layer_name)
+                )
+        else:
+            for action in self.hillshade_variant_menu.actions():
+                action.setChecked(action.data() == current)
         self._update_hillshade_variant_button()
         self._update_hillshade_variant_state()
 

@@ -60,9 +60,14 @@ def _write_lines(source, destination, open_only=False):
     destination = Path(destination)
     destination.unlink(missing_ok=True)
     output = driver.CreateDataSource(str(destination))
-    layer = output.CreateLayer("coastline", geom_type=ogr.wkbLineString)
+    source_layer = dataset.GetLayer(0)
+    # Слой создаётся в СК исходника: иначе промежуточные GeoJSON и
+    # итоговый water_dissolved.sqlite остаются без пространственной
+    # привязки.
+    layer = output.CreateLayer(
+        "coastline", source_layer.GetSpatialRef(), geom_type=ogr.wkbLineString
+    )
     try:
-        source_layer = dataset.GetLayer(0)
         for feature in source_layer:
             for geometry in _line_geometries(feature.GetGeometryRef()):
                 if open_only and _is_closed_ring(geometry):
@@ -128,7 +133,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
 
     notify = progress or (lambda message: None)
     lines = config.vector_dir / "coastline.sqlite"
-    crop = config.project_dir / "crop.geojson"
+    crop = config.crop_path
     if not lines.exists() or not _has_features(lines):
         notify("Береговая линия: нет данных")
         return False

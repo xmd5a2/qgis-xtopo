@@ -15,10 +15,14 @@ import ctypes
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+
+# Как долго ждать бюджет памяти, прежде чем проверить отмену.
+WAIT_TICK = 0.2
 
 # Резерв для QGIS, системы и роста уже занятых структур.
 RESERVE_BYTES = int(1.5 * GIB)
@@ -42,6 +46,10 @@ OSMIUM_FILTER_MAX = 512 * MIB
 # Оценка памяти одного потока обработки слоёв и одного тайла изолиний.
 LAYER_WORKER_BYTES = int(1.5 * GIB)
 CONTOUR_WORKER_BYTES = 768 * MIB
+
+# Поток рельефа работает одновременно со слоями: варпы, MEM-растры и
+# предзагрузка COG занимают память, которую нельзя отдавать слоям.
+TERRAIN_RESERVE_BYTES = int(1.5 * GIB)
 
 
 def _cgroup_memory():
@@ -256,11 +264,25 @@ class MemoryLimiter:
         self.peak = 0
         self._condition = threading.Condition()
 
-    def acquire(self, amount):
+    def acquire(self, amount, cancel=None, timeout=None):
+        """Занимает место в бюджете и возвращает его размер.
+
+        Ожидание прерываемо: ``cancel`` — событие отмены, ``timeout`` —
+        предельное время ожидания в секундах.  Без них задача ждала бы
+        бюджет вечно и не реагировала бы на отмену.
+        """
         amount = max(1, int(amount))
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
             while self.used and self.used + amount > self.budget:
-                self._condition.wait()
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("Memory budget wait cancelled")
+                wait = WAIT_TICK
+                if deadline is not None:
+                    wait = min(wait, deadline - time.monotonic())
+                    if wait <= 0:
+                        raise TimeoutError("Memory budget wait timed out")
+                self._condition.wait(wait)
             self.used += amount
             self.peak = max(self.peak, self.used)
         return amount
@@ -270,18 +292,20 @@ class MemoryLimiter:
             self.used = max(0, self.used - max(0, int(amount)))
             self._condition.notify_all()
 
-    def reservation(self, amount):
+    def reservation(self, amount, cancel=None, timeout=None):
         """Контекстный менеджер для одной задачи."""
-        return _Reservation(self, amount)
+        return _Reservation(self, amount, cancel=cancel, timeout=timeout)
 
 
 class _Reservation:
-    def __init__(self, limiter, amount):
+    def __init__(self, limiter, amount, cancel=None, timeout=None):
         self.limiter = limiter
         self.amount = amount
+        self.cancel = cancel
+        self.timeout = timeout
 
     def __enter__(self):
-        self.limiter.acquire(self.amount)
+        self.limiter.acquire(self.amount, self.cancel, self.timeout)
         return self
 
     def __exit__(self, exc_type, exc, traceback):

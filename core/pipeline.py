@@ -7,13 +7,15 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, disk_space, gdal_log, i18n, icon_angles, label_cache,
-    osm_convert, peak_filter, poi_icons, polygon_overlaps, project, sources,
-    terrain,
+    coastline, dem_sources, disk_space, gdal_log, i18n, icon_angles,
+    label_cache, osm_convert, peak_filter, poi_icons, polygon_overlaps,
+    project, sources, terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
-from .memory import LAYER_WORKER_BYTES, worker_cap
+from .memory import (
+    LAYER_WORKER_BYTES, TERRAIN_RESERVE_BYTES, memory_budget, worker_cap,
+)
 from .query_recipes import recipe_for
 
 
@@ -72,11 +74,11 @@ class Timings:
 
 _TERRAIN_STEPS = (
     ("Preparing terrain", 0.05),
-    ("Downloading", 0.15),
-    ("Merging", 0.35),
-    ("Reprojecting", 0.5),
+    ("Загрузка рельефа", 0.15),
+    ("Merging ", 0.35),
+    ("Reprojecting DEM", 0.5),
     ("Generating slope", 0.65),
-    ("Upscaling", 0.75),
+    ("Writing slope", 0.72),
     ("Generating hillshade", 0.85),
     ("Generating contour lines", 0.95),
 )
@@ -105,6 +107,8 @@ def progress_stages(config):
         stages.append(("Проверка пиков", 3))
     if config.resolve_polygon_overlaps:
         stages.append(("Пересечения полигонов", 3))
+    stages.append(("Размещение значков POI", 2))
+    stages.append(("Углы поворота значков", 1))
     stages.append(("Удаление пустых слоёв", 2))
     return stages
 
@@ -458,6 +462,10 @@ class ProcessingRunner:
                 context=self._processing_context(),
             )
         except Exception as exc:
+            if self.feedback.isCanceled():
+                # Отмена — это не сбой алгоритма: её нельзя выдавать за
+                # ошибку слоя, иначе сборка выглядит успешной.
+                raise InterruptedError("Preparation cancelled") from exc
             raise PipelineError(f"{algorithm} failed: {exc}") from exc
 
 
@@ -496,11 +504,17 @@ def _layer_has_features(path):
 
 
 def _recipe_outputs(name):
+    """Файлы, которые производит рецепт слоя.
+
+    Это имена файлов, а не имена слоёв внутри них: ``save`` с
+    ``layer_name`` меняет имя слоя в файле, но файл называется по
+    имени слоя и суффиксу.  Зависимости ищутся по именам файлов.
+    """
     outputs = {name}
     for operation, parameters in recipe_for(name).steps:
         if operation == "save":
             suffix = parameters.get("suffix") or ""
-            outputs.add(parameters.get("layer_name") or f"{name}{suffix}")
+            outputs.add(f"{name}{suffix}")
         elif operation == "split_layer":
             outputs.update({name, f"{name}_layer_1", f"{name}_layer_-1"})
     return outputs
@@ -548,17 +562,30 @@ class _GpkgWriter:
     """Потоковая запись в GeoPackage одной транзакцией."""
 
     def __init__(self, path, layer_name, definition, spatial_ref=None,
-                 geometry_type=None):
+                 geometry_type=None, cancel=None):
         from osgeo import ogr
 
         self.path = Path(path)
         self.count = 0
+        self.cancel = cancel
         self.driver = ogr.GetDriverByName("GPKG")
-        self.dataset = self.driver.CreateDataSource(str(self.path))
-        self.layer = self.dataset.CreateLayer(
-            layer_name, spatial_ref,
-            ogr.wkbUnknown if geometry_type is None else geometry_type,
-        )
+        try:
+            self.dataset = self.driver.CreateDataSource(str(self.path))
+        except Exception as exc:  # noqa: BLE001 - сообщаем как сбой записи
+            raise PipelineError(f"Cannot create {self.path}: {exc}") from exc
+        if self.dataset is None:
+            raise PipelineError(f"Cannot create {self.path}")
+        try:
+            self.layer = self.dataset.CreateLayer(
+                layer_name, spatial_ref,
+                ogr.wkbUnknown if geometry_type is None else geometry_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - сообщаем как сбой записи
+            raise PipelineError(
+                f"Cannot create layer {layer_name} in {self.path}: {exc}"
+            ) from exc
+        if self.layer is None:
+            raise PipelineError(f"Cannot create layer {layer_name} in {self.path}")
         for index in range(definition.GetFieldCount()):
             field = definition.GetFieldDefn(index)
             self.layer.CreateField(ogr.FieldDefn(field.GetName(), field.GetType()))
@@ -568,6 +595,8 @@ class _GpkgWriter:
     def add(self, feature, geometry=None):
         from osgeo import ogr
 
+        if self.cancel is not None and self.count % 64 == 0 and self.cancel.is_set():
+            raise InterruptedError("Preparation cancelled")
         definition = self.layer.GetLayerDefn()
         output = ogr.Feature(definition)
         if geometry is None:
@@ -610,12 +639,58 @@ class Pipeline:
             return self.warnings
         workers = self._worker_count(len(query_names))
         if workers <= 1 or len(query_names) == 1:
-            total = len(query_names)
-            for index, name in enumerate(query_names, start=1):
-                self._run_layer(name, source, index, total)
-                self.fraction(index / total)
+            self._run_serial(source, query_names)
             return self.warnings
         return self._run_parallel(source, query_names, workers)
+
+    def _dependency_graph(self, query_names):
+        """Кто что производит и от кого зависит каждый слой.
+
+        Слой может читать другой (вычитание воды, объединение потоков),
+        и порядок запросов пользователя этому не соответствует.  Граф
+        зависимостей строится одинаково для последовательного и
+        параллельного пути.
+        """
+        producers = {}
+        for name in query_names:
+            for output in _recipe_outputs(name):
+                producers.setdefault(output, name)
+        return {
+            name: _recipe_dependencies(name, producers) for name in query_names
+        }
+
+    def _run_serial(self, source, query_names):
+        """Последовательная обработка слоёв с соблюдением зависимостей."""
+        dependencies = self._dependency_graph(query_names)
+        total = len(query_names)
+        done = set()
+        failed = set()
+        pending = list(query_names)
+        processed = 0
+        while pending:
+            for name in [n for n in pending if dependencies[n] & failed]:
+                pending.remove(name)
+                failed.add(name)
+                self.warnings.append(f"{name}: skipped, source layer failed")
+                self.progress(f"{name}: skipped (source layer failed)")
+            ready = [name for name in pending if dependencies[name].issubset(done)]
+            if not ready:
+                # Зависимости не разрешаются (цикл или слой вне набора):
+                # дальше идти нельзя, остальные слои пропускаем.
+                for name in pending:
+                    self.warnings.append(f"{name}: skipped, unresolved dependency")
+                    self.progress(f"{name}: skipped (unresolved dependency)")
+                failed.update(pending)
+                pending.clear()
+                break
+            name = ready[0]
+            pending.remove(name)
+            processed += 1
+            if self._run_layer(name, source, processed, total):
+                done.add(name)
+            else:
+                failed.add(name)
+            self.fraction(processed / total)
 
     def _worker_count(self, total):
         """Сколько слоёв обрабатывать одновременно.
@@ -623,17 +698,30 @@ class Pipeline:
         Потолок по ядрам не должен приводить к OOM: на машине с 8 ГБ
         одновременно помещается заметно меньше слоёв, чем на 32 ГБ.
         Явно заданное ``parallel_workers`` тоже ограничивается памятью.
+        Параллельно слоям идёт поток рельефа, поэтому его память
+        вычитается из бюджета.
         """
         configured = int(getattr(self.config, "parallel_workers", 0) or 0)
         # 3/4 ядер, но не больше 8: на 16 ядрах 12 слоёв оказались
         # медленнее восьми из-за конкуренции за диск и память.
         requested = configured if configured > 0 else cpu_workers(limit=8)
         requested = max(1, min(requested, total))
+        terrain = bool(getattr(self.config, "generate_terrain", False))
+        budget = memory_budget(
+            extra_reserve=TERRAIN_RESERVE_BYTES if terrain else 0
+        )
         return max(
-            1, min(requested, worker_cap(LAYER_WORKER_BYTES, cpu_limit=requested))
+            1,
+            min(
+                requested,
+                worker_cap(
+                    LAYER_WORKER_BYTES, cpu_limit=requested, budget=budget
+                ),
+            ),
         )
 
     def _run_layer(self, name, source, index, total):
+        """Готовит один слой. True — слой собран, False — пропущен."""
         if self.cancel is not None and self.cancel.is_set():
             raise InterruptedError("Preparation cancelled")
         if total:
@@ -650,7 +738,7 @@ class Pipeline:
             geojson = self._source_geojson(name, source)
             if geojson is None:
                 self.progress(f"{name}: no objects, skipped")
-                return
+                return True
             current = geojson
             try:
                 for operation, parameters in recipe_for(name).steps:
@@ -662,6 +750,14 @@ class Pipeline:
             except PipelineError as exc:
                 self.warnings.append(f"{name}: {exc}; layer skipped")
                 self.progress(f"{name}: skipped ({exc})")
+                return False
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - слой не валит сборку
+                self.warnings.append(f"{name}: {exc}; layer skipped")
+                self.progress(f"{name}: skipped ({exc})")
+                return False
+            return True
         finally:
             gdal_log.LOG.restore()
 
@@ -674,17 +770,7 @@ class Pipeline:
             task.runner.release()
 
     def _run_parallel(self, source, query_names, workers):
-        producers = {}
-        for name in query_names:
-            for output in _recipe_outputs(name):
-                producers.setdefault(output, name)
-        dependencies = {
-            name: _recipe_dependencies(name, producers) for name in query_names
-        }
-        # Раньше здесь были рецепты со скелетом GRASS: он не переносит
-        # параллельные вызовы. Свой расчёт линии подписи потокобезопасен.
-        serial = set()
-
+        dependencies = self._dependency_graph(query_names)
         lock = threading.Lock()
 
         def report(message):
@@ -694,6 +780,7 @@ class Pipeline:
         total = len(query_names)
         started = 0
         completed = set()
+        failed = set()
         # Тяжёлые слои идут первыми: по размеру исходных данных видно,
         # сколько работы ждёт слой.  Иначе лес и ледники (самые долгие)
         # стартуют последними и затягивают конец подготовки.
@@ -708,15 +795,18 @@ class Pipeline:
                         future.cancel()
                     raise InterruptedError("Preparation cancelled")
 
-                serial_busy = any(
-                    name in serial for name, _task in running.values()
-                )
                 for name in list(pending):
                     if len(running) >= workers:
                         break
-                    if not dependencies[name].issubset(completed):
+                    if dependencies[name] & failed:
+                        # Слой, на который опирается этот, не удался:
+                        # ждать его бессмысленно.
+                        pending.remove(name)
+                        failed.add(name)
+                        report(f"{name}: skipped (source layer failed)")
+                        warnings.append(f"{name}: skipped, source layer failed")
                         continue
-                    if name in serial and serial_busy:
+                    if not dependencies[name].issubset(completed):
                         continue
                     pending.remove(name)
                     started += 1
@@ -730,8 +820,6 @@ class Pipeline:
                         started, total,
                     )
                     running[future] = (name, task)
-                    if name in serial:
-                        serial_busy = True
 
                 if running:
                     done, _ = wait(running, return_when=FIRST_COMPLETED)
@@ -744,19 +832,29 @@ class Pipeline:
                                 pending_future.cancel()
                             raise
                         except Exception as exc:
+                            # Упавший слой не считается выполненным:
+                            # зависящие от него слои пропускаются.
                             report(f"{name}: skipped ({exc})")
+                            warnings.append(f"{name}: skipped ({exc})")
+                            failed.add(name)
                         else:
                             warnings.extend(task.warnings)
-                        completed.add(name)
-                        self.fraction(len(completed) / total)
+                            completed.add(name)
+                        self.fraction(
+                            (len(completed) + len(failed)) / total
+                        )
                 elif pending:
                     name = pending.pop(0)
                     started += 1
-                    self._run_layer(name, source, started, total)
+                    if self._run_layer(name, source, started, total):
+                        completed.add(name)
+                    else:
+                        failed.add(name)
                     warnings.extend(self.warnings)
                     self.warnings = []
-                    completed.add(name)
-                    self.fraction(len(completed) / total)
+                    self.fraction(
+                        (len(completed) + len(failed)) / total
+                    )
 
         self.warnings.extend(warnings)
         return self.warnings
@@ -779,8 +877,7 @@ class Pipeline:
             return None
         return destination
 
-    @staticmethod
-    def _ndjson_to_geojson(source, destination):
+    def _ndjson_to_geojson(self, source, destination):
         source = Path(source)
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -790,6 +887,8 @@ class Pipeline:
         ) as writer:
             writer.write('{"type":"FeatureCollection","features":[')
             for line in reader:
+                if self.cancel is not None and count % 2000 == 0 and self.cancel.is_set():
+                    raise InterruptedError("Preparation cancelled")
                 line = line.strip()
                 if not line:
                     continue
@@ -842,7 +941,10 @@ class Pipeline:
             )
         if operation == "load":
             path = self.config.vector_dir / f"{parameters['name']}.sqlite"
-            return path if path.exists() else current
+            if path.exists():
+                return path
+            self._missing_layer(name, parameters["name"])
+            return current
         if operation == "fix":
             return self._algorithm("native:fixgeometries", {
                 "INPUT": current,
@@ -923,7 +1025,10 @@ class Pipeline:
         if operation in ("difference", "intersection"):
             overlay = self._overlay_path(parameters["overlay"])
             if overlay is None:
-                self.progress(f"{name}: overlay {parameters['overlay']} not found, skipped")
+                # Слой-источник не выбран или не собрался: шаг
+                # пропускается, но это видно в журнале и в списке
+                # предупреждений — иначе вода молча остаётся в реках.
+                self._missing_layer(name, parameters["overlay"])
                 return current
             algorithm = "native:difference" if operation == "difference" else "native:intersection"
             return self._algorithm(algorithm, {
@@ -937,6 +1042,8 @@ class Pipeline:
                 path = self._overlay_path(layer_name)
                 if path is not None:
                     layers.append(path)
+                else:
+                    self._missing_layer(name, layer_name)
             if not layers:
                 return current
             layers.insert(0, current)
@@ -954,8 +1061,10 @@ class Pipeline:
 
     def _algorithm(self, algorithm, parameters):
         if not self.runner.has_algorithm(algorithm):
-            self.warnings.append(f"{algorithm} is unavailable, step skipped")
-            return parameters.get("INPUT") or parameters.get("input")
+            # Шаг без алгоритма пропускать нельзя: слой сохранился бы
+            # необработанным под именем обработанного, и пользователь
+            # не увидел бы разницы.
+            raise PipelineError(f"{algorithm} is unavailable")
         result = self.runner.run(algorithm, parameters)
         output = None
         for key, value in result.items():
@@ -987,6 +1096,20 @@ class Pipeline:
         )
         self.progress(f"{name}: saved {destination.name}")
         return current
+
+    def _missing_layer(self, name, reference):
+        """Предупреждение о ненайденном слое-источнике шага.
+
+        Шаг без источника не отменяет слой, но и молчать о нём нельзя:
+        невычтенная вода или необъединённые потоки выглядят как обычные
+        данные.
+        """
+        message = (
+            f"{name}: слой {reference} не найден, шаг пропущен — "
+            "данные могут быть неполными"
+        )
+        self.warnings.append(message)
+        self.progress(f"WARNING: {message}")
 
     def _overlay_path(self, name):
         candidates = [
@@ -1021,11 +1144,14 @@ class Pipeline:
         spatial_ref = layer.GetSpatialRef()
         path = self._temp_path(name, "polygons")
         path.unlink(missing_ok=True)
-        writer = _GpkgWriter(path, name, definition, spatial_ref)
+        writer = _GpkgWriter(path, name, definition, spatial_ref,
+                              cancel=self.cancel)
         converted = 0
         dropped = 0
         try:
             for feature in layer:
+                if self.cancel is not None and converted % 500 == 0 and self.cancel.is_set():
+                    raise InterruptedError("Preparation cancelled")
                 geometry = feature.GetGeometryRef()
                 polygon = _polygon_from_geometry(geometry)
                 if polygon is not None:
@@ -1074,6 +1200,7 @@ class Pipeline:
         writer = _GpkgWriter(
             path, name, definition, spatial_ref,
             geometry_type=ogr.wkbMultiLineString,
+            cancel=self.cancel,
         )
         built = 0
         # Одинаковые названия у разных relation — дубликаты OSM. Второй
@@ -1082,6 +1209,8 @@ class Pipeline:
         seen = {}
         try:
             for feature in layer:
+                if self.cancel is not None and built % 200 == 0 and self.cancel.is_set():
+                    raise InterruptedError("Preparation cancelled")
                 geometry = feature.GetGeometryRef()
                 if geometry is None or geometry.IsEmpty():
                     continue
@@ -1135,8 +1264,14 @@ class Pipeline:
                     f"{name}{('_' + suffix) if suffix else ''}.gpkg"
                 )
                 path.unlink(missing_ok=True)
-                writers[suffix] = _GpkgWriter(path, name, definition, spatial_ref)
+                writers[suffix] = _GpkgWriter(
+                    path, name, definition, spatial_ref, cancel=self.cancel
+                )
+            processed = 0
             for feature in layer:
+                if self.cancel is not None and processed % 500 == 0 and self.cancel.is_set():
+                    raise InterruptedError("Preparation cancelled")
+                processed += 1
                 index = feature.GetFieldIndex("layer")
                 value = feature.GetField(index) if index >= 0 else None
                 try:
@@ -1238,6 +1373,55 @@ def _polygon_from_geometry(geometry):
     return None
 
 
+# Маркеры типа геометрии в GeoJSON.  Разбор всех объектов через OGR
+# стоит около секунды на сотню тысяч объектов, а нужно знать только,
+# какие типы встречаются в файле.
+_GEOJSON_TYPE_MARKERS = {
+    "POINT": ("Point", "MultiPoint"),
+    "LINESTRING": ("LineString", "MultiLineString"),
+    "POLYGON": ("Polygon", "MultiPolygon"),
+}
+
+# Результат определения типа геометрии по файлу: один и тот же файл
+# сохраняется несколько раз (save() и save("_smoothed")), а определение
+# типа обходом всех объектов стоит секунды.
+_GEOMETRY_TYPE_CACHE = {}
+_GEOMETRY_TYPE_CACHE_LIMIT = 256
+
+
+def _geojson_families(path):
+    """Семейства геометрий в GeoJSON-файле (поиском по содержимому).
+
+    None — файл не GeoJSON или прочитать его не удалось: тогда семейства
+    определяются обычным обходом объектов.
+    """
+    needles = {}
+    for family, names in _GEOJSON_TYPE_MARKERS.items():
+        marks = []
+        for name in names:
+            marks.append(f'"type": "{name}"'.encode("utf-8"))
+            marks.append(f'"type":"{name}"'.encode("utf-8"))
+        needles[family] = marks
+    families = set()
+    try:
+        with open(path, "rb") as handle:
+            tail = b""
+            while True:
+                chunk = handle.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                data = tail + chunk
+                for family, marks in needles.items():
+                    if family in families:
+                        continue
+                    if any(mark in data for mark in marks):
+                        families.add(family)
+                tail = data[-64:]
+    except OSError:
+        return None
+    return families or None
+
+
 def _geometry_families(layer):
     """Семейства геометрий, реально присутствующие в объектах слоя.
 
@@ -1268,6 +1452,31 @@ def _geometry_families(layer):
 
 
 def _geometry_type(source):
+    """Тип геометрии слоя для -nlt.
+
+    Определение обходом всех объектов повторялось при каждом сохранении
+    одного и того же файла, поэтому результат запоминается по файлу.
+    """
+    path = Path(source)
+    key = None
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        cached = _GEOMETRY_TYPE_CACHE.get(key)
+        if cached is not None:
+            return cached
+    result = _compute_geometry_type(source)
+    if key is not None:
+        if len(_GEOMETRY_TYPE_CACHE) >= _GEOMETRY_TYPE_CACHE_LIMIT:
+            _GEOMETRY_TYPE_CACHE.clear()
+        _GEOMETRY_TYPE_CACHE[key] = result
+    return result
+
+
+def _compute_geometry_type(source):
     from osgeo import ogr
 
     try:
@@ -1290,10 +1499,15 @@ def _geometry_type(source):
                 "LINESTRING": "LINESTRING", "MULTILINESTRING": "LINESTRING",
                 "POLYGON": "POLYGON", "MULTIPOLYGON": "POLYGON",
             }[result]
+            families = None
+            if str(source).lower().endswith((".geojson", ".json")):
+                families = _geojson_families(source)
+            if families is None:
+                families = _geometry_families(layer)
             # Заголовок противоречит реальному содержимому (смешанный
             # файл): единый -nlt искажал бы часть объектов, пишем слой
             # без фиксации типа — QGIS отфильтрует нужный по URI слоя.
-            if _geometry_families(layer) - {header_family}:
+            if families - {header_family}:
                 result = "GEOMETRY"
         dataset = None
     except Exception:
@@ -1357,7 +1571,12 @@ def save_vector(source, destination, layer_name, target_crs=None):
     ogr.UseExceptions()
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.unlink(missing_ok=True)
+    # Пишем во временный файл и подменяем готовый: упавшая запись не
+    # должна стирать прежний слой.
+    temporary = destination.with_name(
+        f"{destination.stem}.part{destination.suffix}"
+    )
+    temporary.unlink(missing_ok=True)
     options = [
         "-nln", layer_name,
         "-nlt", _geometry_type(source),
@@ -1379,23 +1598,30 @@ def save_vector(source, destination, layer_name, target_crs=None):
     if target_crs:
         options.extend(["-t_srs", target_crs])
     try:
-        result = gdal.VectorTranslate(str(destination), str(source), options=options)
+        result = gdal.VectorTranslate(str(temporary), str(source), options=options)
     except Exception:
         result = None
     if result is None:
         # -skipfailures отключает пакетную запись в SQLite: каждая
         # геометрия сохраняется отдельной транзакцией, а перенос замедляется
         # в пять раз. Поэтому основной путь идёт без него, а запасной — с ним.
-        destination.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
         try:
             result = gdal.VectorTranslate(
-                str(destination), str(source), options=options + ["-skipfailures"]
+                str(temporary), str(source), options=options + ["-skipfailures"]
             )
         except Exception as exc:
+            temporary.unlink(missing_ok=True)
             raise PipelineError(f"Failed to write {destination}: {exc}") from exc
     if result is None:
+        temporary.unlink(missing_ok=True)
         raise PipelineError(f"Failed to write {destination}")
     result = None
+    try:
+        os.replace(temporary, destination)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise PipelineError(f"Failed to write {destination}: {exc}") from exc
 
 
 def _clean_temp(config):
@@ -1404,38 +1630,16 @@ def _clean_temp(config):
             path.unlink(missing_ok=True)
 
 
-# Промежуточные файлы DEM — это кэш, а не слои проекта: их сохраняем,
-# чтобы не пересобирать репроекцию DEM при каждой подготовке.
-# Проекция DEM в EPSG:3857 — дорогая операция, её результат переживает
-# очистку каталога проекта (рядом лежит отпечаток, по которому видно,
-# что файл соответствует текущему DEM).  Остальные растры каждый раз
-# считаются заново или восстанавливаются из кэша жёсткой ссылкой.
-_RASTER_CACHE_FILES = ("merged_dem_3857.tif", "merged_dem_3857.tif.sha256")
+def _join_thread(thread, timeout=None):
+    """Ждёт поток, но не бесконечно.
 
-
-def _clean_layers(config):
-    """Удаляет ранее подготовленные векторные и растровые слои проекта.
-
-    Возвращает число удалённых файлов.
+    Поток подготовки сам проверяет отмену и выходит быстро, поэтому
+    ждать его можно ограниченное время: зависший поток не должен
+    держать закрытие панели.
     """
-    removed = 0
-    for directory, keep_cache in (
-        (config.vector_dir, False),
-        (config.raster_dir, True),
-    ):
-        if not directory.exists():
-            continue
-        for path in sorted(directory.rglob("*")):
-            if not path.is_file():
-                continue
-            if keep_cache and path.name in _RASTER_CACHE_FILES:
-                continue
-            try:
-                path.unlink()
-            except OSError:
-                continue
-            removed += 1
-    return removed
+    if thread is None:
+        return
+    thread.join(timeout)
 
 
 def _use_project_temp(config):
@@ -1481,8 +1685,11 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     _use_project_temp(config)
     gdal_log.LOG.reset()
     bbox = parse_bbox(config.bbox)
-    report("Очистка прежних слоёв")
-    _clean_layers(config)
+    # Слои новой сборки готовятся в отдельном каталоге: прежний проект
+    # остаётся целым, пока сборка не завершится успешно.  Ошибка или
+    # отмена больше не оставляют проект без данных.
+    project.begin_staging(config)
+    committed = False
     # Временный каталог чистим до параллельного запуска: подготовка
     # источника OSM пишет туда вырезки PBF, и поздняя уборка удалила бы
     # их прямо во время работы.
@@ -1495,6 +1702,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     terrain_thread = None
     terrain_error = []
     terrain_keys = {}
+    terrain_used = []
     terrain_seconds = [0.0]
     try:
         report("Создание проекта QGIS")
@@ -1546,7 +1754,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                     try:
                         terrain_keys["dem"] = terrain.prepare_terrain_raster(
                             config, bbox, progress=report, cancel=cancel,
-                            status=tracker.status,
+                            status=tracker.status, used_out=terrain_used,
                         )
                     finally:
                         gdal_log.LOG.restore()
@@ -1592,8 +1800,12 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             fraction=tracker.fraction, timings=timings,
         )
         started = time.monotonic()
-        pipeline.run(prepared, config.array_queries)
+        warnings = pipeline.run(prepared, config.array_queries)
         timings.add_stage("обработка слоёв", time.monotonic() - started)
+        # Предупреждения конвейера не должны теряться: по ним видно,
+        # какие слои собраны не полностью.
+        for warning in warnings or ():
+            report(f"WARNING: {warning}")
         if terrain_thread is not None:
             _report_terrain_stage(terrain_thread, report)
             terrain_thread.join()
@@ -1686,7 +1898,12 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         timings.add_stage("углы значков", time.monotonic() - started)
         report("Удаление пустых слоёв")
         started = time.monotonic()
-        project.clean_project_layers(project_path)
+        # Атрибуция наборов DEM пишется здесь же: отдельная перезапись
+        # архива проекта стоила бы ещё полминуты.
+        attribution = ""
+        if terrain_used:
+            attribution = dem_sources.attribution_for_keys(terrain_used)
+        project.clean_project_layers(project_path, dem_attribution=attribution)
         timings.add_stage("очистка проекта", time.monotonic() - started)
         for line in timings.summary():
             report(line)
@@ -1699,18 +1916,25 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             )
         for line in gdal_log.LOG.summary():
             report(line)
+        # Готово: прежние слои заменяются собранными.
+        project_path = project.commit_staging(config)
+        committed = True
         tracker.finish()
     finally:
         if source_thread is not None and source_thread.is_alive():
             # Ошибка или отмена до join: поток источника дорабатывает.
             # Без ожидания уборка временного каталога оборвала бы его
             # файлы на полуслове.
-            source_thread.join()
+            _join_thread(source_thread, 300)
         if terrain_thread is not None and terrain_thread.is_alive():
             # Отмена или ошибка до join: поток рельефа дорабатывает
             # (функции рельефа сами реагируют на cancel).
-            terrain_thread.join()
+            _join_thread(terrain_thread, 300)
         if prepared is not None and prepared.dataset is not None:
             prepared.dataset.close()
         _clean_temp(config)
+        if not committed:
+            # Сборка не удалась: прежние слои остаются на месте, а
+            # недоделанная сборка убирается.
+            project.discard_staging(config)
     return project_path

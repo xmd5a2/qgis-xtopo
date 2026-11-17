@@ -18,6 +18,10 @@ from .pbf_source import (
 
 MAX_SAMPLES = 96
 MIN_SAMPLES = 6
+# Заголовок блока PBF —Protobuf-сообщение с именем блока и его
+# размером.  Больше 64 КБ он не бывает: битый файл с заголовком в
+# несколько гигабайт заставил бы читать мусор.
+MAX_BLOCK_HEADER = 64 * 1024
 
 
 @dataclass
@@ -33,6 +37,8 @@ class FastProbe:
     # объектов придётся прочитать драйверу.
     header_area: float = 0.0
     extended_ratio: float = 0.0
+    # Сколько блоков не удалось разобрать: оценка по ним неточна.
+    failed_blobs: int = 0
 
     @property
     def approximate(self):
@@ -46,7 +52,10 @@ class UnsupportedPbf(PbfError):
 def _varint(buffer, position):
     result = 0
     shift = 0
+    size = len(buffer)
     while True:
+        if position >= size:
+            raise UnsupportedPbf("Truncated varint in PBF data")
         byte = buffer[position]
         position += 1
         result |= (byte & 0x7F) << shift
@@ -68,12 +77,18 @@ def _fields(buffer):
             value, position = _varint(buffer, position)
         elif wire == 2:
             length, position = _varint(buffer, position)
+            if length > size - position:
+                raise UnsupportedPbf("Truncated protobuf field in PBF data")
             value = buffer[position:position + length]
             position += length
         elif wire == 1:
+            if size - position < 8:
+                raise UnsupportedPbf("Truncated protobuf field in PBF data")
             value = buffer[position:position + 8]
             position += 8
         elif wire == 5:
+            if size - position < 4:
+                raise UnsupportedPbf("Truncated protobuf field in PBF data")
             value = buffer[position:position + 4]
             position += 4
         else:
@@ -108,6 +123,10 @@ def _blobs(handle):
         if len(header_size_raw) < 4:
             raise UnsupportedPbf("Truncated PBF file")
         header_size = struct.unpack(">I", header_size_raw)[0]
+        if header_size > MAX_BLOCK_HEADER:
+            raise UnsupportedPbf(
+                f"Implausible PBF block header size: {header_size} bytes"
+            )
         header = handle.read(header_size)
         if len(header) < header_size:
             raise UnsupportedPbf("Truncated PBF block header")
@@ -135,7 +154,12 @@ def _blob_payload(handle, offset, size):
         if number == 1:
             return value
         if number == 3:
-            return zlib.decompress(value)
+            try:
+                return zlib.decompress(value)
+            except zlib.error as exc:
+                raise UnsupportedPbf(
+                    f"Broken zlib stream in PBF blob: {exc}"
+                ) from exc
         if number in (4, 5, 6, 7):
             raise UnsupportedPbf("Unsupported PBF compression; use zlib-compressed .pbf")
     raise UnsupportedPbf("PBF blob without data")
@@ -151,6 +175,8 @@ def _header_bbox(handle):
         if len(header_size_raw) < 4:
             return None
         header_size = struct.unpack(">I", header_size_raw)[0]
+        if header_size > MAX_BLOCK_HEADER:
+            return None
         header = handle.read(header_size)
         blob_type = None
         data_size = None
@@ -432,6 +458,7 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
             "relations_matched": 0,
         }
         decoded = 0
+        failed = []
         for position, index_value in enumerate(indices):
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("PBF estimation cancelled")
@@ -441,7 +468,10 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
                 partial = _process_block(payload, index, bbox)
             except UnsupportedPbf:
                 raise
-            except Exception:
+            except Exception as exc:
+                # Один битый блок не обрывает оценку: он просто не
+                # попадает в выборку, а причина попадает в отчёт.
+                failed.append(f"{type(exc).__name__}: {exc}")
                 continue
             decoded += 1
             for key in counters:
@@ -450,7 +480,8 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
                 progress(f"Быстрая оценка PBF: {position + 1}/{len(indices)} блоков")
 
         if not decoded:
-            raise UnsupportedPbf("Could not decode PBF blocks")
+            detail = failed[0] if failed else "неизвестная причина"
+            raise UnsupportedPbf(f"Could not decode PBF blocks: {detail}")
 
         # Выборка сделана по размеру блоков, поэтому и масштабирование
         # ведётся по байтам: иначе крупные блоки в выборке приводят к
@@ -514,4 +545,5 @@ def probe_fast(config, bbox, query_names, query_texts=None, cancel=None, progres
         total_blobs=len(blobs),
         header_area=header_area,
         extended_ratio=extended_ratio,
+        failed_blobs=len(failed),
     )

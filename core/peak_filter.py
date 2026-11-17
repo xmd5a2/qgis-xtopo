@@ -14,6 +14,7 @@
 import hashlib
 import json
 import math
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,9 @@ class ProjectDem:
             and abs(self.step_y - pixel) <= pixel * 0.01
         )
         self._array = None
+        # Чтение из GDAL не потокобезопасно: без замка два потока,
+        # читающие один датасет, мешают друг другу.
+        self._lock = threading.Lock()
 
     def prepare_shared(self):
         """Загружает растр в память для параллельных окон.
@@ -151,9 +155,10 @@ class ProjectDem:
         if self._array is not None:
             piece = self._array[sy0:sy1, sx0:sx1]
         else:
-            piece = self.band.ReadAsArray(
-                sx0, sy0, sx1 - sx0, sy1 - sy0
-            ).astype("float32")
+            with self._lock:
+                piece = self.band.ReadAsArray(
+                    sx0, sy0, sx1 - sx0, sy1 - sy0
+                ).astype("float32")
             if self.nodata is not None:
                 piece[piece == self.nodata] = np.nan
         # Строки растра идут с севера на юг, а в окне — с юга на север.
@@ -189,9 +194,10 @@ class ProjectDem:
         if c1 <= c0 or r1 <= r0:
             return np.full((height, width), np.nan, dtype="float32")
 
-        piece = self.band.ReadAsArray(
-            c0, r0, c1 - c0, r1 - r0
-        ).astype("float32")
+        with self._lock:
+            piece = self.band.ReadAsArray(
+                c0, r0, c1 - c0, r1 - r0
+            ).astype("float32")
         if self.nodata is not None:
             piece[piece == self.nodata] = np.nan
         piece = piece[::-1]
@@ -210,13 +216,17 @@ class SrtmTiles:
         self.cache_dir = Path(cache_dir).expanduser()
         self._tiles = {}
         self._order = []
+        # Кэш тайлов общий на потоки: загрузка и вытеснение под замком.
+        self._lock = threading.Lock()
 
     def path(self, name):
         return self.cache_dir / name[:3] / f"{name}.hgt"
 
     def load(self, name):
-        if name in self._tiles:
-            return self._tiles[name]
+        with self._lock:
+            cached = self._tiles.get(name)
+        if cached is not None:
+            return cached
         path = self.path(name)
         if not path.exists():
             return None
@@ -225,10 +235,12 @@ class SrtmTiles:
             return None
         array = array.reshape(TILE_PIXELS, TILE_PIXELS).astype("float32")
         array[array <= -1000] = np.nan
-        self._tiles[name] = array
-        self._order.append(name)
-        while len(self._order) > 6:
-            self._tiles.pop(self._order.pop(0), None)
+        with self._lock:
+            if name not in self._tiles:
+                self._tiles[name] = array
+                self._order.append(name)
+                while len(self._order) > 6:
+                    self._tiles.pop(self._order.pop(0), None)
         return array
 
     def _tile_window(self, name, lon_min, lon_max, lat_min, lat_max):
@@ -303,6 +315,17 @@ class SrtmDem:
     def __init__(self, cache_dir, fallback):
         self.tiles = SrtmTiles(cache_dir)
         self.fallback = fallback
+
+    def prepare_shared(self):
+        """Готовность к параллельным окнам.
+
+        Тайлы SRTM после чтения только читаются, кэш тайлов защищён
+        замком, запасной растр — своим.  Поэтому окна можно считать в
+        нескольких потоках: в отличие от режима PBF, проверка пиков на
+        SRTM больше не идёт в один поток.  Запасной растр в память не
+        читается: он нужен редко, а массив стоит десятки мегабайт.
+        """
+        return True
 
     def covers(self, bbox, margin=0.01):
         return self.fallback.covers(bbox, margin)
@@ -600,7 +623,10 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction,
             report(i18n.tr("Пики: нет объектов"))
             return None
 
-        shared = isinstance(dem, ProjectDem) and dem.prepare_shared()
+        # Общий доступ только на чтение: окна рельефа можно считать в
+        # нескольких потоках и для растра проекта, и для SRTM.
+        prepare = getattr(dem, "prepare_shared", None)
+        shared = bool(prepare and prepare())
         dem_values = _sample_dem_values(dem, peaks, cancel, fraction)
         neighbours = _neighbour_stats(peaks, dem_values)
         thresholds = peak_placement.thresholds_for_source(

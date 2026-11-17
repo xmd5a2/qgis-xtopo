@@ -2,8 +2,10 @@
 
 Интерфейс плагина создаётся по-русски. При переключении языка обходим
 дерево виджетов и переводим все подписи, заголовки, подсказки, пункты
-списков и вкладок. Повторный обход безопасен: неизвестный текст остаётся
-как есть, а уже переведённый не переводится второй раз.
+списков и вкладок. Отдельно обходятся действия и меню: это не виджеты,
+поэтому обычный обход их не находит. Повторный обход безопасен:
+неизвестный текст остаётся как есть, а уже переведённый не переводится
+второй раз.
 """
 
 from qgis.PyQt.QtCore import Qt
@@ -14,11 +16,17 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QPlainTextEdit,
     QProgressBar,
     QTabWidget,
     QWidget,
 )
+
+try:
+    from qgis.PyQt.QtWidgets import QAction
+except ImportError:  # QGIS 4 / Qt 6
+    from qgis.PyQt.QtGui import QAction
 
 from ..core.i18n import tr
 
@@ -32,6 +40,21 @@ def _tooltip_role():
         return Qt.ItemDataRole.ToolTipRole
     except AttributeError:
         return Qt.ToolTipRole
+
+
+def translate_action(action):
+    """Переводит тексты действия: пункт меню, кнопку панели."""
+    if action is None:
+        return
+    text = action.text()
+    if text:
+        action.setText(tr(text))
+    tooltip = action.toolTip()
+    if tooltip:
+        action.setToolTip(tr(tooltip))
+    status = action.statusTip()
+    if status:
+        action.setStatusTip(tr(status))
 
 
 def translate_widget(widget):
@@ -49,6 +72,10 @@ def translate_widget(widget):
         if text:
             widget.setText(tr(text))
     if isinstance(widget, QGroupBox):
+        title = widget.title()
+        if title:
+            widget.setTitle(tr(title))
+    if isinstance(widget, QMenu):
         title = widget.title()
         if title:
             widget.setTitle(tr(title))
@@ -99,3 +126,7 @@ def translate_tree(root):
     translate_widget(root)
     for widget in root.findChildren(QWidget):
         translate_widget(widget)
+    # Действия не виджеты: обычный обход их не находит. Пункты меню
+    # измерения и кнопки панели — это как раз QAction.
+    for action in root.findChildren(QAction):
+        translate_action(action)
