@@ -1044,7 +1044,17 @@ class SliceOsm:
             ) as response:
                 body = response.read().decode("utf-8", "replace").strip()
         except urllib.error.HTTPError as exc:
-            raise ExtractError(f"SliceOSM: HTTP {exc.code}") from exc
+            # Сервис объясняет отказ в теле ответа: чаще всего это
+            # превышение предела по числу узлов.
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace").strip()
+            except Exception:  # noqa: BLE001 - тело может быть пустым
+                pass
+            message = f"SliceOSM: HTTP {exc.code}"
+            if detail:
+                message += f": {detail}"
+            raise ExtractError(message) from exc
         except Exception as exc:
             raise ExtractError(f"SliceOSM: {exc}") from exc
         uuid = body.strip().strip('"')

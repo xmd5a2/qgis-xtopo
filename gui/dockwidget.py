@@ -10,8 +10,8 @@ from qgis.PyQt.QtCore import (
     pyqtSignal, Qt,
 )
 from qgis.PyQt.QtGui import (
-    QBrush, QDesktopServices, QColor, QFontMetrics, QIcon, QPainter, QPen,
-    QPixmap,
+    QBrush, QDesktopServices, QColor, QFontMetrics, QIcon, QImage, QPainter,
+    QPen, QPixmap,
 )
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core import (
     dem_sources, disk_space, extracts, geofabrik, i18n, measure, net,
-    performance, proxy, sonny, terrain_cache,
+    performance, proxy, slice_estimate, sonny, terrain_cache,
 )
 from ..core.bbox import parse_bbox
 from ..core.config import (
@@ -567,6 +567,76 @@ class MapIndexWorker(QThread):
         self.cancel_event.set()
 
 
+def _load_nodes_image(path):
+    """Декодировать карту плотности в буфер, понятный core-модулю."""
+    path = Path(path)
+    raw = path.read_bytes()
+    image = QImage.fromData(raw)
+    if image.isNull() or image.width() != 4096 or image.height() != 4096:
+        # Битый кэш не должен мешать следующей попытке: удаляем его,
+        # чтобы оценка скачала карту заново.
+        path.unlink(missing_ok=True)
+        raise extracts.ExtractError(
+            "SliceOSM: не удалось прочитать карту плотности узлов"
+        )
+    image = image.convertToFormat(QImage.Format_RGB888)
+    return slice_estimate.RgbImage(
+        image.width(),
+        image.height(),
+        image.bytesPerLine(),
+        image.constBits().asstring(image.sizeInBytes()),
+    )
+
+
+class SliceEstimateWorker(QThread):
+    """Оценка выреза SliceOSM без блокировки панели."""
+
+    result = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, config, bbox, cached_bytes, cpu, workers,
+                 terrain_seconds, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.bbox = bbox
+        self.cached_bytes = cached_bytes
+        self.cpu = cpu
+        self.workers = workers
+        self.terrain_seconds = terrain_seconds
+        self.cancel_event = threading.Event()
+
+    def run(self):
+        try:
+            service = {}
+            image = None
+            if not self.cached_bytes:
+                client = extracts.SliceOsm()
+                service = client.service_status(cancel=self.cancel_event)
+                path = slice_estimate.ensure_nodes_image(
+                    self.config, cancel=self.cancel_event,
+                    progress=self.progress.emit,
+                )
+                if self.cancel_event.is_set():
+                    return
+                image = _load_nodes_image(path)
+            estimate = slice_estimate.estimate(
+                self.bbox, image=image, service=service,
+                cached_bytes=self.cached_bytes, cpu=self.cpu,
+                workers=self.workers,
+                terrain_seconds=self.terrain_seconds,
+            )
+        except InterruptedError:
+            return
+        except Exception as exc:  # noqa: BLE001 - причину показываем в панели
+            self.failed.emit(str(exc))
+        else:
+            self.result.emit(estimate)
+
+    def cancel(self):
+        self.cancel_event.set()
+
+
 class WrappedLabel(QLabel):
     """Подпись, высота которой следует за переносами строк.
 
@@ -645,6 +715,12 @@ class XtopoDockWidget(QDockWidget):
         self._pbf_probe_timer = QTimer(self)
         self._pbf_probe_timer.setSingleShot(True)
         self._pbf_probe_timer.timeout.connect(self._start_pbf_probe)
+        self.slice_estimate_worker = None
+        self.slice_estimate_workers = []
+        self._slice_estimate_state = None
+        self._slice_estimate_timer = QTimer(self)
+        self._slice_estimate_timer.setSingleShot(True)
+        self._slice_estimate_timer.timeout.connect(self._start_slice_estimate)
         self._servers_checked = False
         self._mode_values = {}
         self._active_mode = "slice"
@@ -739,8 +815,8 @@ class XtopoDockWidget(QDockWidget):
         self._shutting_down = True
         for timer in (
                 self._pbf_probe_timer, self._map_index_timer,
-                self._dem_check_timer, self._project_timer,
-                self._proxy_timer):
+                self._slice_estimate_timer, self._dem_check_timer,
+                self._project_timer, self._proxy_timer):
             try:
                 timer.stop()
             except RuntimeError:
@@ -753,6 +829,8 @@ class XtopoDockWidget(QDockWidget):
             worker = getattr(self, name, None)
             if worker is not None:
                 workers.append((name, worker))
+        for worker in list(getattr(self, "slice_estimate_workers", [])):
+            workers.append(("slice_estimate_worker", worker))
         for worker in list(self.server_workers):
             workers.append(("server", worker))
         for _name, worker in workers:
@@ -766,6 +844,7 @@ class XtopoDockWidget(QDockWidget):
             "worker": 30000,
             "pbf_probe": 10000,
             "map_index_worker": 15000,
+            "slice_estimate_worker": 35000,
             "dem_availability_worker": 15000,
             "sonny_catalogue_worker": 30000,
             "proxy_check": 5000,
@@ -781,6 +860,8 @@ class XtopoDockWidget(QDockWidget):
             except RuntimeError:
                 pass
         self.server_workers = []
+        self.slice_estimate_workers = []
+        self.slice_estimate_worker = None
         for name in (
                 "worker", "pbf_probe", "map_index_worker",
                 "dem_availability_worker", "sonny_catalogue_worker",
@@ -1349,6 +1430,8 @@ class XtopoDockWidget(QDockWidget):
     def _project_path_changed(self, *_args):
         """Имя или каталог изменились: обновляем доступность кнопок."""
         self._update_action_buttons()
+        if self.source_mode.currentData() == "slice":
+            self._schedule_slice_estimate()
 
     def _update_disk_info(self, *_args):
         """Свободное место на томе, где лежат данные проекта."""
@@ -1487,11 +1570,15 @@ class XtopoDockWidget(QDockWidget):
                 self.map_index_worker.cancel()
 
         is_overpass = mode == "overpass"
+        if mode != "slice":
+            self._slice_estimate_timer.stop()
+            self._cancel_slice_estimate()
+            self._slice_estimate_state = None
         if mode != "pbf":
             self._pbf_probe_timer.stop()
             if self.pbf_probe is not None and self.pbf_probe.isRunning():
                 self.pbf_probe.cancel()
-        if mode not in ("pbf",) + FILE_MODES:
+        if mode not in ("pbf", "slice") + FILE_MODES:
             self.pbf_info.setVisible(False)
         self.overpass_server.parentWidget().setVisible(is_overpass)
         self.recheck_servers.setVisible(is_overpass)
@@ -1565,11 +1652,12 @@ class XtopoDockWidget(QDockWidget):
                     "Сервис SliceOSM собирает файл PBF по указанной рамке: "
                     "данные свежее минуты, но вырез готовится на стороне "
                     "сервиса и занимает от нескольких секунд до минут. "
-                    "Объём выреза станет известен, когда сервис соберёт файл, "
-                    "до этого показывается ход работы и оценка времени."
+                    "До запуска показывается оценка объёма и времени, "
+                    "точный размер сервис сообщает после сборки."
                 )
             )
-            self.pbf_info.setVisible(False)
+            self.pbf_info.setVisible(True)
+            self._schedule_slice_estimate()
         elif mode == "local":
             self.source_value.setEnabled(True)
             self.source_value.setPlaceholderText(
@@ -1621,6 +1709,8 @@ class XtopoDockWidget(QDockWidget):
                 self.pbf_probe.cancel()
             self.pbf_info.setText("")
             self._schedule_map_index()
+        elif mode == "slice":
+            self._schedule_slice_estimate()
         self._schedule_dem_availability()
 
     def _queries_changed(self, _item):
@@ -1629,6 +1719,8 @@ class XtopoDockWidget(QDockWidget):
             self._schedule_pbf_probe()
         elif mode in FILE_MODES:
             self._pbf_probe_timer.start(700)
+        elif mode == "slice":
+            self._schedule_slice_estimate()
 
     def _file_provider(self):
         """Провайдер файловых выгрузок для текущего режима."""
@@ -2089,12 +2181,17 @@ class XtopoDockWidget(QDockWidget):
         self.pbf_probe.start()
 
     def _pbf_probe_progress(self, message):
+        if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
+            return
         self._pbf_info_state = None
         self.pbf_info.setText(i18n.tr(message))
 
     def _pbf_probed(self, total, in_bbox, matched, elapsed, approximate,
                     sampled, total_blobs, file_count, extended_ratio=0.0,
                     bytes_per_second=0.0):
+        if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
+            # Пока проба работала, режим могли переключить на SliceOSM.
+            return
         if approximate:
             prefix = "≈ "
         else:
@@ -2321,10 +2418,189 @@ class XtopoDockWidget(QDockWidget):
         )
 
     def _pbf_probe_failed(self, message):
+        if self.source_mode.currentData() not in ("pbf",) + FILE_MODES:
+            return
         self._pbf_info_state = None
         self.pbf_info.setText(
             i18n.trf("Не удалось оценить PBF: {}", message)
         )
+
+    def _slice_config(self, bbox):
+        """Настройки для оценки выреза: нужен только каталог кэша."""
+        return Config(
+            qgis_projects_dir=(
+                self.projects_dir.text().strip() or default_projects_dir()
+            ),
+            project_name=self.project_name.text().strip() or "automap",
+            bbox=bbox.as_csv(),
+            array_queries=[],
+            source_mode="slice",
+        )
+
+    def _schedule_slice_estimate(self):
+        """Пересчитать оценку выреза после смены охвата или режима."""
+        if self.source_mode.currentData() != "slice":
+            self._slice_estimate_timer.stop()
+            self._cancel_slice_estimate()
+            return
+        self._slice_estimate_timer.start(700)
+
+    def _cancel_slice_estimate(self):
+        workers = list(getattr(self, "slice_estimate_workers", []))
+        current = self.slice_estimate_worker
+        if current is not None and current not in workers:
+            workers.append(current)
+        for worker in workers:
+            try:
+                if worker.isRunning():
+                    worker.cancel()
+            except RuntimeError:
+                # Объект уже удалён QThread.
+                pass
+
+    def _start_slice_estimate(self):
+        self._slice_estimate_timer.stop()
+        if self.source_mode.currentData() != "slice" or not self.isVisible():
+            return
+        text = self.bbox.text().strip()
+        if not text:
+            self._slice_estimate_state = None
+            self.pbf_info.clear()
+            return
+        try:
+            bbox = parse_bbox(text)
+        except Exception as exc:
+            self._slice_estimate_state = ("error", str(exc))
+            self._render_slice_estimate()
+            return
+        config = self._slice_config(bbox)
+        cached = slice_estimate.cached_slice_size(config, bbox)
+        cpu = performance.cpu_score(self.settings)
+        workers = performance.layer_worker_count(
+            len(self.queries) if hasattr(self, "queries") else 0
+        )
+        terrain_seconds = self._terrain_estimate_seconds(cpu=cpu)
+        self._cancel_slice_estimate()
+        worker = SliceEstimateWorker(
+            config, bbox, cached, cpu, workers, terrain_seconds, parent=self,
+        )
+        worker.result.connect(
+            lambda result, w=worker: self._slice_estimate_ready(w, result)
+        )
+        worker.failed.connect(
+            lambda message, w=worker: self._slice_estimate_failed(w, message)
+        )
+        worker.finished.connect(
+            lambda w=worker: self._slice_estimate_finished(w)
+        )
+        self.slice_estimate_workers.append(worker)
+        self.slice_estimate_worker = worker
+        self._slice_estimate_state = ("loading",)
+        self._render_slice_estimate()
+        worker.start()
+
+    def _slice_estimate_finished(self, worker):
+        try:
+            self.slice_estimate_workers.remove(worker)
+        except ValueError:
+            pass
+        if self.slice_estimate_worker is worker:
+            self.slice_estimate_worker = None
+        worker.deleteLater()
+
+    def _slice_estimate_ready(self, worker, estimate):
+        if worker is not self.slice_estimate_worker:
+            return
+        self.slice_estimate_worker = None
+        self._slice_estimate_state = ("slice", estimate)
+        self._render_slice_estimate()
+
+    def _slice_estimate_failed(self, worker, message):
+        if worker is not self.slice_estimate_worker:
+            return
+        self.slice_estimate_worker = None
+        self._slice_estimate_state = ("error", message)
+        self._render_slice_estimate()
+
+    @staticmethod
+    def _slice_size_text(size):
+        if size <= 0:
+            return i18n.trf("{} МБ", "0")
+        return disk_space.human_size(size)
+
+    def _render_slice_estimate(self):
+        """Собирает подпись оценки выреза на текущем языке."""
+        if self.source_mode.currentData() != "slice":
+            return
+        state = self._slice_estimate_state
+        if state is None:
+            return
+        kind = state[0]
+        if kind == "loading":
+            self.pbf_info.setText(i18n.tr("Оценка вырезки…"))
+            self.pbf_info.setToolTip("")
+            return
+        if kind == "error":
+            self.pbf_info.setText(
+                i18n.trf("Оценка вырезки недоступна: {}", state[1])
+            )
+            self.pbf_info.setToolTip(state[1])
+            return
+        estimate = state[1]
+        if estimate.cached_bytes:
+            self.pbf_info.setText(
+                i18n.trf(
+                    "Вырез уже скачан: {} · подготовка ≈ {}.",
+                    self._slice_size_text(estimate.cached_bytes),
+                    _estimate_duration(estimate.prepare_seconds),
+                )
+            )
+        else:
+            parts = [
+                i18n.trf(
+                    "Объём ≈ {}", self._slice_size_text(estimate.size_bytes)
+                ),
+                i18n.trf("сборка ≈ {}", _duration(estimate.build_seconds)),
+                i18n.trf(
+                    "скачивание ≈ {}", _duration(estimate.download_seconds)
+                ),
+                i18n.trf(
+                    "подготовка ≈ {}",
+                    _estimate_duration(estimate.prepare_seconds),
+                ),
+                i18n.trf(
+                    "всего ≈ {}", _estimate_duration(estimate.total_seconds)
+                ),
+            ]
+            text = " · ".join(parts) + "."
+            if estimate.queue_size:
+                prefix = i18n.trf(
+                    "В очереди {} заданий (ожидание до ≈ {}). ",
+                    _spaced(estimate.queue_size),
+                    _duration(estimate.queue_seconds),
+                )
+                text = prefix + text
+            if estimate.over_limit:
+                text = i18n.trf(
+                    "Предел SliceOSM превышен: ≈ {} узлов при пределе {}. "
+                    "Уменьшите охват или выберите Geofabrik.",
+                    _spaced(estimate.nodes),
+                    _spaced(estimate.nodes_limit),
+                ) + "\n" + text
+            self.pbf_info.setText(text)
+        if estimate.cached_bytes:
+            self.pbf_info.setToolTip(
+                i18n.tr("Готовый вырез из кэша: размер точный.")
+            )
+        else:
+            self.pbf_info.setToolTip(
+                i18n.trf(
+                    "Оценка по карте плотности OSM: ≈ {} узлов. "
+                    "Предел сервиса: {}.",
+                    _spaced(estimate.nodes),
+                    _spaced(estimate.nodes_limit) or "—",
+                )
+            )
 
     def _server_changed(self, _index):
         if self.source_mode.currentData() != "overpass":
@@ -2427,6 +2703,8 @@ class XtopoDockWidget(QDockWidget):
             self._check_servers()
         elif mode in FILE_MODES:
             self._schedule_map_index()
+        elif mode == "slice":
+            self._schedule_slice_estimate()
 
     def _terrain_changed(self, enabled):
         manual = self.dem_source.currentData() == dem_sources.MANUAL_SOURCE
@@ -2457,6 +2735,8 @@ class XtopoDockWidget(QDockWidget):
             box.setEnabled(steps_enabled)
         self._update_dem_info()
         self._update_dem_warning()
+        if self.source_mode.currentData() == "slice":
+            self._schedule_slice_estimate()
 
     def _dem_worker_running(self):
         worker = self.dem_availability_worker
@@ -3083,6 +3363,7 @@ class XtopoDockWidget(QDockWidget):
     def _retranslate_dynamic(self):
         """Пересобирает динамические подписи на текущем языке."""
         self._render_pbf_info()
+        self._render_slice_estimate()
         self._update_dem_info()
         self._update_dem_warning()
         # Размеры пересобираются заново: единицы измерения переводятся.

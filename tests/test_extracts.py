@@ -1,9 +1,12 @@
 import importlib.util
+import io
 import itertools
 import json
+import math
 import os
 import socket
 import tempfile
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -13,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 HAS_QGIS = importlib.util.find_spec("qgis") is not None
 
-from qgis_xtopo.core import disk_space, extracts
+from qgis_xtopo.core import disk_space, extracts, slice_estimate
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config
 
@@ -510,6 +513,16 @@ class SliceOsmTest(unittest.TestCase):
         # Сервис ждёт min_lat, min_lon, max_lat, max_lon.
         self.assertEqual(payload["RegionData"], [2.0, 1.0, 4.0, 3.0])
 
+    def test_submit_reports_service_error_body(self):
+        error = urllib.error.HTTPError(
+            extracts.SliceOsm.API, 400, "Bad Request", {},
+            io.BytesIO(b"Error: the limit of nodes was exceeded."),
+        )
+        with mock.patch.object(extracts, "_open", side_effect=error):
+            with self.assertRaises(extracts.ExtractError) as raised:
+                extracts.SliceOsm().submit(BBox(1, 2, 3, 4))
+        self.assertIn("limit of nodes", str(raised.exception))
+
     def test_is_complete(self):
         client = extracts.SliceOsm()
         self.assertTrue(client.is_complete({"Complete": "true"}))
@@ -565,6 +578,153 @@ class SliceOsmTest(unittest.TestCase):
         ):
             payload = client.wait("uuid", timeout=1)
         self.assertTrue(client.is_complete(payload))
+
+
+class SliceEstimateTest(unittest.TestCase):
+    """Предварительная оценка выреза до обращения к сервису."""
+
+    class _Image:
+        """Карта плотности с одним ненулевым пикселем z12."""
+
+        width = 4096
+        height = 4096
+
+        def __init__(self, value):
+            self.value = value
+
+        def pixel(self, x, y):
+            if (x, y) == (2048, 2048):
+                return self.value >> 8, self.value & 0xFF
+            return 0, 0
+
+        def block(self, x, y, size):
+            if x <= 2048 < x + size and y <= 2048 < y + size:
+                return self.value
+            return 0
+
+    @staticmethod
+    def _tile_bbox(x, y, zoom=12):
+        count = 1 << zoom
+        lon_min = x / count * 360.0 - 180.0
+        lon_max = (x + 1) / count * 360.0 - 180.0
+        lat_max = math.degrees(
+            math.atan(math.sinh(math.pi * (1 - 2 * y / count)))
+        )
+        lat_min = math.degrees(
+            math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / count)))
+        )
+        return BBox(lon_min, lat_min, lon_max, lat_max)
+
+    def test_estimate_nodes_for_one_z12_pixel(self):
+        bbox = self._tile_bbox(2048, 2048)
+        self.assertEqual(
+            slice_estimate.estimate_nodes(bbox, self._Image(1000)),
+            1000 * slice_estimate.NODE_SCALE,
+        )
+
+    def test_tile_bounds_cover_whole_world(self):
+        bbox = BBox(-180.0, -85.0, 180.0, 85.0)
+        self.assertEqual(slice_estimate._tile_bounds(bbox, 0), (0, 0, 0, 0))
+        zoom, bounds = slice_estimate._covering(bbox)
+        self.assertEqual(zoom, 5)
+        self.assertEqual(slice_estimate._tile_count(bounds), 1024)
+
+    def test_estimate_size_and_build_time_match_measurements(self):
+        # Замер сервиса для этой рамки: 2 973 537 узлов, 23,9 МБ, 38,1 с.
+        bbox = BBox(40.1649638, 55.1542466, 42.1219571, 56.2688148)
+        result = slice_estimate.estimate(
+            bbox, nodes=2_973_537,
+            service={"QueueSize": 0, "NodesLimit": 100_000_000},
+            cpu=1.0, workers=8,
+        )
+        self.assertAlmostEqual(
+            result.size_bytes, 23_883_693, delta=3_000_000
+        )
+        self.assertAlmostEqual(result.build_seconds, 38.05, delta=1.5)
+        self.assertFalse(result.over_limit)
+        self.assertEqual(result.queue_seconds, 0.0)
+
+    def test_cached_cutout_skips_build_and_download(self):
+        bbox = BBox(1.0, 2.0, 3.0, 4.0)
+        result = slice_estimate.estimate(
+            bbox, cached_bytes=123_456,
+            service={"QueueSize": 5, "NodesLimit": 100},
+        )
+        self.assertEqual(result.size_bytes, 123_456)
+        self.assertEqual(result.build_seconds, 0.0)
+        self.assertEqual(result.queue_seconds, 0.0)
+        self.assertEqual(result.download_seconds, 0.0)
+        self.assertGreater(result.prepare_seconds, 0.0)
+
+    def test_over_limit_and_queue(self):
+        bbox = BBox(1.0, 2.0, 3.0, 4.0)
+        result = slice_estimate.estimate(
+            bbox, nodes=200,
+            service={"QueueSize": 2, "NodesLimit": 100},
+        )
+        self.assertTrue(result.over_limit)
+        self.assertEqual(result.queue_size, 2)
+        self.assertGreater(result.queue_seconds, 0.0)
+
+    def test_rgb_image_block(self):
+        data = bytearray(2 * 12)
+        data[12 + 3] = 0x12
+        data[12 + 4] = 0x34
+        image = slice_estimate.RgbImage(4, 2, 12, bytes(data))
+        self.assertEqual(image.block(1, 1, 1), 0x1234)
+        self.assertEqual(image.block(0, 0, 2), 0x1234)
+
+    def test_nodes_image_is_cached_and_falls_back_to_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="slice"
+            )
+            payload = (
+                slice_estimate._PNG_SIGNATURE + b"x" * 100
+                + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+
+            with mock.patch.object(
+                slice_estimate, "NODES_IMAGE_MIN_SIZE", 64,
+            ), mock.patch.object(
+                slice_estimate, "NODES_IMAGE_TTL", 3600,
+            ), mock.patch.object(
+                extracts, "fetch_bytes", return_value=payload,
+            ) as download:
+                path = slice_estimate.ensure_nodes_image(config)
+                self.assertTrue(slice_estimate._valid_png(path))
+                self.assertEqual(download.call_count, 1)
+                # Свежий кэш повторно не скачивается.
+                slice_estimate.ensure_nodes_image(config)
+                self.assertEqual(download.call_count, 1)
+
+                old = time.time() - 7200
+                os.utime(path, (old, old))
+                with mock.patch.object(
+                    extracts, "fetch_bytes",
+                    side_effect=extracts.ExtractError("offline"),
+                ):
+                    self.assertEqual(
+                        slice_estimate.ensure_nodes_image(config), path
+                    )
+
+                path.unlink()
+                with mock.patch.object(
+                    extracts, "fetch_bytes", return_value=b"broken",
+                ):
+                    with self.assertRaises(extracts.ExtractError):
+                        slice_estimate.ensure_nodes_image(config)
+                self.assertFalse(path.exists())
+
+    def test_slice_cache_path_uses_bbox_hash(self):
+        import hashlib
+
+        bbox = BBox(1.0, 2.0, 3.0, 4.0)
+        expected = hashlib.sha1(bbox.as_csv().encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(
+            slice_estimate.slice_cache_path(Config(), bbox).name,
+            f"slice_{expected}.osm.pbf",
+        )
 
 
 @unittest.skipUnless(

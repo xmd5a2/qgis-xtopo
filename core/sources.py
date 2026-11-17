@@ -8,7 +8,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import disk_space, extracts, geofabrik, overpass_batch, osmium_tool, pbf_source
+from . import (
+    disk_space, extracts, geofabrik, overpass_batch, osmium_tool, pbf_source,
+    slice_estimate,
+)
 from .overpass_client import OverpassClient, build_query
 from .resources import read_query
 
@@ -307,8 +310,7 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
         timer = _DownloadTimer()
         query_texts = {name: read_query(name) for name in query_names}
         client = extracts.SliceOsm()
-        key = hashlib.sha1(bbox.as_csv().encode("utf-8")).hexdigest()[:12]
-        destination = config.geofabrik_dir / f"slice_{key}.osm.pbf"
+        destination = slice_estimate.slice_cache_path(config, bbox)
         if not (destination.exists() and destination.stat().st_size > 0):
             config.geofabrik_dir.mkdir(parents=True, exist_ok=True)
             try:

@@ -307,6 +307,17 @@ class SourceModeTest(unittest.TestCase):
 
         cls.app = qgis_app()
 
+    def setUp(self):
+        from qgis_xtopo.core import i18n
+
+        self._language = i18n.language()
+        i18n.set_language("ru", save=False)
+
+    def tearDown(self):
+        from qgis_xtopo.core import i18n
+
+        i18n.set_language(self._language, save=False)
+
     def _dock(self):
         from qgis.PyQt.QtWidgets import QMainWindow
 
@@ -343,6 +354,70 @@ class SourceModeTest(unittest.TestCase):
                 self.assertIsNotNone(color, key)
             else:
                 self.assertIsNone(color, key)
+
+    @staticmethod
+    def _slice_estimate(**overrides):
+        from qgis_xtopo.core import slice_estimate
+
+        values = {
+            "nodes": 2_973_537,
+            "size_bytes": 23_883_693,
+            "build_seconds": 38.0,
+            "queue_seconds": 0.0,
+            "download_seconds": 24.0,
+            "prepare_seconds": 120.0,
+            "total_seconds": 182.0,
+            "nodes_limit": 100_000_000,
+        }
+        values.update(overrides)
+        return slice_estimate.SliceEstimate(**values)
+
+    def test_slice_mode_shows_volume_and_time(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        dock._slice_estimate_state = ("slice", self._slice_estimate())
+        dock._render_slice_estimate()
+        self.assertFalse(dock.pbf_info.isHidden())
+        text = dock.pbf_info.text()
+        self.assertIn("Объём", text)
+        self.assertIn("сборка", text)
+        self.assertIn("скачивание", text)
+        self.assertIn("подготовка", text)
+
+    def test_slice_cached_cutout_uses_exact_size(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        dock._slice_estimate_state = (
+            "slice",
+            self._slice_estimate(cached_bytes=23_883_693),
+        )
+        dock._render_slice_estimate()
+        text = dock.pbf_info.text()
+        self.assertIn("уже скачан", text)
+        self.assertNotIn("сборка", text)
+        self.assertNotIn("скачивание", text)
+
+    def test_slice_limit_warning_is_visible(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        dock._slice_estimate_state = (
+            "slice",
+            self._slice_estimate(nodes=120_000_000, nodes_limit=100_000_000),
+        )
+        dock._render_slice_estimate()
+        self.assertIn("Предел SliceOSM", dock.pbf_info.text())
+
+    def test_slice_estimate_failure_does_not_hide_mode(self):
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        dock._slice_estimate_state = ("error", "нет сети")
+        dock._render_slice_estimate()
+        self.assertFalse(dock.pbf_info.isHidden())
+        self.assertIn("недоступна", dock.pbf_info.text())
 
     def test_rare_modes_start_with_public_overpass(self):
         from qgis_xtopo.gui.dockwidget import RARE_SOURCE_MODES
