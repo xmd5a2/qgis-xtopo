@@ -449,6 +449,34 @@ class SettlementScaleTest(unittest.TestCase):
                     # Дальше 1:500000 правил нет.
                     self.assertFalse(self._visible_at(leaves, 600000))
 
+    def test_exact_scale_boundaries(self):
+        """Ровно 1:100000 — средний диапазон, ровно 1:500000 — уже скрыто.
+
+        Верхняя граница диапазона исключающая: правило `0 - 100000`
+        перестаёт действовать ровно на 1:100000, а `100000 - 200000`
+        начинается там же. Это же подтверждает движок QGIS ниже.
+        """
+        checks = (
+            (99999, self.FINE[1]),
+            (100000, self.MIDDLE),
+            (199999, self.MIDDLE),
+            (200000, self.COARSE),
+            (499999, self.COARSE),
+        )
+        for container in ("renderer-v2/rules", "labeling/rules"):
+            for name in self.NAMES:
+                with self.subTest(container=container, name=name):
+                    leaves = self._leaves(
+                        self._branch(container, ["else", "else", name])
+                    )
+                    for scale, expected in checks:
+                        visible = self._visible_at(leaves, scale)
+                        self.assertEqual(len(visible), 1, (scale, visible))
+                        self.assertEqual(
+                            visible[0].get("filter") or "", expected, scale
+                        )
+                    self.assertFalse(self._visible_at(leaves, 500000))
+
     def test_coarse_scale_stops_at_500k(self):
         for container in ("renderer-v2/rules", "labeling/rules"):
             for name in self.NAMES:
@@ -481,6 +509,84 @@ class SettlementScaleTest(unittest.TestCase):
         for container in ("renderer-v2/rules", "labeling/rules"):
             group = self._branch(container, ["else", "by population"])
             self.assertIn(expected, group.get("filter") or "", container)
+
+
+class SettlementScaleEngineTest(unittest.TestCase):
+    """Точные границы масштабов глазами самого движка правил QGIS."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+        from qgis.core import QgsProject
+
+        cls.project = QgsProject()
+        if not cls.project.read(str(template_path())):
+            raise unittest.SkipTest("шаблон проекта не читается")
+        cls.layer = next(
+            layer for layer in cls.project.mapLayers().values()
+            if layer.name() == "places main"
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.project.clear()
+
+    @staticmethod
+    def _find(rule, description):
+        for child in rule.children():
+            if child.description() == description:
+                return child
+            found = SettlementScaleEngineTest._find(child, description)
+            if found is not None:
+                return found
+        return None
+
+    @staticmethod
+    def _leaves(rule):
+        leaves = []
+        for child in rule.children():
+            if child.children():
+                leaves.extend(SettlementScaleEngineTest._leaves(child))
+            else:
+                leaves.append(child)
+        return leaves
+
+    def _hamlet_leaves(self):
+        root = self.layer.renderer().rootRule()
+        empty = next(
+            child for child in root.children() if not child.description()
+        )
+        else_rule = self._find(empty, "else")
+        self.assertIsNotNone(else_rule)
+        hamlet = self._find(else_rule, "hamlet")
+        self.assertIsNotNone(hamlet)
+        return self._leaves(hamlet)
+
+    def _visible(self, leaves, scale):
+        return [
+            rule for rule in leaves
+            if rule.isScaleOK(scale)
+        ]
+
+    def test_exact_boundaries_match_the_xml_rules(self):
+        leaves = self._hamlet_leaves()
+        checks = (
+            (99999, "0 - 100000", ""),
+            (100000, "100000 - 200000", "@level_of_detail >= 3"),
+            (200000, "200000 - 500000", "@level_of_detail >= 6"),
+        )
+        for scale, description, expression in checks:
+            visible = self._visible(leaves, scale)
+            self.assertEqual(
+                [rule.description() for rule in visible],
+                [description], scale,
+            )
+            self.assertEqual(
+                visible[0].filterExpression() or "", expression, scale,
+            )
+        self.assertEqual(self._visible(leaves, 500000), [])
 
 
 class RuleIntegrityTest(unittest.TestCase):
