@@ -693,6 +693,27 @@ class SliceOsmTest(unittest.TestCase):
             payload = client.wait("uuid", timeout=1)
         self.assertTrue(client.is_complete(payload))
 
+    def test_wait_does_not_repeat_identical_progress(self):
+        """Неизменная оценка не попадает в журнал дважды подряд."""
+        client = extracts.SliceOsm()
+        payloads = [
+            {"NodesTotal": 100, "NodesProg": 99, "Complete": False},
+            {"NodesTotal": 100, "NodesProg": 99, "Complete": False},
+            {"NodesTotal": 100, "NodesProg": 99, "Complete": False},
+            {"Complete": True},
+        ]
+        messages = []
+        with mock.patch.object(
+            client, "status", side_effect=payloads
+        ), mock.patch.object(
+            extracts.time, "sleep"
+        ), mock.patch.object(
+            extracts.time, "monotonic", return_value=0.0,
+        ):
+            client.wait("uuid", timeout=1, progress=messages.append)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("99%", messages[0])
+
 
 class SliceEstimateTest(unittest.TestCase):
     """Предварительная оценка выреза до обращения к сервису."""

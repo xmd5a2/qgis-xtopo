@@ -1220,6 +1220,9 @@ class SliceOsm:
         deadline = time.monotonic() + timeout
         started = time.monotonic()
         step = None
+        # Сервис опрашивается раз в несколько секунд, а оценка меняется
+        # реже: дословно повторённые строки в журнале не нужны.
+        last_text = None
         while True:
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Вырез прерван")
@@ -1231,9 +1234,12 @@ class SliceOsm:
                 step = current
                 deadline = time.monotonic() + timeout
             if progress:
-                progress(self._progress_text(
+                text = self._progress_text(
                     payload, time.monotonic() - started,
-                ))
+                )
+                if text != last_text:
+                    last_text = text
+                    progress(text)
             if time.monotonic() > deadline:
                 raise ExtractError(
                     "SliceOSM: вырез не готов за отведённое время"
