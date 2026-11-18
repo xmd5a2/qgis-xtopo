@@ -1185,12 +1185,12 @@ class PoiSuppressionTest(unittest.TestCase):
         for layer in self.layers:
             self.assertEqual(layer.crs, "EPSG:4326", layer.name)
 
-    def test_service_layer_names_are_unique_and_referenced(self):
-        """Имена служебных слоёв уникальны и существуют в шаблоне.
+    def test_service_layer_names_are_unique(self):
+        """Имена служебных слоёв уникальны.
 
         Два слоя с одинаковым именем (4326 и 3857) делали выбор
-        overlay_nearest неоднозначной: первым находился слой не той
-        системы координат, и вытеснение не работало.
+        соседей неоднозначной: первым находился слой не той системы
+        координат, и вытеснение не работало.
         """
         names = [
             layer.findtext("layername") or ""
@@ -1198,16 +1198,6 @@ class PoiSuppressionTest(unittest.TestCase):
         ]
         service = [name for name in names if name.startswith("poi icons")]
         self.assertEqual(len(service), len(set(service)), service)
-        known = set(names)
-        referenced = set()
-        for layer in self.root.iter("maplayer"):
-            text = ElementTree.tostring(layer, encoding="unicode")
-            referenced.update(re.findall(
-                r"overlay_nearest\(\s*'(poi icons[^']*)'", text,
-            ))
-        self.assertTrue(referenced, "в шаблоне нет ссылок на служебные слои")
-        for name in referenced:
-            self.assertIn(name, known)
 
     def test_service_layers_have_spatial_index(self):
         """Служебный слой лежит в GeoPackage: у SQLite нет индекса."""
@@ -1219,6 +1209,13 @@ class PoiSuppressionTest(unittest.TestCase):
             self.assertIn(".gpkg", source)
 
     def test_icon_rules_suppress_overlaps(self):
+        """Подавление значков берётся из данных слоя.
+
+        Порог до ближайшего подавителя лежит в поле ``hide`` слоя:
+        правило сравнивает его с радиусом подавления.  Выражений с
+        overlay_nearest в правилах нет — они вызывались на каждый
+        объект слоя и делали отрисовку медленной.
+        """
         checked = 0
         for layer in self.layers:
             if layer.name in self.NO_SUPPRESSION_LAYERS:
@@ -1230,58 +1227,40 @@ class PoiSuppressionTest(unittest.TestCase):
                     # Правило не рисуется ни в одном диапазоне.
                     continue
                 self.assertIn(
-                    "overlay_nearest(", leaf.filter,
+                    f'"{poi_icons.hide_field_name()}"', leaf.filter,
                     f"у слоя {layer.name} нет подавления значков",
                 )
-                self.assertIn("@element[2] <", leaf.filter)
+                self.assertNotIn("overlay_nearest(", leaf.filter)
                 self.assertIn("@level_of_detail", leaf.filter)
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет правил значков POI")
 
-    def test_icon_rules_break_ties_within_a_layer(self):
-        """Равный ранг не вытеснял: значки одного слоя накладывались.
+    def test_icon_rules_use_band_thresholds(self):
+        """Каждому диапазону масштаба — свой порог.
 
-        Фильтр должен скрывать точку, если рядом стоит точка того же
-        слоя (тот же ранг) с меньшими координатами — она побеждает.
-        """
-        checked = 0
-        for layer in self.layers:
-            if layer.name in self.NO_SUPPRESSION_LAYERS:
-                continue
-            for leaf in poi_icons.leaves(layer.root):
-                if not poi_icons.band_indexes(
-                    leaf.minimum, leaf.maximum, self.bands,
-                ):
-                    continue
-                self.assertIn('@element[2] =', leaf.filter)
-                self.assertIn("with_variable('pg'", leaf.filter)
-                checked += 1
-        self.assertTrue(checked)
-
-    def test_icon_rules_pick_scale_outside_overlay(self):
-        """Текущий диапазон выбирается снаружи overlay_nearest.
-
-        Аргументы overlay_nearest считаются в контексте служебного
-        слоя, где @map_scale недоступен.  Поэтому диапазон выбирается
-        условием правила, а в выборку соседей попадает слой нужного
-        диапазона.
+        Набор видимых соседей зависит от диапазона масштаба, поэтому
+        и порог в данных свой у каждого диапазона: слот в поле слоя
+        выбирается по номеру диапазона.  Порядок слотов общий для всех
+        слоёв: два слоя могут читать один и тот же файл.
         """
         for layer in self.layers:
             if layer.name in self.NO_SUPPRESSION_LAYERS:
                 continue
             for leaf in poi_icons.leaves(layer.root):
-                if not poi_icons.band_indexes(
+                used = poi_icons.band_indexes(
                     leaf.minimum, leaf.maximum, self.bands,
-                ):
-                    continue
-                self.assertIn("@map_scale", leaf.filter)
-                inside = leaf.filter.split("overlay_nearest", 1)[1]
-                self.assertIn("'poi icons ", inside)
+                )
+                for index in used:
+                    offset = poi_icons.hide_slot_index(index)
+                    self.assertIn(
+                        f"{offset} + @level_of_detail", leaf.filter,
+                        f"у слоя {layer.name} неверный слот порога",
+                    )
 
     def test_places_main_suppression_is_disabled(self):
-        """places main рисуется без overlay_nearest в правилах.
+        """places main рисуется без подавления в правилах.
 
-        Десятки листовых правил с overlay_nearest замедляли отрисовку
+        Десятки листовых правил с подавлением замедляли отрисовку
         слоя настолько, что значки не появлялись.  Остальные слои
         по-прежнему подавляют перекрытия.
         """
@@ -1291,14 +1270,16 @@ class PoiSuppressionTest(unittest.TestCase):
         )
         text = ElementTree.tostring(layer, encoding="unicode")
         self.assertNotIn("overlay_nearest(", text)
+        self.assertNotIn(f'"{poi_icons.hide_field_name()}"', text)
 
     def test_label_rules_suppress_overlaps(self):
+        """Подпись скрывается вместе со значком — по тем же данным."""
         checked = 0
         for layer in self.layers:
             if layer.name in self.NO_SUPPRESSION_LAYERS:
                 continue
             for rule in layer.labels:
-                expected = poi_icons.layer_suppression_expression(
+                expected = poi_icons.layer_suppression_data_expression(
                     layer, self.bands, rule.minimum, rule.maximum,
                 )
                 if expected == "false":
@@ -1306,9 +1287,10 @@ class PoiSuppressionTest(unittest.TestCase):
                     # подписи нечем.
                     continue
                 self.assertIn(
-                    "overlay_nearest(", rule.filter,
+                    f'"{poi_icons.hide_field_name()}"', rule.filter,
                     f"у слоя {layer.name} нет подавления подписей",
                 )
+                self.assertNotIn("overlay_nearest(", rule.filter)
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет подписей POI")
 
@@ -1371,6 +1353,113 @@ class PoiPruneTest(unittest.TestCase):
         bridge = self._point(6.9, 46.05, rank=0.02)
         far = self._point(6.94, 46.05, rank=8)
         self.assertEqual(self._kept([bridge, far]), [])
+
+
+class PoiSuppressionDataTest(unittest.TestCase):
+    """Пороги подавления считаются при подготовке данных.
+
+    Правило рендерера читает порог из поля слоя, поэтому решает,
+    кто кому мешает, расчёт в `core/poi_icons.py`: ближайший
+    подавитель ищется среди точек, стоящих раньше по рангу и
+    координатам.
+    """
+
+    # Диапазон с верхней границей: радиус подавления ограничен
+    # размером значка и этой границей.
+    BANDS = [(0.0, 20000.0)]
+
+    def _point(self, lon, lat, rank, fid, band=0, lod=2, name="peak"):
+        from qgis_xtopo.core.poi_icons import _Point
+
+        return _Point(
+            rank=rank,
+            lon=lon,
+            lat=lat,
+            name=name,
+            fid=fid,
+            bands={band: lod},
+            sizes={band: 2.0},
+        )
+
+    def _distances(self, points):
+        records = {0: list(points)}
+        return poi_icons._suppression_distances(
+            points, records, self.BANDS,
+        )
+
+    def test_same_layer_tie_breaks_by_coordinates(self):
+        """Значки одного слоя: побеждает тот, кто стоит раньше."""
+        west = self._point(6.9, 46.05, 5, 1)
+        east = self._point(6.9005, 46.05, 5, 2)
+        distances = self._distances([west, east])
+        self.assertNotIn(("peak", 1), distances)
+        self.assertIn(("peak", 2), distances)
+        threshold = distances[("peak", 2)][0][2]
+        # Пик в полуторастах метрах от соседнего.
+        self.assertTrue(30 < threshold < 60, threshold)
+
+    def test_lower_priority_is_suppressed(self):
+        """Точка низшего приоритета скрывается рядом с важной."""
+        top = self._point(6.9, 46.05, 3, 1, name="volcano")
+        low = self._point(6.9005, 46.05, 9, 2, name="peak")
+        distances = self._distances([top, low])
+        self.assertNotIn(("volcano", 1), distances)
+        self.assertIn(("peak", 2), distances)
+
+    def test_level_of_detail_hides_late_candidate(self):
+        """Подавитель, видимый только на высоком уровне, не мешает.
+
+        На уровне детализации 2 такой подавитель не нарисован, значит
+        и не вытесняет: порог для уровня 2 остаётся пустым.
+        """
+        top = self._point(6.9, 46.05, 3, 1, name="volcano", lod=5)
+        low = self._point(6.9005, 46.05, 9, 2, name="peak")
+        distances = self._distances([top, low])
+        levels = distances[("peak", 2)][0]
+        self.assertNotIn(2, levels)
+        self.assertNotIn(4, levels)
+        self.assertIn(5, levels)
+        self.assertIn(6, levels)
+
+    def test_far_point_is_not_suppressed(self):
+        """Сосед за пределами радиуса подавления не мешает."""
+        top = self._point(6.9, 46.05, 3, 1, name="volcano")
+        low = self._point(6.95, 46.05, 9, 2, name="peak")
+        distances = self._distances([top, low])
+        self.assertNotIn(("peak", 2), distances)
+
+    def test_coincident_point_does_not_suppress(self):
+        """Точка на том же месте не вытесняет.
+
+        Выражение шаблона отбрасывает кандидатов, совпадающих с
+        родителем по координатам: иначе значки разных слоёв в одной
+        точке гасили бы друг друга всегда.
+        """
+        top = self._point(6.9, 46.05, 3, 1, name="volcano")
+        low = self._point(6.9, 46.05, 9, 2, name="peak")
+        distances = self._distances([top, low])
+        self.assertNotIn(("peak", 2), distances)
+
+    def test_base_filter_drops_suppression(self):
+        """Условие подавления снимается с фильтра правила."""
+        suppression = "a"
+        self.assertEqual(
+            poi_icons.base_filter("NOT (a)", suppression), ""
+        )
+        self.assertEqual(
+            poi_icons.base_filter("(x) AND NOT (a)", suppression), "x"
+        )
+        # Подавления в фильтре нет — слой без вытеснения.
+        self.assertIsNone(poi_icons.base_filter("(x)", suppression))
+
+    def test_data_filter_keeps_base_condition(self):
+        """Новое условие не теряет исходную видимость объекта."""
+        self.assertEqual(
+            poi_icons.data_filter("x", "b"), "(x) AND NOT (b)",
+        )
+        self.assertEqual(
+            poi_icons.data_filter("", "b"), "NOT (b)",
+        )
 
 
 class PoiObstacleTest(unittest.TestCase):
@@ -1698,11 +1787,16 @@ class BridgeIconHideTest(unittest.TestCase):
 
 
 class PoiSuppressionExpressionTest(unittest.TestCase):
-    """Выражение подавления вытесняет значки и внутри слоя.
+    """Прежнее выражение подавления: вытесняет значки и внутри слоя.
+
+    Оно осталось в коде для правки шаблона (`tools/suppression_to_data.py`
+    ищет по нему старые фильтры) и для снятия условия, если попадётся
+    непереведённый шаблон.  В правилах шаблона выражения больше нет:
+    подавление считается при подготовке данных, см. `PoiSuppressionDataTest`.
 
     Прежняя схема ссылалась на geometry(@parent) внутри overlay_nearest,
     но @parent в его аргументах недоступен (NULL): значки одного слоя не
-    вытесняли друг друга.  Теперь родительская точка передаётся через
+    вытесняли друг друга.  Родительская точка передаётся через
     with_variable, кандидаты возвращаются массивами, а расстояние
     считается в метрах.
     """

@@ -3418,14 +3418,13 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertIn("<layername>poi icons ", text)
             tree = re.findall(r'<layer-tree-layer[^>]*name="([^"]+)"', text)
             self.assertFalse([item for item in tree if item.startswith("poi icons")])
-            # Правила значков ссылаются на служебные слои.
-            self.assertIn("overlay_nearest('poi icons ", html.unescape(text))
-
-            # Слой доступен по имени: на нём строится выборка соседей.
-            from qgis.core import (
-                QgsExpression, QgsExpressionContext,
-                QgsExpressionContextUtils, QgsProject,
+            # Правила значков берут порог подавления из данных слоя.
+            self.assertIn(
+                f'"{poi_icons.hide_field_name()}"', html.unescape(text)
             )
+
+            # Слой доступен по имени.
+            from qgis.core import QgsProject
 
             project = QgsProject.instance()
             project.clear()
@@ -3436,20 +3435,6 @@ class PipelineIntegrationTest(unittest.TestCase):
             ]
             self.assertTrue(service, "нет служебных слоёв в проекте")
             self.assertTrue(all(layer.isValid() for layer in service))
-            name = service[0].name()
-            expression = QgsExpression(
-                f"overlay_nearest('{name}', expression:=\"rank\", limit:=-1, "
-                "max_distance:=0.1)"
-            )
-            context = QgsExpressionContext()
-            context.appendScope(QgsExpressionContextUtils.projectScope(project))
-            context.appendScope(
-                QgsExpressionContextUtils.layerScope(service[0]))
-            feature = next(service[0].getFeatures())
-            context.setFeature(feature)
-            value = expression.evaluate(context)
-            self.assertFalse(expression.hasEvalError(), expression.evalErrorString())
-            self.assertIsInstance(value, list)
 
     def test_project_is_regenerated_from_template(self):
         from qgis_xtopo.core import project as project_module

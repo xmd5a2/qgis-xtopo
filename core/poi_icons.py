@@ -1,52 +1,41 @@
-"""Служебный слой POI-значков для подавления наложений между слоями.
+"""Подавление наложений значков POI: расчёт порогов при подготовке данных.
 
 QGIS не разводит значки разных слоёв: кластерный рендерер группирует
 точки только внутри одного слоя, а препятствия для подписей берутся
-только из провайдеров подписей.  Поэтому значок подавляется фильтром
+только из провайдеров подписей.  Поэтому значок подавляется условием
 правила рендерера: он скрывается, если рядом есть более приоритетная
 точка — или точка того же слоя, стоящая ближе к началу координат,
 иначе значки одного слоя (населённые пункты, хижины) накладывались бы
 друг на друга.
 
 Приоритет — порядок слоёв в дереве проекта: верхний в списке рисуется
-поверх и побеждает.  Чтобы не сравнивать каждый слой с каждым, все
-POI-точки собираются в служебные слои ``poi icons`` с полем ``rank``
-(1 — самый приоритетный).  Правило слоя с рангом R скрывает точку,
-когда рядом есть точка с меньшим рангом или с рангом R, но с
-координатами меньшими, чем у текущей.  ``overlay_nearest`` не даёт
-доступа к геометрии текущего объекта (``geometry(@parent)`` в его
-аргументах — NULL), поэтому родитель передаётся через
-``with_variable('pg', $geometry, ...)``, а кандидаты возвращаются
-массивами координат и ранга.
+поверх и побеждает.  Раньше правило искало соседей само, выражением
+``overlay_nearest`` по служебному слою ``poi icons``; выражение
+вызывалось на каждый объект, а радиус поиска рос вместе с масштабом,
+и слой ``peak`` на мелком масштабе рисовался десятки секунд.  Теперь
+решение принимается при подготовке данных: для каждой точки считается
+порог — расстояние до ближайшего подавителя в метрах, — и кладётся в
+поле ``hide`` слоя.  Правило читает поле и сравнивает порог с
+радиусом подавления (размер значка, приведённый к масштабу), поэтому
+отрисовка больше не зависит от числа соседей.
 
-Сосед должен быть виден в текущем масштабе и уровне детализации, иначе
-значок исчезал бы из-за объекта, который не рисуется.  Видимость
-считается по правилам шаблона, а служебный слой свой для каждого
-диапазона масштаба: у диапазона свой набор видимых точек, и правило
-ссылается на слой своего диапазона.
-
-Служебный слой один: все POI-слои шаблона — в EPSG:4326, и
-overlay_nearest считает расстояния в градусах.  Слой в другой
-проекции сломал бы сравнение с max_distance (метры против градусов),
-поэтому рецепты не должны перепроецировать слои со значками.
-
-Точки, которые не могут подавить ни одного соседа, в служебный слой не
-попадают: overlay_nearest перебирает весь слой целиком, поэтому размер
-слоя прямо складывается в время отрисовки.
-
-Текущий диапазон масштаба выбирается снаружи вызова overlay_nearest:
-внутри его аргументов выражения считаются в контексте служебного
-слоя, где @map_scale не видно.  Уровень детализации, наоборот, доступен
-в подвыражении как переменная проекта — порог видимости хранится в
-поле ``lod`` и сравнивается на лету, поэтому смена детализации в панели
+Порог зависит от диапазона масштаба (у диапазона свой набор видимых
+точек) и от уровня детализации (сосед должен быть виден, иначе значок
+исчезал бы из-за объекта, который не рисуется), поэтому в поле лежат
+слоты по всем диапазонам и уровням: слот — номер диапазона × 5 +
+(уровень − 2), пустой слот означает «подавителя нет».  Уровень
+детализации остаётся переменной проекта, и смена детализации в панели
 не требует пересборки данных.
 
 Расстояние подавления — размер значка правила в миллиметрах, переведённый
-в единицы слоя через @map_scale.  Все POI-слои шаблона — в EPSG:4326:
-добавлен множитель cos(широты), потому что градус долготы короче градуса
-широты, а QGIS сравнивает расстояния плоско в единицах слоя.  Слои в
-другой проекции не поддерживаются — расстояния перестанут совпадать с
-max_distance.
+в метры через @map_scale.  Все POI-слои шаблона — в EPSG:4326: добавлен
+множитель cos(широты), потому что градус долготы короче градуса
+широты.  Слои в другой проекции не поддерживаются — расстояния перестанут
+совпадать с расстоянием до соседа.
+
+Служебные слои ``poi icons`` остались: в них видно, какие точки могут
+подавлять, и по ним считается порог.  Они лежат в дереве проекта, но
+скрыты от пользователя.
 
 В служебный слой попадают и значки, нарисованные на объектах линий и
 полигонов: MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).
@@ -56,6 +45,7 @@ max_distance.
 так что ни подготовка, ни отрисовка не замедляются.
 """
 
+import heapq
 import math
 import re
 import zipfile
@@ -70,6 +60,14 @@ AUX_FILE_NAME = "poi_icons.gpkg"
 # Служебный файл прежней схемы с двумя системами координат; удаляется
 # при сборке, чтобы не оставался в каталоге проекта.
 LEGACY_AUX_FILE_NAME_3857 = "poi_icons_3857.gpkg"
+
+# Предельный масштаб для последнего диапазона: выше него значки уже
+# не различаются, а пороги считать больше не нужно.
+MAX_SUPPRESSION_SCALE = 20_000_000
+# Минимальное расстояние между точками, при котором одна вытесняет
+# другую.  То же значение, что и в выражении шаблона: совпадающие
+# по координатам точки не вытесняют друг друга.
+MIN_SUPPRESSION_DISTANCE = 0.001
 
 # Видимая часть холста SVG по имени файла: считается один раз за сеанс.
 _SVG_SCALE_CACHE = {}
@@ -780,6 +778,33 @@ def icon_enabled_expression(index):
     )
 
 
+def base_filter(filter_text, suppression):
+    """Отбрасывает условие подавления из фильтра правила.
+
+    Возвращает исходное условие видимости: в шаблоне подавление
+    добавлено в конец фильтра, поэтому его можно снять точным
+    совпадением суффикса, без разбора скобок.  ``None`` — подавления
+    в фильтре нет (слои, где значки не вытесняются).
+    """
+    if not suppression or suppression == "false":
+        return None
+    condition = f"NOT ({suppression})"
+    if filter_text == condition:
+        return ""
+    suffix = f") AND {condition}"
+    if filter_text.startswith("(") and filter_text.endswith(suffix):
+        return filter_text[1:-len(suffix)]
+    return None
+
+
+def data_filter(base, data_suppression):
+    """Фильтр правила с подавлением по данным слоя."""
+    condition = f"NOT ({data_suppression})"
+    if not base:
+        return condition
+    return f"({base}) AND {condition}"
+
+
 def extend_filter(filter_text, layer, leaf, bands):
     """Добавляет к фильтру правила подавление значка."""
     suppression = suppression_expression(layer, leaf, bands)
@@ -789,6 +814,124 @@ def extend_filter(filter_text, layer, leaf, bands):
     if filter_text:
         return f"({filter_text}) AND {condition}"
     return condition
+
+
+def hide_field_name():
+    """Имя поля с порогами подавления значка в слое POI.
+
+    В поле лежат пороги сразу по всем диапазонам масштаба и уровням
+    детализации: значение для диапазона N и уровня L лежит в слоте
+    ``N * len(LOD_LEVELS) + (L - 2)``.  Пустой слот — подавителя
+    нет.  Одно поле на слой: добавление колонок в Spatialite стоит
+    около сотни миллисекунд, а слоёв десятки.
+    """
+    return "hide"
+
+
+def _layer_band_indexes(layer, bands):
+    """Диапазоны масштаба, в которых слою нужен порог подавления.
+
+    Это диапазоны правил значка и диапазоны правил подписи: подпись
+    скрывается вместе со значком, поэтому порог нужен и там, где
+    значок не рисуется.
+    """
+    indexes = set()
+    for leaf in leaves(layer.root):
+        indexes.update(band_indexes(leaf.minimum, leaf.maximum, bands))
+    for label in layer.labels:
+        for leaf in leaves(layer.root):
+            if _leaf_intersects(leaf, label):
+                indexes.update(
+                    band_indexes(leaf.minimum, leaf.maximum, bands)
+                )
+    return sorted(indexes)
+
+
+def _leaf_intersects(leaf, label):
+    """Пересекается ли диапазон правила значка с диапазоном подписи."""
+    if label.maximum and leaf.minimum >= label.maximum:
+        return False
+    if label.minimum and leaf.maximum and leaf.maximum <= label.minimum:
+        return False
+    return True
+
+
+def hide_slot_index(band_index):
+    """Смещение слота диапазона в поле слоя (кратно числу уровней).
+
+    Порядок слотов общий для всех слоёв: два слоя шаблона могут
+    читать один и тот же файл (например, «barrier gate 15-» и
+    «barrier gate 15+»), и тогда их значения должны ложиться в
+    одни и те же слоты.
+    """
+    return band_index * len(LOD_LEVELS)
+
+
+def hide_value_expression(band_index):
+    """Порог подавления для текущего уровня детализации.
+
+    Пустое поле или пустой слот — подавителя нет, порог бесконечный.
+    """
+    offset = hide_slot_index(band_index)
+    return (
+        f"coalesce(to_real(NULLIF(array_get(string_to_array("
+        f"\"{hide_field_name()}\", ';'), "
+        f"{offset} + @level_of_detail - {LOD_LEVELS[0]}), '')), 1e30)"
+    )
+
+
+def suppression_data_expression(layer, leaf, bands):
+    """Условие «значок подавлен» по данным слоя.
+
+    То же условие, что давало выражение с overlay_nearest: значок
+    скрыт, если радиус подавления (размер значка, приведённый к
+    масштабу) больше расстояния до ближайшего подавителя.  Расстояние
+    лежит в данных слоя, поэтому выражение не ищет соседей по
+    пространственному индексу — оно просто читает поле.
+    """
+    terms = []
+    for index in band_indexes(leaf.minimum, leaf.maximum, bands):
+        lower, upper = bands[index]
+        scale = []
+        if lower:
+            scale.append(f"@map_scale >= {lower:g}")
+        if upper:
+            scale.append(f"@map_scale < {upper:g}")
+        term = (
+            f"@map_scale * {leaf.size:g} / 1000 > "
+            f"{hide_value_expression(index)}"
+        )
+        if scale:
+            term = "(" + " AND ".join(scale) + f") AND {term}"
+        terms.append(term)
+    if not terms:
+        return "false"
+    if len(terms) == 1:
+        return terms[0]
+    return "(" + " OR ".join(terms) + ")"
+
+
+def layer_suppression_data_expression(layer, bands, minimum=None, maximum=None):
+    """Подавление по данным слоя для правила подписи.
+
+    Условие собирается из листовых правил слоя: подпись скрывается
+    вместе со значком.
+    """
+    expressions = []
+    for leaf in leaves(layer.root):
+        if minimum is not None or maximum is not None:
+            if minimum and leaf.maximum and leaf.maximum <= minimum:
+                continue
+            if maximum and leaf.minimum >= maximum:
+                continue
+        expression = suppression_data_expression(layer, leaf, bands)
+        if expression != "false" and expression not in expressions:
+            expressions.append(expression)
+    if not expressions:
+        return "false"
+    if len(expressions) == 1:
+        return expressions[0]
+    return "(" + " OR ".join(expressions) + ")"
 
 
 def layer_suppression_expression(layer, bands, minimum=None, maximum=None):
@@ -834,21 +977,29 @@ def restore_base_filters(layers, bands):
 
     При сборке служебного слоя нужны только исходные условия видимости.
     Иначе правила ссылались бы на ещё не построенный служебный слой.
-    Условие формируется тем же кодом, что и при записи шаблона, поэтому
-    его можно удалить точным совпадением суффикса, без разбора скобок.
+
+    Подавление в шаблоне может быть двух видов: прежнее выражение с
+    overlay_nearest или новое, проверка данных.  Снимается то, что
+    есть: условие формируется тем же кодом, что и при записи
+    шаблона, поэтому его можно удалить точным совпадением суффикса,
+    без разбора скобок.
     """
     for layer in layers:
         for leaf in leaves(layer.root):
-            suppression = suppression_expression(layer, leaf, bands)
-            if suppression == "false":
-                continue
-            condition = f"NOT ({suppression})"
-            if leaf.filter == condition:
-                leaf.filter = ""
-                continue
-            suffix = f") AND {condition}"
-            if leaf.filter.startswith("(") and leaf.filter.endswith(suffix):
-                leaf.filter = leaf.filter[1:-len(suffix)]
+            for suppression in (
+                suppression_expression(layer, leaf, bands),
+                suppression_data_expression(layer, leaf, bands),
+            ):
+                if suppression == "false":
+                    continue
+                condition = f"NOT ({suppression})"
+                if leaf.filter == condition:
+                    leaf.filter = ""
+                    break
+                suffix = f") AND {condition}"
+                if leaf.filter.startswith("(") and leaf.filter.endswith(suffix):
+                    leaf.filter = leaf.filter[1:-len(suffix)]
+                    break
 
 
 def template_variables(path=None):
@@ -1332,6 +1483,281 @@ def _write_icon_hide(config, layers, points, bands):
     return hidden
 
 
+def _band_radius(band, candidates, band_index):
+    """Предельный радиус подавления в диапазоне, метры.
+
+    Внутри диапазона значок подавляется, пока радиус подавления
+    (размер значка, приведённый к масштабу) не перестал покрывать
+    расстояние до подавителя.  Радиус растёт вместе с масштабом, и
+    больше верхней границы диапазона он не нужен: в следующем
+    диапазоне свой набор подавителей.
+    """
+    lower, upper = band
+    sizes = [point.sizes.get(band_index, 0.0) for point in candidates]
+    size = max(sizes) if sizes else 0.0
+    if not size:
+        return 0.0
+    if upper:
+        return size * upper / 1000.0
+    # Последний диапазон: масштаб не ограничен сверху, но значок
+    # дальше предельного масштаба уже не различим.
+    return size * MAX_SUPPRESSION_SCALE / 1000.0
+
+
+def _cell_distance(cx, cy, gx, gy, cell_lon, cell_lat, cos_lat):
+    """Наименьшее расстояние до точки в ячейке сетки, метры."""
+    if cx > gx:
+        dlon = (cx - gx - 1) * cell_lon
+    elif cx < gx:
+        dlon = (gx - cx - 1) * cell_lon
+    else:
+        dlon = 0.0
+    if cy > gy:
+        dlat = (cy - gy - 1) * cell_lat
+    elif cy < gy:
+        dlat = (gy - cy - 1) * cell_lat
+    else:
+        dlat = 0.0
+    dlon *= 111320.0 * cos_lat
+    dlat *= 111320.0
+    return math.sqrt(dlon * dlon + dlat * dlat)
+
+
+def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat,
+                        band_index):
+    """Пороги до ближайших подавителей по уровням детализации.
+
+    Расстояния — в метрах, те же, что считает выражение шаблона:
+    разница долгот на широте точки, умноженная на 111320 и на
+    косинус широты, и разница широт на 111320.
+
+    Ячейки сетки обходятся по расстоянию, а не кольцами: сосед
+    может стоять в соседней ячейке и быть ближе, чем те, что в
+    своей.  Обход останавливается, когда расстояние до ячейки больше
+    найденного порога.
+
+    В кандидаты попадают только те, кто встаёт раньше: обход идёт по
+    порядку (ранг, долгота, широта), поэтому в сетке лежат лишь
+    точки с большим приоритетом — ровно те, кого выражение считает
+    подавителями.
+    """
+    cos_lat = math.cos(math.radians(lat))
+    gx = int(lon // cell_lon)
+    gy = int(lat // cell_lat)
+    best = {level: None for level in LOD_LEVELS}
+    heap = [(0.0, gx, gy)]
+    seen = {(gx, gy)}
+    while heap:
+        distance, cx, cy = heapq.heappop(heap)
+        if distance > radius:
+            break
+        closed = True
+        for level in LOD_LEVELS:
+            value = best[level]
+            if value is None or value > distance:
+                closed = False
+                break
+        if closed:
+            break
+        for candidate in grid.get((cx, cy), ()):
+            dlon = candidate.lon - lon
+            dlat = candidate.lat - lat
+            metric = math.sqrt(
+                (dlon * 111320.0 * cos_lat) ** 2
+                + (dlat * 111320.0) ** 2
+            )
+            if metric > radius:
+                continue
+            if metric <= MIN_SUPPRESSION_DISTANCE:
+                # Точка на том же месте не вытесняет: выражение
+                # шаблона отбрасывает такие кандидаты.
+                continue
+            # Конверт поиска overlay_nearest задаётся широтой
+            # кандидата: он тоже ограничивает подавление.
+            cos_candidate = math.cos(math.radians(candidate.lat))
+            value = max(
+                metric,
+                111320.0 * cos_candidate * abs(dlon),
+                111320.0 * cos_candidate * abs(dlat),
+            )
+            lod = candidate.bands.get(band_index, 2)
+            for level in LOD_LEVELS:
+                if lod <= level and (
+                        best[level] is None or value < best[level]):
+                    best[level] = value
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                nx = cx + dx
+                ny = cy + dy
+                if (nx, ny) in seen:
+                    continue
+                seen.add((nx, ny))
+                heapq.heappush(heap, (
+                    _cell_distance(nx, ny, gx, gy, cell_lon, cell_lat,
+                                   cos_lat), nx, ny,
+                ))
+    return best
+
+
+def _suppression_distances(points, records, bands, needed=None, cancel=None):
+    """Пороги подавления для точек POI.
+
+    Возвращает словарь (имя слоя, fid) -> {диапазон: {уровень: метры}}.
+    Порог — расстояние до ближайшего подавителя: значок скрыт, когда
+    радиус подавления (размер значка, приведённый к масштабу) больше
+    этого расстояния.
+
+    ``needed`` — словарь (имя слоя -> диапазоны): порог считается
+    только там, где слой его читает.  Подавители при этом учитываются
+    все: сосед может быть из любого слоя.
+    """
+    order = sorted(points, key=lambda item: (item.rank, item.lon, item.lat))
+    result = {}
+    for index, band in enumerate(bands):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Preparation cancelled")
+        candidates = records.get(index) or []
+        if not candidates:
+            continue
+        member = {id(point) for point in candidates}
+        radius = _band_radius(band, candidates, index)
+        if radius <= 0:
+            continue
+        # Ячейка сетки: чем меньше, тем меньше лишних проверок, но тем
+        # больше колец при поиске далёкого подавителя.  Полтораста
+        # метров — компромисс: в горной местности соседи стоят ближе.
+        cell_lat = min(max(radius / 8.0, 150.0), 1000.0) / 111320.0
+        latitude_max = max(abs(point.lat) for point in candidates)
+        cell_lon = cell_lat / max(math.cos(math.radians(latitude_max)), 0.01)
+        grid = {}
+        for point in order:
+            if point.geometry == "Point" and _band_needed(
+                needed, point, index,
+            ):
+                thresholds = _nearest_thresholds(
+                    grid, point.lon, point.lat, radius, cell_lon, cell_lat,
+                    index,
+                )
+                values = {
+                    level: value for level, value in thresholds.items()
+                    if value is not None
+                }
+                if values:
+                    key = (point.name, point.fid)
+                    result.setdefault(key, {})[index] = values
+            if id(point) in member:
+                grid.setdefault(
+                    (int(point.lon // cell_lon), int(point.lat // cell_lat)),
+                    [],
+                ).append(point)
+    return result
+
+
+def _band_needed(needed, point, index):
+    """Нужен ли порог этого диапазона слою точки."""
+    if needed is None:
+        return True
+    indexes = needed.get(point.name)
+    return indexes is not None and index in indexes
+
+
+def _write_suppression(config, layers, distances, bands, cancel=None):
+    """Пишет пороги подавления в слои POI.
+
+    Поле одно на слой: в нём слоты по диапазонам масштаба и уровням
+    детализации.  Порядок слотов общий для всех слоёв: два слоя
+    шаблона могут читать один и тот же файл (например, «barrier gate
+    15-» и «barrier gate 15+»), и тогда их значения дописываются в
+    одни и те же слоты — диапазоны у таких слоёв не пересекаются.
+
+    Запись идёт через SQLite напрямую: обновление одной строки через
+    GDAL в Spatialite стоит около сотни миллисекунд (переписывается
+    геометрия и пространственный индекс), через SQLite — около сотни
+    микросекунд.
+    """
+    import sqlite3
+
+    by_layer = {}
+    for (name, fid), per_band in distances.items():
+        by_layer.setdefault(name, {})[fid] = per_band
+
+    by_file = {}
+    for info in layers:
+        path = _source_path(config, info.source)
+        if path is None:
+            continue
+        by_file.setdefault(path, []).append(info)
+
+    for path, group in by_file.items():
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Preparation cancelled")
+        slots = len(bands) * len(LOD_LEVELS)
+        values = {}
+        for info in group:
+            indexes = set(_layer_band_indexes(info, bands))
+            if not indexes:
+                continue
+            for fid, per_band in by_layer.get(info.name, {}).items():
+                parts = values.get(fid)
+                if parts is None:
+                    parts = [""] * slots
+                    values[fid] = parts
+                for index, levels in per_band.items():
+                    if index not in indexes:
+                        # Диапазон слою не нужен: ни значок, ни подпись
+                        # в нём не рисуются.
+                        continue
+                    offset = hide_slot_index(index)
+                    for level, value in levels.items():
+                        parts[offset + level - LOD_LEVELS[0]] = repr(value)
+        connection = sqlite3.connect(str(path))
+        try:
+            table = _sqlite_table(connection, path)
+            columns = {
+                row[1] for row in connection.execute(
+                    f'PRAGMA table_info("{table}")'
+                )
+            }
+            if hide_field_name() not in columns:
+                connection.execute(
+                    f'ALTER TABLE "{table}" ADD COLUMN '
+                    f'"{hide_field_name()}" TEXT'
+                )
+            if values:
+                primary = _sqlite_primary_key(connection, table)
+                connection.executemany(
+                    f'UPDATE "{table}" SET "{hide_field_name()}" = ? '
+                    f'WHERE "{primary}" = ?',
+                    [
+                        (";".join(parts).rstrip(";"), fid)
+                        for fid, parts in values.items()
+                    ],
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+
+def _sqlite_table(connection, path):
+    """Имя таблицы слоя в файле Spatialite."""
+    rows = connection.execute(
+        "SELECT f_table_name FROM geometry_columns"
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0][0]
+    if not rows:
+        raise ValueError(f"в {path} нет слоёв с геометрией")
+    raise ValueError(f"в {path} несколько слоёв: {[r[0] for r in rows]}")
+
+
+def _sqlite_primary_key(connection, table):
+    """Имя первичного ключа таблицы."""
+    for row in connection.execute(f'PRAGMA table_info("{table}")'):
+        if row[5]:
+            return row[1]
+    return "fid"
+
+
 def _write_aux(config, records, crs, file_name):
     """Записывает служебные слои по диапазонам в GeoPackage.
 
@@ -1389,6 +1815,7 @@ def build_poi_icons(config, progress=None, cancel=None):
     bands = canonical_bands(layers)
     restore_base_filters(layers, bands)
     points = _collect_points(config, all_layers, bands, cancel=cancel)
+    report(f"POI: точек {len(points)}")
     if not points:
         for file_name in (AUX_FILE_NAME, LEGACY_AUX_FILE_NAME_3857):
             (Path(config.vector_dir) / file_name).unlink(missing_ok=True)
@@ -1407,6 +1834,15 @@ def build_poi_icons(config, progress=None, cancel=None):
         for point in kept:
             records.setdefault(index, []).append(point)
             total += 1
+    needed = {
+        info.name: set(_layer_band_indexes(info, bands)) for info in layers
+    }
+    distances = _suppression_distances(
+        points, records, bands, needed=needed, cancel=cancel,
+    )
+    report(f"POI: пороги подавления, {len(distances)} объектов")
+    _write_suppression(config, layers, distances, bands, cancel=cancel)
+    report("POI: пороги подавления записаны в слои")
     _write_aux(config, records, "EPSG:4326", AUX_FILE_NAME)
     (Path(config.vector_dir) / LEGACY_AUX_FILE_NAME_3857).unlink(missing_ok=True)
     report(
