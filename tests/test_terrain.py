@@ -1821,6 +1821,55 @@ class Cop30FallbackTest(unittest.TestCase):
         self.assertIn("SRTM v3", config.terrain_fallback)
 
 
+class WarpRetryTest(unittest.TestCase):
+    """Сетевой сбой при сборке растра не должен валить рельеф."""
+
+    def test_retry_refreshes_signed_sources(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import terrain
+
+        calls = []
+
+        class FakeGdal:
+            @staticmethod
+            def Warp(target, sources, options=None):
+                calls.append(list(sources))
+                if len(calls) < 3:
+                    raise RuntimeError("CURL error: Operation timed out")
+                return object()
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "dem.part"
+            with mock.patch.object(terrain.time, "sleep", lambda seconds: None):
+                result = terrain._warp_with_retry(
+                    FakeGdal, target, ["old"], object(), "ALOS AW3D30",
+                    progress=[].append, refresh=lambda: ["new", "fresh"],
+                )
+        self.assertIsNotNone(result)
+        self.assertEqual(calls, [["old"], ["new", "fresh"], ["new", "fresh"]])
+
+    def test_failure_reports_gdal_reason(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import terrain
+
+        class FakeGdal:
+            @staticmethod
+            def Warp(target, sources, options=None):
+                raise RuntimeError("CURL error: Operation timed out")
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "dem.part"
+            with mock.patch.object(terrain.time, "sleep", lambda seconds: None):
+                with self.assertRaises(RuntimeError) as caught:
+                    terrain._warp_with_retry(
+                        FakeGdal, target, ["source"], object(), "ALOS AW3D30",
+                    )
+        self.assertIn("ALOS AW3D30", str(caught.exception))
+        self.assertIn("Operation timed out", str(caught.exception))
+
+
 class AutoMosaicTest(unittest.TestCase):
     def test_mosaic_grid_prefers_finest_that_fits(self):
         from qgis_xtopo.core import terrain
@@ -1894,7 +1943,6 @@ class AutoMosaicTest(unittest.TestCase):
         from osgeo import gdal, osr
 
         from qgis_xtopo.core import terrain
-
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             background = root / "background.tif"
@@ -1929,6 +1977,36 @@ class AutoMosaicTest(unittest.TestCase):
             dataset = None
         self.assertEqual(array[0, 0], 100.0)
         self.assertEqual(array[0, 9], 250.0)
+
+    def test_auto_replaces_failed_source_with_srtm(self):
+        """Сбой набора в авторежиме не валит рельеф: тайлы добирает SRTM."""
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            srtm = root / "layer_srtm.tif"
+            srtm.write_bytes(b"tif")
+
+            messages = []
+            with mock.patch.object(
+                dem_sources, "auto_plan", return_value={(46, 7): "alos"}
+            ), mock.patch.object(
+                terrain, "_cog_layer",
+                side_effect=RuntimeError("CURL error: Operation timed out"),
+            ), mock.patch.object(
+                terrain, "_srtm_layer", return_value=srtm
+            ):
+                target = terrain.download_auto_dem(
+                    BBox(7.0, 46.0, 8.0, 47.0), root / "out",
+                    progress=messages.append, availability={},
+                )
+            self.assertTrue(target.exists())
+        self.assertTrue(any(
+            "ALOS AW3D30" in line and "CURL error" in line
+            for line in messages
+        ))
 
 
 class CogDownloadTest(unittest.TestCase):

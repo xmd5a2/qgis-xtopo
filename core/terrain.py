@@ -40,6 +40,13 @@ COG_PREFETCH_WORKERS = 6
 # вместе с числом тайлов набора.
 MAX_COG_PREFETCH_PARTS = 8
 
+# Сколько раз повторяется сборка растра после сетевого сбоя.  Обрыв
+# одного HTTP-блока не должен валить рельеф: при повторе источники
+# подписываются заново, потому что ссылки Planetary Computer живут час
+# и за время долгой сборки успевают истечь.
+WARP_ATTEMPTS = 3
+WARP_RETRY_DELAY = 5.0
+
 # Запас вокруг тайла при нарезке DEM на изолинии.  Алгоритм GDAL считает
 # контур по соседним ячейкам, и без запаса линия у края тайла обрывается
 # и загибается.  В результат попадает только ядро тайла, поэтому куски
@@ -76,6 +83,10 @@ def _gdal():
     gdal.SetConfigOption("CPL_VSIL_CURL_TIMEOUT", "15")
     gdal.SetConfigOption("GDAL_HTTP_CONNECTTIMEOUT", "5")
     gdal.SetConfigOption("GDAL_HTTP_TIMEOUT", "15")
+    # Повтор HTTP-запроса на уровне GDAL: без него любой обрыв чтения
+    # блока /vsicurl возвращает ошибку всему gdal.Warp.
+    gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "4")
+    gdal.SetConfigOption("GDAL_HTTP_RETRY_DELAY", "2")
     # Кэш GDAL — часть общего бюджета памяти. На 8 ГБ он меньше, на
     # машинах с запасом — больше, но не выше 2 ГБ.
     gdal.SetConfigOption("GDAL_CACHEMAX", str(gdal_cache_mb()))
@@ -430,6 +441,47 @@ def _warp_callback(cancel, status, label):
     return callback
 
 
+def _warp_with_retry(gdal, target, sources, options, label, cancel=None,
+                     progress=None, refresh=None):
+    """gdal.Warp с повторами: сетевой сбой не должен валить рельеф.
+
+    ``refresh`` вызывается перед повторной попыткой и возвращает новые
+    источники: подписанные ссылки Planetary Computer живут час, а сборка
+    большого окна может идти дольше.  Если после всех попыток растр так и
+    не собрался, в сообщении остаётся причина от GDAL — иначе в журнале
+    видно только название набора.
+    """
+    target = Path(target)
+    detail = ""
+    for attempt in range(1, WARP_ATTEMPTS + 1):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM download cancelled")
+        try:
+            result = gdal.Warp(str(target), sources, options=options)
+        except Exception as exc:  # noqa: BLE001 - сеть или GDAL
+            detail = str(exc).strip()[:300]
+            result = None
+        if result is not None:
+            return result
+        target.unlink(missing_ok=True)
+        if attempt == WARP_ATTEMPTS:
+            break
+        reason = f": {detail}" if detail else ""
+        if progress:
+            progress(
+                f"WARNING: сборка рельефа {label} не удалась{reason}; повтор"
+            )
+        time.sleep(WARP_RETRY_DELAY * attempt)
+        if refresh is not None:
+            sources = refresh()
+            if not sources:
+                break
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError("DEM download cancelled")
+    reason = f": {detail}" if detail else ""
+    raise RuntimeError(f"Не удалось собрать рельеф {label}{reason}")
+
+
 def download_cog_dem(source_key, bbox, destination, progress=None, cancel=None,
                      cache_dir=None, status=None):
     """Скачивает окно растрового набора (COG) в локальный GeoTIFF.
@@ -489,12 +541,13 @@ def download_cog_dem(source_key, bbox, destination, progress=None, cancel=None,
         multithread=True,
         callback=_warp_callback(cancel, status, item.short),
     )
-    result = gdal.Warp(str(temporary), sources, options=options)
-    if result is None:
-        temporary.unlink(missing_ok=True)
-        if cancel is not None and cancel.is_set():
-            raise InterruptedError("DEM download cancelled")
-        raise RuntimeError(f"Не удалось собрать рельеф {item.short}")
+    result = _warp_with_retry(
+        gdal, temporary, sources, options, item.short,
+        cancel=cancel, progress=progress,
+        refresh=lambda: _cog_sources(
+            source_key, bbox, progress=progress, cancel=cancel
+        ),
+    )
     result = None
     temporary.replace(target)
     if cached is not None:
@@ -601,7 +654,7 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
     try:
         return _warp_sources(
             gdal, sources, bounds, width, height, destination, name,
-            cancel, status, label,
+            cancel, status, label, progress=progress,
         )
     finally:
         if parts_dir is not None:
@@ -609,7 +662,7 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
 
 
 def _warp_sources(gdal, sources, bounds, width, height, destination, name,
-                  cancel, status, label):
+                  cancel, status, label, progress=None):
     datasets = []
     for source in sources:
         if cancel is not None and cancel.is_set():
@@ -626,15 +679,13 @@ def _warp_sources(gdal, sources, bounds, width, height, destination, name,
     temporary = target.with_name(target.name + ".part")
     options = _layer_options(gdal, bounds, width, height, cancel, status, label)
     try:
-        result = gdal.Warp(str(temporary), datasets, options=options)
+        result = _warp_with_retry(
+            gdal, temporary, datasets, options, label,
+            cancel=cancel, progress=progress,
+        )
     finally:
         for dataset in datasets:
             dataset = None
-    if result is None:
-        temporary.unlink(missing_ok=True)
-        if cancel is not None and cancel.is_set():
-            raise InterruptedError("DEM download cancelled")
-        raise RuntimeError(f"Не удалось собрать рельеф {label}")
     result = None
     temporary.replace(target)
     return target
@@ -903,17 +954,31 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
                 progress=progress, cancel=cancel, status=status,
             )
             made = [layer] if layer else []
-        elif key == "sonny":
-            made = _sonny_layers(
-                cells, catalogue, sonny_tiles_dir, padded, width, height,
-                layers_dir, progress=progress, cancel=cancel, status=status,
-            )
         else:
-            layer = _cog_layer(
-                key, cells, padded, width, height, layers_dir,
-                progress=progress, cancel=cancel, status=status,
-            )
-            made = [layer] if layer else []
+            # Сбой набора (сеть, истёкшая подпись) не должен валить весь
+            # рельеф: его тайлы ниже доберёт SRTM, как и при пустом STAC.
+            try:
+                if key == "sonny":
+                    made = _sonny_layers(
+                        cells, catalogue, sonny_tiles_dir, padded, width,
+                        height, layers_dir, progress=progress, cancel=cancel,
+                        status=status,
+                    )
+                else:
+                    layer = _cog_layer(
+                        key, cells, padded, width, height, layers_dir,
+                        progress=progress, cancel=cancel, status=status,
+                    )
+                    made = [layer] if layer else []
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - набор заменит SRTM
+                if progress:
+                    progress(
+                        f"WARNING: не удалось собрать "
+                        f"{dem_sources.source(key).short}: {exc}"
+                    )
+                made = []
         if not made:
             continue
         layers.extend(made)
