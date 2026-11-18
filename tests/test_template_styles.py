@@ -42,6 +42,21 @@ def _template_root():
     return _TEMPLATE_ROOT[0]
 
 
+def _base_filter(filter_text):
+    """Фильтр правила без условия подавления значка.
+
+    Подавление добавлено в конец фильтра: либо `NOT (...)`, либо
+    `(основа) AND NOT (...)`.
+    """
+    text = filter_text or ""
+    match = re.match(r"^\((?P<base>.*)\) AND NOT \(.*\)$", text, re.S)
+    if match:
+        return match.group("base")
+    if text.startswith("NOT ("):
+        return ""
+    return text
+
+
 def _find_option(element, name):
     """Первое свойство с указанным именем (в QGIS свойства лежат в картах)."""
     if element is None:
@@ -427,6 +442,11 @@ class SettlementScaleTest(unittest.TestCase):
                 result.append(rule)
         return result
 
+    @staticmethod
+    def _base_filter(filter_text):
+        """Фильтр правила без условия подавления значка."""
+        return _base_filter(filter_text)
+
     def test_visibility_matrix_for_both_containers(self):
         checks = (
             (25000, self.FINE[0]),
@@ -444,7 +464,8 @@ class SettlementScaleTest(unittest.TestCase):
                         visible = self._visible_at(leaves, scale)
                         self.assertEqual(len(visible), 1, (scale, visible))
                         self.assertEqual(
-                            visible[0].get("filter") or "", expected, scale
+                            self._base_filter(visible[0].get("filter")),
+                            expected, scale,
                         )
                     # Дальше 1:500000 правил нет.
                     self.assertFalse(self._visible_at(leaves, 600000))
@@ -473,7 +494,8 @@ class SettlementScaleTest(unittest.TestCase):
                         visible = self._visible_at(leaves, scale)
                         self.assertEqual(len(visible), 1, (scale, visible))
                         self.assertEqual(
-                            visible[0].get("filter") or "", expected, scale
+                            self._base_filter(visible[0].get("filter")),
+                            expected, scale,
                         )
                     self.assertFalse(self._visible_at(leaves, 500000))
 
@@ -584,7 +606,8 @@ class SettlementScaleEngineTest(unittest.TestCase):
                 [description], scale,
             )
             self.assertEqual(
-                visible[0].filterExpression() or "", expression, scale,
+                _base_filter(visible[0].filterExpression()), expression,
+                scale,
             )
         self.assertEqual(self._visible(leaves, 500000), [])
 
@@ -1141,11 +1164,6 @@ class PoiSuppressionTest(unittest.TestCase):
     проекта, а правила ссылаются на них по имени.
     """
 
-    # У places main десятки листовых правил: overlay_nearest в каждом
-    # замедлял отрисовку настолько, что значки не появлялись.  Поэтому
-    # у этого слоя подавление отключено, у остальных работает.
-    NO_SUPPRESSION_LAYERS = {"places main"}
-
     @classmethod
     def setUpClass(cls):
         cls.root = _template_root()
@@ -1218,8 +1236,6 @@ class PoiSuppressionTest(unittest.TestCase):
         """
         checked = 0
         for layer in self.layers:
-            if layer.name in self.NO_SUPPRESSION_LAYERS:
-                continue
             for leaf in poi_icons.leaves(layer.root):
                 if not poi_icons.band_indexes(
                     leaf.minimum, leaf.maximum, self.bands,
@@ -1244,8 +1260,6 @@ class PoiSuppressionTest(unittest.TestCase):
         слоёв: два слоя могут читать один и тот же файл.
         """
         for layer in self.layers:
-            if layer.name in self.NO_SUPPRESSION_LAYERS:
-                continue
             for leaf in poi_icons.leaves(layer.root):
                 used = poi_icons.band_indexes(
                     leaf.minimum, leaf.maximum, self.bands,
@@ -1257,27 +1271,36 @@ class PoiSuppressionTest(unittest.TestCase):
                         f"у слоя {layer.name} неверный слот порога",
                     )
 
-    def test_places_main_suppression_is_disabled(self):
-        """places main рисуется без подавления в правилах.
+    def test_every_icon_layer_is_suppressed(self):
+        """Подавление есть у всех слоёв POI, включая places main.
 
-        Десятки листовых правил с подавлением замедляли отрисовку
-        слоя настолько, что значки не появлялись.  Остальные слои
-        по-прежнему подавляют перекрытия.
+        Раньше у places main его не было: десятки выражений с
+        overlay_nearest делали слой неотрисовываемым.  Теперь пороги
+        лежат в данных слоя, и выражение в правиле — простая проверка
+        поля, поэтому slowdown больше нет.
         """
-        layer = next(
-            element for element in self.root.iter("maplayer")
-            if element.findtext("layername") == "places main"
-        )
-        text = ElementTree.tostring(layer, encoding="unicode")
-        self.assertNotIn("overlay_nearest(", text)
-        self.assertNotIn(f'"{poi_icons.hide_field_name()}"', text)
+        names = {layer.name for layer in self.layers}
+        self.assertIn("places main", names)
+        for layer in self.layers:
+            if layer.name != "places main":
+                continue
+            leaves = poi_icons.leaves(layer.root)
+            self.assertTrue(leaves)
+            for leaf in leaves:
+                self.assertIn(
+                    f'"{poi_icons.hide_field_name()}"', leaf.filter,
+                    "у places main нет подавления значков",
+                )
+            for rule in layer.labels:
+                self.assertIn(
+                    f'"{poi_icons.hide_field_name()}"', rule.filter,
+                    "у places main нет подавления подписей",
+                )
 
     def test_label_rules_suppress_overlaps(self):
         """Подпись скрывается вместе со значком — по тем же данным."""
         checked = 0
         for layer in self.layers:
-            if layer.name in self.NO_SUPPRESSION_LAYERS:
-                continue
             for rule in layer.labels:
                 expected = poi_icons.layer_suppression_data_expression(
                     layer, self.bands, rule.minimum, rule.maximum,
@@ -1460,6 +1483,88 @@ class PoiSuppressionDataTest(unittest.TestCase):
         self.assertEqual(
             poi_icons.data_filter("", "b"), "NOT (b)",
         )
+
+
+class SettlementPriorityTest(unittest.TestCase):
+    """Приоритет населённого пункта внутри слоя places main.
+
+    Все точки слоя имели один ранг — места в дереве проекта, — и
+    внутри слоя решали только координаты.  Теперь ранг учитывает тип
+    места и население: город вытесняет деревню, а внутри одного типа
+    — тот, у кого больше население.
+    """
+
+    @staticmethod
+    def _feature(place, population=None):
+        from qgis.core import QgsFeature, QgsField, QgsFields
+        from qgis.PyQt.QtCore import QVariant
+
+        fields = QgsFields()
+        fields.append(QgsField("place", QVariant.String))
+        fields.append(QgsField("population", QVariant.String))
+        feature = QgsFeature(fields)
+        feature.setAttribute("place", place)
+        feature.setAttribute("population", population)
+        return feature
+
+    def _priority(self, place, population=None):
+        return poi_icons._settlement_priority(
+            self._feature(place, population),
+        )
+
+    def test_type_beats_position_and_population(self):
+        """Город важнее деревни, даже если у деревни больше людей."""
+        city = self._priority("city", 5000)
+        village = self._priority("village", 50000)
+        self.assertLess(city, village)
+
+    def test_hamlet_beats_isolated_dwelling(self):
+        self.assertLess(
+            self._priority("hamlet"), self._priority("isolated_dwelling"),
+        )
+        self.assertLess(
+            self._priority("village"), self._priority("hamlet"),
+        )
+        self.assertLess(
+            self._priority("town"), self._priority("village"),
+        )
+
+    def test_population_breaks_ties_of_one_type(self):
+        """Внутри одного типа важнее тот, у кого больше население."""
+        big = self._priority("village", 5000)
+        small = self._priority("village", 100)
+        self.assertLess(big, small)
+
+    def test_place_without_type_ranks_by_population(self):
+        """Пункт без типа места получает ранг по населению."""
+        big = self._priority("", 200000)
+        small = self._priority("", 50)
+        self.assertLess(big, small)
+        self.assertLess(big, self._priority("village", 1000))
+
+    def test_ranks_stay_inside_the_layer_slot(self):
+        """Ранг точки не выходит за пределы места слоя в дереве.
+
+        Иначе точки слоя вытесняли бы значки слоёв, которые стоят
+        ниже, — или наоборот.
+        """
+        from qgis_xtopo.core.poi_icons import _Point
+
+        points = [
+            _Point(rank=5.0, lon=6.9, lat=46.0, name="places main", fid=1),
+            _Point(rank=5.0, lon=6.91, lat=46.0, name="places main", fid=2),
+        ]
+        # fid=1 — хутор, fid=2 — город: город должен получить ранг
+        # меньше, хотя стоит восточнее.
+        poi_icons._apply_priorities(
+            points, [(3, -100.0), (0, -5000.0)], 5.0,
+        )
+        self.assertLess(points[1].rank, points[0].rank)
+        for point in points:
+            self.assertTrue(5.0 < point.rank < 6.0, point.rank)
+
+    def test_layer_is_in_the_list(self):
+        self.assertIn("places main", poi_icons.SELF_RANKED_LAYERS)
 
 
 class PoiObstacleTest(unittest.TestCase):
@@ -1709,7 +1814,7 @@ class BridgeIconHideTest(unittest.TestCase):
     def test_same_layer_tie_breaks_by_coordinates(self):
         west = self._point(6.9000, 46.05, fid=1)
         east = self._point(6.9006, 46.05, fid=2)
-        hidden = poi_icons._hidden_bridge_bands(
+        hidden = poi_icons._hidden_icon_bands(
             [west, east], [(100000.0, 130000.0)],
         )
         self.assertNotIn(("highway main bridge", 1), hidden)
@@ -1718,7 +1823,7 @@ class BridgeIconHideTest(unittest.TestCase):
     def test_other_layer_does_not_suppress(self):
         bridge = self._point(6.9000, 46.05, fid=1)
         track = self._point(6.9006, 46.05, name="track bridge", fid=2)
-        hidden = poi_icons._hidden_bridge_bands(
+        hidden = poi_icons._hidden_icon_bands(
             [bridge, track], [(100000.0, 130000.0)],
         )
         self.assertFalse(hidden)
@@ -1784,6 +1889,88 @@ class BridgeIconHideTest(unittest.TestCase):
                 ) if value
             ])
             dataset = None
+
+    def test_cemetery_icon_is_suppressed_too(self):
+        """Значок кладбища вытесняется соседним кладбищем."""
+        west = poi_icons._Point(
+            rank=0.02, lon=6.9000, lat=46.05, name="cemetery", fid=1,
+            geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
+        )
+        east = poi_icons._Point(
+            rank=0.02, lon=6.9006, lat=46.05, name="cemetery", fid=2,
+            geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
+        )
+        hidden = poi_icons._hidden_icon_bands(
+            [west, east], [(100000.0, 130000.0)],
+        )
+        self.assertNotIn(("cemetery", 1), hidden)
+        self.assertIn(("cemetery", 2), hidden)
+
+    def test_expression_for_several_bands(self):
+        """Значок на несколько диапазонов: скрыт, если скрыт в любом."""
+        expression = poi_icons.icon_enabled_expression_for([0, 1, 2])
+        self.assertIn("'0'", expression)
+        self.assertIn("'2'", expression)
+        self.assertIn(" or ", expression)
+        self.assertNotIn("@map_scale", expression)
+        # Один диапазон — выражение как у мостов.
+        self.assertEqual(
+            poi_icons.icon_enabled_expression_for([4]),
+            poi_icons.icon_enabled_expression(4),
+        )
+
+
+class CemeteryIconSuppressionTest(unittest.TestCase):
+    """Значок кладбища скрывается по данным слоя, а не фильтром правила."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layer = next(
+            layer for layer in _template_root().iter("maplayer")
+            if layer.findtext("layername") == "cemetery"
+        )
+        cls.obstacle = next(
+            layer for layer in poi_icons.read_template_obstacles()
+            if layer.name == "cemetery"
+        )
+
+    def test_icon_symbol_has_enabled_property(self):
+        """У символа со значком стоит свойство enabled по полю icon_hide."""
+        symbols = {
+            symbol.get("name"): symbol
+            for symbol in self.layer.findall("renderer-v2/symbols/symbol")
+        }
+        checked = 0
+        for name, indexes in poi_icons.icon_symbol_bands(
+            self.obstacle, poi_icons.canonical_bands(
+                poi_icons.read_template_poi()),
+        ).items():
+            symbol = symbols.get(name)
+            self.assertIsNotNone(symbol, name)
+            centroid = next(
+                (
+                    item for item in symbol.findall("layer")
+                    if item.get("class") == "CentroidFill"
+                ),
+                None,
+            )
+            self.assertIsNotNone(centroid, name)
+            properties = centroid.find(
+                'data_defined_properties/Option/Option[@name="properties"]'
+            )
+            self.assertIsNotNone(properties, name)
+            enabled = properties.find('Option[@name="enabled"]')
+            self.assertIsNotNone(enabled, name)
+            expression = enabled.find(
+                'Option[@name="expression"]'
+            ).get("value")
+            self.assertEqual(
+                expression,
+                poi_icons.icon_enabled_expression_for(indexes),
+            )
+            self.assertNotIn("@map_scale", expression)
+            checked += 1
+        self.assertTrue(checked, "у кладбищ нет значка с подавлением")
 
 
 class PoiSuppressionExpressionTest(unittest.TestCase):

@@ -29,9 +29,11 @@ sys.path.insert(0, str(ROOT))
 
 from core import poi_icons  # noqa: E402
 
-# Слои, у которых подавление отключено вручную: их правила не содержат
-# условия подавления, и скрипт их не трогает.
-NO_SUPPRESSION_LAYERS = {"places main"}
+# Правило слоя ищется по символу: имена символов в слое не повторяются,
+# а ключи правил — повторяются (правило копируется вместе с диапазоном
+# масштаба).  Правило подписи ищется по ключу: в подписях ключи не
+# повторяются.
+RULE_TAG = re.compile(r"<rule\b[^>]*>")
 
 
 def escape(text):
@@ -70,7 +72,7 @@ def has_condition(filter_text, suppression):
 
 
 def collect_patches(layers, bands):
-    """Список правок: имя слоя, старый фильтр, новый фильтр.
+    """Список правок: имя слоя, правило, новый фильтр.
 
     Возвращает (правки, расхождения).  Расхождение — правило, у которого
     в фильтре нет условия подавления, которое есть в коде: значит,
@@ -87,7 +89,7 @@ def collect_patches(layers, bands):
             if has_condition(leaf.filter, old):
                 base = poi_icons.base_filter(leaf.filter, old)
                 patches.append((
-                    layer.name, leaf.filter,
+                    layer.name, _locator(leaf, label),
                     poi_icons.data_filter(base, new),
                 ))
             elif has_condition(leaf.filter, new):
@@ -97,9 +99,27 @@ def collect_patches(layers, bands):
                 if base is None or leaf.filter != poi_icons.data_filter(
                         base, new):
                     problems.append((layer.name, leaf.filter))
-            elif layer.name not in NO_SUPPRESSION_LAYERS:
+            elif label is None and not leaf.symbol:
+                # Правило без значка: подавление значку не нужно.
+                continue
+            elif leaf.filter.strip().upper() == "ELSE":
+                # Ветка ELSE: условие в неё не вставляется — иначе
+                # она перестала бы быть «иначе».
                 problems.append((layer.name, leaf.filter))
+            else:
+                # Условия подавления в правиле не было: добавляем.
+                patches.append((
+                    layer.name, _locator(leaf, label),
+                    poi_icons.data_filter(leaf.filter, new),
+                ))
     return patches, problems
+
+
+def _locator(leaf, label):
+    """Чем правило однозначно ищется в шаблоне."""
+    if label is not None:
+        return "key", label.key
+    return "symbol", leaf.symbol
 
 
 def _rules(layer):
@@ -125,21 +145,27 @@ def _suppression(layer, leaf, label, bands, old):
     )
 
 
-def patch_filter(region, old_filter, new_filter):
+def patch_filter(region, locator, new_filter):
     """Заменяет фильтр правила на проверку данных.
 
-    Ищем по тексту старого фильтра: ключи правил в шаблоне
-    повторяются между слоями и внутри одного слоя (правило скопировано
-    вместе с диапазоном масштаба), а текст фильтра у таких правил
-    разный.  Совпадение текста означает и совпадение нового фильтра,
-    поэтому заменяются все вхождения.
+    Правило ищется по символу (правило значка) или по ключу (правило
+    подписи): имена символов в слое не повторяются, а ключи правил
+    повторяются — правило копируется вместе с диапазоном масштаба.
     """
-    marker = f'filter="{escape(old_filter)}"'
-    if marker not in region:
-        raise ValueError(f"фильтр правила не найден: {old_filter[:60]}")
-    return region.replace(
-        marker, f'filter="{escape(new_filter)}"'
+    attribute, value = locator
+    pattern = re.compile(
+        rf'<rule\b[^>]*\b{attribute}="{re.escape(value)}"[^>]*>'
     )
+    match = pattern.search(region)
+    if match is None:
+        raise ValueError(f"правило не найдено: {attribute}={value}")
+    tag = match.group(0)
+    replacement = f'filter="{escape(new_filter)}"'
+    patched, count = re.subn(r'filter="[^"]*"', replacement, tag)
+    if not count:
+        # Атрибута filter у правила нет — добавляем.
+        patched = tag[:-1].rstrip() + f' {replacement}>'
+    return region[:match.start()] + patched + region[match.end():]
 
 
 def main():
@@ -152,7 +178,9 @@ def main():
             name: archive.read(name) for name in names if name != qgs
         }
 
-    layers = poi_icons.read_template_poi()
+    # Слои читаются из того же файла, который правится: иначе правила
+    # правились бы по образцу другого шаблона.
+    layers = poi_icons.read_template_poi(template)
     bands = poi_icons.canonical_bands(layers)
     patches, problems = collect_patches(layers, bands)
     if problems:
@@ -167,19 +195,9 @@ def main():
             "в другое время — пересоберите его из исходного"
         )
 
-    by_layer = {}
-    for name, old_filter, new_filter in patches:
-        # Один и тот же старый фильтр встречается и у правила значка,
-        # и у правила подписи: тогда и новый фильтр один.
-        key = (name, old_filter)
-        if key in by_layer and by_layer[key] != new_filter:
-            raise SystemExit(
-                f"у слоя {name} разные новые фильтры для одного старого"
-            )
-        by_layer[key] = new_filter
     grouped = {}
-    for (name, old_filter), new_filter in by_layer.items():
-        grouped.setdefault(name, []).append((old_filter, new_filter))
+    for name, locator, new_filter in patches:
+        grouped.setdefault(name, []).append((locator, new_filter))
 
     regions = layer_regions(text)
     pieces = []
@@ -192,8 +210,8 @@ def main():
         if not name_match:
             continue
         name = name_match.group(1)
-        for old_filter, new_filter in grouped.get(name, ()):
-            region = patch_filter(region, old_filter, new_filter)
+        for locator, new_filter in grouped.get(name, ()):
+            region = patch_filter(region, locator, new_filter)
             changed += 1
         pieces.append(text[position:start])
         pieces.append(region)

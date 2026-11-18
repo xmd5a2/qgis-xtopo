@@ -96,13 +96,38 @@ NEVER_RANK = 99999
 # шаг делает ранги уникальными для _prune_band.
 OBSTACLE_RANK_STEP = 0.01
 
-# Слои, у которых значок моста рисуется на линии и вытесняется внутри
-# своего слоя через поле icon_hide.
-BRIDGE_ICON_LAYERS = (
+# Слои, у которых значок вытесняется соседом того же слоя через поле
+# icon_hide: мосты (значок в середине линии) и кладбища (значок в
+# центре площадки).
+SELF_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
+    "cemetery",
 )
 # Поле с индексами диапазонов, где значок моста скрыт.
 ICON_HIDE_FIELD = "icon_hide"
+
+# Слои, у которых приоритет внутри слоя задаётся данными объекта, а не
+# только координатами: у населённых пунктов важнее город, чем посёлок,
+# а внутри одного типа — большее население.
+SELF_RANKED_LAYERS = ("places main",)
+
+# Ранг типа населённого пункта: меньше — важнее.  Порядок тот же, что
+# в иерархии place в OSM: город, посёлок, деревня, хутор; пригород и
+# квартал — части города, отдельное жильё — мельче всех.
+PLACE_RANKS = {
+    "city": 0,
+    "town": 1,
+    "village": 2,
+    "hamlet": 3,
+    "suburb": 4,
+    "neighbourhood": 5,
+    "isolated_dwelling": 6,
+}
+# Границы населения для пункта без типа места: тот же порядок, что и в
+# шаблоне (ветка «by population»).
+POPULATION_RANKS = (
+    (100000, 0), (10000, 1), (1000, 2), (100, 3), (0, 6),
+)
 
 
 @dataclass
@@ -111,6 +136,7 @@ class PoiRule:
 
     key: str = ""
     filter: str = ""
+    symbol: str = ""  # имя символа правила в шаблоне
     minimum: float = 0.0  # нижняя граница знаменателя, включительно
     maximum: float = 0.0  # верхняя граница знаменателя, исключительно
     size: float = 0.0
@@ -345,6 +371,7 @@ def _parse_rules(rules_element, sizes, minimum, maximum):
         rule = PoiRule(
             key=node.get("key") or "",
             filter=node.get("filter") or "",
+            symbol=node.get("symbol") or "",
             minimum=effective_min,
             maximum=effective_max,
             size=sizes.get(node.get("symbol"), 0.0),
@@ -789,6 +816,43 @@ def icon_enabled_expression(index):
         "if(coalesce(array_contains(string_to_array("
         f"\"{ICON_HIDE_FIELD}\", ';'), '{index}'), false), false, true)"
     )
+
+
+def icon_enabled_expression_for(indexes):
+    """Видимость значка в нескольких диапазонах масштаба.
+
+    Значок слоя может быть один на несколько диапазонов (у кладбищ
+    значок один, а диапазонов несколько).  Решение принимается по
+    верхней границе диапазона — так же, как у мостов, — поэтому
+    значок скрыт, если он скрыт в любом из диапазонов.
+    """
+    if not indexes:
+        return "true"
+    if len(indexes) == 1:
+        return icon_enabled_expression(indexes[0])
+    terms = " or ".join(
+        "array_contains(string_to_array("
+        f"\"{ICON_HIDE_FIELD}\", ';'), '{index}')"
+        for index in indexes
+    )
+    return f"if(coalesce({terms}, false), false, true)"
+
+
+def icon_symbol_bands(layer, bands):
+    """Диапазоны масштаба по символам значка слоя.
+
+    Возвращает словарь (имя символа) -> список индексов диапазонов,
+    в которых этот символ рисуется.
+    """
+    result = {}
+    for leaf in leaves(layer.root):
+        if not leaf.symbol:
+            continue
+        indexes = result.setdefault(leaf.symbol, set())
+        indexes.update(band_indexes(leaf.minimum, leaf.maximum, bands))
+    return {
+        symbol: sorted(indexes) for symbol, indexes in result.items()
+    }
 
 
 def base_filter(filter_text, suppression):
@@ -1269,6 +1333,9 @@ def _collect_points(config, layers, bands, cancel=None):
         project.addMapLayer(layer)
         evaluator = _RuleEvaluator(project, layer)
         detailed = _uses_detail_level(info.root)
+        ranked = info.name in SELF_RANKED_LAYERS
+        start = len(points)
+        priorities = []
         for feature in layer.getFeatures():
             visible = _visible_bands(
                 evaluator, info.root, feature, bands, detailed,
@@ -1293,7 +1360,68 @@ def _collect_points(config, layers, bands, cancel=None):
                 bands={index: level for index, level, _size in visible},
                 sizes={index: size for index, _level, size in visible},
             ))
+            if ranked:
+                priorities.append(_settlement_priority(feature))
+        if ranked:
+            _apply_priorities(points[start:], priorities, info.rank)
     return points
+
+
+def _apply_priorities(points, priorities, rank):
+    """Расставляет ранги точек слоя по приоритету объектов.
+
+    Ранг слоя — целое число, место слоя в дереве проекта.  Точки слоя
+    получают дробную часть: их порядок внутри слоя задаётся
+    приоритетом объекта, а положение слоя относительно остальных
+    слоёв не меняется.
+    """
+    order = sorted(
+        range(len(points)),
+        key=lambda index: (
+            priorities[index], points[index].lon, points[index].lat,
+        ),
+    )
+    total = len(points)
+    for position, index in enumerate(order, start=1):
+        points[index].rank = rank + position / (total + 1)
+
+
+def _feature_value(feature, name):
+    """Значение поля объекта (None, если такого поля нет)."""
+    if feature.fields().lookupField(name) < 0:
+        return None
+    value = feature.attribute(name)
+    return None if value is None or value == "" else value
+
+
+def _population(value):
+    """Население числом (0, если его нет или оно не число)."""
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _settlement_priority(feature):
+    """Приоритет населённого пункта: тип места, потом население.
+
+    Город вытесняет посёлок, посёлок — деревню, деревня — хутор.
+    Внутри одного типа важнее тот, у кого больше население; при
+    равном населении — тот, кто стоит раньше по координатам (тот же
+    порядок, что и у остальных слоёв).
+
+    Пункт без типа места получает ранг по населению — тем же
+    порядком, что и в шаблоне (ветка «by population»).
+    """
+    place = str(_feature_value(feature, "place") or "")
+    population = _population(_feature_value(feature, "population"))
+    rank = PLACE_RANKS.get(place)
+    if rank is None:
+        for limit, value in POPULATION_RANKS:
+            if population >= limit:
+                rank = value
+                break
+    return rank, -population
 
 
 def _prune_band(points, index, scale, latitude_max):
@@ -1383,8 +1511,8 @@ def _prune_band(points, index, scale, latitude_max):
     return keep
 
 
-def _hidden_bridge_bands(points, bands):
-    """Диапазоны, где значок моста проигрывает соседу того же слоя.
+def _hidden_icon_bands(points, bands):
+    """Диапазоны, где значок проигрывает соседу того же слоя.
 
     Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
     Побеждает объект с меньшими координатами, как у точечных POI; радиус
@@ -1396,8 +1524,8 @@ def _hidden_bridge_bands(points, bands):
         entries = [
             point for point in points
             if index in point.bands
-            and point.name in BRIDGE_ICON_LAYERS
-            and point.geometry == "Line"
+            and point.name in SELF_ICON_LAYERS
+            and point.geometry in ("Line", "Polygon")
             and point.fid >= 0
         ]
         if len(entries) < 2:
@@ -1453,18 +1581,18 @@ def _hidden_bridge_bands(points, bands):
 
 
 def _write_icon_hide(config, layers, points, bands):
-    """Пишет поле icon_hide в слои мостов.
+    """Пишет поле icon_hide в слои со значком на объекте.
 
     Поле хранит через точку с запятой индексы диапазонов, где значок
     скрыт.  Выражение шаблона выбирает нужный индекс по @map_scale.
 
     Запись идёт через SQLite напрямую: обновление строки через GDAL в
     Spatialite переписывает геометрию и пространственный индекс и стоит
-    около сотни миллисекунд на мост, через SQLite — около сотни
+    около сотни миллисекунд на объект, через SQLite — около сотни
     микросекунд.  Геометрия при этом не меняется: триггеры Spatialite
     висят на `UPDATE OF "GEOMETRY"`, а поле icon_hide — другое поле.
     """
-    hidden = _hidden_bridge_bands(points, bands)
+    hidden = _hidden_icon_bands(points, bands)
     import sqlite3
 
     updates = {}
@@ -1473,7 +1601,9 @@ def _write_icon_hide(config, layers, points, bands):
             (fid, ";".join(str(index) for index in sorted(indexes)))
         )
     for info in layers:
-        if info.name not in BRIDGE_ICON_LAYERS or info.geometry != "Line":
+        if info.name not in SELF_ICON_LAYERS:
+            continue
+        if info.geometry not in ("Line", "Polygon"):
             continue
         path = _source_path(config, info.source)
         if path is None:
