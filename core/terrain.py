@@ -2096,7 +2096,7 @@ def _clip_to_core(geometry, box):
     return _geometry_lines(clipped) if clipped is not None else []
 
 
-def _contour_tile(task, mask_path=None):
+def _contour_tile(task, mask_path=None, simplify=0.0):
     """Контуры одного тайла: только то, что попадает в его ядро.
 
     Тайл считается по окну с запасом, а в результат попадает только
@@ -2105,6 +2105,10 @@ def _contour_tile(task, mask_path=None):
 
     ``mask_path`` — общая маска воды в сетке DEM: без неё вода
     растеризуется заново по каждому тайлу.
+
+    ``simplify`` — допуск упрощения в единицах СК.  Упрощение идёт
+    здесь же, в потоке тайла: отдельный проход по готовому слою
+    занимает десятки секунд и не параллелится.
 
     Возвращает слой с отрезками: файл на тайл не пишется — создание
     GeoPackage обходится дороже самой генерации.
@@ -2168,6 +2172,11 @@ def _contour_tile(task, mask_path=None):
     for feature in contour_layer:
         geometry = feature.GetGeometryRef()
         for piece in _clip_to_core(geometry, box):
+            if simplify > 0:
+                simplified = piece.Simplify(simplify)
+                if simplified is None or simplified.IsEmpty():
+                    continue
+                piece = simplified
             item = ogr.Feature(layer.GetLayerDefn())
             item.SetField("ID", written)
             item.SetField("ELEV", feature.GetField("ELEV"))
@@ -2249,10 +2258,12 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
     layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
     layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+    simplify = _contour_simplify_tolerance(spatial_ref, config.isolines_step)
 
     raster = gdal.Open(str(source))
     pixels = raster.RasterXSize * raster.RasterYSize
     side = _contour_tile_side(pixels)
+    tiled = side > 1
     water_paths = _water_mask_paths(config)
     masked = False
     if side <= 1:
@@ -2315,7 +2326,7 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         try:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
-                    pool.submit(_contour_tile, task, mask): index
+                    pool.submit(_contour_tile, task, mask, simplify): index
                     for index, task in enumerate(tasks)
                 }
                 done = 0
@@ -2358,15 +2369,14 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     layer.SyncToDisk()
     dataset = None
 
-    simplify = _contour_simplify_tolerance(spatial_ref, config.isolines_step)
     options = [
         "-nln", "isolines",
         "-dsco", "SPATIALITE=YES",
         "-lco", "COMPRESS_GEOM=YES",
     ]
-    if simplify > 0:
-        # Дуглас-Пекер в единицах СК: убирает шум растра, не меняя
-        # заметно форму контуров на 1:25 000.
+    if simplify > 0 and not tiled:
+        # Один проход для мелкого DEM: в тайловом режиме контуры уже
+        # упрощены в потоках _contour_tile.
         options += ["-simplify", format(simplify, ".12g")]
     destination = config.vector_dir / "isolines_full.sqlite"
     try:
@@ -2386,7 +2396,9 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     if result is None:
         raise RuntimeError("Failed to write contour lines")
     result = None
-    glacier_destination = _generate_glacier_isolines(config, shape_path, progress)
+    glacier_destination = _generate_glacier_isolines(
+        config, shape_path, progress, simplify=0.0 if tiled else simplify
+    )
     for suffix in (".shp", ".shx", ".dbf", ".prj"):
         (config.temp_dir / f"isolines_full{suffix}").unlink(missing_ok=True)
     if glacier_destination is None:
@@ -2519,7 +2531,7 @@ def _glacier_polygons(config):
     return polygons
 
 
-def _split_isolines_by_glaciers(config, shape_path, progress=None):
+def _split_isolines_by_glaciers(config, shape_path, progress=None, simplify=None):
     """Делит изолинии на части внутри ледников и вне их.
 
     Внутри ледника изолинии относятся к леднику (в исходном проекте они
@@ -2552,9 +2564,10 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
         glacier_output = driver.CreateDataSource(str(glacier_destination))
         regular_output = driver.CreateDataSource(str(regular_destination))
         spatial_ref = source_layer.GetSpatialRef()
-        simplify = _contour_simplify_tolerance(
-            spatial_ref, config.isolines_step
-        )
+        if simplify is None:
+            simplify = _contour_simplify_tolerance(
+                spatial_ref, config.isolines_step
+            )
         glacier_target = glacier_output.CreateLayer(
             "isolines", spatial_ref, ogr.wkbLineString
         )
@@ -2631,13 +2644,15 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
     return glacier_destination
 
 
-def _generate_glacier_isolines(config, shape_path, progress=None):
+def _generate_glacier_isolines(config, shape_path, progress=None, simplify=None):
     """Контурные линии, обрезанные по полигонам ледников.
 
     Обычные изолинии при этом тоже пересобираются: на площади ледников
     их нет, там рисуются ледниковые (синие).
     """
-    return _split_isolines_by_glaciers(config, shape_path, progress)
+    return _split_isolines_by_glaciers(
+        config, shape_path, progress, simplify=simplify
+    )
 
 
 def _extend_used(used_out, used):

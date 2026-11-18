@@ -2189,6 +2189,37 @@ class ContourTilingTest(unittest.TestCase):
             self.assertEqual(levels, reference_levels)
             self.assertAlmostEqual(length, reference_length, places=6)
 
+    def test_tile_simplification_reduces_vertices(self):
+        """Упрощение в тайле уменьшает вершины, не теряя уровни."""
+        from osgeo import gdal
+
+        from qgis_xtopo.core import terrain
+
+        raster = gdal.Open(str(self.source))
+        tiles = terrain._contour_tiles(raster, 2, terrain.CONTOUR_HALO)
+        raster = None
+
+        def collect(simplify):
+            vertices = 0
+            levels = set()
+            for tile in tiles:
+                dataset, _count, _masked = terrain._contour_tile(
+                    (str(self.source), tile, 50, []), simplify=simplify
+                )
+                layer = dataset.GetLayer(0)
+                for feature in layer:
+                    geometry = feature.GetGeometryRef()
+                    if geometry is None:
+                        continue
+                    vertices += geometry.GetPointCount()
+                    levels.add(round(feature.GetField("ELEV"), 6))
+            return vertices, levels
+
+        plain, plain_levels = collect(0.0)
+        simplified, simplified_levels = collect(0.001)
+        self.assertEqual(simplified_levels, plain_levels)
+        self.assertLess(simplified, plain)
+
     def test_simplify_tolerance_is_capped_by_step_and_crs(self):
         """Допуск упрощения: min(5 м, шаг/2) в единицах СК."""
         from osgeo import osr
