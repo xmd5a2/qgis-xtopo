@@ -2478,86 +2478,33 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
-    def test_project_panel_rule_exclusivity(self):
+    def test_project_panel_rule_target_is_independent(self):
+        """Галочки кратностей независимы: включение не трогает соседей."""
         from qgis_xtopo.gui.projectpanel import ProjectPanel
 
         panel = ProjectPanel(None)
-        values = {
-            5: "5", 10: "10", 25: "25", 50: "50",
-            100: "100", 200: "200", 1000: "1000",
-        }
-        # Зависимости взяты из фильтров правил исходного проекта.
-        deps = {
-            5: {10, 50, 100, 1000},
-            10: {50, 100, 1000},
-            25: {50, 100, 1000},
-            50: {100, 1000},
-            100: {1000},
-            200: {1000},
-            1000: set(),
-        }
-        # Общие линии есть только у 5 и 25 (25 не исключён фильтром 5) и
-        # у 100 и 200. Кратности 200 и 1000 совместны: правило 200 не
-        # рисует линии, кратные 1000, поэтому дубликатов нет.
-        conflicts = [(5, 25), (100, 200)]
-        available = set(values)
         current = {10, 50, 100, 1000}
-
-        # Базовая кратность задаёт набор кратных, как на вкладке «Рельеф».
-        # Недостающая кратность добавляется, иначе в линиях будут пропуски.
         self.assertEqual(
-            panel._rule_target(
-                True, 10, values, deps, available, current, conflicts
-            ),
-            {10, 50, 100, 1000},
-        )
-        self.assertEqual(
-            panel._rule_target(
-                True, 5, values, deps, available, current, conflicts
-            ),
+            panel._rule_target(True, 5, current),
             {5, 10, 50, 100, 1000},
         )
-        # 200 нельзя включать вместе со 100: линии совпадают
         self.assertEqual(
-            panel._rule_target(
-                True, 100, values, deps, available, current, conflicts
-            ),
-            {100, 1000},
-        )
-        # 200 и 1000 совместимы: фильтр 200 исключает кратные 1000
-        self.assertEqual(
-            panel._rule_target(
-                True, 200, values, deps, available, current, conflicts
-            ),
-            {200, 1000},
+            panel._rule_target(True, 200, current),
+            {10, 50, 100, 200, 1000},
         )
         self.assertEqual(
-            panel._rule_target(
-                True, 1000, values, deps, available, current, conflicts
-            ),
-            {1000},
+            panel._rule_target(False, 50, current),
+            {10, 100, 1000},
         )
-        # Снятие 50 убирает и 10: его фильтр исключает линии кратности 50
         self.assertEqual(
-            panel._rule_target(
-                False, 50, values, deps, available, current, conflicts
-            ),
-            {100, 1000},
-        )
-        # Снятие 10 оставляет более крупные кратности
-        self.assertEqual(
-            panel._rule_target(
-                False, 10, values, deps, available, current, conflicts
-            ),
+            panel._rule_target(False, 10, current),
             {50, 100, 1000},
         )
-        # Снятие 1000 убирает все кратности, которые его исключают
         self.assertEqual(
-            panel._rule_target(
-                False, 1000, values, deps, available, current, conflicts
-            ),
-            set(),
+            panel._rule_target(False, 1000, current),
+            {10, 50, 100},
         )
+        panel.deleteLater()
 
     def test_project_panel_export_dpi_default(self):
         from qgis_xtopo.gui.projectpanel import ProjectPanel
@@ -2565,7 +2512,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         panel = ProjectPanel(None)
         self.assertEqual(panel.export_dpi.currentData(), 300)
 
-    def test_project_panel_rule_toggle_applies_exclusivity(self):
+    def test_project_panel_rule_toggle_levels(self):
         from qgis.core import (
             QgsFeature, QgsGeometry, QgsLineSymbol, QgsProject,
             QgsRuleBasedRenderer, QgsVectorLayer,
@@ -2579,29 +2526,33 @@ class PipelineIntegrationTest(unittest.TestCase):
             "[TERRAIN] isolines regular",
             "memory",
         )
-        # Фильтры как в исходном проекте: каждое правило не рисует линии
-        # более крупных кратностей. Правило «5 м» не исключает кратные 25,
-        # поэтому 5 и 25 рисуют общие линии, а 200 не исключает 1000 —
-        # значит, 200 и 1000 совместимы.
+        # Каждый уровень исключает более крупные, поэтому линии не
+        # пересекаются: 100 не рисует 200-е, 50 не рисует 100-е и т.д.
         filters = {
             1000: '("ELEV" % 1000) = 0 AND "ELEV" != 0',
             200: '("ELEV" % 1000) != 0 AND ("ELEV" % 200) = 0',
-            100: '("ELEV" % 1000) != 0 AND ("ELEV" % 100) = 0',
+            100: (
+                '("ELEV" % 1000) != 0 AND ("ELEV" % 200) != 0 '
+                'AND ("ELEV" % 100) = 0'
+            ),
             50: (
-                '("ELEV" % 1000) != 0 AND ("ELEV" % 100) != 0 '
-                'AND ("ELEV" % 50) = 0'
+                '("ELEV" % 1000) != 0 AND ("ELEV" % 200) != 0 '
+                'AND ("ELEV" % 100) != 0 AND ("ELEV" % 50) = 0'
             ),
             25: (
-                '("ELEV" % 1000) != 0 AND ("ELEV" % 100) != 0 '
-                'AND ("ELEV" % 50) != 0 AND ("ELEV" % 25) = 0'
+                '("ELEV" % 1000) != 0 AND ("ELEV" % 200) != 0 '
+                'AND ("ELEV" % 100) != 0 AND ("ELEV" % 50) != 0 '
+                'AND ("ELEV" % 25) = 0'
             ),
             10: (
-                '("ELEV" % 1000) != 0 AND ("ELEV" % 100) != 0 '
-                'AND ("ELEV" % 50) != 0 AND ("ELEV" % 10) = 0'
+                '("ELEV" % 1000) != 0 AND ("ELEV" % 200) != 0 '
+                'AND ("ELEV" % 100) != 0 AND ("ELEV" % 50) != 0 '
+                'AND ("ELEV" % 25) != 0 AND ("ELEV" % 10) = 0'
             ),
             5: (
-                '("ELEV" % 1000) != 0 AND ("ELEV" % 100) != 0 '
-                'AND ("ELEV" % 50) != 0 AND ("ELEV" % 10) != 0 '
+                '("ELEV" % 1000) != 0 AND ("ELEV" % 200) != 0 '
+                'AND ("ELEV" % 100) != 0 AND ("ELEV" % 50) != 0 '
+                'AND ("ELEV" % 25) != 0 AND ("ELEV" % 10) != 0 '
                 'AND ("ELEV" % 5) = 0'
             ),
         }
@@ -2639,20 +2590,29 @@ class PipelineIntegrationTest(unittest.TestCase):
                     label for label, state in panel._rule_states().items() if state
                 }
 
-            # Снятие 50 м убирает и 10 м: фильтр правила «10 м»
-            # исключает линии кратности 50, иначе в изолиниях пропуск.
+            def rule(value):
+                return next(
+                    item for item in layer.renderer().rootRule().children()
+                    if item.label() == str(value)
+                )
+
             self.assertEqual(active(), {"10", "50", "100", "1000"})
+            # Уровни независимы: снятие 50 не трогает 10 и 100.
             toggle("50", False)
+            self.assertEqual(active(), {"10", "100", "1000"})
+            toggle("10", False)
             self.assertEqual(active(), {"100", "1000"})
-            # Обратное включение возвращает набор от базовой кратности
-            toggle("10", True)
-            self.assertEqual(active(), {"10", "50", "100", "1000"})
-            # 200 несовместима со 100: линии совпадают, остаётся мелкая
             toggle("200", True)
-            self.assertEqual(active(), {"200", "1000"})
-            # Конфликты вычисляются по фильтрам: 200 и 1000 совместимы,
-            # общие линии есть только у 5 и 25, а также у 100 и 200.
-            self.assertEqual(panel._rule_conflicts(), [(5, 25), (100, 200)])
+            self.assertEqual(active(), {"100", "200", "1000"})
+            self.assertEqual(rule(200).maximumScale(), 0.0)
+            # Снятая галочка 200 оставляет правило активным до 1:600 000,
+            # чтобы на мелком масштабе 200-е линии были принудительно.
+            toggle("200", False)
+            self.assertEqual(active(), {"100", "1000"})
+            self.assertTrue(rule(200).active())
+            self.assertEqual(rule(200).maximumScale(), 600000.0)
+            toggle("5", True)
+            self.assertEqual(active(), {"5", "100", "1000"})
         finally:
             panel.deleteLater()
             project.clear()

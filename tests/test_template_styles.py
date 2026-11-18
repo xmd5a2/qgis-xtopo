@@ -357,6 +357,141 @@ class IsolinesHachureTest(unittest.TestCase):
                     self.assertNotEqual(option.get("name"), DD_PROPERTY)
 
 
+class IsolinesSchemeTest(unittest.TestCase):
+    """Видимость изолиний, подписи и штриховка по масштабам.
+
+    Схема: 1-25k все, 25-50k без 5, 50-100k без 5/10, 100-300k без
+    5/10/25, 300-600k без 5/10/25/50, 600k+ только 200 (принудительно)
+    и 1000.  Подписи на уровень грубее, 25 и 200 не подписываются.
+    Фильтры правил не пересекаются: каждая линия рисуется одним уровнем.
+    """
+
+    RENDER_MAX = {5: 25000, 10: 50000, 25: 100000, 50: 300000,
+                  100: 600000, 200: 0, 1000: 0}
+    LABEL_MAX = {10: 25000, 50: 100000, 100: 300000, 1000: 0}
+    LABEL_OFF = (25, 200)
+    EXCLUDED = {
+        5: (1000, 200, 100, 50, 25, 10),
+        10: (1000, 200, 100, 50, 25),
+        25: (1000, 200, 100, 50),
+        50: (1000, 200, 100),
+        100: (1000, 200),
+        200: (1000,),
+        1000: (),
+    }
+    HASH_BUCKETS = {5: (), 10: (0,), 25: (0,), 50: (0,),
+                    100: (0, 1, 2), 200: (0, 1, 2), 1000: (0, 1, 2)}
+    LAYERS = (ISOLINES_REGULAR, ISOLINES_GLACIER)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _rules(self, layer_name, tag, attribute):
+        layer = self.layers.get(layer_name)
+        self.assertIsNotNone(layer, f"в шаблоне нет слоя {layer_name}")
+        parent = layer.find(tag)
+        self.assertIsNotNone(parent, f"у слоя {layer_name} нет {tag}")
+        return {
+            rule.get(attribute): rule
+            for rule in parent.findall("./rules/rule")
+        }
+
+    def _check_filter(self, rule, value):
+        expression = rule.get("filter") or ""
+        self.assertIn(f'("ELEV" % {value}) = 0', expression)
+        for excluded in self.EXCLUDED[value]:
+            self.assertIn(f'("ELEV" % {excluded}) != 0', expression)
+
+    @staticmethod
+    def _bucket(child):
+        minimum = int(child.get("scalemindenom", "0"))
+        maximum = int(child.get("scalemaxdenom", "0"))
+        return {(0, 50000): 0, (50000, 100000): 1,
+                (100000, 300000): 2, (300000, 0): 3}.get(
+                    (minimum, maximum))
+
+    @staticmethod
+    def _hash_enabled(renderer, child):
+        name = child.get("symbol")
+        symbols = renderer.findall("./symbols/symbol")
+        symbol = next(
+            (item for item in symbols if item.get("name") == name), None)
+        if symbol is None:
+            return []
+        return [
+            layer.get("enabled") == "1"
+            for layer in symbol.findall("layer")
+            if layer.get("class") == HASH_CLASS
+        ]
+
+    def test_renderer_levels_and_scales(self):
+        for name in self.LAYERS:
+            rules = self._rules(name, "renderer-v2", "label")
+            self.assertEqual(
+                set(rules), {str(value) for value in self.RENDER_MAX})
+            for value, maximum in self.RENDER_MAX.items():
+                rule = rules[str(value)]
+                self.assertNotIn(
+                    "checkstate", rule.attrib,
+                    f"{name}: правило {value} должно быть активным")
+                self.assertEqual(
+                    int(rule.get("scalemaxdenom", "0")), maximum)
+                self.assertEqual(
+                    int(rule.get("scalemindenom", "0")), 0)
+                self._check_filter(rule, value)
+
+    def test_hash_lines_follow_scale_and_level(self):
+        for name in self.LAYERS:
+            renderer = self.layers[name].find("renderer-v2")
+            rules = self._rules(name, "renderer-v2", "label")
+            for value, buckets in self.HASH_BUCKETS.items():
+                rule = rules[str(value)]
+                for child in rule.findall("rule"):
+                    bucket = self._bucket(child)
+                    if bucket is None:
+                        continue
+                    expected = bucket in buckets
+                    enabled = self._hash_enabled(renderer, child)
+                    self.assertTrue(
+                        enabled, f"{name}: у {value} нет HashLine")
+                    for flag in enabled:
+                        self.assertEqual(
+                            flag, expected,
+                            f"{name}: HashLine {value}/{bucket}")
+
+    def test_label_levels_scales_and_visibility(self):
+        for name in self.LAYERS:
+            rules = self._rules(name, "labeling", "description")
+            self.assertEqual(
+                set(rules),
+                {str(value) for value in self.LABEL_MAX}
+                | {str(value) for value in self.LABEL_OFF},
+            )
+            for value, maximum in self.LABEL_MAX.items():
+                rule = rules[str(value)]
+                self.assertIsNone(
+                    rule.get("active"),
+                    f"{name}: подписи {value} должны быть включены")
+                self.assertEqual(
+                    int(rule.get("scalemaxdenom", "0")), maximum)
+                self.assertEqual(
+                    int(rule.get("scalemindenom", "0")), 0)
+                self._check_filter(rule, value)
+                for child in rule.iter("rule"):
+                    self.assertIsNone(child.get("active"))
+            for value in self.LABEL_OFF:
+                rule = rules[str(value)]
+                self.assertEqual(
+                    rule.get("active"), "0",
+                    f"{name}: подписи {value} должны быть выключены")
+                for child in rule.iter("rule"):
+                    self.assertEqual(child.get("active"), "0")
+
+
 class LabelPriorityTest(unittest.TestCase):
     """Название острова не должно вытесняться подписью пика."""
 

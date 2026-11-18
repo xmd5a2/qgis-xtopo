@@ -1,5 +1,4 @@
 import math
-import re
 import time
 import zipfile
 from pathlib import Path
@@ -72,9 +71,6 @@ PAGE_FORMATS = {
 }
 
 MEMORY_BUDGET = 800 * 1024 * 1024
-
-# Сколько кратных отметок перебирается при поиске общей линии у двух правил.
-CONFLICT_SEARCH_LIMIT = 1000
 
 # Предел обхода слоя изогипс, если фильтр правила пришлось считать самим:
 # без предела слой читается целиком и панель замирает на секунды.
@@ -2904,9 +2900,26 @@ class ProjectPanel(QWidget):
         if not isinstance(renderer, QgsRuleBasedRenderer):
             return {}
         return {
-            rule.label().strip(): rule.active()
+            rule.label().strip(): self._rule_state(rule)
             for rule in renderer.rootRule().children()
         }
+
+    @staticmethod
+    def _rule_state(rule):
+        """Состояние галочки кратности.
+
+        Правило 200 м остаётся активным и при снятой галочке: на масштабе
+        мельче 1:600 000 200-е изолинии показываются принудительно.
+        Поэтому для него состояние читается по верхней границе масштаба,
+        а не по active().
+        """
+        try:
+            value = int(rule.label().strip())
+        except ValueError:
+            return rule.active()
+        if value == 200:
+            return rule.active() and rule.maximumScale() < 600000
+        return rule.active()
 
     def _rebuild_rules(self):
         while self.rules_layout.count():
@@ -2929,7 +2942,7 @@ class ProjectPanel(QWidget):
                 value = int(label)
             except ValueError:
                 continue
-            rules.append((value, label, rule.active()))
+            rules.append((value, label, self._rule_state(rule)))
         if not rules:
             self.rules_container.setVisible(False)
             self.rules_title.setVisible(False)
@@ -3031,16 +3044,11 @@ class ProjectPanel(QWidget):
             value = int(label)
         except ValueError:
             return
-        deps = self._rule_dependencies()
-        available = self._available_values(values)
         states = self._rule_states()
         current = {
             item for item, name in values.items() if states.get(name)
         }
-        conflicts = self._rule_conflicts(values)
-        target = self._rule_target(
-            checked, value, values, deps, available, current, conflicts
-        )
+        target = self._rule_target(checked, value, current)
         self._syncing = True
         try:
             self._set_rule_states(renderer, values, target)
@@ -3067,8 +3075,8 @@ class ProjectPanel(QWidget):
             label = rule.label().strip()
             if label not in states:
                 continue
-            if rule.active() != states[label]:
-                rule.setActive(states[label])
+            if self._rule_state(rule) != states[label]:
+                self._apply_rule_state(rule, states[label])
                 changed = True
         if not changed:
             return False
@@ -3078,127 +3086,6 @@ class ProjectPanel(QWidget):
         except Exception:
             pass
         return True
-
-    def _rule_dependencies(self):
-        """Кратности, линии которых правило не рисует: взяты из фильтра.
-
-        Например, правило «10 м» не рисует линии кратности 25, 50, 100 и
-        1000 — значит, оно зависит от этих правил.
-        """
-        layer = self._layer(ISOLINES_LAYER)
-        renderer = layer.renderer() if layer is not None else None
-        if not isinstance(renderer, QgsRuleBasedRenderer):
-            return {}
-        deps = {}
-        for rule in renderer.rootRule().children():
-            label = rule.label().strip()
-            try:
-                value = int(label)
-            except ValueError:
-                continue
-            excluded = set()
-            for match in re.finditer(
-                r'\(\s*"ELEV"\s*%\s*(\d+)\s*\)\s*!=\s*0',
-                rule.filterExpression() or "",
-            ):
-                excluded.add(int(match.group(1)))
-            deps[value] = excluded
-        return deps
-
-    def _rule_filters(self):
-        """Разбор фильтров правил: {кратность: (базовая, исключения)}.
-
-        Правило «200 м» рисует отметки, кратные 200, но не кратные 1000, а
-        правило «1000 м» — отметки, кратные 1000. Общих линий у них нет,
-        поэтому конфликт есть не у всех кратных, а вычисляется по фильтрам.
-        """
-        layer = self._layer(ISOLINES_LAYER)
-        renderer = layer.renderer() if layer is not None else None
-        if not isinstance(renderer, QgsRuleBasedRenderer):
-            return {}
-        filters = {}
-        for rule in renderer.rootRule().children():
-            label = rule.label().strip()
-            try:
-                value = int(label)
-            except ValueError:
-                continue
-            expression = rule.filterExpression() or ""
-            base = None
-            for match in re.finditer(
-                r'\(\s*"ELEV"\s*%\s*(\d+)\s*\)\s*=\s*0', expression
-            ):
-                base = int(match.group(1))
-            excluded = {
-                int(match.group(1))
-                for match in re.finditer(
-                    r'\(\s*"ELEV"\s*%\s*(\d+)\s*\)\s*!=\s*0', expression
-                )
-            }
-            filters[value] = (base, excluded)
-        return filters
-
-    @staticmethod
-    def _rules_conflict(first, second):
-        """True, если два правила рисуют хотя бы одну общую линию."""
-        (base_first, excluded_first), (base_second, excluded_second) = first, second
-        if not base_first or not base_second:
-            return False
-        excluded = excluded_first | excluded_second
-        step = base_first * base_second // math.gcd(base_first, base_second)
-        for multiplier in range(1, CONFLICT_SEARCH_LIMIT + 1):
-            elevation = step * multiplier
-            if elevation % base_first or elevation % base_second:
-                continue
-            if any(elevation % value == 0 for value in excluded):
-                continue
-            return True
-        return False
-
-    def _rule_conflicts(self, values=None):
-        """Пары кратностей, которые нельзя включать одновременно.
-
-        При конфликте остаётся более мелкая кратность: её правило рисует и
-        линии более крупной кратности, поэтому пропусков не будет.
-        """
-        filters = self._rule_filters()
-        if not filters:
-            return []
-        conflicts = []
-        items = sorted(filters)
-        for index, first in enumerate(items):
-            for second in items[index + 1:]:
-                if self._rules_conflict(filters[first], filters[second]):
-                    conflicts.append((first, second))
-        return conflicts
-
-    def _available_values(self, values):
-        """Кратности, для которых в данных есть линии."""
-        return {
-            value for value, label in values.items()
-            if self._rule_available.get(label, True)
-        }
-
-    def _close_rule_set(self, target, deps, available, add):
-        """Привести набор к правилам без пропусков в линиях.
-
-        Правило, которое не рисует линии отключённой кратности, оставило бы
-        пропуск: при снятии кратности такое правило выключается, при включении
-        — включается недостающая кратность.
-        """
-        changed = True
-        while changed:
-            changed = False
-            for value in sorted(target):
-                missing = (deps.get(value, set()) & available) - target
-                if not missing:
-                    continue
-                if add:
-                    target |= missing
-                else:
-                    target.discard(value)
-                changed = True
-        return target
 
     def _rule_values(self):
         """Кратности, доступные в слое изолиний: {значение: подпись правила}."""
@@ -3215,28 +3102,38 @@ class ProjectPanel(QWidget):
                 continue
         return values
 
-    def _rule_target(self, checked, value, values, deps, available, current,
-                     conflicts=None):
-        """Набор включённых кратностей после действия пользователя."""
+    def _rule_target(self, checked, value, current):
+        """Набор включённых кратностей после действия пользователя.
+
+        Уровни независимы: включение 5 не трогает 10 и 50, выключение
+        убирает только этот уровень. Видимость по масштабам задают
+        правила, а не набор галочек.
+        """
+        target = set(current)
         if checked:
-            # Базовая кратность задаёт набор кратных, как на вкладке «Рельеф».
-            target = {
-                item for item in values
-                if item % value == 0 and item in available
-            }
-            target = self._close_rule_set(target, deps, available, add=True)
+            target.add(value)
         else:
-            # Снятая кратность убирает и более мелкие: их фильтр исключает
-            # эти линии, иначе в изолиниях появляются пропуски.
-            target = set(current)
             target.discard(value)
-            target = self._close_rule_set(target, deps, available, add=False)
-        if conflicts is None:
-            conflicts = self._rule_conflicts(values)
-        for smaller, larger in conflicts:
-            if smaller in target and larger in target:
-                target.discard(larger)
         return target
+
+    @staticmethod
+    def _apply_rule_state(rule, enabled):
+        """Включить или выключить кратность.
+
+        Правило 200 м не выключается: на масштабе мельче 1:600 000
+        200-е изолинии показываются принудительно, даже если галочка
+        снята. Снятая галочка лишь ограничивает правило этим диапазоном.
+        """
+        try:
+            value = int(rule.label().strip())
+        except ValueError:
+            value = None
+        if value == 200:
+            rule.setActive(True)
+            rule.setMinimumScale(0.0)
+            rule.setMaximumScale(0.0 if enabled else 600000.0)
+        else:
+            rule.setActive(enabled)
 
     def _set_rule_states(self, renderer, values, target):
         labels = {values[value] for value in target}
@@ -3244,7 +3141,7 @@ class ProjectPanel(QWidget):
             label = rule.label().strip()
             if label not in values.values():
                 continue
-            rule.setActive(label in labels)
+            self._apply_rule_state(rule, label in labels)
         layer = self._layer(ISOLINES_LAYER)
         if layer is not None:
             layer.triggerRepaint()
