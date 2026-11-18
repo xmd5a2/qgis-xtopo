@@ -2189,6 +2189,46 @@ class ContourTilingTest(unittest.TestCase):
             self.assertEqual(levels, reference_levels)
             self.assertAlmostEqual(length, reference_length, places=6)
 
+    def test_simplify_tolerance_is_capped_by_step_and_crs(self):
+        """Допуск упрощения: min(5 м, шаг/2) в единицах СК."""
+        from osgeo import osr
+
+        from qgis_xtopo.core import terrain
+
+        geographic = osr.SpatialReference()
+        geographic.ImportFromEPSG(4326)
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(geographic, 10),
+            5.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(geographic, 5),
+            2.5 / terrain.GEOGRAPHIC_SCALE,
+        )
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(geographic, 12),
+            5.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        projected = osr.SpatialReference()
+        projected.ImportFromEPSG(3857)
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(projected, 10), 5.0
+        )
+        feet = osr.SpatialReference()
+        feet.ImportFromEPSG(2225)
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(feet, 10),
+            5.0 / feet.GetLinearUnits(),
+        )
+        empty = osr.SpatialReference()
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(empty, 10),
+            5.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        self.assertEqual(
+            terrain._contour_simplify_tolerance(geographic, 0), 0.0
+        )
+
     def test_tile_side_grows_with_raster(self):
         """Тайлов тем больше, чем больше растр."""
         from qgis_xtopo.core import terrain

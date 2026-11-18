@@ -2206,6 +2206,31 @@ def _merge_contour_tile(target, dataset, written=0):
     return written
 
 
+def _contour_simplify_tolerance(spatial_ref, step):
+    """Допуск упрощения контуров в единицах их СК.
+
+    Не больше 5 м и не больше половины шага изолиний: для шага 10 м
+    это 5 м, для шага 5 м — 2.5 м.  В географической СК допуск
+    переводится в градусы через ``GEOGRAPHIC_SCALE``.
+    """
+    meters = min(5.0, float(step) / 2.0)
+    if meters <= 0:
+        return 0.0
+    try:
+        # Пустая СК ведёт себя как географическая — так же, как в
+        # _dem_vertical_scale.
+        if spatial_ref is None or not spatial_ref.ExportToWkt():
+            return meters / GEOGRAPHIC_SCALE
+        if spatial_ref.IsGeographic():
+            return meters / GEOGRAPHIC_SCALE
+        units = spatial_ref.GetLinearUnits()
+    except Exception:  # noqa: BLE001 - неизвестная или пустая СК
+        return meters / GEOGRAPHIC_SCALE
+    if units and units > 0:
+        return meters / units
+    return meters
+
+
 def generate_isolines(config, bbox, progress=None, cancel=None):
     gdal, ogr, osr = _gdal()
     source = config.raster_dir / "merged_dem.tif"
@@ -2333,11 +2358,16 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     layer.SyncToDisk()
     dataset = None
 
+    simplify = _contour_simplify_tolerance(spatial_ref, config.isolines_step)
     options = [
         "-nln", "isolines",
         "-dsco", "SPATIALITE=YES",
         "-lco", "COMPRESS_GEOM=YES",
     ]
+    if simplify > 0:
+        # Дуглас-Пекер в единицах СК: убирает шум растра, не меняя
+        # заметно форму контуров на 1:25 000.
+        options += ["-simplify", format(simplify, ".12g")]
     destination = config.vector_dir / "isolines_full.sqlite"
     try:
         result = gdal.VectorTranslate(str(destination), str(shape_path), options=options)
@@ -2522,6 +2552,9 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
         glacier_output = driver.CreateDataSource(str(glacier_destination))
         regular_output = driver.CreateDataSource(str(regular_destination))
         spatial_ref = source_layer.GetSpatialRef()
+        simplify = _contour_simplify_tolerance(
+            spatial_ref, config.isolines_step
+        )
         glacier_target = glacier_output.CreateLayer(
             "isolines", spatial_ref, ogr.wkbLineString
         )
@@ -2541,6 +2574,10 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
             if geometry is None or geometry.IsEmpty():
                 continue
             envelope = geometry.GetEnvelope()
+            if simplify > 0:
+                simplified = geometry.Simplify(simplify)
+                if simplified is not None and not simplified.IsEmpty():
+                    geometry = simplified
             remainder = geometry.Clone()
             inside = []
             for polygon in polygon_index.candidates(envelope):
