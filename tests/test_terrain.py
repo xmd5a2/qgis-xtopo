@@ -660,8 +660,8 @@ class GlacierIsolinesWaterTest(unittest.TestCase):
     def test_without_water_glacier_isolines_cross_the_band(self):
         """Контроль: без воды изолинии ледников шли бы через полосу.
 
-        Показывает, что проверка выше не пустая: режет изолинии именно
-        маска воды.
+        Показывает, что проверка выше не пустая: изолинии режет именно
+        вода.
         """
         from qgis_xtopo.core.terrain import generate_isolines
 
@@ -2149,8 +2149,8 @@ class ContourTilingTest(unittest.TestCase):
         levels = set()
         length = 0.0
         for index, tile in enumerate(tiles):
-            dataset, _count, _masked = terrain._contour_tile(
-                (str(self.source), tile, 50, []))
+            dataset, _count = terrain._contour_tile(
+                (str(self.source), tile, 50))
             layer = dataset.GetLayer(0)
             for feature in layer:
                 levels.add(round(feature.GetField("ELEV"), 6))
@@ -2203,8 +2203,8 @@ class ContourTilingTest(unittest.TestCase):
             vertices = 0
             levels = set()
             for tile in tiles:
-                dataset, _count, _masked = terrain._contour_tile(
-                    (str(self.source), tile, 50, []), simplify=simplify
+                dataset, _count = terrain._contour_tile(
+                    (str(self.source), tile, 50), simplify=simplify
                 )
                 layer = dataset.GetLayer(0)
                 for feature in layer:

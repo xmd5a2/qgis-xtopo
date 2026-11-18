@@ -11,12 +11,12 @@ HAS_QGIS = importlib.util.find_spec("qgis") is not None
 
 
 class SlopeResolutionTest(unittest.TestCase):
-    def test_slope_upsampled_dem(self):
-        """Уклон и оттенок считаются по DEM, укрупнённому вдвое.
+    def test_relief_rasters_keep_dem_size(self):
+        """Уклон и оттенок считаются в разрешении исходного DEM.
 
-        Растры в шесть раз крупнее исходного занимали десятки гигабайт
-        на области в несколько градусов, поэтому укрупнение уменьшено
-        до двух.
+        Раньше DEM укрупнялся вдвое, чтобы сгладить отмывку, но QGIS
+        передискретизирует растры бикубом сам: запас пикселей только
+        раздувал файлы и подготовку.
         """
         from osgeo import gdal, osr
         import numpy as np
@@ -50,8 +50,8 @@ class SlopeResolutionTest(unittest.TestCase):
                 "hillshade_composite.tif",
             ):
                 raster = gdal.Open(str(root / name))
-                self.assertEqual(raster.RasterXSize, 40 * 2, name)
-                self.assertEqual(raster.RasterYSize, 40 * 2, name)
+                self.assertEqual(raster.RasterXSize, 40, name)
+                self.assertEqual(raster.RasterYSize, 40, name)
                 raster = None
             self.assertFalse((root / "merged_dem_x2.tif").exists())
             # Промежуточных файлов больше нет: отсечение уклона пишется
@@ -75,8 +75,101 @@ class SlopeResolutionTest(unittest.TestCase):
         self.assertIn("BIGTIFF=YES", options)
 
 
-class HighResolutionTerrainTest(unittest.TestCase):
-    """DEM точнее 0,9″ не укрупняется искусственно."""
+class WaterCutIsolinesTest(unittest.TestCase):
+    """Вода вычитается из контуров векторно: концы лежат на берегу."""
+
+    def test_isolines_touch_water_without_bending(self):
+        from osgeo import gdal, ogr, osr
+        import numpy as np
+
+        from qgis_xtopo.core import terrain
+        from qgis_xtopo.core.config import Config
+
+        gdal.UseExceptions()
+        ogr.UseExceptions()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="water",
+                generate_terrain=True,
+                generate_terrain_isolines=True,
+                isolines_step=10,
+                smooth_isolines=False,
+                terrain_resample_method="bilinear",
+            )
+            config.ensure_directories()
+
+            # Ровный склон: высота зависит только от x, поэтому все
+            # изолинии — строго вертикальные линии.
+            dem_path = config.raster_dir / "merged_dem.tif"
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(dem_path), 60, 60, 1, gdal.GDT_Float32
+            )
+            dataset.SetGeoTransform((0, 30, 0, 1800, 0, -30))
+            spatial_ref = osr.SpatialReference()
+            spatial_ref.ImportFromEPSG(3857)
+            dataset.SetProjection(spatial_ref.ExportToWkt())
+            ys, xs = np.mgrid[0:60, 0:60]
+            dataset.GetRasterBand(1).WriteArray(
+                ((xs * 30 + 15) * 0.5).astype("float32")
+            )
+            dataset.GetRasterBand(1).SetNoDataValue(-32768)
+            dataset = None
+
+            water_path = config.vector_dir / "water_dissolved.sqlite"
+            water_ds = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(water_path)
+            )
+            water_layer = water_ds.CreateLayer(
+                "water_dissolved", spatial_ref, ogr.wkbPolygon
+            )
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in (
+                (710, 600), (1090, 600), (1090, 1200), (710, 1200),
+                (710, 600),
+            ):
+                ring.AddPoint(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(water_layer.GetLayerDefn())
+            feature.SetGeometry(polygon)
+            water_layer.CreateFeature(feature)
+            water_ds = None
+
+            terrain.generate_isolines(config, None)
+
+            result = ogr.Open(
+                str(config.vector_dir / "isolines_regular.sqlite")
+            )
+            layer = result.GetLayer(0)
+            endpoints_on_water = 0
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                if geometry is None:
+                    continue
+                expected_x = feature.GetField("ELEV") / 0.5
+                for x, y in geometry.GetPoints():
+                    # Линия не должна изгибаться вокруг растровой маски:
+                    # на линейном склоне x постоянен.
+                    self.assertAlmostEqual(x, expected_x, delta=0.1)
+                    point = ogr.Geometry(ogr.wkbPoint)
+                    point.AddPoint_2D(x, y)
+                    self.assertFalse(
+                        polygon.Contains(point),
+                        "изолиния заходит на воду",
+                    )
+                for x, y in (
+                    geometry.GetPoint_2D(0),
+                    geometry.GetPoint_2D(geometry.GetPointCount() - 1),
+                ):
+                    if abs(y - 600) < 0.1 or abs(y - 1200) < 0.1:
+                        endpoints_on_water += 1
+            self.assertGreaterEqual(endpoints_on_water, 30)
+            result = None
+
+
+class NativeTerrainResolutionTest(unittest.TestCase):
+    """Уклон и отмывка считаются в разрешении исходного DEM."""
 
     def test_fine_dem_keeps_native_size(self):
         from osgeo import gdal, osr
@@ -121,24 +214,46 @@ class HighResolutionTerrainTest(unittest.TestCase):
             self.assertFalse((root / "merged_dem_downscaled.tif").exists())
             self.assertFalse((root / "merged_dem_x2.tif").exists())
 
-    def test_nominal_one_arcsecond_still_upscales(self):
+    def test_coarse_dem_keeps_native_size(self):
+        """DEM 1″ больше не укрупняется: растры остаются нативными."""
         from osgeo import gdal, osr
-        from qgis_xtopo.core import terrain
+        import numpy as np
+        from qgis_xtopo.core.terrain import generate_hillshade_slope
 
+        gdal.UseExceptions()
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "dem.tif"
+            root = Path(directory)
+            config = type("Config", (), {})()
+            config.raster_dir = root
+            config.temp_dir = root / "tmp"
+            config.temp_dir.mkdir()
+            config.terrain_resample_method = "cubicspline"
+
+            dem_path = root / "merged_dem.tif"
             dataset = gdal.GetDriverByName("GTiff").Create(
-                str(path), 1, 1, 1, gdal.GDT_Float32
+                str(dem_path), 40, 40, 1, gdal.GDT_Float32
             )
             # 0,0002772° — это 0,998″; так GLO-30 выглядит после варпа.
             dataset.SetGeoTransform((0, 0.0002772, 0, 0, 0, -0.0002772))
             srs = osr.SpatialReference()
             srs.ImportFromEPSG(4326)
             dataset.SetProjection(srs.ExportToWkt())
+            x = np.linspace(0, 100, 40, dtype=np.float32)
+            dataset.GetRasterBand(1).WriteArray(np.tile(x, (40, 1)))
             dataset = None
-            dataset = gdal.Open(str(path))
-            self.assertTrue(terrain._needs_upscale(dataset))
-            dataset = None
+
+            generate_hillshade_slope(config, None)
+
+            for name in (
+                "slope_upscaled.tif",
+                "hillshade_composite.tif",
+                "merged_dem_upscaled.tif",
+            ):
+                raster = gdal.Open(str(root / name))
+                self.assertIsNotNone(raster, name)
+                self.assertEqual(raster.RasterXSize, 40, name)
+                self.assertEqual(raster.RasterYSize, 40, name)
+                raster = None
 
 
 class RasterBlockTransformTest(unittest.TestCase):

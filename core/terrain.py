@@ -1358,49 +1358,6 @@ def build_dem(config, bbox, progress=None, cancel=None):
     return merged
 
 
-def _dem_resolution_arcseconds(dataset):
-    """Разрешение растра в угловых секундах (приблизительно).
-
-    ``merged_dem.tif`` обычно в EPSG:4326, но ручной DEM может быть в
-    метрах.  Для проекции переводим шаг пикселя в градусы в центре растра.
-    """
-    gdal, _, osr = _gdal()
-    transform = dataset.GetGeoTransform()
-    step_x = abs(transform[1])
-    step_y = abs(transform[5])
-    if step_x <= 0 or step_y <= 0:
-        return None
-    projection = dataset.GetProjection()
-    if not projection:
-        return None
-    srs = osr.SpatialReference()
-    srs.ImportFromWkt(projection)
-    srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    if srs.IsGeographic():
-        return max(step_x, step_y) * 3600.0
-    wgs84 = osr.SpatialReference()
-    wgs84.ImportFromEPSG(4326)
-    wgs84.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    try:
-        coordinate_transform = osr.CoordinateTransformation(srs, wgs84)
-        center_x = transform[0] + step_x * dataset.RasterXSize / 2
-        center_y = transform[3] - step_y * dataset.RasterYSize / 2
-        lon1, lat1, _ = coordinate_transform.TransformPoint(center_x, center_y)
-        lon2, lat2, _ = coordinate_transform.TransformPoint(
-            center_x + step_x, center_y
-        )
-        lon3, lat3, _ = coordinate_transform.TransformPoint(
-            center_x, center_y + step_y
-        )
-    except Exception:  # noqa: BLE001 - неизвестная проекция
-        return None
-    longitude = abs(lon2 - lon1) * 3600.0 * math.cos(
-        math.radians((lat1 + lat2) / 2)
-    )
-    latitude = abs(lat3 - lat1) * 3600.0
-    return max(longitude, latitude)
-
-
 def _dem_vertical_scale(path):
     """Во сколько метров один шаг растра по горизонтали.
 
@@ -1432,70 +1389,27 @@ def _dem_vertical_scale(path):
         dataset = None
 
 
-def _needs_upscale(dataset):
-    """Нужно ли искусственное укрупнение DEM.
-
-    DEM точнее 0,9″ (3DEP 1/3″, ручные LiDAR-модели) уже достаточно
-    подробен: двукратное укрупнение даёт гигабайты на ровном месте.
-    """
-    resolution = _dem_resolution_arcseconds(dataset)
-    if resolution is None:
-        return True
-    # GLO-30 и ALOS после варпа дают 0,998″ вместо ровно 1″.
-    return resolution >= 0.9
-
-
-def _generate_slope(config, merged, dem_width, dem_height, upscale,
-                    progress=None):
-    """Ветка уклона: для грубого DEM — вдвое детальнее исходного."""
+def _generate_slope(config, merged, progress=None):
+    """Ветка уклона: считается по нативному DEM."""
     gdal, _, _ = _gdal()
     if progress:
         progress("Generating slope")
-    dem_x2 = None
-    if upscale:
-        # Сначала удваиваем разрешение DEM с интерполяцией: уклон
-        # получается детальнее, чем при интерполяции готового растра.
-        dem_x2 = config.raster_dir / "merged_dem_x2.tif"
-        disk_space.require_space(
-            dem_x2,
-            dem_width * dem_height * 4 * disk_space.FILE_FLOAT_PIXEL,
-            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
-            "укруплённый DEM",
-        )
-        options = gdal.WarpOptions(
-            width=dem_width * 2,
-            height=dem_height * 2,
-            resampleAlg=config.terrain_resample_method,
-            outputType=gdal.GDT_Float32,
-            creationOptions=_relief_creation_options(),
-        )
-        result = gdal.Warp(str(dem_x2), str(merged), options=options)
-        if result is None:
-            raise RuntimeError("Failed to upscale DEM for slope")
-        result = None
-        slope_source = dem_x2
-    else:
-        slope_source = merged
-
     slope = config.raster_dir / "slope.tif"
     options = gdal.DEMProcessingOptions(
         computeEdges=True,
         slopeFormat="degree",
-        scale=_dem_vertical_scale(slope_source),
+        scale=_dem_vertical_scale(merged),
         creationOptions=_relief_creation_options(),
     )
     result = gdal.DEMProcessing(
-        str(slope), str(slope_source), "slope", options=options
+        str(slope), str(merged), "slope", options=options
     )
     if result is None:
         raise RuntimeError("Failed to generate slope")
     result = None
-    if dem_x2 is not None:
-        dem_x2.unlink(missing_ok=True)
 
     # Отсечение пологих склонов пишется сразу в итоговый растр: отдельный
-    # файл с обрезкой и последующее укрупнение только раздували бы
-    # подготовку (лишний растр вчетверо больше DEM).
+    # файл с обрезкой только раздувал бы подготовку.
     if progress:
         progress("Writing slope")
     slope_up = config.raster_dir / "slope_upscaled.tif"
@@ -1514,44 +1428,19 @@ def _link_or_copy(source, destination):
         shutil.copy2(source, destination)
 
 
-def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
+def _generate_hillshade(config, merged, dem_width, dem_height,
                         progress=None):
-    """Ветка отмывки: для грубого DEM — вдвое детальнее и затенение.
+    """Ветка отмывки: оттенок считается по нативному DEM.
 
-    DEM укрупняется вдвое, и оттенок считается по нему же: грубая сетка
-    даёт плоское полотно, на котором рельеф не читается.
+    Имя ``merged_dem_upscaled.tif`` оставлено ради шаблона проекта и
+    выражений склонов; укрупнения больше нет, это ссылка на нативный DEM.
     """
     gdal, _, _ = _gdal()
     numpy = _numpy()
     if progress:
         progress("Generating hillshade")
     upscaled = config.raster_dir / "merged_dem_upscaled.tif"
-    if upscale:
-        # Двукратное укрупшение DEM: оттенок считается по нему же, а сам
-        # растр нужен шаблону и выражениям склонов.
-        options = gdal.WarpOptions(
-            width=dem_width * 2,
-            height=dem_height * 2,
-            resampleAlg=config.terrain_resample_method,
-            outputType=gdal.GDT_Float32,
-            creationOptions=_relief_creation_options(),
-        )
-        disk_space.require_space(
-            upscaled,
-            dem_width * dem_height * 4 * disk_space.FILE_FLOAT_PIXEL,
-            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
-            "укруплённый DEM",
-        )
-        result = gdal.Warp(str(upscaled), str(merged), options=options)
-        if result is None:
-            raise RuntimeError("Failed to upscale DEM")
-        result = None
-        hillshade_source = upscaled
-    else:
-        # Шаблон проекта и выражения склонов ссылаются на
-        # merged_dem_upscaled.tif; для точного DEM это тот же нативный растр.
-        _link_or_copy(merged, upscaled)
-        hillshade_source = merged
+    _link_or_copy(merged, upscaled)
 
     hillshade = config.raster_dir / "hillshade.tif"
     # Как gdaldem hillshade по умолчанию: солнце 315°/45°, без вертикального
@@ -1562,19 +1451,17 @@ def _generate_hillshade(config, merged, dem_width, dem_height, upscale,
         azimuth=315,
         altitude=45,
         zFactor=1,
-        scale=_dem_vertical_scale(hillshade_source),
+        scale=_dem_vertical_scale(merged),
         creationOptions=_relief_creation_options(),
     )
-    factor = 2 if upscale else 1
     disk_space.require_space(
         hillshade,
-        dem_width * dem_height * factor * factor
-        * disk_space.FILE_BYTE_PIXEL,
+        dem_width * dem_height * disk_space.FILE_BYTE_PIXEL,
         "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
         "оттенок",
     )
     result = gdal.DEMProcessing(
-        str(hillshade), str(hillshade_source), "hillshade", options=options
+        str(hillshade), str(merged), "hillshade", options=options
     )
     if result is None:
         raise RuntimeError("Failed to generate hillshade")
@@ -1603,15 +1490,13 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
 
     dem_ds = gdal.Open(str(merged))
     dem_width, dem_height = dem_ds.RasterXSize, dem_ds.RasterYSize
-    upscale = _needs_upscale(dem_ds)
     dem_ds = None
-    if progress and not upscale:
-        progress("DEM точнее 0,9″: укрупнение растров не требуется")
-    # Уклон и отмывка вдвое крупнее DEM, и все производные
-    # растры лежат рядом: предупреждаем, пока расчёт не начался.
+    # Уклон и отмывка считаются по нативному DEM: QGIS передискретизирует
+    # растры бикубом при увеличении, поэтому запас пикселей в файле не
+    # улучшает картинку, а только раздувает растр и время подготовки.
     warning = disk_space.space_warning(
         config.raster_dir,
-        disk_space.relief_estimate(dem_width, dem_height, upscale),
+        disk_space.relief_estimate(dem_width, dem_height),
         "Недостаточно места для рельефа: нужно ≈{}, свободно {}. "
         "Подготовка может прерваться.",
     )
@@ -1641,18 +1526,12 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     ) as pool:
         futures = [
             pool.submit(
-                guarded(
-                    lambda: _generate_slope(
-                        config, merged, dem_width, dem_height, upscale,
-                        progress,
-                    )
-                )
+                guarded(lambda: _generate_slope(config, merged, progress))
             ),
             pool.submit(
                 guarded(
                     lambda: _generate_hillshade(
-                        config, merged, dem_width, dem_height, upscale,
-                        progress,
+                        config, merged, dem_width, dem_height, progress
                     )
                 )
             ),
@@ -1864,145 +1743,6 @@ def _contour_workers(tiles):
     return max(1, min(tiles, limit, worker_cap(CONTOUR_WORKER_BYTES, cpu_limit=limit)))
 
 
-def _build_water_mask(source_path, destination, water_paths):
-    """Общий растр-маска воды в сетке DEM.
-
-    Один проход по water-слоям на весь DEM вместо растеризации по
-    каждому тайлу: на охвате в 9–25 тайлов это было столько же полных
-    проходов по слоям воды.  None — построить маску не удалось, тогда
-    работает запасной путь с маской по каждому тайлу.
-    """
-    gdal, ogr, osr = _gdal()
-    source = gdal.Open(str(source_path))
-    if source is None:
-        return None
-    width = source.RasterXSize
-    height = source.RasterYSize
-    transform = source.GetGeoTransform()
-    projection = source.GetProjection()
-    source = None
-    if not projection:
-        return None
-    raster_srs = osr.SpatialReference()
-    raster_srs.ImportFromWkt(projection)
-    raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    mask = None
-    try:
-        driver = gdal.GetDriverByName("GTiff")
-        mask = driver.Create(
-            str(destination), width, height, 1, gdal.GDT_Byte,
-            options=["COMPRESS=LZW", "BIGTIFF=YES"],
-        )
-        mask.SetGeoTransform(transform)
-        mask.SetProjection(projection)
-        mask.GetRasterBand(1).Fill(0)
-        for path in water_paths:
-            dataset = ogr.Open(str(path))
-            if dataset is None:
-                mask = None
-                return None
-            try:
-                for layer in dataset:
-                    layer_srs = layer.GetSpatialRef()
-                    if layer_srs is None:
-                        mask = None
-                        return None
-                    layer_srs = layer_srs.Clone()
-                    layer_srs.SetAxisMappingStrategy(
-                        osr.OAMS_TRADITIONAL_GIS_ORDER
-                    )
-                    if not layer_srs.IsSame(raster_srs):
-                        mask = None
-                        return None
-                    gdal.RasterizeLayer(
-                        mask, [1], layer, burn_values=[1],
-                        options=["ALL_TOUCHED=TRUE"],
-                    )
-            finally:
-                dataset = None
-    except Exception:  # noqa: BLE001 - запасной путь
-        mask = None
-        return None
-    finally:
-        mask = None
-    return destination
-
-
-def _apply_water_mask(memory, mask_path, window, nodata):
-    """Записывает в окно DEM воду значением nodata по общей маске.
-
-    False — маску применить не удалось и нужен запасной путь.
-    """
-    gdal, _, _ = _gdal()
-    xoff, yoff, xsize, ysize = window
-    mask = gdal.Open(str(mask_path))
-    if mask is None:
-        return False
-    try:
-        array = mask.GetRasterBand(1).ReadAsArray(xoff, yoff, xsize, ysize)
-        if array is None:
-            return False
-        band = memory.GetRasterBand(1)
-        values = band.ReadAsArray()
-        if values is None:
-            return False
-        values[array == 1] = nodata
-        band.WriteArray(values)
-    except Exception:  # noqa: BLE001 - запасной путь
-        return False
-    finally:
-        mask = None
-    return True
-
-
-def _try_mask_water(raster, water_paths):
-    """Записывает полигоны воды в растр DEM значением nodata.
-
-    Контуры, посчитанные gdal.ContourGenerate по такому растру, обрываются
-    у берега сами — векторное срезание линий по большим озёрам (десятки
-    секунд на GEOS) не нужно.  False — маску применить не удалось и нужен
-    запасной векторный путь.  Каждый вызывающий поток открывает файлы
-    воды самостоятельно.
-    """
-    gdal, ogr, osr = _gdal()
-    band = raster.GetRasterBand(1)
-    nodata = band.GetNoDataValue()
-    if nodata is None:
-        nodata = -32768.0
-        band.SetNoDataValue(nodata)
-    projection = raster.GetProjection()
-    if not projection:
-        return False
-    raster_srs = osr.SpatialReference()
-    raster_srs.ImportFromWkt(projection)
-    raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    try:
-        for path in water_paths:
-            dataset = ogr.Open(str(path))
-            if dataset is None:
-                return False
-            try:
-                for layer in dataset:
-                    layer_srs = layer.GetSpatialRef()
-                    if layer_srs is None:
-                        return False
-                    layer_srs = layer_srs.Clone()
-                    layer_srs.SetAxisMappingStrategy(
-                        osr.OAMS_TRADITIONAL_GIS_ORDER
-                    )
-                    if not layer_srs.IsSame(raster_srs):
-                        return False
-                    gdal.RasterizeLayer(
-                        raster, [1], layer, burn_values=[nodata],
-                        options=["ALL_TOUCHED=TRUE"],
-                    )
-            finally:
-                dataset = None
-    except Exception:  # noqa: BLE001 - запасной путь ниже
-        return False
-    return True
-
-
 def _contour_tile_side(pixels):
     """Сколько тайлов по стороне нарезать DEM.
 
@@ -2096,24 +1836,25 @@ def _clip_to_core(geometry, box):
     return _geometry_lines(clipped) if clipped is not None else []
 
 
-def _contour_tile(task, mask_path=None, simplify=0.0):
+def _contour_tile(task, simplify=0.0):
     """Контуры одного тайла: только то, что попадает в его ядро.
 
     Тайл считается по окну с запасом, а в результат попадает только
     ядро: так линия у края получается такой же, как при расчёте по
     всему DEM, и тайлы не дублируют друг друга.
 
-    ``mask_path`` — общая маска воды в сетке DEM: без неё вода
-    растеризуется заново по каждому тайлу.
-
     ``simplify`` — допуск упрощения в единицах СК.  Упрощение идёт
     здесь же, в потоке тайла: отдельный проход по готовому слою
     занимает десятки секунд и не параллелится.
 
+    Вода в растре не вырезается: контуры считаются по всему DEM, а
+    полигоны воды вычитаются из готовых линий.  Так концы изолиний
+    лежат точно на берегу, а не обрываются за пиксель до него.
+
     Возвращает слой с отрезками: файл на тайл не пишется — создание
     GeoPackage обходится дороже самой генерации.
     """
-    source_path, tile, step, water_paths = task
+    source_path, tile, step = task
     gdal, ogr, osr = _gdal()
     raster = gdal.Open(source_path)
     if raster is None:
@@ -2122,8 +1863,7 @@ def _contour_tile(task, mask_path=None, simplify=0.0):
     transform = raster.GetGeoTransform()
     xoff, yoff, xsize, ysize = tile["window"]
     # Окно читается прямо в память: копия массива в памяти обошлась бы
-    # вдвое дороже по месту.  Вода записывается в окно значением nodata:
-    # тогда контуры обрываются у берега ещё при генерации.
+    # вдвое дороже по месту.
     memory = gdal.Translate(
         "", source_path, format="MEM",
         srcWin=[xoff, yoff, xsize, ysize],
@@ -2133,14 +1873,6 @@ def _contour_tile(task, mask_path=None, simplify=0.0):
     if nodata is None:
         nodata = -32768.0
     memory_band.SetNoDataValue(nodata)
-    if mask_path:
-        masked = _apply_water_mask(
-            memory, mask_path, (xoff, yoff, xsize, ysize), nodata
-        )
-        if not masked:
-            masked = _try_mask_water(memory, water_paths)
-    else:
-        masked = _try_mask_water(memory, water_paths)
     spatial_ref = osr.SpatialReference()
     spatial_ref.ImportFromWkt(raster.GetProjection())
 
@@ -2151,8 +1883,8 @@ def _contour_tile(task, mask_path=None, simplify=0.0):
     # «Invalid index».
     contour_layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
     contour_layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
-    # useNoData: у растра есть nodata (дырки покрытия и вода, записанная
-    # маской) — через такие пиксели контуры не проводятся.
+    # useNoData: у растра есть nodata (дырки покрытия) — через такие
+    # пиксели контуры не проводятся.
     nodata = memory_band.GetNoDataValue()
     if nodata is not None:
         gdal.ContourGenerate(
@@ -2189,7 +1921,7 @@ def _contour_tile(task, mask_path=None, simplify=0.0):
             written += 1
     memory = None
     raster = None
-    return result, written, masked
+    return result, written
 
 
 def _merge_contour_tile(target, dataset, written=0):
@@ -2240,11 +1972,48 @@ def _contour_simplify_tolerance(spatial_ref, step):
     return meters
 
 
+def _smoothed_isolines_dem(config, progress=None):
+    """Двукратный DEM для «Сглаживать контуры»; None — сглаживание выключено.
+
+    Уклон и отмывка считаются по нативному DEM, но сглаживание контуров
+    по-прежнему берёт более подробную сетку.  Файл временный: он нужен
+    только на время расчёта контуров и удаляется вызывающим кодом.
+    """
+    if not config.smooth_isolines:
+        return None
+    gdal, _, _ = _gdal()
+    merged = config.raster_dir / "merged_dem.tif"
+    dataset = gdal.Open(str(merged))
+    if dataset is None:
+        return None
+    width, height = dataset.RasterXSize, dataset.RasterYSize
+    dataset = None
+    destination = config.temp_dir / "isolines_dem_x2.tif"
+    destination.unlink(missing_ok=True)
+    disk_space.require_space(
+        destination,
+        width * height * 4 * disk_space.FILE_FLOAT_PIXEL,
+        "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+        "укруплённый DEM",
+    )
+    options = gdal.WarpOptions(
+        width=width * 2,
+        height=height * 2,
+        resampleAlg=config.terrain_resample_method,
+        outputType=gdal.GDT_Float32,
+        creationOptions=_relief_creation_options(),
+    )
+    result = gdal.Warp(str(destination), str(merged), options=options)
+    if result is None:
+        raise RuntimeError("Failed to upscale DEM for isolines")
+    result = None
+    return destination
+
+
 def generate_isolines(config, bbox, progress=None, cancel=None):
     gdal, ogr, osr = _gdal()
-    source = config.raster_dir / "merged_dem.tif"
-    if config.smooth_isolines and (config.raster_dir / "merged_dem_upscaled.tif").exists():
-        source = config.raster_dir / "merged_dem_upscaled.tif"
+    smooth_source = _smoothed_isolines_dem(config, progress)
+    source = smooth_source or (config.raster_dir / "merged_dem.tif")
     if not source.exists():
         raise RuntimeError("DEM raster is missing")
 
@@ -2264,18 +2033,12 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     pixels = raster.RasterXSize * raster.RasterYSize
     side = _contour_tile_side(pixels)
     tiled = side > 1
-    water_paths = _water_mask_paths(config)
-    masked = False
     if side <= 1:
-        # Вода записывается в копию растра значением nodata: контуры
-        # обрываются у берега при генерации (см. _try_mask_water).
         # Ледники в растр не вырезаются: готовые контуры делятся по
         # полигонам ледников векторно, иначе на границе ледника
         # ледниковая и обычная линии обрывались в разных точках.
         memory = gdal.Translate("", str(source), format="MEM")
         memory_band = memory.GetRasterBand(1)
-        if _try_mask_water(memory, water_paths):
-            masked = True
         nodata = memory_band.GetNoDataValue()
         if nodata is not None:
             gdal.ContourGenerate(
@@ -2308,64 +2071,51 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         # в результат попадает только середина тайла.
         tiles = _contour_tiles(raster, side, CONTOUR_HALO)
         raster = None
-        masked = True
         tasks = [
-            (str(source), tile, config.isolines_step, water_paths)
+            (str(source), tile, config.isolines_step)
             for tile in tiles
         ]
-        # Маска воды строится один раз на весь DEM: растеризация по
-        # каждому тайлу отдельно повторяла полный проход по слоям
-        # воды столько же раз, сколько тайлов.
-        mask_path = config.temp_dir / "water_mask.tif"
-        mask_path.unlink(missing_ok=True)
-        mask = None
-        if water_paths:
-            mask = _build_water_mask(str(source), mask_path, water_paths)
         workers = _contour_workers(len(tasks))
         written = 0
-        try:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(_contour_tile, task, mask, simplify): index
-                    for index, task in enumerate(tasks)
-                }
-                done = 0
-                for future in as_completed(futures):
-                    _index, result, _count, tile_masked = (
-                        futures[future], *future.result()
-                    )
-                    masked = masked and tile_masked
-                    # Тайл склеивается сразу: держать все результаты в
-                    # памяти до конца расчёта нельзя.
-                    written = _merge_contour_tile(layer, result, written)
-                    result = None
-                    done += 1
-                    if progress:
-                        progress(f"Contour lines: tile {done} of {len(tasks)}")
-                    if cancel is not None and cancel.is_set():
-                        for pending in futures:
-                            pending.cancel()
-                        raise InterruptedError("Preparation cancelled")
-        finally:
-            mask_path.unlink(missing_ok=True)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_contour_tile, task, simplify): index
+                for index, task in enumerate(tasks)
+            }
+            done = 0
+            for future in as_completed(futures):
+                _index, result, _count = (
+                    futures[future], *future.result()
+                )
+                # Тайл склеивается сразу: держать все результаты в
+                # памяти до конца расчёта нельзя.
+                written = _merge_contour_tile(layer, result, written)
+                result = None
+                done += 1
+                if progress:
+                    progress(f"Contour lines: tile {done} of {len(tasks)}")
+                if cancel is not None and cancel.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    raise InterruptedError("Preparation cancelled")
         if progress:
             progress(f"Contour lines: {written} segments")
+    dataset = None
+    if smooth_source is not None:
+        smooth_source.unlink(missing_ok=True)
+        smooth_source = None
     dataset = None
 
     dataset = ogr.Open(str(shape_path), 1)
     layer = dataset.GetLayer(0)
-    # Вода режет контуры до того, как они делятся на ледниковые и обычные,
-    # поэтому обе группы не заходят на воду — в том числе ледниковые.
-    # Обычно вода уже записана в растр nodata и контуры оборвались у
-    # берега при генерации; векторное срезание — запасной путь.
-    if not masked:
-        changed = _subtract_water_from_layer(
-            layer, _water_mask_paths(config), spatial_ref
-        )
-        if progress and changed:
-            progress(f"Contour lines cut by water: {changed}")
-    elif progress and water_paths:
-        progress("Contour lines cut by water")
+    # Вода вычитается из готовых контуров: конец линии ложится точно на
+    # берег.  Растеризация воды в nodata расширяла её на пиксель, и
+    # изолинии обрывались, не доходя до воды.
+    changed = _subtract_water_from_layer(
+        layer, _water_mask_paths(config), spatial_ref
+    )
+    if progress and changed:
+        progress(f"Contour lines cut by water: {changed}")
     layer.SyncToDisk()
     dataset = None
 
