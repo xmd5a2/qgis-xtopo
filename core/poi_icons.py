@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree
 
+from .cpu import cpu_workers
 from .resources import RESOURCES_DIR, template_path
 
 AUX_LAYER_NAME = "poi icons"
@@ -77,6 +78,16 @@ _TEMPLATE_ROOTS = {}
 _TEMPLATE_VARIABLES = {}
 
 LOD_LEVELS = (2, 3, 4, 5, 6)
+# Уровни, начиная с заданного: подавитель с уровнем L попадает в пороги
+# всех уровней не ниже L.
+_LEVELS_FROM = {
+    lod: tuple(level for level in LOD_LEVELS if level >= lod)
+    for lod in range(0, max(LOD_LEVELS) + 2)
+}
+# Соседние ячейки сетки: вокруг точки.
+_NEIGHBOUR_OFFSETS = tuple(
+    (dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+)
 # Ранг, который никого не подавляет: подставляется в подвыражении для
 # точек, скрытых текущим уровнем детализации.
 NEVER_RANK = 99999
@@ -1311,11 +1322,14 @@ def _prune_band(points, index, scale, latitude_max):
         # Диапазон без верхней границы: расстояние не ограничено.
         return entries
 
-    def limit(point):
-        size = point.sizes.get(index, 0.0) if point.sizes else 0.0
-        return size * scale / 1000.0
-
-    max_limit = max((limit(point) for point in entries), default=0.0)
+    # Радиус и косинус широты считаются один раз на точку: в поиске
+    # соседей они нужны для каждой пары.
+    limits = [
+        (point.sizes.get(index, 0.0) if point.sizes else 0.0) * scale / 1000.0
+        for point in entries
+    ]
+    cosines = [math.cos(math.radians(point.lat)) for point in entries]
+    max_limit = max(limits, default=0.0)
     if max_limit <= 0:
         return []
     # Ячейка сетки должна покрывать весь радиус поиска: градус долготы
@@ -1342,11 +1356,10 @@ def _prune_band(points, index, scale, latitude_max):
                     # него расстояние завышалось, и служебный слой терял
                     # точки-подавители: значки накладывались.
                     distance = math.hypot(
-                        (neighbour.lon - point.lon)
-                        * math.cos(math.radians(point.lat)),
+                        (neighbour.lon - point.lon) * cosines[position],
                         neighbour.lat - point.lat,
                     ) * 111320.0
-                    if distance > limit(neighbour):
+                    if distance > limits[other]:
                         continue
                     if neighbour.rank > point.rank:
                         # Более низкий приоритет соседа: эта точка
@@ -1537,8 +1550,7 @@ def _cell_distance(cx, cy, gx, gy, cell_lon, cell_lat, cos_lat):
     return math.sqrt(dlon * dlon + dlat * dlat)
 
 
-def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat,
-                        band_index):
+def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
     """Пороги до ближайших подавителей по уровням детализации.
 
     Расстояния — в метрах, те же, что считает выражение шаблона:
@@ -1554,6 +1566,11 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat,
     порядку (ранг, долгота, широта), поэтому в сетке лежат лишь
     точки с большим приоритетом — ровно те, кого выражение считает
     подавителями.
+
+    В сетке лежит тройка (точка, меридиан, уровень): меридиан —
+    111320 на косинус широты кандидата, уровень — его минимальный
+    LOD в этом диапазоне.  Оба считаются один раз на кандидата, а
+    не на каждую проверку.
     """
     cos_lat = math.cos(math.radians(lat))
     gx = int(lon // cell_lon)
@@ -1565,15 +1582,13 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat,
         distance, cx, cy = heapq.heappop(heap)
         if distance > radius:
             break
-        closed = True
-        for level in LOD_LEVELS:
-            value = best[level]
-            if value is None or value > distance:
-                closed = False
-                break
-        if closed:
+        nearest = best[LOD_LEVELS[0]]
+        if nearest is not None and nearest <= distance:
+            # Уровни вложены: порог самого низкого уровня — наибольший
+            # из всех, и когда он не больше расстояния до ячейки,
+            # искать больше нечего.
             break
-        for candidate in grid.get((cx, cy), ()):
+        for candidate, meridian, lod in grid.get((cx, cy), ()):
             dlon = candidate.lon - lon
             dlat = candidate.lat - lat
             metric = math.sqrt(
@@ -1588,16 +1603,22 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat,
                 continue
             # Конверт поиска overlay_nearest задаётся широтой
             # кандидата: он тоже ограничивает подавление.
-            cos_candidate = math.cos(math.radians(candidate.lat))
             value = max(
                 metric,
-                111320.0 * cos_candidate * abs(dlon),
-                111320.0 * cos_candidate * abs(dlat),
+                meridian * abs(dlon),
+                meridian * abs(dlat),
             )
-            lod = candidate.bands.get(band_index, 2)
-            for level in LOD_LEVELS:
-                if lod <= level and (
-                        best[level] is None or value < best[level]):
+            levels = _LEVELS_FROM.get(lod)
+            if levels is None:
+                levels = tuple(
+                    level for level in LOD_LEVELS if level >= lod
+                )
+            current = best.get(lod)
+            if current is not None and value >= current:
+                continue
+            for level in levels:
+                previous = best[level]
+                if previous is None or value < previous:
                     best[level] = value
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -1627,6 +1648,10 @@ def _suppression_distances(points, records, bands, needed=None, cancel=None):
     """
     order = sorted(points, key=lambda item: (item.rank, item.lon, item.lat))
     result = {}
+    # Широта для сетки берётся по всем точкам, а не только по кандидатам:
+    # иначе ячейка по долготе вышла бы уже нужной для точки-вопроса.
+    latitude_limit = max(abs(point.lat) for point in points)
+    cos_limit = max(math.cos(math.radians(latitude_limit)), 0.01)
     for index, band in enumerate(bands):
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Preparation cancelled")
@@ -1637,33 +1662,58 @@ def _suppression_distances(points, records, bands, needed=None, cancel=None):
         radius = _band_radius(band, candidates, index)
         if radius <= 0:
             continue
-        # Ячейка сетки: чем меньше, тем меньше лишних проверок, но тем
-        # больше колец при поиске далёкого подавителя.  Полтораста
-        # метров — компромисс: в горной местности соседи стоят ближе.
-        cell_lat = min(max(radius / 8.0, 150.0), 1000.0) / 111320.0
+        # Ячейка сетки: одна ячейка на радиус поиска.  Мельче — больше
+        # колец при поиске далёкого подавителя, крупнее — больше
+        # лишних кандидатов в просмотренной ячейке.  Размер ячейки на
+        # результат не влияет: нижняя оценка расстояния до ячейки
+        # остаётся корректной при любой сетке.
+        cell_lat = min(max(radius, 150.0), 1000.0) / 111320.0
         latitude_max = max(abs(point.lat) for point in candidates)
         cell_lon = cell_lat / max(math.cos(math.radians(latitude_max)), 0.01)
+        # Сетка занятых ячеек: ячейка не меньше радиуса поиска, поэтому
+        # любой подавитель в радиусе лежит в одной из девяти ячеек
+        # вокруг точки.  Если все они пусты, подавителей рядом нет и
+        # порогов не будет — искать нечего.  Запас в 0.1 % — на
+        # округление при разбиении на ячейки.
+        occupied_lat = radius * 1.001 / 111320.0
+        occupied_lon = occupied_lat / cos_limit
+        occupied = set()
         grid = {}
         for point in order:
             if point.geometry == "Point" and _band_needed(
                 needed, point, index,
             ):
-                thresholds = _nearest_thresholds(
-                    grid, point.lon, point.lat, radius, cell_lon, cell_lat,
-                    index,
-                )
-                values = {
-                    level: value for level, value in thresholds.items()
-                    if value is not None
-                }
-                if values:
-                    key = (point.name, point.fid)
-                    result.setdefault(key, {})[index] = values
+                ox = int(point.lon // occupied_lon)
+                oy = int(point.lat // occupied_lat)
+                near = False
+                for dx, dy in _NEIGHBOUR_OFFSETS:
+                    if (ox + dx, oy + dy) in occupied:
+                        near = True
+                        break
+                if near:
+                    thresholds = _nearest_thresholds(
+                        grid, point.lon, point.lat, radius, cell_lon, cell_lat,
+                    )
+                    values = {
+                        level: value for level, value in thresholds.items()
+                        if value is not None
+                    }
+                    if values:
+                        key = (point.name, point.fid)
+                        result.setdefault(key, {})[index] = values
             if id(point) in member:
                 grid.setdefault(
                     (int(point.lon // cell_lon), int(point.lat // cell_lat)),
                     [],
-                ).append(point)
+                ).append((
+                    point,
+                    111320.0 * math.cos(math.radians(point.lat)),
+                    point.bands.get(index, 2),
+                ))
+                occupied.add(
+                    (int(point.lon // occupied_lon),
+                     int(point.lat // occupied_lat)),
+                )
     return result
 
 
@@ -1688,6 +1738,9 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
     GDAL в Spatialite стоит около сотни миллисекунд (переписывается
     геометрия и пространственный индекс), через SQLite — около сотни
     микросекунд.
+
+    Файлов десятки, а коммит каждого ждёт диск: пишутся они
+    параллельно, иначе ожидание диска идёт впустую.
     """
     import sqlite3
 
@@ -1702,10 +1755,9 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
             continue
         by_file.setdefault(path, []).append(info)
 
+    slots = len(bands) * len(LOD_LEVELS)
+    prepared = {}
     for path, group in by_file.items():
-        if cancel is not None and cancel.is_set():
-            raise InterruptedError("Preparation cancelled")
-        slots = len(bands) * len(LOD_LEVELS)
         values = {}
         for info in group:
             indexes = set(_layer_band_indexes(info, bands))
@@ -1724,6 +1776,11 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
                     offset = hide_slot_index(index)
                     for level, value in levels.items():
                         parts[offset + level - LOD_LEVELS[0]] = repr(value)
+        prepared[path] = values
+
+    def write(path):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Preparation cancelled")
         connection = sqlite3.connect(str(path))
         try:
             table = _sqlite_table(connection, path)
@@ -1737,6 +1794,7 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
                     f'ALTER TABLE "{table}" ADD COLUMN '
                     f'"{hide_field_name()}" TEXT'
                 )
+            values = prepared[path]
             if values:
                 primary = _sqlite_primary_key(connection, table)
                 connection.executemany(
@@ -1750,6 +1808,18 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
             connection.commit()
         finally:
             connection.close()
+
+    paths = list(prepared)
+    if len(paths) < 2:
+        for path in paths:
+            write(path)
+        return
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    workers = min(cpu_workers(limit=8), len(paths))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for future in as_completed([pool.submit(write, path) for path in paths]):
+            future.result()
 
 
 def _sqlite_table(connection, path):
@@ -1798,12 +1868,18 @@ def _write_aux(config, records, crs, file_name):
             ):
                 layer.CreateField(ogr.FieldDefn(name, kind))
             definition = layer.GetLayerDefn()
+            # Поля по номеру, а не по имени: поиск имени на каждой
+            # записи обходится дороже самой записи.
+            indexes = {
+                definition.GetFieldDefn(number).GetName(): number
+                for number in range(definition.GetFieldCount())
+            }
             layer.StartTransaction()
             for point in items:
                 feature = ogr.Feature(definition)
-                feature.SetField("rank", point.rank)
-                feature.SetField("lod", point.bands[index])
-                feature.SetField("layer", str(point.rank))
+                feature.SetField(indexes["rank"], point.rank)
+                feature.SetField(indexes["lod"], point.bands[index])
+                feature.SetField(indexes["layer"], str(point.rank))
                 feature.SetGeometry(ogr.CreateGeometryFromWkt(
                     f"POINT ({point.lon:.9f} {point.lat:.9f})"))
                 layer.CreateFeature(feature)
