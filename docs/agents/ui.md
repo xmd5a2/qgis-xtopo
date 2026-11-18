@@ -130,7 +130,10 @@
   Ставится в `proxy.apply()` и для `dem_sources._OPENER`.
 - **Прокси — `core/proxy.py`.** Кнопка в углу вкладок открывает диалог;
   `proxy.apply()` ставит opener urllib (через предохранитель), opener
-  dem_sources и `QNetworkProxy`. Статус значка: `proxy.probe()` (TCP +
+  dem_sources и `QNetworkProxy`. Для GDAL `/vsicurl` выставляется
+  `GDAL_HTTP_PROXY`; у SOCKS5 схема `socks5h` — имя хоста разрешает прокси,
+  иначе curl резолвит его локально и DEM не читается там, где DNS закрыт.
+  Статус значка: `proxy.probe()` (TCP +
   приветствие SOCKS5 с авторизацией, без внешней сети) в фоновом
   `ProxyCheckWorker`, панель проверяет при показе и раз в 30 с; пока панель
   скрыта, проверки нет. Живой прокси в тестах — только через

@@ -259,10 +259,15 @@ def _apply_qt_proxy(config):
 
 
 def gdal_proxy_url(config):
-    """Адрес прокси для GDAL (его /vsicurl/ не знает про urllib)."""
+    """Адрес прокси для GDAL (его /vsicurl/ не знает про urllib).
+
+    Для SOCKS5 — схема ``socks5h``: имя хоста разрешает прокси.  С простым
+    ``socks5`` curl резолвит локально, и при выходе только через прокси
+    чтение DEM падает на «Could not resolve host».
+    """
     if not config.enabled or not config.host:
         return ""
-    scheme = "socks5" if config.ptype == "socks5" else "http"
+    scheme = "socks5h" if config.ptype == "socks5" else "http"
     auth = ""
     if config.login:
         auth = urllib.parse.quote(config.login, safe="")

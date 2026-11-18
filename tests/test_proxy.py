@@ -209,7 +209,13 @@ class ProxyConfigTest(unittest.TestCase):
         config.ptype = "socks5"
         config.port = 1080
         self.assertEqual(
-            proxy.gdal_proxy_url(config), "socks5://proxy.local:1080"
+            proxy.gdal_proxy_url(config), "socks5h://proxy.local:1080"
+        )
+        config.login = "user@example.com"
+        config.password = "p@ss:word/x"
+        self.assertEqual(
+            proxy.gdal_proxy_url(config),
+            "socks5h://user%40example.com:p%40ss%3Aword%2Fx@proxy.local:1080",
         )
         self.assertEqual(proxy.gdal_proxy_url(proxy.ProxyConfig()), "")
 
