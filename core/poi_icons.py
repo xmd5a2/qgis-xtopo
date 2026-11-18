@@ -90,6 +90,8 @@ OBSTACLE_RANK_STEP = 0.01
 BRIDGE_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
 )
+# Поле с индексами диапазонов, где значок моста скрыт.
+ICON_HIDE_FIELD = "icon_hide"
 
 
 @dataclass
@@ -774,7 +776,7 @@ def icon_enabled_expression(index):
     """
     return (
         "if(coalesce(array_contains(string_to_array("
-        f"\"icon_hide\", ';'), '{index}'), false), false, true)"
+        f"\"{ICON_HIDE_FIELD}\", ';'), '{index}'), false), false, true)"
     )
 
 
@@ -1442,9 +1444,15 @@ def _write_icon_hide(config, layers, points, bands):
 
     Поле хранит через точку с запятой индексы диапазонов, где значок
     скрыт.  Выражение шаблона выбирает нужный индекс по @map_scale.
+
+    Запись идёт через SQLite напрямую: обновление строки через GDAL в
+    Spatialite переписывает геометрию и пространственный индекс и стоит
+    около сотни миллисекунд на мост, через SQLite — около сотни
+    микросекунд.  Геометрия при этом не меняется: триггеры Spatialite
+    висят на `UPDATE OF "GEOMETRY"`, а поле icon_hide — другое поле.
     """
     hidden = _hidden_bridge_bands(points, bands)
-    from osgeo import ogr
+    import sqlite3
 
     updates = {}
     for (name, fid), indexes in hidden.items():
@@ -1457,29 +1465,35 @@ def _write_icon_hide(config, layers, points, bands):
         path = _source_path(config, info.source)
         if path is None:
             continue
-        dataset = ogr.Open(str(path), 1)
-        if dataset is None:
-            continue
+        connection = sqlite3.connect(str(path))
         try:
-            layer = dataset.GetLayer(0)
-            if layer is None:
-                continue
-            if layer.GetLayerDefn().GetFieldIndex("icon_hide") < 0:
-                layer.CreateField(ogr.FieldDefn("icon_hide", ogr.OFTString))
+            table = _sqlite_table(connection, path)
+            columns = {
+                row[1] for row in connection.execute(
+                    f'PRAGMA table_info("{table}")'
+                )
+            }
+            if ICON_HIDE_FIELD not in columns:
+                connection.execute(
+                    f'ALTER TABLE "{table}" ADD COLUMN "{ICON_HIDE_FIELD}" TEXT'
+                )
             else:
-                result = dataset.ExecuteSQL(
-                    f'UPDATE "{layer.GetName()}" SET "icon_hide" = NULL')
-                if result is not None:
-                    dataset.ReleaseResultSet(result)
-            for fid, value in updates.get(info.name, ()):
-                feature = layer.GetFeature(fid)
-                if feature is None:
-                    continue
-                feature.SetField("icon_hide", value)
-                layer.SetFeature(feature)
-                feature = None
+                # Мост мог перестать вытесняться: старые значения
+                # надо сбросить, иначе значок останется скрытым.
+                connection.execute(
+                    f'UPDATE "{table}" SET "{ICON_HIDE_FIELD}" = NULL'
+                )
+            values = updates.get(info.name, ())
+            if values:
+                primary = _sqlite_primary_key(connection, table)
+                connection.executemany(
+                    f'UPDATE "{table}" SET "{ICON_HIDE_FIELD}" = ? '
+                    f'WHERE "{primary}" = ?',
+                    [(value, fid) for fid, value in values],
+                )
+            connection.commit()
         finally:
-            dataset = None
+            connection.close()
     return hidden
 
 
