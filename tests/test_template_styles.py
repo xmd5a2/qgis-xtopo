@@ -463,6 +463,52 @@ class IsolinesSchemeTest(unittest.TestCase):
                             flag, expected,
                             f"{name}: HashLine {value}/{bucket}")
 
+    @staticmethod
+    def _hash_layer_elements(renderer, child):
+        name = child.get("symbol")
+        symbol = next(
+            (item for item in renderer.findall("./symbols/symbol")
+             if item.get("name") == name), None)
+        if symbol is None:
+            return []
+        return [
+            layer for layer in symbol.findall("layer")
+            if layer.get("class") == HASH_CLASS
+        ]
+
+    @staticmethod
+    def _dd_enabled(layer):
+        for option in layer.iter("Option"):
+            if option.get("name") != "enabled":
+                continue
+            return {
+                item.get("name"): item.get("value")
+                for item in option.findall("Option")
+            }
+        return None
+
+    def test_hash_lines_stop_at_150k(self):
+        """Выше 1:150 000 штриховка выключена data-defined enabled."""
+        for name in self.LAYERS:
+            renderer = self.layers[name].find("renderer-v2")
+            rules = self._rules(name, "renderer-v2", "label")
+            for value in (100, 200, 1000):
+                for child in rules[str(value)].findall("rule"):
+                    bucket = self._bucket(child)
+                    if bucket not in (0, 1, 2):
+                        continue
+                    layers = self._hash_layer_elements(renderer, child)
+                    self.assertTrue(
+                        layers, f"{name}: нет HashLine {value}/{bucket}")
+                    for layer in layers:
+                        data = self._dd_enabled(layer)
+                        self.assertIsNotNone(
+                            data, f"{name}: нет enabled {value}/{bucket}")
+                        self.assertEqual(data.get("active"), "true")
+                        self.assertIn(
+                            "@map_scale <= 150000",
+                            data.get("expression") or "")
+
     def test_label_levels_scales_and_visibility(self):
         for name in self.LAYERS:
             rules = self._rules(name, "labeling", "description")
