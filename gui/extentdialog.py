@@ -12,7 +12,10 @@ from qgis.core import (
     QgsRectangle,
     QgsWkbTypes,
 )
-from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
+from qgis.gui import (
+    QgsMapCanvas, QgsMapCanvasItem, QgsMapTool, QgsMapToolPan,
+    QgsRubberBand,
+)
 from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import (
     QColor, QKeySequence, QPainter, QPainterPath, QPen, QStandardItem,
@@ -468,8 +471,36 @@ class RectangleMapTool(QgsMapTool):
         self.band.hide()
 
 
+class ExtentHandles(QgsMapCanvasItem):
+    """Квадратные маркеры углов нарисованной рамки охвата."""
+
+    def __init__(self, canvas, tool):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.tool = tool
+        self.setZValue(1001)
+
+    def boundingRect(self):
+        return QRectF(
+            -12, -12, self.canvas.width() + 24, self.canvas.height() + 24
+        )
+
+    def updatePosition(self):
+        self.setPos(0, 0)
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(0, 75, 140), 1))
+        painter.setBrush(QColor(255, 255, 255, 245))
+        for point in self.tool.handle_positions():
+            painter.drawRect(
+                QRectF(point.x() - 4, point.y() - 4, 8, 8)
+            )
+
+
 class ExtentPanTool(QgsMapToolPan):
-    """Перетаскивание карты; начатая на рамке протяжка двигает саму рамку."""
+    """Перетаскивание карты; рамка двигается и меняет размер за углы."""
 
     def __init__(self, canvas, extent_provider, extent_shower=None,
                  extent_changed=None, extent_finished=None):
@@ -479,79 +510,189 @@ class ExtentPanTool(QgsMapToolPan):
         self._show_extent = extent_shower
         self._extent_changed = extent_changed
         self._extent_finished = extent_finished
-        self._start = None
+        self._operation = None
+        self._corner = None
         self._start_extent = None
         self._extent = None
+        self.handles = ExtentHandles(canvas, self)
+        self.handles.hide()
 
-    def _extent_at(self, position):
+    @staticmethod
+    def _corners(rectangle):
+        return (
+            QgsPointXY(rectangle.xMinimum(), rectangle.yMinimum()),
+            QgsPointXY(rectangle.xMaximum(), rectangle.yMinimum()),
+            QgsPointXY(rectangle.xMaximum(), rectangle.yMaximum()),
+            QgsPointXY(rectangle.xMinimum(), rectangle.yMaximum()),
+        )
+
+    def _normalized_extent(self):
         rectangle = self._extent_provider()
         if rectangle is None or rectangle.isEmpty():
             return None
         rectangle = QgsRectangle(rectangle)
         rectangle.normalize()
+        return rectangle
+
+    def handle_positions(self):
+        rectangle = self._normalized_extent()
+        if rectangle is None:
+            return []
+        return [
+            self.toCanvasCoordinates(corner)
+            for corner in self._corners(rectangle)
+        ]
+
+    def _corner_at(self, position):
+        for index, point in enumerate(self.handle_positions()):
+            if abs(point.x() - position.x()) <= 8 and abs(
+                point.y() - position.y()
+            ) <= 8:
+                return index
+        return None
+
+    def _extent_at(self, position):
+        rectangle = self._normalized_extent()
+        if rectangle is None:
+            return None
         if not rectangle.contains(self.toMapCoordinates(position)):
             return None
         return rectangle
 
+    def refresh_handles(self):
+        if self.handles is None:
+            return
+        active = self.canvas.mapTool() is self
+        self.handles.setVisible(
+            active and self._extent_provider() is not None
+        )
+        self.handles.update()
+
+    def activate(self):
+        super().activate()
+        if self.handles is not None:
+            self.handles.setVisible(
+                self._extent_provider() is not None
+            )
+            self.handles.update()
+
     def canvasPressEvent(self, event):
         if event.button() == _left_button():
-            rectangle = self._extent_at(event.pos())
-            if rectangle is not None:
-                self._start = self.toMapCoordinates(event.pos())
+            corner = self._corner_at(event.pos())
+            rectangle = self._normalized_extent()
+            if corner is not None and rectangle is not None:
                 self._start_extent = rectangle
                 self._extent = QgsRectangle(rectangle)
+                self._press_point = self.toMapCoordinates(event.pos())
+                self._operation = "resize"
+                self._corner = corner
+                self.canvas.setCursor(self._resize_cursor(corner))
+                return
+            rectangle = self._extent_at(event.pos())
+            if rectangle is not None:
+                self._start_extent = rectangle
+                self._extent = QgsRectangle(rectangle)
+                self._press_point = self.toMapCoordinates(event.pos())
+                self._operation = "move"
+                self._corner = None
                 self.canvas.setCursor(Qt.SizeAllCursor)
                 return
-        self._clear_move()
+        self._clear_operation()
         super().canvasPressEvent(event)
 
+    @staticmethod
+    def _resize_cursor(corner):
+        return (
+            Qt.SizeBDiagCursor if corner in (0, 2)
+            else Qt.SizeFDiagCursor
+        )
+
+    def _hover_cursor(self, position):
+        corner = self._corner_at(position)
+        if corner is not None:
+            return self._resize_cursor(corner)
+        if self._extent_at(position) is not None:
+            return Qt.SizeAllCursor
+        return Qt.OpenHandCursor
+
+    def _resize(self, position):
+        current = self.toMapCoordinates(position)
+        corners = self._corners(self._start_extent)
+        anchor = corners[(self._corner + 2) % 4]
+        rectangle = QgsRectangle(
+            anchor.x(), anchor.y(), current.x(), current.y()
+        )
+        rectangle.normalize()
+        return rectangle
+
+    def _move(self, position):
+        current = self.toMapCoordinates(position)
+        start = self._press_point
+        dx = current.x() - start.x()
+        dy = current.y() - start.y()
+        return QgsRectangle(
+            self._start_extent.xMinimum() + dx,
+            self._start_extent.yMinimum() + dy,
+            self._start_extent.xMaximum() + dx,
+            self._start_extent.yMaximum() + dy,
+        )
+
     def canvasMoveEvent(self, event):
-        if self._start is not None and self._start_extent is not None:
-            point = self.toMapCoordinates(event.pos())
-            dx = point.x() - self._start.x()
-            dy = point.y() - self._start.y()
-            self._extent = QgsRectangle(
-                self._start_extent.xMinimum() + dx,
-                self._start_extent.yMinimum() + dy,
-                self._start_extent.xMaximum() + dx,
-                self._start_extent.yMaximum() + dy,
-            )
+        if self._operation is not None and self._start_extent is not None:
+            if self._operation == "resize":
+                self._extent = self._resize(event.pos())
+            else:
+                self._extent = self._move(event.pos())
             if self._show_extent is not None:
                 self._show_extent(self._extent)
             if self._extent_changed is not None:
                 self._extent_changed(QgsRectangle(self._extent))
+            if self.handles is not None:
+                self.handles.update()
             return
         if not (event.buttons() & _left_button()):
-            inside = self._extent_at(event.pos()) is not None
-            self.canvas.setCursor(
-                Qt.SizeAllCursor if inside else Qt.OpenHandCursor
-            )
+            self.canvas.setCursor(self._hover_cursor(event.pos()))
         super().canvasMoveEvent(event)
 
     def canvasReleaseEvent(self, event):
-        if self._start is not None:
+        if self._operation is not None:
             rectangle = self._extent
-            self._clear_move()
+            self._clear_operation()
             if rectangle is not None:
                 if self._show_extent is not None:
                     self._show_extent(rectangle)
                 if self._extent_finished is not None:
                     self._extent_finished(QgsRectangle(rectangle))
-            inside = self._extent_at(event.pos()) is not None
-            self.canvas.setCursor(
-                Qt.SizeAllCursor if inside else Qt.OpenHandCursor
-            )
+            self.canvas.setCursor(self._hover_cursor(event.pos()))
+            self.refresh_handles()
             return
         super().canvasReleaseEvent(event)
 
-    def _clear_move(self):
-        self._start = None
+    def _clear_operation(self):
+        self._operation = None
+        self._corner = None
         self._start_extent = None
         self._extent = None
+        self._press_point = None
 
     def deactivate(self):
-        self._clear_move()
+        self._clear_operation()
+        if self.handles is not None:
+            self.handles.hide()
         super().deactivate()
+
+    def dispose(self):
+        self._clear_operation()
+        handles = self.handles
+        self.handles = None
+        if handles is None:
+            return
+        try:
+            scene = handles.scene()
+            if scene is not None:
+                scene.removeItem(handles)
+        except Exception:
+            pass
 
 
 _SEARCH_WORKERS = set()
@@ -719,6 +860,7 @@ class ExtentDialog(QDialog):
             self._drawn_extent = QgsRectangle(initial)
             self._draw_tool.show_rectangle(self._drawn_extent)
             self.reset_button.setEnabled(True)
+            self._pan_tool.refresh_handles()
         self.canvas.extentsChanged.connect(self._update_coords)
         self.canvas.extentsChanged.connect(self._update_measurement)
         self.canvas.set_frame_provider(self._frame_provider)
@@ -727,9 +869,10 @@ class ExtentDialog(QDialog):
 
         hint = QLabel(
             "Перетаскивайте карту мышью, колесом меняйте масштаб. Готовую "
-            "рамку можно тянуть прямо за неё. Кнопка с иконкой прямоугольника "
-            "рисует новую рамку; при рисовании правая кнопка перемещает карту. "
-            "Затем нажмите «Использовать охват»."
+            "рамку можно тянуть прямо за неё, а за угловые маркеры — менять "
+            "размер. Кнопка с иконкой прямоугольника рисует новую рамку; при "
+            "рисовании правая кнопка перемещает карту. Затем нажмите "
+            "«Использовать охват»."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -993,6 +1136,7 @@ class ExtentDialog(QDialog):
         self._drawn_extent.normalize()
         self.draw_button.setChecked(False)
         self.reset_button.setEnabled(True)
+        self._pan_tool.refresh_handles()
         self._update_coords()
         self._update_measurement()
 
@@ -1002,6 +1146,7 @@ class ExtentDialog(QDialog):
             return
         self._drawn_extent = QgsRectangle(rectangle)
         self._drawn_extent.normalize()
+        self._pan_tool.refresh_handles()
         self._update_coords()
         self._update_measurement()
 
@@ -1010,6 +1155,7 @@ class ExtentDialog(QDialog):
         self._draw_tool.clear()
         self.draw_button.setChecked(False)
         self.reset_button.setEnabled(False)
+        self._pan_tool.refresh_handles()
         self._update_coords()
         self._update_measurement()
 
@@ -1115,6 +1261,7 @@ class ExtentDialog(QDialog):
 
     def done(self, result):
         self._draw_tool.clear()
+        self._pan_tool.dispose()
         self.canvas.stopRendering()
         self.canvas.setLayers([])
         # Поиск и подсказки больше не нужны: окно закрывается, а модель

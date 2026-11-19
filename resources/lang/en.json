@@ -240,7 +240,7 @@
   "Использовать охват": "Use extent",
   "Нарисовать охват": "Draw extent",
   "Нарисовать охват: левой кнопкой протяните прямоугольник, правой — перемещайте карту": "Draw extent: drag a rectangle with the left button, move the map with the right button",
-  "Перетаскивайте карту мышью, колесом меняйте масштаб. Готовую рамку можно тянуть прямо за неё. Кнопка с иконкой прямоугольника рисует новую рамку; при рисовании правая кнопка перемещает карту. Затем нажмите «Использовать охват».": "Drag the map with the mouse and use the wheel to zoom. Drag a finished frame directly to move it. The rectangle button draws a new frame; while drawing, the right button moves the map. Then press Use extent.",
+  "Перетаскивайте карту мышью, колесом меняйте масштаб. Готовую рамку можно тянуть прямо за неё, а за угловые маркеры — менять размер. Кнопка с иконкой прямоугольника рисует новую рамку; при рисовании правая кнопка перемещает карту. Затем нажмите «Использовать охват».": "Drag the map with the mouse and use the wheel to zoom. Drag a finished frame directly to move it, or drag its corner handles to resize it. The rectangle button draws a new frame; while drawing, the right button moves the map. Then press Use extent.",
   "Поиск места": "Search for a place",
   "Подложка карты": "Map background",
   "Ошибка поиска: {}": "Search error: {}",

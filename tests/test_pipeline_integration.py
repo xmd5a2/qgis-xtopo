@@ -3094,10 +3094,37 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 dialog._draw_tool.band.strokeColor(), FRAME_COLOR
             )
+            self.assertTrue(dialog._pan_tool.handles.isVisible())
+            self.assertEqual(len(dialog._pan_tool.handle_positions()), 4)
+
+            # Угловой маркер меняет размер рамки, противоположный угол стоит.
+            before_resize = QgsRectangle(dialog._drawn_extent)
+            corner = dialog._pan_tool.handle_positions()[2]
+            tool = dialog._pan_tool
+            tool.canvasPressEvent(
+                Event(_left_button(), corner, _left_button())
+            )
+            tool.canvasMoveEvent(
+                Event(
+                    _left_button(), corner + QPoint(40, 30), _left_button()
+                )
+            )
+            resized = QgsRectangle(dialog._drawn_extent)
+            self.assertNotAlmostEqual(
+                resized.width(), before_resize.width(), places=2
+            )
+            self.assertAlmostEqual(
+                resized.xMinimum(), before_resize.xMinimum(), places=2
+            )
+            self.assertAlmostEqual(
+                resized.yMinimum(), before_resize.yMinimum(), places=2
+            )
+            tool.canvasReleaseEvent(
+                Event(_left_button(), corner + QPoint(40, 30))
+            )
 
             before = QgsRectangle(dialog._drawn_extent)
             center = dialog.canvas.viewport().rect().center()
-            tool = dialog._pan_tool
             tool.canvasPressEvent(
                 Event(_left_button(), center, _left_button())
             )
@@ -3151,6 +3178,7 @@ class PipelineIntegrationTest(unittest.TestCase):
 
             dialog._reset_drawn()
             self.assertIsNone(dialog._drawn_extent)
+            self.assertFalse(dialog._pan_tool.handles.isVisible())
         finally:
             dialog.done(0)
 
