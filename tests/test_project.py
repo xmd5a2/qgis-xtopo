@@ -197,6 +197,30 @@ class OverlayFilterPatchTest(unittest.TestCase):
         self.assertIn("try(overlay_within('prison'), false)", text)
         self.assertNotIn("if(overlay_within", text)
 
+    def test_repair_project_limits_label_candidates(self):
+        from qgis_xtopo.core.project import repair_project
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "demo.qgz"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "demo.qgs",
+                    "<qgis><PAL>"
+                    '<CandidatesLinePerCM type="double">5'
+                    "</CandidatesLinePerCM></PAL></qgis>",
+                )
+            self.assertTrue(repair_project(path))
+            with zipfile.ZipFile(path) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+            self.assertIn(
+                '<CandidatesLinePerCM type="double">0.5'
+                "</CandidatesLinePerCM>",
+                text,
+            )
+            self.assertIn("<qgis>", text)
+            self.assertIn("</PAL>", text)
+            self.assertFalse(repair_project(path))
+
 
 class RasterResamplingTest(unittest.TestCase):
     """Растры рельефа передискретизируются бикубом, и по возможности

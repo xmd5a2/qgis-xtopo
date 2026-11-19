@@ -63,6 +63,15 @@ RESAMPLING_STAGE_PATTERN = re.compile(
 )
 GDAL_PROVIDER_PATTERN = re.compile(r"<provider[^>]*>\s*gdal\s*</provider>")
 
+# Штатные 5 кандидатов линейных подписей на сантиметр заставляют PAL
+# перебирать в разы больше позиций. 0.5 заметно ускоряет плотные
+# подписи, почти не меняя карту.
+LABEL_CANDIDATES_PATTERN = re.compile(
+    r"(<CandidatesLinePerCM\b[^>]*>)\s*([0-9.]+)\s*"
+    r"(</CandidatesLinePerCM>)"
+)
+LABEL_CANDIDATES_PER_CM = 0.5
+
 
 def resolve_label_font():
     try:
@@ -478,8 +487,31 @@ def patch_raster_resampling(text):
     return MAPLAYER_PATTERN.sub(fix_layer, text)
 
 
+def patch_label_candidates(text):
+    """Ограничивает число кандидатов линейных подписей.
+
+    Штатные 5 на сантиметр заставляют PAL перебирать в разы больше
+    позиций. 0.5 заметно ускоряет рендер плотных подписей.  Уже
+    уменьшенные и пользовательские значения не перебиваем: правим
+    только штатную пятёрку.
+    """
+    match = LABEL_CANDIDATES_PATTERN.search(text)
+    if match is None:
+        return text
+    try:
+        value = float(match.group(2))
+    except ValueError:
+        return text
+    if value != 5.0:
+        return text
+    replacement = (
+        f"{match.group(1)}{LABEL_CANDIDATES_PER_CM:g}{match.group(3)}"
+    )
+    return text[:match.start()] + replacement + text[match.end():]
+
+
 def repair_project(path):
-    """Patch fonts and drop empty layers in a single archive rewrite."""
+    """Чинит шрифт, пустые слои, фильтры, растры и подписи."""
     path = Path(path)
     if not path.exists():
         return False
@@ -498,6 +530,7 @@ def repair_project(path):
     updated, _removed = _remove_empty_layers(text, base_dir)
     updated = patch_overlay_filters(updated)
     updated = patch_raster_resampling(updated)
+    updated = patch_label_candidates(updated)
     if new_font:
         updated = updated.replace(old_font, new_font)
     if updated == text:
