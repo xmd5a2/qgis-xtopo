@@ -3961,7 +3961,9 @@ class XtopoDockWidget(QDockWidget):
         self._set_running(False)
         self._set_status("Ошибка")
         self.log_toggle.setChecked(True)
-        self._append_log(f"Ошибка: {message}")
+        self._append_log(
+            i18n.trf("Ошибка: {}", i18n.tr(message))
+        )
         QMessageBox.critical(self, "QGIS-xtopo", i18n.tr(message))
 
     def _cancelled(self):
