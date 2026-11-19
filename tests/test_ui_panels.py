@@ -1067,6 +1067,7 @@ class ExportPreviewDialogTest(unittest.TestCase):
         single = self._dialog(count=1)
         self.assertFalse(single.thumbnails_button.isVisibleTo(single))
         self.assertFalse(single.thumbnail_panel.isVisibleTo(single))
+        self.assertFalse(single.navigation.isVisibleTo(single))
 
     def test_export_buttons_emit_extension(self):
         dialog = self._dialog()
@@ -1098,6 +1099,10 @@ class ExportPreviewDialogTest(unittest.TestCase):
         press("Key_Right")
         self.assertEqual(dialog.current_index, 1)
         press("Key_Left")
+        self.assertEqual(dialog.current_index, 0)
+        press("Key_Down")
+        self.assertEqual(dialog.current_index, 1)
+        press("Key_Up")
         self.assertEqual(dialog.current_index, 0)
         press("Key_Space")
         self.assertEqual(dialog.current_index, 1)

@@ -313,14 +313,28 @@ class ExportPreviewDialog(QDialog):
         self.thumbnails.setHorizontalScrollBarPolicy(
             _enum(Qt, "ScrollBarPolicy", "ScrollBarAlwaysOff")
         )
+        self.thumbnails.setStyleSheet(
+            "QListWidget { border: none; background: transparent; }"
+            "QListWidget::item { border: 1px solid transparent; padding: 2px; }"
+            "QListWidget::item:selected {"
+            " border: 1px solid #0078d7;"
+            " background: transparent;"
+            " color: palette(text);"
+            "}"
+        )
         self.thumbnails.itemClicked.connect(self._thumbnail_clicked)
         panel_layout.addWidget(self.thumbnails)
         body.addWidget(self.thumbnail_panel)
         layout.addLayout(body, 1)
 
-        tools = QHBoxLayout()
-        tools.setContentsMargins(8, 6, 8, 2)
-        tools.setSpacing(6)
+        self._control_row = QHBoxLayout()
+        self._control_row.setContentsMargins(8, 6, 8, 6)
+        self._control_row.setSpacing(6)
+
+        self._left_controls = QWidget(self)
+        left_layout = QHBoxLayout(self._left_controls)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
         self.zoom_out_button = QPushButton("−", self)
         self.zoom_out_button.setFixedWidth(34)
         self.zoom_out_button.setToolTip(i18n.tr("Уменьшить"))
@@ -329,6 +343,34 @@ class ExportPreviewDialog(QDialog):
         self.zoom_in_button.setToolTip(i18n.tr("Увеличить"))
         self.fit_button = QPushButton("Вписать в окно", self)
         self.fit_button.setToolTip(i18n.tr("Вписать лист в окно"))
+        left_layout.addWidget(self.zoom_out_button)
+        left_layout.addWidget(self.zoom_in_button)
+        left_layout.addWidget(self.fit_button)
+        left_layout.addStretch(1)
+
+        self.navigation = QWidget(self)
+        navigation = QHBoxLayout(self.navigation)
+        navigation.setContentsMargins(0, 0, 0, 0)
+        navigation.setSpacing(6)
+        self.previous_button = QPushButton("←", self)
+        self.previous_button.setFixedWidth(34)
+        self.previous_button.setToolTip(i18n.tr("Предыдущий лист"))
+        self.next_button = QPushButton("→", self)
+        self.next_button.setFixedWidth(34)
+        self.next_button.setToolTip(i18n.tr("Следующий лист"))
+        self.sheet_label = QLabel("", self)
+        self.sheet_label.setAlignment(
+            _enum(Qt, "AlignmentFlag", "AlignCenter")
+        )
+        self.sheet_label.setMinimumWidth(64)
+        navigation.addWidget(self.previous_button)
+        navigation.addWidget(self.sheet_label)
+        navigation.addWidget(self.next_button)
+
+        self._right_controls = QWidget(self)
+        right_layout = QHBoxLayout(self._right_controls)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
         self.thumbnails_button = QPushButton("Миниатюры", self)
         self.thumbnails_button.setCheckable(True)
         self.thumbnails_button.setToolTip(
@@ -348,36 +390,17 @@ class ExportPreviewDialog(QDialog):
             button.setToolTip(i18n.tr("Экспортировать листы в {}…").format(
                 button.text()
             ))
-        tools.addWidget(self.zoom_out_button)
-        tools.addWidget(self.zoom_in_button)
-        tools.addWidget(self.fit_button)
-        tools.addStretch(1)
-        tools.addWidget(self.thumbnails_button)
-        tools.addWidget(self.png_button)
-        tools.addWidget(self.pdf_button)
-        tools.addWidget(self.close_button)
-        layout.addLayout(tools)
+        right_layout.addStretch(1)
+        right_layout.addWidget(self.thumbnails_button)
+        right_layout.addWidget(self.png_button)
+        right_layout.addWidget(self.pdf_button)
+        right_layout.addWidget(self.close_button)
 
-        navigation = QHBoxLayout()
-        navigation.setContentsMargins(8, 2, 8, 6)
-        navigation.setSpacing(6)
-        self.previous_button = QPushButton("←", self)
-        self.previous_button.setFixedWidth(34)
-        self.previous_button.setToolTip(i18n.tr("Предыдущий лист"))
-        self.next_button = QPushButton("→", self)
-        self.next_button.setFixedWidth(34)
-        self.next_button.setToolTip(i18n.tr("Следующий лист"))
-        self.sheet_label = QLabel("", self)
-        self.sheet_label.setAlignment(
-            _enum(Qt, "AlignmentFlag", "AlignCenter")
-        )
-        self.sheet_label.setMinimumWidth(64)
-        navigation.addStretch(1)
-        navigation.addWidget(self.previous_button)
-        navigation.addWidget(self.sheet_label)
-        navigation.addWidget(self.next_button)
-        navigation.addStretch(1)
-        layout.addLayout(navigation)
+        self._control_row.addWidget(self._left_controls, 1)
+        self._control_row.addWidget(self.navigation)
+        self._control_row.addWidget(self._right_controls, 1)
+        layout.addLayout(self._control_row)
+        self._balance_control_groups()
 
         no_focus = _enum(Qt, "FocusPolicy", "NoFocus")
         for button in (
@@ -408,6 +431,15 @@ class ExportPreviewDialog(QDialog):
         )
         self.close_button.clicked.connect(lambda: self.close())
 
+    def _balance_control_groups(self):
+        """Одинаковая ширина боковых групп держит навигацию по центру."""
+        side = max(
+            self._left_controls.sizeHint().width(),
+            self._right_controls.sizeHint().width(),
+        )
+        self._left_controls.setMinimumWidth(side)
+        self._right_controls.setMinimumWidth(side)
+
     @property
     def sheet_count(self):
         return len(self._images)
@@ -425,6 +457,10 @@ class ExportPreviewDialog(QDialog):
         if key == _enum(Qt, "Key", "Key_Left"):
             self._previous()
         elif key == _enum(Qt, "Key", "Key_Right"):
+            self._next()
+        elif key == _enum(Qt, "Key", "Key_Up"):
+            self._previous()
+        elif key == _enum(Qt, "Key", "Key_Down"):
             self._next()
         elif key == _enum(Qt, "Key", "Key_Home"):
             self._show_index(0)
@@ -455,7 +491,11 @@ class ExportPreviewDialog(QDialog):
                 _enum(Qt, "AspectRatioMode", "KeepAspectRatio"),
                 _enum(Qt, "TransformationMode", "SmoothTransformation"),
             )
-            item = QListWidgetItem(QIcon(QPixmap.fromImage(thumbnail)), "")
+            pixmap = QPixmap.fromImage(thumbnail)
+            icon = QIcon()
+            icon.addPixmap(pixmap, _enum(QIcon, "Mode", "Normal"))
+            icon.addPixmap(pixmap, _enum(QIcon, "Mode", "Selected"))
+            item = QListWidgetItem(icon, "")
             item.setText(str(number))
             item.setData(_enum(Qt, "ItemDataRole", "UserRole"), number - 1)
             item.setTextAlignment(
@@ -463,11 +503,13 @@ class ExportPreviewDialog(QDialog):
             )
             self.thumbnails.addItem(item)
         many = len(self._images) > 1
+        self.navigation.setVisible(many)
         self.thumbnails_button.setVisible(many)
         self.thumbnail_panel.setVisible(many)
         self.thumbnails_button.blockSignals(True)
         self.thumbnails_button.setChecked(many)
         self.thumbnails_button.blockSignals(False)
+        self._balance_control_groups()
 
     def _show_index(self, index):
         if not self._images:

@@ -1840,7 +1840,7 @@ class ProjectPanel(QWidget):
             )
         )
         self._export_preview = dialog
-        dialog.showFullScreen()
+        dialog.showMaximized()
         dialog.raise_()
         dialog.activateWindow()
 

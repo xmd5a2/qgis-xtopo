@@ -16,7 +16,7 @@ from qgis.core import (
     Qgis,
 )
 from qgis.PyQt.QtCore import QRectF, Qt
-from qgis.PyQt.QtGui import QColor, QPainter, QPen
+from qgis.PyQt.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from ..core.measure import scale_bar
 
@@ -47,6 +47,9 @@ class LayoutScaleBarItem(QgsLayoutItem):
     def __init__(self, layout, map_item):
         super().__init__(layout)
         self.map_item = map_item
+        # QgsLayoutItem по умолчанию заливает прямоугольник белым.
+        self.setBackgroundEnabled(False)
+        self.setFrameEnabled(False)
 
     def _meters_per_mm(self):
         """Метров на миллиметр листа для текущего охвата карты."""
@@ -122,16 +125,20 @@ class LayoutScaleBarItem(QgsLayoutItem):
             font = painter.font()
             font.setPointSizeF(TEXT_POINT_SIZE)
             painter.setFont(font)
-            painter.setPen(QPen(QColor(25, 25, 25), 1))
-            painter.setBrush(QColor(255, 255, 255, 0))
-            alignment = (
-                _enum(Qt, "AlignmentFlag", "AlignHCenter")
-                | _enum(Qt, "AlignmentFlag", "AlignBottom")
+            metrics = painter.fontMetrics()
+            text_width = metrics.horizontalAdvance(text)
+            baseline = top - 2.0 - metrics.descent()
+            path = QPainterPath()
+            path.addText(
+                (length - text_width) / 2.0, baseline, font, text
             )
-            painter.drawText(
-                QRectF(0, 0, length, top),
-                alignment,
-                text,
-            )
+            halo = QPen(QColor(255, 255, 255), max(1.0, 0.3 * millimeters))
+            halo.setJoinStyle(_enum(Qt, "PenJoinStyle", "RoundJoin"))
+            painter.setPen(halo)
+            painter.setBrush(_enum(Qt, "BrushStyle", "NoBrush"))
+            painter.drawPath(path)
+            painter.setPen(_enum(Qt, "PenStyle", "NoPen"))
+            painter.setBrush(QColor(25, 25, 25))
+            painter.drawPath(path)
         finally:
             painter.restore()
