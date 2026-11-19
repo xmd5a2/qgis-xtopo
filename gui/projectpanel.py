@@ -45,8 +45,9 @@ from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDockWidget,
     QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu,
-    QMessageBox, QPushButton, QSlider, QStyle, QStyleOptionComboBox,
-    QStylePainter, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QMessageBox, QProgressDialog, QPushButton, QSlider, QStyle,
+    QStyleOptionComboBox, QStylePainter, QToolBar, QToolButton, QVBoxLayout,
+    QWidget,
 )
 from qgis.PyQt.QtXml import QDomDocument
 
@@ -63,6 +64,7 @@ from ..core.resources import template_path
 from .atlas import (
     SheetEditMapTool, SheetMapTool, SheetMarker, SheetSizeLabels,
 )
+from .exportpreview import ExportPreviewDialog
 from .projecticons import terrain_icon
 from .translation import translate_tree
 
@@ -73,6 +75,10 @@ PAGE_FORMATS = {
 }
 
 MEMORY_BUDGET = 800 * 1024 * 1024
+
+# Длинная сторона картинки предпросмотра: лист остаётся читаемым при
+# увеличении, но рендер идёт заметно быстрее настоящего экспорта.
+PREVIEW_LONG_SIDE = 1280
 
 # Предел обхода слоя изогипс, если фильтр правила пришлось считать самим:
 # без предела слой читается целиком и панель замирает на секунды.
@@ -570,6 +576,7 @@ class ProjectPanel(QWidget):
         self._atlas_layer = None
         self._layout_original_layers = None
         self._export_progress = None
+        self._export_preview = None
         self._opacity_baseline = {}
         self._hillshade_baseline = {}
         self._hillshade_before_basemap = False
@@ -1132,6 +1139,14 @@ class ProjectPanel(QWidget):
         self._wrapped_labels = [self.sheets_label, hint]
 
         export_buttons = QHBoxLayout()
+        self.preview_button = QPushButton(
+            QgsApplication.getThemeIcon("mActionZoomIn.svg"), "Предпросмотр"
+        )
+        self.preview_button.setIconSize(QSize(16, 16))
+        self.preview_button.setToolTip(
+            "Собрать листы в HD и открыть просмотрщик"
+        )
+        export_buttons.addWidget(self.preview_button)
         self.export_png_button = QPushButton(
             QgsApplication.getThemeIcon("mActionFileSave.svg"), "PNG"
         )
@@ -1157,6 +1172,7 @@ class ProjectPanel(QWidget):
         self.edit_sheet_button.toggled.connect(self._toggle_edit_sheet_tool)
         self.remove_sheet_button.clicked.connect(self._remove_last_sheet)
         self.clear_sheets_button.clicked.connect(self._clear_sheets)
+        self.preview_button.clicked.connect(self._show_export_preview)
         self.export_png_button.clicked.connect(
             lambda: self._export("png")
         )
@@ -1447,6 +1463,9 @@ class ProjectPanel(QWidget):
         """
         self.add_sheet_button.setChecked(False)
         self.edit_sheet_button.setChecked(False)
+        if self._export_preview is not None:
+            self._export_preview.close()
+            self._export_preview = None
         self._sheets = []
         self._sheet_items = []
         self._active_sheet_index = None
@@ -1715,13 +1734,130 @@ class ProjectPanel(QWidget):
             name = "map"
         return str(base / f"{name}.{extension}")
 
-    def _export(self, extension):
+    def _show_export_preview(self):
+        """Рисует листы в HD и открывает встроенный просмотрщик."""
+        if self._export_preview is not None:
+            self._export_preview.close()
+            self._export_preview = None
+        try:
+            images = self._render_export_preview()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "QGIS-xtopo",
+                i18n.trf("Не удалось подготовить предпросмотр: {}", exc),
+            )
+            return
+        if images is None:
+            self._notify("Предпросмотр отменён")
+            return
+        dialog = ExportPreviewDialog(images, self)
+        dialog.setWindowModality(
+            _enum(Qt, "WindowModality", "WindowModal")
+        )
+        dialog.exportRequested.connect(
+            lambda extension, window=dialog: self._export(
+                extension, parent=window
+            )
+        )
+        dialog.finished.connect(
+            lambda _result=0, window=dialog: self._export_preview_closed(
+                window
+            )
+        )
+        self._export_preview = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _export_preview_closed(self, window):
+        if self._export_preview is window:
+            self._export_preview = None
+
+    def _render_export_preview(self):
+        canvas = self._freeze_canvas()
+        QApplication.setOverrideCursor(
+            _enum(Qt, "CursorShape", "WaitCursor")
+        )
+        try:
+            layout, atlas = self._configure_layout("preview")
+            return self._render_preview_images(layout, atlas)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._remove_atlas_layer()
+            self._restore_map_layers()
+            self._unfreeze_canvas(canvas)
+
+    def _render_preview_images(self, layout, atlas):
+        """Рендерит листы в память с длинной стороной PREVIEW_LONG_SIDE."""
+        width, height = self._page_size_mm()
+        dpi = PREVIEW_LONG_SIDE * 25.4 / max(width, height, 1.0)
+        total = max(1, len(self._sheets))
+        progress = QProgressDialog(
+            i18n.tr("Подготовка предпросмотра…"),
+            i18n.tr("Отмена"),
+            0,
+            total,
+            self,
+        )
+        progress.setWindowTitle("QGIS-xtopo")
+        progress.setWindowModality(
+            _enum(Qt, "WindowModality", "WindowModal")
+        )
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+
+        context = layout.renderContext()
+        previous_dpi = context.dpi()
+        context.setDpi(dpi)
+        exporter = QgsLayoutExporter(layout)
+        images = []
+        memory_error = i18n.tr(
+            "Недостаточно памяти для предпросмотра листа"
+        )
+        try:
+            if atlas.enabled():
+                if not atlas.beginRender():
+                    raise RuntimeError(
+                        i18n.tr("В атласе нет листов для экспорта")
+                    )
+                try:
+                    while atlas.next():
+                        if progress.wasCanceled():
+                            return None
+                        progress.setLabelText(i18n.trf(
+                            "Предпросмотр: лист {} из {}…",
+                            len(images) + 1,
+                            total,
+                        ))
+                        progress.setValue(len(images))
+                        QApplication.processEvents()
+                        if progress.wasCanceled():
+                            return None
+                        image = exporter.renderPageToImage(0, QSize(), dpi)
+                        if image.isNull():
+                            raise RuntimeError(memory_error)
+                        images.append(image)
+                finally:
+                    atlas.endRender()
+            else:
+                image = exporter.renderPageToImage(0, QSize(), dpi)
+                if image.isNull():
+                    raise RuntimeError(memory_error)
+                images.append(image)
+            progress.setValue(total)
+            return images
+        finally:
+            context.setDpi(previous_dpi)
+            progress.close()
+
+    def _export(self, extension, parent=None):
         atlas_export = bool(self._sheets)
         if atlas_export:
             title = i18n.trf("Экспорт атласа {}", extension.upper())
         else:
             title = i18n.trf("Экспорт {}", extension.upper())
-        dialog = QFileDialog(self, title)
+        dialog = QFileDialog(parent or self, title)
         dialog.setAcceptMode(_enum(QFileDialog, "AcceptMode", "AcceptSave"))
         dialog.setFileMode(_enum(QFileDialog, "FileMode", "AnyFile"))
         dialog.setNameFilter(f"{extension.upper()} (*.{extension})")

@@ -1003,5 +1003,88 @@ class VariantMenuTest(unittest.TestCase):
             project.clear()
 
 
+class ExportPreviewDialogTest(unittest.TestCase):
+    """Просмотрщик листов: листание, миниатюры и сигналы экспорта."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def _dialog(self, count=3):
+        from qgis.PyQt.QtGui import QColor, QImage
+
+        from qgis_xtopo.gui.exportpreview import ExportPreviewDialog, _enum
+
+        images = []
+        for number in range(count):
+            image = QImage(
+                100, 140, _enum(QImage, "Format", "Format_ARGB32")
+            )
+            image.fill(QColor(30 + number * 40, 90, 140))
+            images.append(image)
+        dialog = ExportPreviewDialog(images)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def test_navigation_and_indicator(self):
+        dialog = self._dialog()
+        self.assertEqual(dialog.sheet_count, 3)
+        self.assertEqual(dialog.current_index, 0)
+        self.assertEqual(dialog.sheet_label.text(), "1 / 3")
+        self.assertFalse(dialog.previous_button.isEnabled())
+        self.assertTrue(dialog.next_button.isEnabled())
+
+        dialog._next()
+        self.assertEqual(dialog.current_index, 1)
+        self.assertEqual(dialog.sheet_label.text(), "2 / 3")
+        self.assertTrue(dialog.previous_button.isEnabled())
+        self.assertTrue(dialog.next_button.isEnabled())
+
+        dialog._next()
+        self.assertEqual(dialog.current_index, 2)
+        self.assertEqual(dialog.sheet_label.text(), "3 / 3")
+        self.assertFalse(dialog.next_button.isEnabled())
+
+        dialog._previous()
+        self.assertEqual(dialog.current_index, 1)
+
+    def test_thumbnails_mode_opens_selected_sheet(self):
+        dialog = self._dialog()
+        self.assertEqual(dialog.thumbnails.count(), 3)
+
+        dialog.thumbnails_button.setChecked(True)
+        self.assertIs(dialog.stack.currentWidget(), dialog.thumbnails)
+
+        dialog._thumbnail_clicked(dialog.thumbnails.item(2))
+        self.assertEqual(dialog.current_index, 2)
+        self.assertFalse(dialog.thumbnails_button.isChecked())
+        self.assertIs(dialog.stack.currentWidget(), dialog.canvas)
+
+    def test_export_buttons_emit_extension(self):
+        dialog = self._dialog()
+        requested = []
+        dialog.exportRequested.connect(requested.append)
+        dialog.png_button.click()
+        dialog.pdf_button.click()
+        self.assertEqual(requested, ["png", "pdf"])
+
+    def test_mouse_wheel_zoom_is_bounded(self):
+        dialog = self._dialog()
+        dialog.show()
+        self.app.processEvents()
+        canvas = dialog.canvas
+        fit = canvas.scale
+        self.assertGreater(fit, 0)
+        canvas.zoom_at(2.0)
+        self.assertGreater(canvas.scale, fit)
+        canvas.zoom_at(100.0)
+        self.assertLessEqual(canvas.scale, fit * 8.0 + 1e-6)
+        canvas.reset_view()
+        self.assertAlmostEqual(canvas.scale, fit)
+        dialog.close()
+
+
 if __name__ == "__main__":
     unittest.main()

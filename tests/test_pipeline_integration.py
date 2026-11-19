@@ -1258,6 +1258,72 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_export_preview_renders_hd_sheets(self):
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsLayoutItemMap, QgsLayoutPoint,
+            QgsLayoutSize, QgsPrintLayout, QgsProject, QgsRectangle,
+            QgsUnitTypes,
+        )
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        project.clear()
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        layout.setName("Detailed")
+        map_item = QgsLayoutItemMap(layout)
+        map_item.attemptMove(
+            QgsLayoutPoint(0, 0, QgsUnitTypes.LayoutMillimeters)
+        )
+        map_item.attemptResize(
+            QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters)
+        )
+        map_item.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        layout.addLayoutItem(map_item)
+        project.layoutManager().addLayout(layout)
+
+        class Iface:
+            def __init__(self, canvas):
+                self._canvas = canvas
+
+            def mapCanvas(self):
+                return self._canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        panel = projectpanel.ProjectPanel(Iface(canvas))
+        try:
+            panel._sheets = [
+                (
+                    QgsRectangle(0, 0, 1000, 707),
+                    canvas.mapSettings().destinationCrs(),
+                ),
+                (
+                    QgsRectangle(1000, 0, 2000, 707),
+                    canvas.mapSettings().destinationCrs(),
+                ),
+            ]
+            images = panel._render_export_preview()
+            self.assertEqual(len(images), 2)
+            for image in images:
+                self.assertFalse(image.isNull())
+                self.assertEqual(
+                    max(image.width(), image.height()),
+                    projectpanel.PREVIEW_LONG_SIDE,
+                )
+            # После рендера макет и атлас остаются в исходном состоянии.
+            self.assertIsNone(panel._atlas_layer)
+            self.assertFalse(layout.atlas().enabled())
+            self.assertIsNone(panel._layout_original_layers)
+        finally:
+            panel.deleteLater()
+            project.clear()
+            canvas.deleteLater()
+            self.app.processEvents()
+
     def test_export_png_without_atlas(self):
         from osgeo import gdal
         from qgis.core import (
