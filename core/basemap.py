@@ -12,9 +12,9 @@
 меняются местами, чтобы подписи читались на снимке.  Прежние цвета
 хранятся в свойстве слоя — по ним надписи возвращаются в исходный вид.
 
-Инверсия не трогает надписи дорог, нарисованных широкой полосой: у
-таких надписей halo совпадает с цветом полосы (см. `is_band_color`),
-и менять их местами нельзя — надпись рассыпается на самой дороге.
+Инверсия не трогает надписи дорог, нарисованных широкой полосой, и
+надписи площадных дорог: их тип определяется по тегам объекта (см.
+`core/label_tags.py`), а не по цвету надписи.
 """
 
 import json
@@ -29,7 +29,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtGui import QColor
 
-from . import label_style
+from . import label_style, label_tags
 
 SOURCE_PROPERTY = "qgis_xtopo/basemap"
 OSM_VISIBLE_PROPERTY = "qgis_xtopo/basemap_osm_visible"
@@ -42,12 +42,6 @@ EXCLUDED_LAYERS = (OSM_LAYER_NAME, "BBOX")
 
 SETTINGS_KEY = "basemap_source"
 DEFAULT_SOURCE = "google"
-
-# Насыщенность цвета, при которой его считают цветом широкой полосы
-# дороги.  В шаблоне полосы магистралей и второстепенных дорог —
-# оранжевая и светло-оранжевая; обычные улицы и площадные слои
-# нарисованы серым и белым.
-BAND_SATURATION = 0.25
 
 
 @dataclass(frozen=True)
@@ -335,41 +329,30 @@ def sync(project=None):
     return basemap
 
 
-def is_band_color(color):
-    """Цвет линии широкой полосы дороги.
-
-    Полоса в шаблоне — насыщенный цвет: оранжевый у магистралей,
-    светло-оранжевый у второстепенных дорог.  Надписи этих дорог
-    нарисованы с halo того же цвета, чтобы сливаться с полосой.
-    Обычные улицы и площадные слои нарисованы серым и белым — их
-    надписи инверсия меняет.
-    """
-    color = QColor(color)
-    if not color.isValid():
-        return False
-    _hue, saturation, value, _alpha = color.getHsvF()
-    return saturation >= BAND_SATURATION and value > 0.0
-
-
 def _label_pairs(layer):
-    """Пары «ключ правила, настройки» для правил с включённым halo.
+    """Пары «ключ правила, настройки» для правил, которые инверсия меняет.
 
     Настройки — копии: иначе Python удалил бы внутренний объект правила
     и стиль слоя испортился бы (см. `core/label_style.py`).
 
-    Надписи дорог с широкой полосой пропускаются: их halo совпадает
-    с цветом полосы, и инверсия им не нужна.
+    Пропускаются надписи дорог, нарисованных широкой полосой, и
+    площадных дорог: тип объекта определяется по тегам (см.
+    `core/label_tags.py`), а не по цвету надписи.
     """
+    labeling = layer.labeling()
+    filters = label_tags.rule_filters(labeling)
+    area_road = label_tags.layer_is_area_road(layer)
     pairs = []
-    for key, settings in label_style.label_settings(layer.labeling()):
+    for key, settings in label_style.label_settings(labeling):
         if settings is None:
             continue
-        _text_color, halo_color, halo_enabled = label_style.label_colors(
+        _text_color, _halo_color, halo_enabled = label_style.label_colors(
             settings
         )
         if not halo_enabled:
             continue
-        if is_band_color(halo_color):
+        tags = label_tags.filter_tags(filters.get(key, ""))
+        if label_tags.excluded(tags, area_road):
             continue
         pairs.append((key, settings))
     return pairs
@@ -435,7 +418,7 @@ def invert_labels(project=None):
     возвращаются в исходный вид.  Перед обменом прежние цвета
     возвращаются, поэтому все слои получают одинаковую картину,
     даже если стиль слоя трогали стороной.  Надписи дорог с широкой
-    полосой не меняются (см. `is_band_color`).
+    полосой и площадных дорог не меняются (см. `core/label_tags.py`).
     """
     project = project or QgsProject.instance()
     # Прежние цвета возвращаются: слой, стиль которого поменяли

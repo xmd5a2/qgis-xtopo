@@ -905,20 +905,50 @@ class BasemapLabelInversionTest(unittest.TestCase):
         self.project.removeMapLayer(layer.id())
 
     def test_band_color_marks_road_band_colors(self):
-        """Цвет полосы дороги — насыщенный, а у улиц и слоёв серый."""
-        from qgis.PyQt.QtGui import QColor
+        """Тип дороги определяется по тегам, а не по цвету надписи."""
+        from qgis_xtopo.core import label_tags
 
-        self.assertTrue(self.basemap.is_band_color(QColor(255, 121, 0)))
-        self.assertTrue(self.basemap.is_band_color(QColor(255, 188, 128)))
-        self.assertFalse(self.basemap.is_band_color(QColor(255, 255, 255)))
-        self.assertFalse(self.basemap.is_band_color(QColor(243, 243, 243)))
-        self.assertFalse(self.basemap.is_band_color(QColor(0, 0, 0)))
-        self.assertFalse(self.basemap.is_band_color(QColor()))
+        tags = label_tags.filter_tags(
+            "\"highway='motorway' OR highway='trunk' OR highway='primary'\""
+        )
+        self.assertEqual(
+            tags, {"highway": {"motorway", "trunk", "primary"}}
+        )
+        self.assertTrue(label_tags.is_wide_band(tags))
+        # Улицы нарисованы узкой полосой: инверсия их меняет.
+        self.assertFalse(
+            label_tags.is_wide_band(
+                label_tags.filter_tags("\"highway='residential'\"")
+            )
+        )
+        # Отрицание типа не определяет.
+        self.assertFalse(
+            label_tags.is_wide_band(
+                label_tags.filter_tags("NOT \"highway\" = 'motorway'")
+            )
+        )
+
+    def test_area_road_tags_are_recognized(self):
+        """Площадная дорога отличается от площади по тегам."""
+        from qgis_xtopo.core import label_tags
+
+        area = label_tags.filter_tags("\"area:highway='pedestrian'\"")
+        self.assertTrue(label_tags.is_area_road(area))
+        self.assertFalse(label_tags.is_square(area))
+        # Площадь: инверсия её надписи меняет.
+        square = label_tags.filter_tags("\"place='square'\"")
+        self.assertTrue(label_tags.is_square(square))
+        self.assertFalse(label_tags.is_area_road(square))
+        # Площадь, нарисованная площадной дорогой, остаётся площадью.
+        both = label_tags.filter_tags(
+            "\"area:highway='pedestrian' AND place='square'\""
+        )
+        self.assertFalse(label_tags.is_area_road(both))
 
     def test_wide_band_road_labels_are_not_inverted(self):
         """Надписи дорог с широкой полосой инверсия не меняет."""
         from qgis.core import QgsVectorLayer
-        from qgis_xtopo.core import label_style
+        from qgis_xtopo.core import label_style, label_tags
         from qgis_xtopo.gui import projectpanel as pp
 
         renderer, labeling = pp._template_layer_objects("highway main")
@@ -939,18 +969,104 @@ class BasemapLabelInversionTest(unittest.TestCase):
             return result
 
         before = colors()
-        # Первые правила — магистрали, у них halo цвета полосы;
-        # следом идут второстепенные дороги с таким же halo.
-        self.assertTrue(self.basemap.is_band_color(before[0][1]))
-        self.assertTrue(self.basemap.is_band_color(before[2][1]))
-        # Дальше — улицы: halo белый, инверсия их меняет.
-        self.assertFalse(self.basemap.is_band_color(before[4][1]))
+        # Правила с тегами: магистрали, второстепенные дороги, улицы.
+        filters = label_tags.rule_filters(layer.labeling())
+        tags = [
+            label_tags.filter_tags(filters[key])
+            for key in layer.labeling().subProviders()
+        ]
+        wide = [i for i, item in enumerate(tags)
+                if label_tags.is_wide_band(item)]
+        self.assertTrue(wide)
+        self.assertTrue(
+            [i for i, item in enumerate(tags)
+             if item.get("highway") == {"residential", "unclassified",
+                                        "living_street", "service"}]
+        )
 
         self.basemap.invert_labels(self.project)
         after = colors()
-        self.assertEqual(after[0], before[0])
-        self.assertEqual(after[2], before[2])
-        self.assertNotEqual(after[4], before[4])
+        # Магистрали и второстепенные дороги остались прежними.
+        for index in wide:
+            self.assertEqual(after[index], before[index])
+        # Улицы инверсия поменяла.
+        streets = next(
+            i for i, item in enumerate(tags)
+            if "residential" in item.get("highway", set())
+        )
+        self.assertNotEqual(after[streets], before[streets])
+        self.project.removeMapLayer(layer.id())
+
+    def _square_layer(self, place, area):
+        """Слой с подписями площадей и объекты с тегами."""
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField, QgsFeature, QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel as pp
+
+        _renderer, labeling = pp._template_layer_objects(
+            "place square highway area names"
+        )
+        layer = QgsVectorLayer(
+            "Polygon?crs=EPSG=4326", "place square highway area names",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("area:highway", QVariant.String),
+            QgsField("place", QVariant.String),
+        ])
+        layer.updateFields()
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([area, place])
+        provider.addFeatures([feature])
+        layer.setLabeling(labeling)
+        self.project.addMapLayer(layer)
+        return layer
+
+    def test_area_road_labels_are_not_inverted(self):
+        """Надписи площадных дорог инверсия не меняет."""
+        from qgis_xtopo.core import label_style
+
+        layer = self._square_layer(None, "pedestrian")
+
+        def colors():
+            result = []
+            for _key, settings in label_style.label_settings(
+                layer.labeling()
+            ):
+                text, halo, _enabled = label_style.label_colors(settings)
+                result.append((text, halo))
+            return result
+
+        before = colors()
+        self.assertTrue(before)
+        self.basemap.invert_labels(self.project)
+        self.assertEqual(colors(), before)
+        self.assertIsNone(
+            layer.customProperty(self.basemap.LABEL_COLORS_PROPERTY)
+        )
+        self.project.removeMapLayer(layer.id())
+
+    def test_square_labels_are_inverted(self):
+        """Надписи площадей инверсия меняет."""
+        from qgis_xtopo.core import label_style
+
+        layer = self._square_layer("square", None)
+
+        def colors():
+            result = []
+            for _key, settings in label_style.label_settings(
+                layer.labeling()
+            ):
+                text, halo, _enabled = label_style.label_colors(settings)
+                result.append((text, halo))
+            return result
+
+        before = colors()
+        self.basemap.invert_labels(self.project)
+        after = colors()
+        self.assertTrue(before)
+        self.assertNotEqual(after, before)
         self.project.removeMapLayer(layer.id())
 
 
