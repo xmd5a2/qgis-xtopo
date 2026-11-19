@@ -47,7 +47,6 @@ class TerrainCacheTest(unittest.TestCase):
             names = [
                 "merged_dem.tif",
                 "merged_dem_3857.tif",
-                "merged_dem_upscaled.tif",
                 "slope_upscaled.tif",
                 "hillshade_composite.tif",
             ]

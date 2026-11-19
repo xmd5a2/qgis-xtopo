@@ -46,13 +46,13 @@ class SlopeResolutionTest(unittest.TestCase):
             generate_hillshade_slope(config, None)
             for name in (
                 "slope_upscaled.tif",
-                "merged_dem_upscaled.tif",
                 "hillshade_composite.tif",
             ):
                 raster = gdal.Open(str(root / name))
                 self.assertEqual(raster.RasterXSize, 40, name)
                 self.assertEqual(raster.RasterYSize, 40, name)
                 raster = None
+            self.assertFalse((root / "merged_dem_upscaled.tif").exists())
             self.assertFalse((root / "merged_dem_x2.tif").exists())
             # Промежуточных файлов больше нет: отсечение уклона пишется
             # сразу в итоговый растр.
@@ -204,13 +204,13 @@ class NativeTerrainResolutionTest(unittest.TestCase):
             for name in (
                 "slope_upscaled.tif",
                 "hillshade_composite.tif",
-                "merged_dem_upscaled.tif",
             ):
                 raster = gdal.Open(str(root / name))
                 self.assertIsNotNone(raster, name)
                 self.assertEqual(raster.RasterXSize, 40, name)
                 self.assertEqual(raster.RasterYSize, 40, name)
                 raster = None
+            self.assertFalse((root / "merged_dem_upscaled.tif").exists())
             self.assertFalse((root / "merged_dem_downscaled.tif").exists())
             self.assertFalse((root / "merged_dem_x2.tif").exists())
 
@@ -247,13 +247,13 @@ class NativeTerrainResolutionTest(unittest.TestCase):
             for name in (
                 "slope_upscaled.tif",
                 "hillshade_composite.tif",
-                "merged_dem_upscaled.tif",
             ):
                 raster = gdal.Open(str(root / name))
                 self.assertIsNotNone(raster, name)
                 self.assertEqual(raster.RasterXSize, 40, name)
                 self.assertEqual(raster.RasterYSize, 40, name)
                 raster = None
+            self.assertFalse((root / "merged_dem_upscaled.tif").exists())
 
 
 class RasterBlockTransformTest(unittest.TestCase):

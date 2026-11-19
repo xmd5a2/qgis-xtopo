@@ -1419,29 +1419,13 @@ def _generate_slope(config, merged, progress=None):
     slope.unlink(missing_ok=True)
 
 
-def _link_or_copy(source, destination):
-    """Создаёт жёсткую ссылку, а если файловая система не позволяет — копию."""
-    destination.unlink(missing_ok=True)
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
-
-
 def _generate_hillshade(config, merged, dem_width, dem_height,
                         progress=None):
-    """Ветка отмывки: оттенок считается по нативному DEM.
-
-    Имя ``merged_dem_upscaled.tif`` оставлено ради шаблона проекта и
-    выражений склонов; укрупнения больше нет, это ссылка на нативный DEM.
-    """
+    """Ветка отмывки: оттенок считается по нативному DEM."""
     gdal, _, _ = _gdal()
     numpy = _numpy()
     if progress:
         progress("Generating hillshade")
-    upscaled = config.raster_dir / "merged_dem_upscaled.tif"
-    _link_or_copy(merged, upscaled)
-
     hillshade = config.raster_dir / "hillshade.tif"
     # Как gdaldem hillshade по умолчанию: солнце 315°/45°, без вертикального
     # преувеличения. Многопроходная отмывка с altitude=70 и zFactor=2 давала

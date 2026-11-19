@@ -23,7 +23,6 @@ from pathlib import Path
 DEM_FILES = (
     "merged_dem.tif",
     "merged_dem_3857.tif",
-    "merged_dem_upscaled.tif",
     "slope_upscaled.tif",
     "hillshade_composite.tif",
 )
@@ -454,9 +453,7 @@ def dem_required(config):
     """Растры, которые должны быть в кэше при текущих настройках."""
     names = ["merged_dem.tif", "merged_dem_3857.tif"]
     if config.generate_terrain_hillshade_slope:
-        names.extend(
-            ["merged_dem_upscaled.tif", "slope_upscaled.tif", "hillshade_composite.tif"]
-        )
+        names.extend(["slope_upscaled.tif", "hillshade_composite.tif"])
     return tuple(names)
 
 
