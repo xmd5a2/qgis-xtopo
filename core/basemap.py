@@ -35,6 +35,7 @@ SOURCE_PROPERTY = "qgis_xtopo/basemap"
 OSM_VISIBLE_PROPERTY = "qgis_xtopo/basemap_osm_visible"
 LABEL_INVERSION_PROPERTY = "qgis_xtopo/basemap_label_inversion"
 LABEL_COLORS_PROPERTY = "qgis_xtopo/basemap_label_colors"
+HILLSHADE_PROPERTY = "qgis_xtopo/basemap_hillshade"
 FULL_STYLE = "qgis_xtopo_full"
 LABELS_STYLE = "qgis_xtopo_labels"
 OSM_LAYER_NAME = "OpenStreetMap"
@@ -277,12 +278,16 @@ def apply(key, project=None):
         return existing[0]
     osm_flags = ""
     inversion = ""
+    hillshade = ""
     if existing:
         osm_flags = existing[0].customProperty(
             OSM_VISIBLE_PROPERTY
         ) or ""
         inversion = str(
             existing[0].customProperty(LABEL_INVERSION_PROPERTY) or ""
+        )
+        hillshade = str(
+            existing[0].customProperty(HILLSHADE_PROPERTY) or ""
         )
         for layer in existing:
             project.removeMapLayer(layer.id())
@@ -295,6 +300,7 @@ def apply(key, project=None):
         osm_flags = _hide_osm(project)
     layer.setCustomProperty(OSM_VISIBLE_PROPERTY, osm_flags)
     layer.setCustomProperty(LABEL_INVERSION_PROPERTY, inversion)
+    layer.setCustomProperty(HILLSHADE_PROPERTY, hillshade)
     project.addMapLayer(layer, False)
     project.layerTreeRoot().addLayer(layer)
     _apply_labels_only(project)
@@ -341,7 +347,7 @@ def _label_pairs(layer):
     """
     labeling = layer.labeling()
     filters = label_tags.rule_filters(labeling)
-    area_road = label_tags.layer_is_area_road(layer)
+    layer_item = label_tags.layer_profile(layer)
     pairs = []
     for key, settings in label_style.label_settings(labeling):
         if settings is None:
@@ -351,8 +357,8 @@ def _label_pairs(layer):
         )
         if not halo_enabled:
             continue
-        tags = label_tags.filter_tags(filters.get(key, ""))
-        if label_tags.excluded(tags, area_road):
+        rule = label_tags.profile(filters.get(key, ""))
+        if label_tags.excluded(label_tags.combine(rule, layer_item)):
             continue
         pairs.append((key, settings))
     return pairs
@@ -505,4 +511,26 @@ def set_label_inversion(enabled, project=None):
     layer.setCustomProperty(
         LABEL_INVERSION_PROPERTY, "1" if enabled else "0"
     )
+    return True
+
+
+def hillshade_state(project=None):
+    """Была ли отмывка включена до подложки.
+
+    Подложка отмывку выключает, а после её выключения отмывка
+    возвращается в прежний вид.  Состояние хранится в слое подложки,
+    поэтому оно переживает и смену источника, и перезагрузку проекта.
+    """
+    layer = active_layer(project)
+    if layer is None:
+        return False
+    return str(layer.customProperty(HILLSHADE_PROPERTY)) == "1"
+
+
+def set_hillshade_state(enabled, project=None):
+    """Запоминает состояние отмывки в слое подложки."""
+    layer = active_layer(project)
+    if layer is None:
+        return False
+    layer.setCustomProperty(HILLSHADE_PROPERTY, "1" if enabled else "0")
     return True

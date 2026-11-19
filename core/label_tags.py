@@ -5,24 +5,40 @@
 Признак берётся из тегов объекта, а не из цвета надписи: цвет полосы
 в шаблоне может поменяться, и исключение перестало бы работать.
 
-Тип определяется по фильтру правила подписей: правило наследует
-фильтры родителей, поэтому у надписи магистрали видны теги всех
-правил выше.  Если фильтр ничего не говорит о типе объекта, смотрим
-на данные слоя.
+Тип определяется по условиям отбора: условие правила подписей (правило
+наследует условия родителей) и условие слоя.  Если условия молчат,
+смотрим на теги самих объектов слоя.
 """
 
 import re
+from dataclasses import dataclass
 
 from qgis.core import QgsRuleBasedLabeling
 
 # Классы дорог, которые в шаблоне нарисованы широкой полосой: надпись
-# лежит на самой полосе, и обмен цветов её рассыпает.
+# лежит на самой полосе, и обмен цветов её рассыпает.  Это магистрали
+# и второстепенные дороги вместе с их примыканиями.
 WIDE_BAND_HIGHWAYS = frozenset({
     "motorway",
+    "motorway_link",
     "trunk",
+    "trunk_link",
     "primary",
+    "primary_link",
     "secondary",
+    "secondary_link",
     "tertiary",
+    "tertiary_link",
+})
+
+# Все классы дорог, которые встречаются в данных плагина: по ним
+# вычисляется дополнение к условию вида «highway NOT IN (...)».
+HIGHWAY_CLASSES = WIDE_BAND_HIGHWAYS | frozenset({
+    "residential",
+    "unclassified",
+    "living_street",
+    "pedestrian",
+    "service",
 })
 
 # Площадь: её надпись инверсия меняет, даже если площадь нарисована
@@ -33,7 +49,7 @@ _FIELD = r"""(?:"(?P<quoted>[^"]+)"|(?P<plain>(?!(?:NOT|IN|AND|OR)\b)[A-Za-z_][\
 
 _EQUAL = re.compile(_FIELD + r"""\s*=\s*'(?P<value>[^']*)'""")
 _IN = re.compile(
-    _FIELD + r"""\s+IN\s*\((?P<values>[^)]*)\)""",
+    _FIELD + r"""\s+(?P<neg>NOT\s+)?IN\s*\((?P<values>[^)]*)\)""",
     re.IGNORECASE,
 )
 _PRESENT = re.compile(
@@ -42,6 +58,20 @@ _PRESENT = re.compile(
 )
 _NOT = re.compile(r"\bNOT\b", re.IGNORECASE)
 _JOIN = re.compile(r"\b(?:AND|OR)\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class Profile:
+    """Тип объектов по тегам OSM.
+
+    classes — классы дорог, которые отбирает условие (None — условие
+    не позволяет их определить); area_road — площадная дорога;
+    square — площадь.
+    """
+
+    classes: frozenset = None
+    area_road: bool = False
+    square: bool = False
 
 
 def rule_filters(labeling):
@@ -81,100 +111,129 @@ def _negated(expression, position):
     return _JOIN.search(before[matches[-1].end():]) is None
 
 
-def filter_tags(expression):
-    """Теги, которые ограничивает условие отбора: поле -> значения.
+def _classes(values, excluded):
+    """Классы дорог, которые отбирает условие; None — не определены."""
+    if values and excluded:
+        return frozenset(values) - frozenset(excluded)
+    if values:
+        return frozenset(values)
+    if excluded:
+        # Условие исключает классы: остаются все прочие.
+        return HIGHWAY_CLASSES - frozenset(excluded)
+    return None
 
-    Пустой словарь означает, что условие ничего не говорит о типе
-    объекта.  Условия с отрицанием игнорируются: по ним тип не
-    определить.
+
+def profile(expression):
+    """Профиль объектов, которые отбирает условие отбора.
+
+    Отрицание не перечисляет значения, а исключает их: набор классов
+    восстанавливается по списку известных классов дорог.
     """
-    tags = {}
     if not expression:
-        return tags
+        return Profile()
+    values = {}
+    excluded = {}
     for match in _EQUAL.finditer(expression):
-        if _negated(expression, match.start()):
-            continue
         field = match.group("quoted") or match.group("plain")
-        tags.setdefault(field, set()).add(match.group("value"))
+        if _negated(expression, match.start()):
+            excluded.setdefault(field, set()).add(match.group("value"))
+        else:
+            values.setdefault(field, set()).add(match.group("value"))
     for match in _IN.finditer(expression):
-        if _negated(expression, match.start()):
-            continue
         field = match.group("quoted") or match.group("plain")
-        values = re.findall(r"'([^']*)'", match.group("values"))
-        tags.setdefault(field, set()).update(values)
+        items = set(re.findall(r"'([^']*)'", match.group("values")))
+        if match.group("neg"):
+            excluded.setdefault(field, set()).update(items)
+        else:
+            values.setdefault(field, set()).update(items)
     for match in _PRESENT.finditer(expression):
         field = match.group("quoted") or match.group("plain")
-        # Поле есть, значение неизвестно: пустое множество значений.
-        tags.setdefault(field, set())
-    return tags
+        # Поле есть, значение неизвестно.
+        values.setdefault(field, set())
+    area_road = "area:highway" in values or "area:highway" in excluded
+    if not area_road and values.get("area") == {"yes"} and values.get("highway"):
+        area_road = True
+    return Profile(
+        classes=_classes(values.get("highway"), excluded.get("highway")),
+        area_road=area_road,
+        square=SQUARE in values.get("place", ()),
+    )
 
 
-def is_wide_band(tags):
-    """Дорога, нарисованная широкой полосой.
+def layer_profile(layer, limit=50):
+    """Профиль объектов слоя по тегам.
 
-    Класс дороги определяется по тегам объекта: надпись лежит на самой
-    полосе, и обмен цветов её рассыпает.
+    Условие слоя прямо говорит о типах объектов (так разделены
+    магистрали и улицы); если его нет или оно молчит, смотрим на теги
+    самих объектов.
     """
-    values = tags.get("highway")
-    if not values:
-        return False
-    return values <= WIDE_BAND_HIGHWAYS
-
-
-def is_area_road(tags):
-    """Площадная дорога: area:highway=* или highway=* с area=yes."""
-    if "area:highway" in tags:
-        return not is_square(tags)
-    if tags.get("area") == {"yes"} and "highway" in tags:
-        return not is_square(tags)
-    return False
-
-
-def is_square(tags):
-    """Площадь place=square: её надпись инверсия меняет."""
-    return SQUARE in tags.get("place", ())
-
-
-def layer_is_area_road(layer, limit=50):
-    """Слой состоит из площадных дорог.
-
-    Смотрим на теги самих объектов: у площадной дороги есть
-    ``area:highway`` или ``highway`` вместе с ``area=yes``.  Площади
-    (``place=square``) площадными дорогами не считаются: их надписи
-    инверсия меняет.
-    """
+    subset = profile(layer.subsetString())
     names = {field.name() for field in layer.fields()}
-    area_tag = "area:highway" in names
-    area_yes = {"area", "highway"} <= names
-    if not area_tag and not area_yes:
-        return False
+    classes = subset.classes
+    area_road = subset.area_road
+    square = subset.square
+    need_data = (
+        (classes is None and "highway" in names)
+        or "area:highway" in names
+        or {"area", "highway"} <= names
+    )
+    if need_data:
+        data_classes, data_area, data_square = _sample(layer, names, limit)
+        if classes is None:
+            classes = data_classes
+        area_road = area_road or data_area
+        square = square or data_square
+    return Profile(
+        classes=classes, area_road=area_road, square=square
+    )
+
+
+def _sample(layer, names, limit):
+    """Профиль объектов слоя по тегам самих объектов."""
+    classes = set()
+    area_road = False
     square = False
-    road = False
+    has_area = "area:highway" in names
+    has_area_yes = {"area", "highway"} <= names
     for count, feature in enumerate(layer.getFeatures()):
         if count >= limit:
             break
-        if not square and "place" in names:
-            square = square or feature["place"] == SQUARE
-        if not road:
-            if area_tag and feature["area:highway"]:
-                road = True
-            elif area_yes and feature["area"] == "yes" and feature["highway"]:
-                road = True
-        if square and road:
-            break
-    return road and not square
+        if "highway" in names and feature["highway"]:
+            classes.add(feature["highway"])
+        if "place" in names and feature["place"] == SQUARE:
+            square = True
+        if has_area and feature["area:highway"]:
+            area_road = True
+        elif has_area_yes and feature["area"] == "yes" and feature["highway"]:
+            area_road = True
+    return (frozenset(classes) if classes else None), area_road, square
 
 
-def excluded(tags, layer_area_road=False):
-    """Исключить ли правило подписей из инверсии.
+def combine(rule, layer):
+    """Профиль объектов правила подписей в слое.
 
-    Правило, про тип объекта которого ничего не сказано, определяется
-    по слою: площадные дороги инверсия не меняет.
+    Правило отбирает часть объектов слоя, поэтому класс дороги берём
+    из правила, а из слоя — только когда правило о дорогах не говорит.
     """
-    if is_wide_band(tags):
+    classes = rule.classes
+    if classes is None:
+        classes = layer.classes
+    return Profile(
+        classes=classes,
+        area_road=rule.area_road or layer.area_road,
+        square=rule.square or layer.square,
+    )
+
+
+def excluded(item):
+    """Исключить ли объекты из инверсии.
+
+    Дороги, нарисованные широкой полосой, и площадные дороги: их
+    надписи лежат на самой дороге, и обмен цветов их рассыпает.
+    Площади под исключение не попадают: их названия инверсия меняет.
+    """
+    if item.classes and item.classes <= WIDE_BAND_HIGHWAYS:
         return True
-    if is_area_road(tags):
-        return True
-    if layer_area_road and not is_square(tags):
-        return True
-    return False
+    if item.square:
+        return False
+    return item.area_road

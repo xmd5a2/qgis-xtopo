@@ -567,6 +567,74 @@ class LabelPriorityTest(unittest.TestCase):
             self.assertGreater(min(self._priorities(name)), peak)
 
 
+class PeakLabelSizeTest(unittest.TestCase):
+    """Размер подписи пика растёт ступенями по высоте."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+        from qgis_xtopo.core.expressions import load_expressions
+
+        cls.app = qgis_app()
+        load_expressions()
+        cls.layer = next(
+            layer for layer in _template_root().iter("maplayer")
+            if layer.findtext("layername") == "peak"
+        )
+
+    def _rules(self):
+        return self.layer.find("labeling").find("rules").findall("rule")
+
+    def _size_expression(self, rule):
+        size = rule.find(
+            "settings/dd_properties/Option/Option[@name='properties']"
+            "/Option[@name='Size']"
+        )
+        self.assertIsNotNone(size)
+        expression = size.find("Option[@name='expression']")
+        self.assertIsNotNone(expression)
+        return expression.get("value") or ""
+
+    def test_elevation_steps(self):
+        from qgis.core import QgsExpression, QgsExpressionContext
+
+        expected = {
+            0: 0.0, 999: 0.0, 1000: 0.5, 1999: 0.5,
+            2000: 1.0, 2999: 1.0, 3000: 1.5, 3999: 1.5,
+            4000: 2.0, 4478: 2.0,
+        }
+        context = QgsExpressionContext()
+        for elevation, value in expected.items():
+            expression = QgsExpression(
+                f"get_peak_text_size_add({elevation})"
+            )
+            self.assertFalse(expression.hasParserError())
+            self.assertAlmostEqual(expression.evaluate(context), value)
+
+    def test_expressions_use_elevation_steps(self):
+        rules = self._rules()
+        self.assertEqual(len(rules), 4)
+        for rule in rules:
+            expression = self._size_expression(rule)
+            self.assertIn("get_peak_text_size_add(", expression)
+            self.assertNotIn("raster_statistic", expression)
+            self.assertNotIn("get_text_size_add", expression)
+            self.assertEqual(expression.count("@text_size_mult"), 1)
+
+    def test_medium_scale_keeps_boost(self):
+        rule = next(
+            rule for rule in self._rules()
+            if rule.get("scalemindenom") == "50000"
+            and rule.get("scalemaxdenom") == "100000"
+        )
+        self.assertIn("* 2.5", self._size_expression(rule))
+
+    def test_text_add_field_is_removed(self):
+        with zipfile.ZipFile(template_path()) as archive:
+            text = archive.read("automap.qgs").decode("utf-8")
+        self.assertNotIn("text_add", text)
+
+
 class SettlementScaleTest(unittest.TestCase):
     """Видимость хуторов зависит от масштаба и уровня детализации."""
 

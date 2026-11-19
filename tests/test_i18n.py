@@ -1147,6 +1147,68 @@ class DockLanguageTest(unittest.TestCase):
         finally:
             self.basemap.remove(project)
 
+    def test_hillshade_returns_after_basemap(self):
+        """Отмывка возвращается, когда подложку выключили."""
+        from unittest import mock
+
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        hillshade = QgsVectorLayer(
+            "Polygon?crs=EPSG:4326", "[TERRAIN] hillshade var1", "memory"
+        )
+        project.addMapLayer(hillshade)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.hillshade_check.setChecked(True)
+                self.app.processEvents()
+                self.assertTrue(panel.hillshade_check.isChecked())
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                # На подложке отмывка выключена и заблокирована.
+                self.assertFalse(panel.hillshade_check.isChecked())
+                self.assertFalse(panel.hillshade_check.isEnabled())
+                self.assertFalse(
+                    panel._layer_visible("[TERRAIN] hillshade var1")
+                )
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+                # После выключения подложки отмывка вернулась.
+                self.assertTrue(panel.hillshade_check.isChecked())
+                self.assertTrue(panel.hillshade_check.isEnabled())
+                self.assertTrue(
+                    panel._layer_visible("[TERRAIN] hillshade var1")
+                )
+        finally:
+            self.basemap.remove(project)
+            project.removeMapLayer(hillshade.id())
+
+    def test_basemap_remembers_hillshade_state(self):
+        """Состояние отмывки хранится в слое подложки."""
+        from qgis.core import QgsProject
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        try:
+            self.basemap.apply("bing", project)
+            self.assertFalse(self.basemap.hillshade_state(project))
+            self.basemap.set_hillshade_state(True)
+            self.assertTrue(self.basemap.hillshade_state(project))
+            # Смена источника подложки состояние не теряет.
+            self.basemap.apply("arcgis", project)
+            self.assertTrue(self.basemap.hillshade_state(project))
+        finally:
+            self.basemap.remove(project)
+
     def test_basemap_labels_follow_interface_language(self):
         dock = self._dock()
         panel = dock.project_panel

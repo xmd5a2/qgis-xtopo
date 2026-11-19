@@ -572,6 +572,7 @@ class ProjectPanel(QWidget):
         self._export_progress = None
         self._opacity_baseline = {}
         self._hillshade_baseline = {}
+        self._hillshade_before_basemap = False
         self._isoline_color = None
         self._isoline_baseline = {}
         self._basemap_isoline_forced = False
@@ -2444,13 +2445,23 @@ class ProjectPanel(QWidget):
         self._repaint_canvas()
 
     def _block_hillshade(self):
-        """На подложке отмывка выключена: снимок показывает рельеф лучше."""
+        """На подложке отмывка выключена: снимок показывает рельеф лучше.
+
+        Прежнее состояние запоминается: после выключения подложки
+        отмывка возвращается в прежний вид.
+        """
+        self._hillshade_before_basemap = self.hillshade_check.isChecked()
+        basemap.set_hillshade_state(self._hillshade_before_basemap)
         self.hillshade_check.setChecked(False)
         self._update_hillshade_block()
 
     def _unblock_hillshade(self):
-        """Подложка выключена — отмывку снова можно включить."""
+        """Подложка выключена — отмывка возвращается в прежний вид."""
+        restore = self._hillshade_before_basemap
+        self._hillshade_before_basemap = False
         self._update_hillshade_block()
+        if restore:
+            self.hillshade_check.setChecked(True)
 
     def _update_hillshade_block(self):
         """Пока подложка включена, отмывку включить нельзя."""
@@ -2497,11 +2508,15 @@ class ProjectPanel(QWidget):
             self.basemap_invert_check.setEnabled(True)
             if inversion:
                 basemap.invert_labels()
+            # Прежнее состояние отмывки лежит в слое подложки: после
+            # выключения подложки отмывка вернётся в прежний вид.
+            self._hillshade_before_basemap = basemap.hillshade_state()
         else:
             # Если слой подложки удалили вручную, вернуть обычные стили.
             basemap.remove()
             self._restore_isoline_style_after_basemap()
             self._apply_isoline_bold()
+            self._hillshade_before_basemap = False
             self.basemap_invert_check.blockSignals(True)
             try:
                 self.basemap_invert_check.setChecked(False)
