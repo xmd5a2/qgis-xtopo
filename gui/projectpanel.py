@@ -55,7 +55,9 @@ try:
 except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
-from ..core import basemap, i18n, map_language, slope_style, text_size
+from ..core import (
+    basemap, i18n, label_style, map_language, slope_style, text_size,
+)
 from ..core.project import fit_project_extent
 from ..core.resources import template_path
 from .atlas import (
@@ -175,6 +177,9 @@ ISOLINES_WIDTH_VARIABLE = "isolines_width_mult"
 BASEMAP_ISOLINE_COLOR = "#00ff00"
 BASEMAP_WIDTH_PROPERTY = "qgis_xtopo/basemap_isolines_width"
 BASEMAP_COLOR_PROPERTY = "qgis_xtopo/basemap_isolines_color"
+# Что из ширины и цвета изогипс поменял пользователь сам: подложка
+# переключает их автоматически, но выбор пользователя не отменяет.
+BASEMAP_OVERRIDE_PROPERTY = "qgis_xtopo/basemap_isolines_override"
 
 
 def _instant_popup():
@@ -251,13 +256,13 @@ def _symbol_layers(symbol):
 
 
 def _label_settings(labeling):
-    """Пары «правило, настройки» для правила-based подписей слоя."""
-    if not isinstance(labeling, QgsRuleBasedLabeling):
-        return
-    for rule in _rule_descendants(labeling.rootRule()):
-        settings = rule.settings()
-        if settings is not None:
-            yield rule, settings
+    """Пары «ключ правила, настройки» для подписей слоя.
+
+    Настройки берутся копией: указатель на внутренний объект Python
+    удаляет при сборке мусора, и правило остаётся с испорченными
+    настройками. Подробности — в `core/label_style.py`.
+    """
+    return label_style.label_settings(labeling)
 
 
 def _renderer_symbol_colors(renderer):
@@ -273,9 +278,9 @@ def _renderer_symbol_colors(renderer):
 def _labeling_styles(labeling):
     """Цвет и обводка подписей в порядке обхода."""
     styles = []
-    for _rule, settings in _label_settings(labeling):
-        fmt = settings.format()
-        styles.append((QColor(fmt.color()), fmt.buffer().enabled()))
+    for _key, settings in _label_settings(labeling):
+        text, _halo, halo_enabled = label_style.label_colors(settings)
+        styles.append((QColor(text), halo_enabled))
     return styles
 
 
@@ -326,16 +331,12 @@ def apply_isoline_label_bold(layer, bold):
     """Делает подписи изогипс жирными или обычными."""
     if layer is None:
         return False
+    labeling = layer.labeling()
     changed = False
-    for rule, settings in _label_settings(layer.labeling()):
-        fmt = settings.format()
-        font = fmt.font()
-        if font.bold() == bool(bold):
+    for key, settings in _label_settings(labeling):
+        if not label_style.set_label_colors(settings, bold=bold):
             continue
-        font.setBold(bool(bold))
-        fmt.setFont(font)
-        settings.setFormat(fmt)
-        rule.setSettings(settings)
+        label_style.set_label_settings(labeling, key, settings)
         changed = True
     if changed:
         _repaint_layer(layer)
@@ -365,27 +366,16 @@ def apply_isoline_color(layer, color, light=False, bold=None):
                 continue
             symbol_layer.setColor(new)
             changed = True
-    for rule, settings in _label_settings(layer.labeling()):
-        fmt = settings.format()
-        item_changed = False
-        if fmt.color() != text:
-            fmt.setColor(text)
-            item_changed = True
-        if fmt.buffer().enabled():
-            buffer = fmt.buffer()
-            buffer.setEnabled(False)
-            fmt.setBuffer(buffer)
-            item_changed = True
-        if bold is not None:
-            font = fmt.font()
-            if font.bold() != bool(bold):
-                font.setBold(bool(bold))
-                fmt.setFont(font)
-                item_changed = True
-        if not item_changed:
+    labeling = layer.labeling()
+    for key, settings in _label_settings(labeling):
+        if not label_style.set_label_colors(
+            settings,
+            text_color=text,
+            halo_enabled=False,
+            bold=bold,
+        ):
             continue
-        settings.setFormat(fmt)
-        rule.setSettings(settings)
+        label_style.set_label_settings(labeling, key, settings)
         changed = True
     if changed:
         _repaint_layer(layer)
@@ -405,22 +395,18 @@ def restore_isoline_style(layer, symbol_colors, label_styles):
             continue
         symbol_layer.setColor(QColor(base))
         changed = True
-    settings_list = list(_label_settings(layer.labeling()))
-    for (rule, settings), (base, buffer_enabled) in zip(
+    labeling = layer.labeling()
+    settings_list = list(_label_settings(labeling))
+    for (key, settings), (base, buffer_enabled) in zip(
         settings_list, label_styles
     ):
-        fmt = settings.format()
-        if (
-            fmt.color() == base
-            and fmt.buffer().enabled() == buffer_enabled
+        if not label_style.set_label_colors(
+            settings,
+            text_color=QColor(base),
+            halo_enabled=buffer_enabled,
         ):
             continue
-        fmt.setColor(QColor(base))
-        buffer = fmt.buffer()
-        buffer.setEnabled(buffer_enabled)
-        fmt.setBuffer(buffer)
-        settings.setFormat(fmt)
-        rule.setSettings(settings)
+        label_style.set_label_settings(labeling, key, settings)
         changed = True
     if changed:
         _repaint_layer(layer)
@@ -794,8 +780,19 @@ class ProjectPanel(QWidget):
         self.basemap_combo.currentIndexChanged.connect(
             self._basemap_source_changed
         )
+        self.basemap_invert_check = QCheckBox(
+            "Инверсия", self.basemap_row
+        )
+        self.basemap_invert_check.setToolTip(
+            "Инверсия надписей: цвет текста и цвет halo меняются местами"
+        )
+        self.basemap_invert_check.setEnabled(False)
+        self.basemap_invert_check.toggled.connect(
+            self._basemap_inversion_toggled
+        )
         basemap_layout.addWidget(self.basemap_check)
         basemap_layout.addWidget(self.basemap_combo)
+        basemap_layout.addWidget(self.basemap_invert_check)
         basemap_layout.addStretch(1)
         layout.addWidget(self.basemap_row)
         self._fill_map_language_combo()
@@ -2387,9 +2384,13 @@ class ProjectPanel(QWidget):
                 return
             basemap.set_last_source(key)
             self._apply_basemap_isoline_style()
+            self._set_basemap_inversion(True)
+            self._block_hillshade()
         else:
-            basemap.remove(project)
+            self._set_basemap_inversion(False)
             self._restore_isoline_style_after_basemap()
+            basemap.remove(project)
+            self._unblock_hillshade()
         self._update_isoline_controls()
         self._repaint_canvas()
 
@@ -2409,6 +2410,60 @@ class ProjectPanel(QWidget):
         self._apply_basemap_isoline_style()
         self._update_isoline_controls()
         self._repaint_canvas()
+
+    def _basemap_inversion_toggled(self, checked):
+        """Галка инверсии надписей: цвет текста и halo меняются местами."""
+        if self._syncing:
+            return
+        project = QgsProject.instance()
+        if basemap.active_source(project) is None:
+            return
+        if checked:
+            basemap.invert_labels(project)
+        else:
+            basemap.restore_labels(project)
+        basemap.set_label_inversion(bool(checked), project)
+        self._repaint_canvas()
+
+    def _set_basemap_inversion(self, checked):
+        """Включает или выключает инверсию надписей вместе с галкой."""
+        project = QgsProject.instance()
+        self.basemap_invert_check.blockSignals(True)
+        try:
+            self.basemap_invert_check.setChecked(bool(checked))
+            # Без подложки галка недоступна.
+            self.basemap_invert_check.setEnabled(bool(checked))
+        finally:
+            self.basemap_invert_check.blockSignals(False)
+        if checked:
+            basemap.invert_labels(project)
+        else:
+            basemap.restore_labels(project)
+        basemap.set_label_inversion(bool(checked), project)
+        self._repaint_canvas()
+
+    def _block_hillshade(self):
+        """На подложке отмывка выключена: снимок показывает рельеф лучше."""
+        self.hillshade_check.setChecked(False)
+        self._update_hillshade_block()
+
+    def _unblock_hillshade(self):
+        """Подложка выключена — отмывку снова можно включить."""
+        self._update_hillshade_block()
+
+    def _update_hillshade_block(self):
+        """Пока подложка включена, отмывку включить нельзя."""
+        blocked = basemap.active_source() is not None
+        self.hillshade_check.setEnabled(not blocked)
+        if blocked:
+            self.hillshade_check.setToolTip(
+                "На растровой подложке отмывка не используется"
+            )
+            # Отмывка на снимке не нужна: слой прячем, даже если его
+            # включили в дереве слоёв QGIS.
+            self._apply_hillshade_visibility(False)
+        else:
+            self.hillshade_check.setToolTip("Затенение рельефа")
 
     def _sync_basemap_state(self):
         """Показывает в панели подложку, сохранённую в проекте."""
@@ -2430,12 +2485,30 @@ class ProjectPanel(QWidget):
                     combo.blockSignals(False)
             basemap.sync()
             self._apply_basemap_isoline_style()
+            # Инверсия хранится в слое подложки: после открытия проекта
+            # галка остаётся в том же виде, в каком её оставили.
+            inversion = basemap.label_inversion_enabled()
+            self.basemap_invert_check.blockSignals(True)
+            try:
+                self.basemap_invert_check.setChecked(inversion)
+            finally:
+                self.basemap_invert_check.blockSignals(False)
+            self.basemap_invert_check.setEnabled(True)
+            if inversion:
+                basemap.invert_labels()
         else:
             # Если слой подложки удалили вручную, вернуть обычные стили.
             basemap.remove()
             self._restore_isoline_style_after_basemap()
             self._apply_isoline_bold()
+            self.basemap_invert_check.blockSignals(True)
+            try:
+                self.basemap_invert_check.setChecked(False)
+            finally:
+                self.basemap_invert_check.blockSignals(False)
+            self.basemap_invert_check.setEnabled(False)
         combo.setEnabled(check.isChecked())
+        self._update_hillshade_block()
         self._update_isoline_controls()
 
     def _repaint_canvas(self):
@@ -2879,6 +2952,9 @@ class ProjectPanel(QWidget):
             self._update_rule_checks(available[ISOLINES_LAYER])
             self._sync_glacier_rules()
             self._update_isoline_controls()
+            # Подложка запрещает отмывку: галку нельзя включить, пока
+            # подложка стоит.
+            self._update_hillshade_block()
         finally:
             self._syncing = False
 
@@ -3719,7 +3795,12 @@ class ProjectPanel(QWidget):
             )
 
     def _apply_basemap_isoline_style(self):
-        """Зелёные толстые изогипсы со светлыми жирными подписями."""
+        """Зелёные толстые изогипсы со светлыми жирными подписями.
+
+        Подложка переключает ширину и цвет автоматически, но выбор
+        пользователя не отменяет: если ширину или цвет поменяли
+        вручную, подложка их больше не трогает.
+        """
         project = QgsProject.instance()
         if basemap.active_source(project) is None:
             return False
@@ -3727,12 +3808,53 @@ class ProjectPanel(QWidget):
         if not layers:
             return False
         self._capture_basemap_isoline_state()
-        set_isolines_width_doubled(True, project)
-        color = QColor(BASEMAP_ISOLINE_COLOR)
-        for layer in layers:
-            apply_isoline_color(layer, color, light=True, bold=True)
+        forced = self._basemap_overrides()
+        if "width" in forced:
+            bold = isolines_width_doubled(project)
+        else:
+            set_isolines_width_doubled(True, project)
+            bold = True
+        if "color" in forced:
+            # Цвет выбрал пользователь: подложка его не меняет, но
+            # подписи оставляем светлыми — на снимке тёмные не видно.
+            color = QColor(self._basemap_state(BASEMAP_COLOR_PROPERTY) or "")
+            if not color.isValid():
+                color = self._isoline_color
+            if color is None:
+                color = self._custom_isoline_color()
+        else:
+            color = QColor(BASEMAP_ISOLINE_COLOR)
+        if color is not None:
+            for layer in layers:
+                apply_isoline_color(layer, color, light=True, bold=bold)
         self._basemap_isoline_forced = True
         return True
+
+    def _basemap_overrides(self):
+        """Что из ширины и цвета изогипс поменял пользователь сам."""
+        value = self._basemap_state(BASEMAP_OVERRIDE_PROPERTY) or ""
+        return {part for part in value.split(",") if part}
+
+    def _mark_isoline_override(self, part):
+        """Помечает ширину или цвет изогипс изменёнными пользователем.
+
+        Пометка живёт в свойстве слоя, поэтому переживает и выключение
+        подложки, и перезагрузку проекта: подложка больше не переключает
+        то, что пользователь выбрал сам.
+        """
+        forced = self._basemap_overrides()
+        forced.add(part)
+        self._set_basemap_state(
+            BASEMAP_OVERRIDE_PROPERTY, ",".join(sorted(forced))
+        )
+
+    def _clear_isoline_override(self, part):
+        """Снимает пометку ручного выбора: снова действует автоматика."""
+        forced = self._basemap_overrides()
+        forced.discard(part)
+        self._set_basemap_state(
+            BASEMAP_OVERRIDE_PROPERTY, ",".join(sorted(forced))
+        )
 
     def _restore_isoline_style_after_basemap(self):
         """Возвращает цвет и ширину изогипс после выключения подложки."""
@@ -3764,6 +3886,8 @@ class ProjectPanel(QWidget):
                 apply_isoline_label_bold(layer, bold)
         self._clear_basemap_state(BASEMAP_WIDTH_PROPERTY)
         self._clear_basemap_state(BASEMAP_COLOR_PROPERTY)
+        # Пометки ручного выбора остаются: подложка больше не переключает
+        # то, что пользователь выбрал сам.
         self._basemap_isoline_forced = False
         return True
 
@@ -3781,25 +3905,18 @@ class ProjectPanel(QWidget):
         layer = self._layer(ISOLINES_LAYER) or self._layer(
             GLACIER_ISOLINES_LAYER
         )
-        basemap_active = basemap.active_source() is not None
         enabled = layer is not None and self.isolines_check.isChecked()
-        doubled = isolines_width_doubled() or basemap_active
-        self.isolines_width_button.setEnabled(enabled and not basemap_active)
+        doubled = isolines_width_doubled()
+        self.isolines_width_button.setEnabled(enabled)
         self.isolines_width_button.blockSignals(True)
         self.isolines_width_button.setChecked(doubled)
         self.isolines_width_button.blockSignals(False)
         self._style_isoline_width_button(doubled)
-        self.isolines_color_button.setEnabled(enabled and not basemap_active)
+        self.isolines_color_button.setEnabled(enabled)
         self.isolines_color_button.setIcon(
-            color_swatch_icon(
-                BASEMAP_ISOLINE_COLOR
-                if basemap_active
-                else self._isoline_swatch_color()
-            )
+            color_swatch_icon(self._isoline_swatch_color())
         )
-        self.isolines_color_reset.setEnabled(
-            self._reset_available(enabled) and not basemap_active
-        )
+        self.isolines_color_reset.setEnabled(self._reset_available(enabled))
 
     def _isoline_width_toggled(self, checked):
         """Двойная ширина линий изогипс через переменную проекта."""
@@ -3808,6 +3925,11 @@ class ProjectPanel(QWidget):
             return
         set_isolines_width_doubled(bool(checked))
         self._apply_isoline_bold()
+        # Ширину выбрал пользователь: подложка больше её не меняет.
+        self._set_basemap_state(
+            BASEMAP_WIDTH_PROPERTY, "1" if checked else "0"
+        )
+        self._mark_isoline_override("width")
         for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             layer = self._layer(name)
             if layer is not None:
@@ -3834,17 +3956,30 @@ class ProjectPanel(QWidget):
         self._isoline_color = QColor(color)
         for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             apply_isoline_color(self._layer(name), self._isoline_color)
+        # Цвет выбрал пользователь: подложка больше его не меняет.
+        self._set_basemap_state(
+            BASEMAP_COLOR_PROPERTY,
+            self._isoline_color.name(QColor.HexArgb),
+        )
+        self._mark_isoline_override("color")
         self._update_isoline_controls()
 
     def _reset_isoline_color(self):
         self._isoline_color = None
         self._capture_isoline_baseline()
-        for name, captured in self._isoline_baseline.items():
-            layer = self._layer(name)
-            if layer is None:
-                continue
-            colors, labels = isoline_reset_styles(layer, captured)
-            restore_isoline_style(layer, colors, labels)
+        # Сброс возвращает автоматический выбор: подложка снова сама
+        # переключает цвет изогипс.
+        self._clear_isoline_override("color")
+        self._set_basemap_state(BASEMAP_COLOR_PROPERTY, "")
+        if basemap.active_source() is not None:
+            self._apply_basemap_isoline_style()
+        else:
+            for name, captured in self._isoline_baseline.items():
+                layer = self._layer(name)
+                if layer is None:
+                    continue
+                colors, labels = isoline_reset_styles(layer, captured)
+                restore_isoline_style(layer, colors, labels)
         self._update_isoline_controls()
 
     def _sync_isoline_color(self):

@@ -775,6 +775,119 @@ class IsolineWidthToggleTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
+class BasemapLabelInversionTest(unittest.TestCase):
+    """Инверсия надписей: цвет текста и цвет halo меняются местами."""
+
+    LAYER = "mountain area"
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def setUp(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.core import basemap
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.basemap = basemap
+        self.project = QgsProject.instance()
+        self.project.clear()
+        renderer, labeling = pp._template_layer_objects(self.LAYER)
+        self.layer = QgsVectorLayer(
+            "Polygon?crs=EPSG:4326", self.LAYER, "memory"
+        )
+        self.layer.setRenderer(renderer)
+        self.layer.setLabeling(labeling)
+        self.project.addMapLayer(self.layer)
+
+    def tearDown(self):
+        self.project.clear()
+
+    def _colors(self):
+        """Цвета текста и halo всех правил подписей слоя."""
+        from qgis_xtopo.core import label_style
+
+        colors = []
+        for _key, settings in label_style.label_settings(
+            self.layer.labeling()
+        ):
+            text, halo, _enabled = label_style.label_colors(settings)
+            colors.append((text, halo))
+        return colors
+
+    def test_inversion_swaps_text_and_halo_colors(self):
+        before = self._colors()
+        self.assertTrue(before)
+        self.assertTrue(self.basemap.invert_labels(self.project))
+        after = self._colors()
+        for (text, halo), (new_text, new_halo) in zip(before, after):
+            # Halo получает прежний цвет текста, текст — прежний halo.
+            self.assertEqual(new_halo, text)
+            self.assertEqual(new_text, halo.lighter(150))
+            # Прозрачность не трогаем.
+            self.assertEqual(new_text.alpha(), text.alpha())
+            self.assertEqual(new_halo.alpha(), halo.alpha())
+
+    def test_halo_becomes_white_for_light_halo(self):
+        """Не совсем белый halo усиливается до белого."""
+        from qgis.PyQt.QtGui import QColor
+
+        new_text, new_halo = self.basemap.inverted_label_colors(
+            QColor(0, 0, 0, 255), QColor(243, 243, 243, 255)
+        )
+        self.assertEqual(new_text, QColor(255, 255, 255, 255))
+        self.assertEqual(new_halo, QColor(0, 0, 0, 255))
+
+    def test_restore_returns_original_colors(self):
+        before = self._colors()
+        self.basemap.invert_labels(self.project)
+        self.assertTrue(self.basemap.restore_labels(self.project))
+        self.assertEqual(self._colors(), before)
+        self.assertIsNone(
+            self.layer.customProperty(self.basemap.LABEL_COLORS_PROPERTY)
+        )
+
+    def test_inversion_is_not_applied_twice(self):
+        self.basemap.invert_labels(self.project)
+        inverted = self._colors()
+        self.basemap.invert_labels(self.project)
+        self.assertEqual(self._colors(), inverted)
+
+    def test_labels_without_halo_are_not_touched(self):
+        """Подписи без halo инверсия не меняет: менять нечего."""
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.core import label_style
+        from qgis_xtopo.gui import projectpanel as pp
+
+        renderer, labeling = pp._template_layer_objects(pp.ISOLINES_LAYER)
+        layer = QgsVectorLayer(
+            "LineString?crs=EPSG:4326", pp.ISOLINES_LAYER, "memory"
+        )
+        layer.setRenderer(renderer)
+        layer.setLabeling(labeling)
+        self.project.addMapLayer(layer)
+
+        def colors():
+            result = []
+            for _key, settings in label_style.label_settings(
+                layer.labeling()
+            ):
+                text, halo, _enabled = label_style.label_colors(settings)
+                result.append((text, halo))
+            return result
+
+        before = colors()
+        self.basemap.invert_labels(self.project)
+        self.assertEqual(colors(), before)
+        self.assertIsNone(
+            layer.customProperty(self.basemap.LABEL_COLORS_PROPERTY)
+        )
+        self.project.removeMapLayer(layer.id())
+
+
+@unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
 class BasemapIsolineStyleTest(unittest.TestCase):
     """На подложке изогипсы зелёные, толстые и со светлыми жирными подписями."""
 

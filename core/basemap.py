@@ -7,8 +7,13 @@
 
 Стили ``qgis_xtopo_full`` и ``qgis_xtopo_labels`` остаются в проекте:
 это позволяет переключать подложку без повторного снятия копии стиля.
+
+Подложка даёт ещё и инверсию надписей: цвет текста и цвет halo
+меняются местами, чтобы подписи читались на снимке.  Прежние цвета
+хранятся в свойстве слоя — по ним надписи возвращаются в исходный вид.
 """
 
+import json
 from dataclasses import dataclass
 
 from qgis.core import (
@@ -18,9 +23,14 @@ from qgis.core import (
     QgsVectorLayer,
     Qgis,
 )
+from qgis.PyQt.QtGui import QColor
+
+from . import label_style
 
 SOURCE_PROPERTY = "qgis_xtopo/basemap"
 OSM_VISIBLE_PROPERTY = "qgis_xtopo/basemap_osm_visible"
+LABEL_INVERSION_PROPERTY = "qgis_xtopo/basemap_label_inversion"
+LABEL_COLORS_PROPERTY = "qgis_xtopo/basemap_label_colors"
 FULL_STYLE = "qgis_xtopo_full"
 LABELS_STYLE = "qgis_xtopo_labels"
 OSM_LAYER_NAME = "OpenStreetMap"
@@ -262,10 +272,14 @@ def apply(key, project=None):
         _apply_labels_only(project)
         return existing[0]
     osm_flags = ""
+    inversion = ""
     if existing:
         osm_flags = existing[0].customProperty(
             OSM_VISIBLE_PROPERTY
         ) or ""
+        inversion = str(
+            existing[0].customProperty(LABEL_INVERSION_PROPERTY) or ""
+        )
         for layer in existing:
             project.removeMapLayer(layer.id())
     layer = _create_layer(basemap)
@@ -276,6 +290,7 @@ def apply(key, project=None):
     if not osm_flags:
         osm_flags = _hide_osm(project)
     layer.setCustomProperty(OSM_VISIBLE_PROPERTY, osm_flags)
+    layer.setCustomProperty(LABEL_INVERSION_PROPERTY, inversion)
     project.addMapLayer(layer, False)
     project.layerTreeRoot().addLayer(layer)
     _apply_labels_only(project)
@@ -308,3 +323,143 @@ def sync(project=None):
         return None
     _apply_labels_only(project)
     return basemap
+
+
+def _label_pairs(layer):
+    """Пары «ключ правила, настройки» для правил с включённым halo.
+
+    Настройки — копии: иначе Python удалил бы внутренний объект правила
+    и стиль слоя испортился бы (см. `core/label_style.py`).
+    """
+    pairs = []
+    for key, settings in label_style.label_settings(layer.labeling()):
+        if settings is None:
+            continue
+        if not label_style.label_colors(settings)[2]:
+            continue
+        pairs.append((key, settings))
+    return pairs
+
+
+def inverted_label_colors(text_color, halo_color):
+    """Цвета текста и halo, если поменять их местами.
+
+    Текст становится светлее прежнего halo — вплоть до белого, halo
+    принимает прежний цвет текста.  Прозрачность не трогается: у текста
+    и halo остаются собственные значения alpha.
+    """
+    text = QColor(text_color)
+    halo = QColor(halo_color)
+    if not text.isValid() or not halo.isValid():
+        return None
+    new_text = halo.lighter(150)
+    new_text.setAlpha(text.alpha())
+    new_halo = QColor(text)
+    new_halo.setAlpha(halo.alpha())
+    return new_text, new_halo
+
+
+def _repaint(layer):
+    layer.triggerRepaint()
+    try:
+        layer.emitStyleChanged()
+    except Exception:
+        pass
+
+
+def invert_labels(project=None):
+    """Меняет местами цвет надписей и цвет их halo.
+
+    Прежние цвета сохраняются в свойстве слоя: по ним надписи
+    возвращаются в исходный вид.  Слои с уже применённой инверсией
+    пропускаются, поэтому повторный вызов ничего не портит.
+    """
+    project = project or QgsProject.instance()
+    changed = False
+    for layer in project.mapLayers().values():
+        if not isinstance(layer, QgsVectorLayer):
+            continue
+        if layer.customProperty(LABEL_COLORS_PROPERTY):
+            continue
+        labeling = layer.labeling()
+        saved = []
+        for key, settings in _label_pairs(layer):
+            text_color, halo_color, _halo_enabled = label_style.label_colors(
+                settings
+            )
+            inverted = inverted_label_colors(text_color, halo_color)
+            if inverted is None:
+                continue
+            new_text, new_halo = inverted
+            saved.append([
+                key,
+                text_color.name(QColor.HexArgb),
+                halo_color.name(QColor.HexArgb),
+            ])
+            label_style.set_label_colors(
+                settings, text_color=new_text, halo_color=new_halo
+            )
+            label_style.set_label_settings(labeling, key, settings)
+        if not saved:
+            continue
+        layer.setCustomProperty(LABEL_COLORS_PROPERTY, json.dumps(saved))
+        _repaint(layer)
+        changed = True
+    return changed
+
+
+def restore_labels(project=None):
+    """Возвращает надписям прежние цвета текста и halo."""
+    project = project or QgsProject.instance()
+    changed = False
+    for layer in project.mapLayers().values():
+        if not isinstance(layer, QgsVectorLayer):
+            continue
+        raw = layer.customProperty(LABEL_COLORS_PROPERTY)
+        if not raw:
+            continue
+        try:
+            saved = json.loads(str(raw))
+        except ValueError:
+            saved = []
+        labeling = layer.labeling()
+        for item in saved:
+            if len(item) != 3:
+                continue
+            key, text_color, halo_color = item
+            settings = label_style.settings_by_key(labeling, key)
+            if settings is None:
+                continue
+            label_style.set_label_colors(
+                settings,
+                text_color=QColor(text_color),
+                halo_color=QColor(halo_color),
+            )
+            label_style.set_label_settings(labeling, key, settings)
+        layer.removeCustomProperty(LABEL_COLORS_PROPERTY)
+        _repaint(layer)
+        changed = True
+    return changed
+
+
+def label_inversion_enabled(project=None):
+    """Включена ли инверсия надписей."""
+    layer = active_layer(project)
+    if layer is None:
+        return False
+    return str(layer.customProperty(LABEL_INVERSION_PROPERTY)) == "1"
+
+
+def set_label_inversion(enabled, project=None):
+    """Запоминает состояние инверсии надписей в слое подложки.
+
+    Состояние хранится в проекте, поэтому после открытия файла галка
+    останется в том же виде, в каком её оставили.
+    """
+    layer = active_layer(project)
+    if layer is None:
+        return False
+    layer.setCustomProperty(
+        LABEL_INVERSION_PROPERTY, "1" if enabled else "0"
+    )
+    return True

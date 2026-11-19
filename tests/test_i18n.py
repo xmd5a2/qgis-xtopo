@@ -1145,6 +1145,149 @@ class DockLanguageTest(unittest.TestCase):
         self.assertEqual(panel.basemap_check.text(), "Raster basemap")
         self.assertIn("satellite", panel.basemap_combo.toolTip())
 
+    def test_label_inversion_checkbox_is_disabled_without_basemap(self):
+        """Без подложки галка инверсии есть, но недоступна."""
+        dock = self._dock()
+        panel = dock.project_panel
+        self.assertEqual(panel.basemap_invert_check.text(), "Инверсия")
+        self.assertFalse(panel.basemap_invert_check.isEnabled())
+        self.assertFalse(panel.basemap_invert_check.isChecked())
+
+    def test_basemap_enables_inversion_and_blocks_hillshade(self):
+        """Подложка включает инверсию и выключает отмывку."""
+        from unittest import mock
+
+        from qgis.core import QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.hillshade_check.setChecked(True)
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                # Инверсия включается автоматически.
+                self.assertTrue(panel.basemap_invert_check.isChecked())
+                self.assertTrue(panel.basemap_invert_check.isEnabled())
+                self.assertTrue(
+                    self.basemap.label_inversion_enabled(project)
+                )
+                # Отмывку включить нельзя, пока стоит подложка.
+                self.assertFalse(panel.hillshade_check.isEnabled())
+                self.assertFalse(panel.hillshade_check.isChecked())
+                self.assertIn(
+                    "растровой подложке",
+                    panel.hillshade_check.toolTip(),
+                )
+                # Подложка выключается — отмывка снова доступна.
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+                self.assertTrue(panel.hillshade_check.isEnabled())
+                self.assertFalse(panel.basemap_invert_check.isEnabled())
+        finally:
+            self.basemap.remove(project)
+
+    def test_basemap_does_not_block_isoline_controls(self):
+        """Подложка переключает изогипсы сама, но не запрещает их менять."""
+        from unittest import mock
+
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        renderer, labeling = projectpanel._template_layer_objects(
+            projectpanel.ISOLINES_LAYER
+        )
+        isolines = QgsVectorLayer(
+            "LineString?crs=EPSG:4326",
+            projectpanel.ISOLINES_LAYER,
+            "memory",
+        )
+        isolines.setRenderer(renderer)
+        isolines.setLabeling(labeling)
+        project.addMapLayer(isolines)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.isolines_check.setChecked(True)
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                self.assertTrue(panel.isolines_width_button.isEnabled())
+                self.assertTrue(panel.isolines_color_button.isEnabled())
+        finally:
+            self.basemap.remove(project)
+            project.removeMapLayer(isolines.id())
+
+    def test_manual_isoline_choice_survives_basemap(self):
+        """Выбранный пользователем цвет изолипс подложка не затирает."""
+        from unittest import mock
+
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        renderer, labeling = projectpanel._template_layer_objects(
+            projectpanel.ISOLINES_LAYER
+        )
+        isolines = QgsVectorLayer(
+            "LineString?crs=EPSG:4326",
+            projectpanel.ISOLINES_LAYER,
+            "memory",
+        )
+        isolines.setRenderer(renderer)
+        isolines.setLabeling(labeling)
+        project.addMapLayer(isolines)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel._set_isoline_color(QColor(255, 0, 0))
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                # Подложка не переключает цвет, выбранный вручную.
+                self.assertEqual(
+                    panel._isoline_swatch_color(), QColor(255, 0, 0)
+                )
+                # Смена источника подложки тоже его не трогает.
+                panel.basemap_combo.setCurrentIndex(
+                    panel.basemap_combo.findData("bing")
+                )
+                self.app.processEvents()
+                self.assertEqual(
+                    panel._isoline_swatch_color(), QColor(255, 0, 0)
+                )
+                # После выключения подложки выбор остаётся.
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+                self.assertEqual(
+                    panel._isoline_swatch_color(), QColor(255, 0, 0)
+                )
+        finally:
+            self.basemap.remove(project)
+            project.removeMapLayer(isolines.id())
+
     def test_saved_map_language_is_restored(self):
         self.settings.setValue(self.map_language.SETTINGS_KEY, "fr")
         self.map_language.load_map_language()
