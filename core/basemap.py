@@ -8,31 +8,27 @@
 Стили ``qgis_xtopo_full`` и ``qgis_xtopo_labels`` остаются в проекте:
 это позволяет переключать подложку без повторного снятия копии стиля.
 
-Подложка даёт ещё и инверсию: надписи, дороги, скалы, ЛЭП, подъёмники
-и чёрные значки перекрашиваются, чтобы читаться на снимке.  Цвет текста
-и цвет halo меняются местами, дороги и тропы становятся светлыми, скалы
-— светло-коричневыми, ЛЭП — серыми, подъёмники — серо-белыми, а чёрные
-значки — белыми с полупрозрачной серо-белой обводкой.  Прежние цвета
-хранятся в свойствах слоя — по ним всё возвращается в исходный вид.
+Подложка даёт ещё и инверсию: надписи, дороги, скалы, ЛЭП и подъёмники
+перекрашиваются, чтобы читаться на снимке.  Цвет текста и цвет halo
+меняются местами, дороги и тропы становятся светлыми, скалы —
+светло-коричневыми, ЛЭП — серыми, подъёмники — серо-белыми.  Чёрным
+значкам добавляется белая полупрозрачная обводка, сами значки остаются
+исходными.  Прежние цвета хранятся в свойствах слоя — по ним всё
+возвращается в исходный вид.
 
 Инверсия надписей не трогает надписи дорог и площадных дорог: надпись
 дороги лежит на самой полосе, и её тип определяется по тегам объекта
-(см. `core/label_tags.py`), а не по цвету надписи.  Значки перекрашивает
-paint effect QGIS; только значкам со светлой или серой заливкой
-подставляется перекрашенная копия SVG в кэше — иначе рисунок слился бы
-в белое пятно.
+(см. `core/label_tags.py`), а не по цвету надписи.  Значкам paint effect
+QGIS добавляет белую полупрозрачную обводку, сами значки не перекрашиваются.
 """
 
-import hashlib
 import json
 import re
-import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from qgis.core import (
-    QgsColorEffect,
     QgsDrawSourceEffect,
     QgsEffectStack,
     QgsHashedLineSymbolLayer,
@@ -51,7 +47,6 @@ from qgis.core import (
     QgsVectorLayer,
     Qgis,
 )
-from qgis.PyQt.QtCore import QStandardPaths
 from qgis.PyQt.QtGui import QColor
 
 from . import label_style, label_tags
@@ -90,16 +85,7 @@ RIDGE_COLOR = "#c9a17a"
 POWER_COLOR = "#b8b8b8"
 AERIALWAY_CASING_COLOR = "#f2f2f2"
 AERIALWAY_LINE_COLOR = "#a8a8a8"
-ICON_GLOW_COLOR = (210, 210, 210, 170)
-# Белая заливка значка на снимке становится светло-серой: иначе после
-# осветления рисунок слился бы в белое пятно.
-ICON_FILL_COLOR = "#b8b8b8"
-ICON_SCHEME_VERSION = "1"
-
-_COLOR_VALUE = re.compile(
-    r"(?P<prefix>(?<![\w-])(?:fill|stroke|stop-color|color)\s*[:=]\s*[\"']?)"
-    r"#(?P<value>[0-9a-fA-F]{3,8})"
-)
+ICON_GLOW_COLOR = (255, 255, 255, 170)
 
 SETTINGS_KEY = "basemap_source"
 DEFAULT_SOURCE = "google"
@@ -657,8 +643,8 @@ def _saved_symbol_colors(layer):
 def _saved_icon_effects(layer):
     """Сохранённые значки: список «ключ, прежний путь или None».
 
-    Путь нужен значкам с белой заливкой: им подставляется
-    перекрашенная копия SVG, а при выключении возвращается исходный.
+    Прежний путь остаётся в проектах старых версий: там значкам со
+    светлой заливкой подставлялась перекрашенная копия SVG.
     """
     raw = layer.customProperty(ICON_EFFECTS_PROPERTY)
     if not raw:
@@ -710,7 +696,11 @@ def _apply_saved_symbol_colors(layer, saved):
 
 
 def _restore_icon_effects(layer, saved):
-    """Снимает paint effect и возвращает значкам прежний путь."""
+    """Снимает paint effect и возвращает значкам прежний путь.
+
+    Путь возвращается проектам старых версий, где значку подставлялась
+    перекрашенная копия SVG.
+    """
     keyed = _symbol_layers_by_key(layer)
     changed = False
     for key, original_path in saved:
@@ -728,7 +718,7 @@ def _restore_icon_effects(layer, saved):
 
 
 def _icon_glow():
-    """Полупрозрачная серо-белая обводка значка."""
+    """Белая полупрозрачная обводка значка."""
     glow = QgsOuterGlowEffect()
     glow.setColor(QColor(*ICON_GLOW_COLOR))
     glow.setSpread(1.5)
@@ -737,23 +727,11 @@ def _icon_glow():
 
 
 def _icon_effect():
-    """Белый значок с полупрозрачной серо-белой обводкой."""
+    """Белая обводка под значком; сам значок не меняется."""
     effect = QgsEffectStack()
+    # Стек рисует эффекты в порядке добавления: сначала обводку,
+    # затем исходный значок поверх неё, поэтому рисунок не закрыт.
     effect.appendEffect(_icon_glow())
-    # Colorize не осветляет чёрный: он сохраняет яркость.  Поэтому
-    # значок осветляется brightness, а glow рисуется под ним.
-    brighten = QgsColorEffect()
-    brighten.setBrightness(255)
-    brighten.setSaturation(0)
-    effect.appendEffect(brighten)
-    return effect
-
-
-def _icon_glow_only_effect():
-    """Обводка для значка, который уже перекрашен в SVG-копии."""
-    effect = QgsEffectStack()
-    effect.appendEffect(_icon_glow())
-    # Эффект сам рисует только обводку; значок рисует drawSource.
     source = QgsDrawSourceEffect()
     source.setOpacity(1.0)
     effect.appendEffect(source)
@@ -830,81 +808,6 @@ def _is_black_icon(path):
     return _svg_is_black(str(_icon_source(path)))
 
 
-@lru_cache(maxsize=None)
-def _svg_needs_white_copy(path):
-    """True, если в SVG есть непустая заливка не чёрного цвета.
-
-    Осветление такой заливки стёрло бы рисунок: белая или серая
-    площадь стала бы белой вместе с чёрными линиями.
-    """
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    for value in _drawing_colors(text, ("fill",)):
-        rgb = _svg_rgb(value)
-        if rgb is not None and max(rgb) > 40:
-            return True
-    return False
-
-
-def _white_icon_text(text):
-    """Чёрный рисунок становится белым, белая заливка — светло-серой."""
-    def replacement(match):
-        rgb = _svg_rgb("#" + match.group("value"))
-        if rgb is None:
-            return match.group(0)
-        if max(rgb) - min(rgb) > 24 and max(rgb) > 40:
-            # Цветной элемент не трогаем: чёрным считается только
-            # чёрно-серый значок.
-            return match.group(0)
-        if min(rgb) >= 200:
-            color = ICON_FILL_COLOR
-        elif max(rgb) <= 40:
-            color = "#ffffff"
-        elif max(rgb) <= 120:
-            color = "#7a7a7a"
-        else:
-            color = ICON_FILL_COLOR
-        return match.group("prefix") + color
-
-    return _COLOR_VALUE.sub(replacement, text)
-
-
-def _icon_cache_dir():
-    """Каталог перекрашенных копий SVG."""
-    base = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
-    directory = Path(base or tempfile.gettempdir()) / "qgis_xtopo" / "icons"
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return directory
-
-
-def _white_icon_path(path):
-    """Путь к перекрашенной копии SVG или None."""
-    source = _icon_source(path)
-    try:
-        text = source.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    digest = hashlib.sha256(
-        (ICON_SCHEME_VERSION + text).encode("utf-8")
-    ).hexdigest()[:12]
-    target = _icon_cache_dir() / f"{source.stem}_{digest}.svg"
-    if not target.exists():
-        temporary = target.with_suffix(".tmp")
-        try:
-            temporary.write_text(
-                _white_icon_text(text), encoding="utf-8"
-            )
-            temporary.replace(target)
-        except OSError:
-            return None
-    return str(target)
-
-
 def _is_black_marker(symbol_layer):
     """Чёрный маркер без цветной заливки и обводки."""
     color = symbol_layer.color()
@@ -950,20 +853,18 @@ def _invert_layer_symbols(layer):
     return True
 
 
-def _whiten_layer_icons(layer):
-    """Белые чёрные значки слоя с серо-белой обводкой."""
+def _outline_layer_icons(layer):
+    """Добавляет чёрным значкам слоя белую полупрозрачную обводку."""
     point_layer = layer.geometryType() == Qgis.GeometryType.Point
     saved = []
     for key, symbol_layer in _symbol_layers_by_key(layer).items():
         if isinstance(symbol_layer, QgsSvgMarkerSymbolLayer):
-            icon = symbol_layer.path()
-            if not _is_black_icon(icon):
+            if not _is_black_icon(symbol_layer.path()):
                 continue
         elif (
             isinstance(symbol_layer, QgsSimpleMarkerSymbolLayer)
             and point_layer
         ):
-            icon = None
             if not _is_black_marker(symbol_layer):
                 continue
         else:
@@ -972,21 +873,8 @@ def _whiten_layer_icons(layer):
         if effect is not None and effect.enabled():
             # Включённый чужой эффект не затираем: значок останется как есть.
             continue
-        if icon is not None and _svg_needs_white_copy(
-            str(_icon_source(icon))
-        ):
-            # Осветление краской стёрло бы рисунок: светлая или серая
-            # заливка стала бы белой вместе с чёрными линиями.  Поэтому
-            # такому значку подставляется перекрашенная копия SVG.
-            white = _white_icon_path(icon)
-            if white is None:
-                continue
-            saved.append([key, icon])
-            symbol_layer.setPath(white)
-            symbol_layer.setPaintEffect(_icon_glow_only_effect())
-        else:
-            saved.append([key, None])
-            symbol_layer.setPaintEffect(_icon_effect())
+        saved.append([key, None])
+        symbol_layer.setPaintEffect(_icon_effect())
     if not saved:
         return False
     layer.setCustomProperty(ICON_EFFECTS_PROPERTY, json.dumps(saved))
@@ -995,7 +883,7 @@ def _whiten_layer_icons(layer):
 
 
 def invert_symbols(project=None):
-    """Перекрашивает дороги, скалы, ЛЭП, подъёмники и значки.
+    """Перекрашивает дороги, скалы, ЛЭП и подъёмники, обводит значки.
 
     Прежние цвета и наложенные эффекты хранятся в свойствах слоя: по
     ним символы возвращаются в исходный вид.  Перед перекраской прежние
@@ -1010,7 +898,7 @@ def invert_symbols(project=None):
             continue
         if layer.name() in INVERTED_SYMBOL_LAYERS:
             changed = _invert_layer_symbols(layer) or changed
-        changed = _whiten_layer_icons(layer) or changed
+        changed = _outline_layer_icons(layer) or changed
     return changed
 
 

@@ -1147,22 +1147,12 @@ class BasemapSymbolInversionTest(unittest.TestCase):
             cls.renderers[name] = renderer
 
     def setUp(self):
-        from unittest import mock
         from qgis.core import QgsProject, QgsVectorLayer
         from qgis_xtopo.core import basemap
 
         self.basemap = basemap
         self.project = QgsProject.instance()
         self.project.clear()
-        self._cache = tempfile.TemporaryDirectory()
-        self.addCleanup(self._cache.cleanup)
-        patcher = mock.patch.object(
-            self.basemap,
-            "_icon_cache_dir",
-            return_value=Path(self._cache.name),
-        )
-        self.addCleanup(patcher.stop)
-        patcher.start()
         self.layers = {}
         for name, geometry in self.TEMPLATE_LAYERS:
             layer = QgsVectorLayer(
@@ -1290,12 +1280,14 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         self.basemap.restore_symbols(self.project)
         self.assertEqual(self._line_colors(layer), before)
 
-    def test_black_icons_get_white_effect(self):
+    def test_black_icons_get_white_outline(self):
         from qgis.core import (
             QgsColorEffect,
+            QgsDrawSourceEffect,
             QgsOuterGlowEffect,
             QgsSvgMarkerSymbolLayer,
         )
+        from qgis.PyQt.QtGui import QColor
 
         layer = self.layers["alpine hut"]
         self.assertEqual(self._enabled_effects(layer), [])
@@ -1308,15 +1300,18 @@ class BasemapSymbolInversionTest(unittest.TestCase):
             self.assertTrue(effect.enabled(), key)
             effects = [effect.effect(index)
                        for index in range(effect.count())]
-            self.assertTrue(
-                any(isinstance(item, QgsOuterGlowEffect)
-                    for item in effects), key
+            # Обводка идёт первой, значок рисуется поверх неё и остаётся
+            # исходным: цвета эффекта не меняют.
+            self.assertIsInstance(effects[0], QgsOuterGlowEffect, key)
+            self.assertEqual(
+                effects[0].color(), QColor(*self.basemap.ICON_GLOW_COLOR)
             )
-            color = next(
-                item for item in effects
-                if isinstance(item, QgsColorEffect)
+            self.assertLess(effects[0].color().alpha(), 255)
+            self.assertIsInstance(effects[-1], QgsDrawSourceEffect, key)
+            self.assertFalse(
+                any(isinstance(item, QgsColorEffect) for item in effects),
+                key,
             )
-            self.assertEqual(color.brightness(), 255, key)
         self.basemap.restore_symbols(self.project)
         self.assertEqual(self._enabled_effects(layer), [])
         self.assertIsNone(layer.customProperty(
@@ -1332,10 +1327,9 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         self.assertTrue(icons)
         self.assertEqual(self._enabled_effects(layer), [])
 
-    def test_white_filled_icons_keep_their_drawing(self):
-        """Белая заливка не становится белой: рисунок сохраняется."""
+    def test_white_filled_icons_keep_their_path(self):
+        """Светлая заливка остаётся исходной: копий SVG больше нет."""
         from qgis.core import (
-            QgsColorEffect,
             QgsMarkerSymbol,
             QgsSingleSymbolRenderer,
             QgsSvgMarkerSymbolLayer,
@@ -1354,39 +1348,15 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         original = icon.path()
 
         self.basemap.invert_symbols(self.project)
-        rewritten = next(
+        outlined = next(
             iter(self.basemap._symbol_layers_by_key(layer).values())
         )
-        self.assertNotEqual(rewritten.path(), original)
-        self.assertTrue(
-            rewritten.path().startswith(str(Path(self._cache.name)))
-        )
-        text = Path(rewritten.path()).read_text(encoding="utf-8")
-        self.assertIn("#ffffff", text)
-        self.assertIn(self.basemap.ICON_FILL_COLOR, text)
-        effect = rewritten.paintEffect()
-        effects = [effect.effect(index)
-                   for index in range(effect.count())]
-        self.assertFalse(
-            any(isinstance(item, QgsColorEffect) for item in effects)
-        )
+        self.assertEqual(outlined.path(), original)
+        self.assertIsNotNone(outlined.paintEffect())
 
         self.basemap.restore_symbols(self.project)
-        self.assertEqual(rewritten.path(), original)
-
-    def test_white_fill_detection(self):
-        from qgis_xtopo.core.resources import resource_path
-
-        self.assertTrue(self.basemap._svg_needs_white_copy(
-            resource_path("icons", "aerialway_station.svg")
-        ))
-        # Серая заливка тоже требует копии: иначе она станет белой.
-        self.assertTrue(self.basemap._svg_needs_white_copy(
-            resource_path("icons", "castle.svg")
-        ))
-        self.assertFalse(self.basemap._svg_needs_white_copy(
-            resource_path("icons", "alpine_hut.svg")
-        ))
+        self.assertEqual(outlined.path(), original)
+        self.assertIsNone(outlined.paintEffect())
 
     def test_black_svg_detection(self):
         self.assertTrue(self.basemap._is_black_icon("peak.svg"))

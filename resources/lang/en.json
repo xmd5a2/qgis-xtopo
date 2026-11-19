@@ -621,7 +621,7 @@
   "Обновить индекс выгрузок SliceOSM": "Refresh the SliceOSM extracts index",
   "Обновление индекса выгрузок SliceOSM…": "Refreshing the SliceOSM extracts index…",
   "Инверсия": "Inversion",
-  "Инверсия: дороги и тропы светлые, скалы светло-коричневые, ЛЭП серые, подъёмники серо-белые, чёрные значки белые с серо-белой обводкой; цвет текста и halo меняются местами. Надписи дорог и площадных дорог не меняются": "Inversion: roads and paths are light, ridges light brown, power lines grey, lifts grey-white, black icons white with a grey-white outline; text and halo colours swap places. Road names and area-road names stay unchanged",
+  "Инверсия: дороги и тропы светлые, скалы светло-коричневые, ЛЭП серые, подъёмники серо-белые, чёрные значки получают белую полупрозрачную обводку и не перекрашиваются; цвет текста и halo меняются местами. Надписи дорог и площадных дорог не меняются": "Inversion: roads and paths are light, ridges light brown, power lines grey, lifts grey-white, black icons get a translucent white outline and keep their colours; text and halo colours swap places. Road names and area-road names stay unchanged",
   "На растровой подложке отмывка не используется": "Hillshade is not used on a raster basemap",
   "{}: скачано {} МБ": "{}: {} MB downloaded",
   "Склейка вырезанных областей…": "Merging the extracted areas…",
