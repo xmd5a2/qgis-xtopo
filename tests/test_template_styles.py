@@ -1157,13 +1157,15 @@ class ServiceRoadLodTest(unittest.TestCase):
 
 
 class RoadLayerScaleSplitTest(unittest.TestCase):
-    """Вблизи дороги рисуются одним слоем, на обзоре остаются магистрали.
+    """Вблизи дороги рисуются одним слоем, на обзоре остаются главные.
 
     Правила рендерера скрывают улицы, но QGIS всё равно перебирает все
-    объекты слоя.  Поэтому на обзорных масштабах виден слой с подмножеством
-    только магистралей, а улицы не читаются.  Вблизи, наоборот, нужен один
-    слой со всеми дорогами: symbol levels кладут casing всех дорог под
-    заливки, и на стыке магистрали с улицей нет видимой границы.
+    объекты слоя. Поэтому на обзорных масштабах виден слой с подмножеством
+    дорог без улиц, а улицы не читаются. `unclassified` остаётся в обзоре:
+    это не внутриквартальная улица, и он нужен на 1:200000+. Вблизи,
+    наоборот, нужен один слой со всеми дорогами: symbol levels кладут
+    casing всех дорог под заливки, и на стыке магистрали с улицей нет
+    видимой границы.
     """
 
     @classmethod
@@ -1191,7 +1193,7 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertIsNotNone(renderer)
         self.assertEqual(renderer.get("symbollevels"), "1")
 
-    def test_overview_layer_reads_only_major_roads(self):
+    def test_overview_layer_keeps_unclassified_roads(self):
         layer = self.layers.get("highway main overview")
         self.assertIsNotNone(layer)
         datasource = self._datasource("highway main overview")
@@ -1199,6 +1201,8 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertIn("subset=", datasource)
         self.assertIn("NOT IN", datasource)
         self.assertIn("'service'", datasource)
+        # unclassified — не улица: он должен читаться и на обзоре.
+        self.assertNotIn("'unclassified'", datasource)
         self.assertEqual(layer.get("hasScaleBasedVisibilityFlag"), "1")
         self.assertEqual(layer.get("minScale"), "0")
         self.assertEqual(layer.get("maxScale"), "200000")
@@ -1214,6 +1218,10 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertNotIn("subset=", self._datasource("[blocking] highway main"))
         self.assertIn(
             "NOT IN",
+            self._datasource("[blocking] highway main overview"),
+        )
+        self.assertNotIn(
+            "'unclassified'",
             self._datasource("[blocking] highway main overview"),
         )
         self.assertEqual(close.get("hasScaleBasedVisibilityFlag"), "1")
