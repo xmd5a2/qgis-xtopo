@@ -121,6 +121,21 @@ DRAW_TOOL_STYLE = (
     "}"
 )
 
+MOVE_BUTTON_STYLE = (
+    "QPushButton {"
+    " background-color: rgba(255, 255, 255, 220);"
+    " border: 1px solid #0078d7;"
+    " border-radius: 4px;"
+    " padding: 2px;"
+    "}"
+    "QPushButton:hover {"
+    " background-color: #ffffff;"
+    "}"
+    "QPushButton:checked {"
+    " background-color: rgba(0, 120, 215, 45);"
+    "}"
+)
+
 # Цвет рамки охвата и её подписей размеров.
 FRAME_COLOR = QColor(0, 120, 215)
 FRAME_FILL_COLOR = QColor(0, 120, 215, 40)
@@ -192,6 +207,25 @@ class MeasuredCanvas(QgsMapCanvas):
         self._width_label = ""
         self._height_label = ""
         self._frame_provider = None
+        self._overlay_widget = None
+
+    def set_overlay_widget(self, widget):
+        """Виджет, который держится под нижней стороной рамки."""
+        self._overlay_widget = widget
+
+    def _place_overlay(self, left, top, right, bottom):
+        widget = self._overlay_widget
+        if widget is None:
+            return
+        size = widget.size()
+        if size.width() <= 0 or size.height() <= 0:
+            size = widget.sizeHint()
+        view = self.viewport()
+        x = (left + right - size.width()) / 2.0
+        y = bottom + 4.0
+        x = min(max(2.0, x), max(2.0, view.width() - size.width() - 2.0))
+        y = min(max(2.0, y), max(2.0, view.height() - size.height() - 2.0))
+        widget.move(round(x), round(y))
 
     def set_frame(self, rectangle, width_label="", height_label=""):
         """Задаёт рамку (в координатах холста) и подписи её сторон."""
@@ -230,7 +264,27 @@ class MeasuredCanvas(QgsMapCanvas):
         super().paintEvent(event)
         self._draw_scale_bar()
         frame, self._width_label, self._height_label = self._current_frame()
-        if frame is None or not self._width_label or not self._height_label:
+        if frame is None:
+            return
+        transform = self.getCoordinateTransform()
+
+        def device(x, y):
+            point = transform.transform(QgsPointXY(x, y))
+            return point.x(), point.y()
+
+        left, top = device(frame.xMinimum(), frame.yMaximum())
+        right, bottom = device(frame.xMaximum(), frame.yMinimum())
+        # Во время перетаскивания карты QgsMapCanvas сдвигает сцену,
+        # а не пересчитывает преобразование координат. Подписи рисуются
+        # поверх viewport, поэтому их нужно сдвинуть вместе со сценой,
+        # иначе цифры остаются на старом месте до отпускания мыши.
+        shift_x, shift_y = self._scene_shift()
+        left += shift_x
+        right += shift_x
+        top += shift_y
+        bottom += shift_y
+        if not self._width_label or not self._height_label:
+            self._place_overlay(left, top, right, bottom)
             return
         # QgsMapCanvas рисует карту во viewport(): сам виджет — только рамка,
         # и на нём QPainter не активируется.
@@ -242,23 +296,6 @@ class MeasuredCanvas(QgsMapCanvas):
             font.setBold(True)
             painter.setFont(font)
             metrics = painter.fontMetrics()
-            transform = self.getCoordinateTransform()
-
-            def device(x, y):
-                point = transform.transform(QgsPointXY(x, y))
-                return point.x(), point.y()
-
-            left, top = device(frame.xMinimum(), frame.yMaximum())
-            right, bottom = device(frame.xMaximum(), frame.yMinimum())
-            # Во время перетаскивания карты QgsMapCanvas сдвигает сцену,
-            # а не пересчитывает преобразование координат. Подписи рисуются
-            # поверх viewport, поэтому их нужно сдвинуть вместе со сценой,
-            # иначе цифры остаются на старом месте до отпускания мыши.
-            shift_x, shift_y = self._scene_shift()
-            left += shift_x
-            right += shift_x
-            top += shift_y
-            bottom += shift_y
             height = metrics.height()
             gap = 3.0
             view = self.viewport()
@@ -268,6 +305,14 @@ class MeasuredCanvas(QgsMapCanvas):
                 width_rect = QRectF(left, bottom + gap, right - left, height)
             else:
                 width_rect = QRectF(left, top - height - gap, right - left, height)
+            # Кнопка перетаскивания идёт под подписью ширины, чтобы не
+            # закрывать цифры, но остаётся под рамкой.
+            anchor = (
+                width_rect.bottom()
+                if width_rect.top() >= bottom
+                else bottom
+            )
+            self._place_overlay(left, top, right, anchor)
             self._draw_label(painter, width_rect, self._width_label, font, metrics)
             # Вертикальная ось: высота — одна подпись вплотную к левой
             # стороне рамки, текст повёрнут (если не помещается — к правой).
@@ -741,25 +786,24 @@ class ExtentDialog(QDialog):
         self.canvas.viewport().installEventFilter(self)
         layout.addWidget(self.canvas, 1)
 
-        move_row = QHBoxLayout()
-        move_row.addStretch(1)
-        self.move_button = QPushButton()
+        self.move_button = QPushButton(self.canvas.viewport())
         self.move_button.setCheckable(True)
         self.move_button.setIcon(move_icon())
-        self.move_button.setIconSize(QSize(22, 22))
-        self.move_button.setMinimumSize(46, 38)
+        self.move_button.setIconSize(QSize(20, 20))
+        self.move_button.setFixedSize(30, 30)
+        self.move_button.setFocusPolicy(Qt.NoFocus)
         self.move_button.setAccessibleName("Переместить рамку охвата")
-        self.move_button.setStyleSheet(DRAW_TOOL_STYLE)
+        self.move_button.setStyleSheet(MOVE_BUTTON_STYLE)
+        self.move_button.setCursor(Qt.SizeAllCursor)
         if self.move_button.icon().isNull():
-            self.move_button.setText("Переместить")
+            self.move_button.setText("↔")
         self.move_button.setToolTip(
             "Перетащить рамку охвата: включите кнопку и тяните рамку мышью"
         )
         self.move_button.setEnabled(self._drawn_extent is not None)
+        self.move_button.setVisible(self._drawn_extent is not None)
         self.move_button.toggled.connect(self._toggle_move)
-        move_row.addWidget(self.move_button)
-        move_row.addStretch(1)
-        layout.addLayout(move_row)
+        self.canvas.set_overlay_widget(self.move_button)
 
         hint = QLabel(
             "Перетаскивайте карту мышью, колесом меняйте масштаб. Найдите "
@@ -1057,6 +1101,7 @@ class ExtentDialog(QDialog):
         self.draw_button.setChecked(False)
         self.reset_button.setEnabled(True)
         self.move_button.setEnabled(True)
+        self.move_button.setVisible(True)
         self._update_coords()
         self._update_measurement()
 
@@ -1067,6 +1112,7 @@ class ExtentDialog(QDialog):
         self._drawn_extent = QgsRectangle(rectangle)
         self._drawn_extent.normalize()
         self.move_button.setEnabled(True)
+        self.move_button.setVisible(True)
         self._update_coords()
         self._update_measurement()
 
@@ -1076,6 +1122,7 @@ class ExtentDialog(QDialog):
         self.draw_button.setChecked(False)
         self.move_button.setChecked(False)
         self.move_button.setEnabled(False)
+        self.move_button.setVisible(False)
         self.reset_button.setEnabled(False)
         self._update_coords()
         self._update_measurement()

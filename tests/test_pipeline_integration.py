@@ -3012,10 +3012,14 @@ class PipelineIntegrationTest(unittest.TestCase):
         try:
             self.assertTrue(dialog.move_button.isEnabled())
             self.assertFalse(dialog.move_button.icon().isNull())
+            self.assertIs(
+                dialog.move_button.parent(), dialog.canvas.viewport()
+            )
+            self.assertTrue(dialog.move_button.isVisible())
             self.assertEqual(
                 dialog._draw_tool.band.strokeColor(), FRAME_COLOR
             )
-            dialog.move_button.setChecked(True)
+            dialog.move_button.click()
             self.assertIs(dialog.canvas.mapTool(), dialog._move_tool)
 
             before = QgsRectangle(dialog._drawn_extent)
@@ -3049,6 +3053,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             dialog._reset_drawn()
             self.assertFalse(dialog.move_button.isEnabled())
             self.assertFalse(dialog.move_button.isChecked())
+            self.assertFalse(dialog.move_button.isVisible())
         finally:
             dialog.done(0)
 
