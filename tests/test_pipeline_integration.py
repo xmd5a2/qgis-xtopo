@@ -2982,6 +2982,76 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertTrue(callable(painter_check))
         dialog.done(0)
 
+    def test_extent_dialog_moves_drawn_frame(self):
+        """Рамку можно тащить кнопкой со стрелками, подписи едут за сценой."""
+        from qgis.core import QgsRectangle
+        from qgis.PyQt.QtCore import QPoint
+        from qgis_xtopo.gui.extentdialog import (
+            FRAME_COLOR, ExtentDialog, _left_button,
+        )
+
+        class Event:
+            def __init__(self, button, position, buttons=0):
+                self._button = button
+                self._position = position
+                self._buttons = buttons
+
+            def button(self):
+                return self._button
+
+            def pos(self):
+                return self._position
+
+            def buttons(self):
+                return self._buttons
+
+        dialog = ExtentDialog("37.5,55.7,37.7,55.8")
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
+        try:
+            self.assertTrue(dialog.move_button.isEnabled())
+            self.assertFalse(dialog.move_button.icon().isNull())
+            self.assertEqual(
+                dialog._draw_tool.band.strokeColor(), FRAME_COLOR
+            )
+            dialog.move_button.setChecked(True)
+            self.assertIs(dialog.canvas.mapTool(), dialog._move_tool)
+
+            before = QgsRectangle(dialog._drawn_extent)
+            center = dialog.canvas.viewport().rect().center()
+            tool = dialog._move_tool
+            tool.canvasPressEvent(
+                Event(_left_button(), center, _left_button())
+            )
+            tool.canvasMoveEvent(
+                Event(
+                    _left_button(), center + QPoint(30, 20), _left_button()
+                )
+            )
+            moved = dialog._drawn_extent
+            self.assertNotAlmostEqual(
+                moved.center().x(), before.center().x(), places=2
+            )
+            self.assertNotAlmostEqual(
+                moved.center().y(), before.center().y(), places=2
+            )
+            tool.canvasReleaseEvent(
+                Event(_left_button(), center + QPoint(30, 20))
+            )
+            self.assertIs(dialog.canvas.mapTool(), dialog._move_tool)
+
+            # Подписи сдвигаются вместе со сценой во время перетаскивания.
+            scene = dialog.canvas.sceneRect()
+            dialog.canvas.setSceneRect(-40, -30, scene.width(), scene.height())
+            self.assertEqual(dialog.canvas._scene_shift(), (40.0, 30.0))
+
+            dialog._reset_drawn()
+            self.assertFalse(dialog.move_button.isEnabled())
+            self.assertFalse(dialog.move_button.isChecked())
+        finally:
+            dialog.done(0)
+
     def test_extent_dialog_basemaps(self):
         """Подложки переключаются, подпись под ними меняется."""
         from qgis_xtopo.gui.extentdialog import BASEMAPS, ExtentDialog

@@ -15,8 +15,8 @@ from qgis.core import (
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
 from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import (
-    QColor, QKeySequence, QPainter, QPainterPath, QPen, QStandardItem,
-    QStandardItemModel,
+    QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
+    QStandardItem, QStandardItemModel,
 )
 from qgis.PyQt.QtWidgets import (
     QApplication, QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel,
@@ -121,6 +121,40 @@ DRAW_TOOL_STYLE = (
     "}"
 )
 
+# Цвет рамки охвата и её подписей размеров.
+FRAME_COLOR = QColor(0, 120, 215)
+FRAME_FILL_COLOR = QColor(0, 120, 215, 40)
+
+
+def move_icon(size=22):
+    """Значок с четырьмя стрелками, расходящимися из центра."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(FRAME_COLOR, 2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        center = size // 2
+        near = 4
+        far = size - 4
+        head = 4
+        painter.drawLine(center, near, center, far)
+        painter.drawLine(near, center, far, center)
+        painter.drawLine(center, near, center - head, near + head)
+        painter.drawLine(center, near, center + head, near + head)
+        painter.drawLine(center, far, center - head, far - head)
+        painter.drawLine(center, far, center + head, far - head)
+        painter.drawLine(near, center, near + head, center - head)
+        painter.drawLine(near, center, near + head, center + head)
+        painter.drawLine(far, center, far - head, center - head)
+        painter.drawLine(far, center, far - head, center + head)
+    finally:
+        painter.end()
+    return QIcon(pixmap)
+
 
 def _left_button():
     try:
@@ -187,6 +221,11 @@ class MeasuredCanvas(QgsMapCanvas):
             return QgsRectangle(rectangle), width_label, height_label
         return self._frame, self._width_label, self._height_label
 
+    def _scene_shift(self):
+        """Сдвиг сцены при перетаскивании карты в координатах viewport."""
+        origin = self.sceneRect().topLeft()
+        return -origin.x(), -origin.y()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         self._draw_scale_bar()
@@ -211,6 +250,15 @@ class MeasuredCanvas(QgsMapCanvas):
 
             left, top = device(frame.xMinimum(), frame.yMaximum())
             right, bottom = device(frame.xMaximum(), frame.yMinimum())
+            # Во время перетаскивания карты QgsMapCanvas сдвигает сцену,
+            # а не пересчитывает преобразование координат. Подписи рисуются
+            # поверх viewport, поэтому их нужно сдвинуть вместе со сценой,
+            # иначе цифры остаются на старом месте до отпускания мыши.
+            shift_x, shift_y = self._scene_shift()
+            left += shift_x
+            right += shift_x
+            top += shift_y
+            bottom += shift_y
             height = metrics.height()
             gap = 3.0
             view = self.viewport()
@@ -320,7 +368,7 @@ class MeasuredCanvas(QgsMapCanvas):
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(25, 25, 25))
+        painter.setBrush(QColor(FRAME_COLOR))
         painter.drawPath(path)
         painter.restore()
 
@@ -342,8 +390,8 @@ class RectangleMapTool(QgsMapTool):
         self.end_point = None
         self.pan_point = None
         self.band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-        self.band.setColor(QColor(0, 120, 215))
-        self.band.setFillColor(QColor(0, 120, 215, 40))
+        self.band.setColor(QColor(FRAME_COLOR))
+        self.band.setFillColor(QColor(FRAME_FILL_COLOR))
         self.band.setWidth(2)
         self.band.hide()
 
@@ -448,6 +496,78 @@ class RectangleMapTool(QgsMapTool):
         self.band.hide()
 
 
+class MoveExtentMapTool(QgsMapTool):
+    """Перетаскивание уже нарисованной рамки охвата."""
+
+    rectangleChanged = pyqtSignal(object)
+    rectangleDrawn = pyqtSignal(object)
+
+    def __init__(self, canvas, extent_provider, extent_shower=None):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self._extent_provider = extent_provider
+        self._show_extent = extent_shower
+        self._start = None
+        self._start_extent = None
+        self._extent = None
+
+    def activate(self):
+        super().activate()
+        self.canvas.setCursor(Qt.SizeAllCursor)
+
+    def canvasPressEvent(self, event):
+        if event.button() != _left_button():
+            return
+        rectangle = self._extent_provider()
+        if rectangle is None or rectangle.isEmpty():
+            return
+        rectangle = QgsRectangle(rectangle)
+        rectangle.normalize()
+        point = self.toMapCoordinates(event.pos())
+        if not rectangle.contains(point):
+            return
+        self._start = point
+        self._start_extent = rectangle
+        self._extent = QgsRectangle(rectangle)
+        self.canvas.setCursor(Qt.SizeAllCursor)
+
+    def canvasMoveEvent(self, event):
+        if self._start is None or self._start_extent is None:
+            return
+        point = self.toMapCoordinates(event.pos())
+        dx = point.x() - self._start.x()
+        dy = point.y() - self._start.y()
+        rectangle = QgsRectangle(
+            self._start_extent.xMinimum() + dx,
+            self._start_extent.yMinimum() + dy,
+            self._start_extent.xMaximum() + dx,
+            self._start_extent.yMaximum() + dy,
+        )
+        self._extent = rectangle
+        if self._show_extent is not None:
+            self._show_extent(rectangle)
+        self.rectangleChanged.emit(QgsRectangle(rectangle))
+
+    def canvasReleaseEvent(self, event):
+        if self._start is None:
+            return
+        rectangle = self._extent
+        self._start = None
+        self._start_extent = None
+        self._extent = None
+        if rectangle is not None:
+            if self._show_extent is not None:
+                self._show_extent(rectangle)
+            self.rectangleDrawn.emit(QgsRectangle(rectangle))
+
+    def deactivate(self):
+        self._start = None
+        self._start_extent = None
+        self._extent = None
+        self.canvas.setCursor(Qt.ArrowCursor)
+        super().deactivate()
+
+
 _SEARCH_WORKERS = set()
 _QUIT_HANDLER_INSTALLED = False
 
@@ -511,6 +631,7 @@ class ExtentDialog(QDialog):
         self._bbox = None
         self._drawn_extent = None
         self._frame_labels = ("", "")
+        self._tool_syncing = False
         self._search_worker = None
         self._wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         self._mercator = QgsCoordinateReferenceSystem("EPSG:3857")
@@ -598,6 +719,13 @@ class ExtentDialog(QDialog):
         self._draw_tool = RectangleMapTool(self.canvas)
         self._draw_tool.rectangleDrawn.connect(self._rectangle_drawn)
         self._draw_tool.rectangleChanged.connect(self._rectangle_changed)
+        self._move_tool = MoveExtentMapTool(
+            self.canvas,
+            lambda: self._drawn_extent,
+            self._draw_tool.show_rectangle,
+        )
+        self._move_tool.rectangleDrawn.connect(self._rectangle_drawn)
+        self._move_tool.rectangleChanged.connect(self._rectangle_changed)
         self.canvas.setMapTool(self._pan_tool)
         initial, remembered = self._initial_extent(bbox_text)
         self.canvas.setExtent(
@@ -612,6 +740,26 @@ class ExtentDialog(QDialog):
         self.canvas.set_frame_provider(self._frame_provider)
         self.canvas.viewport().installEventFilter(self)
         layout.addWidget(self.canvas, 1)
+
+        move_row = QHBoxLayout()
+        move_row.addStretch(1)
+        self.move_button = QPushButton()
+        self.move_button.setCheckable(True)
+        self.move_button.setIcon(move_icon())
+        self.move_button.setIconSize(QSize(22, 22))
+        self.move_button.setMinimumSize(46, 38)
+        self.move_button.setAccessibleName("Переместить рамку охвата")
+        self.move_button.setStyleSheet(DRAW_TOOL_STYLE)
+        if self.move_button.icon().isNull():
+            self.move_button.setText("Переместить")
+        self.move_button.setToolTip(
+            "Перетащить рамку охвата: включите кнопку и тяните рамку мышью"
+        )
+        self.move_button.setEnabled(self._drawn_extent is not None)
+        self.move_button.toggled.connect(self._toggle_move)
+        move_row.addWidget(self.move_button)
+        move_row.addStretch(1)
+        layout.addLayout(move_row)
 
         hint = QLabel(
             "Перетаскивайте карту мышью, колесом меняйте масштаб. Найдите "
@@ -687,9 +835,35 @@ class ExtentDialog(QDialog):
         super().showEvent(event)
 
     def _toggle_draw(self, active):
+        if self._tool_syncing:
+            return
         if active:
+            if self.move_button.isChecked():
+                self._tool_syncing = True
+                try:
+                    self.move_button.setChecked(False)
+                finally:
+                    self._tool_syncing = False
             self.canvas.setMapTool(self._draw_tool)
-        else:
+        elif not self.move_button.isChecked():
+            self.canvas.setMapTool(self._pan_tool)
+
+    def _toggle_move(self, active):
+        if self._tool_syncing:
+            return
+        if active:
+            if self._drawn_extent is None:
+                self.move_button.setChecked(False)
+                return
+            if self.draw_button.isChecked():
+                self._tool_syncing = True
+                try:
+                    self.draw_button.setChecked(False)
+                finally:
+                    self._tool_syncing = False
+            self.canvas.setMapTool(self._move_tool)
+            self.canvas.setFocus()
+        elif not self.draw_button.isChecked():
             self.canvas.setMapTool(self._pan_tool)
 
     def _basemap_changed(self, _index):
@@ -882,6 +1056,7 @@ class ExtentDialog(QDialog):
         self._drawn_extent.normalize()
         self.draw_button.setChecked(False)
         self.reset_button.setEnabled(True)
+        self.move_button.setEnabled(True)
         self._update_coords()
         self._update_measurement()
 
@@ -891,6 +1066,7 @@ class ExtentDialog(QDialog):
             return
         self._drawn_extent = QgsRectangle(rectangle)
         self._drawn_extent.normalize()
+        self.move_button.setEnabled(True)
         self._update_coords()
         self._update_measurement()
 
@@ -898,6 +1074,8 @@ class ExtentDialog(QDialog):
         self._drawn_extent = None
         self._draw_tool.clear()
         self.draw_button.setChecked(False)
+        self.move_button.setChecked(False)
+        self.move_button.setEnabled(False)
         self.reset_button.setEnabled(False)
         self._update_coords()
         self._update_measurement()
