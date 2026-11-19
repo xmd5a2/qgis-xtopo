@@ -7,9 +7,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, dem_sources, disk_space, gdal_log, highway_integrity,
-    i18n, icon_angles, label_cache, osm_convert, peak_filter, poi_icons,
-    polygon_overlaps, project, sources, terrain,
+    coastline, dem_sources, disk_space, field_subset, gdal_log,
+    highway_integrity, i18n, icon_angles, label_cache, osm_convert,
+    peak_filter, poi_icons, polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -1039,6 +1039,7 @@ class Pipeline:
                 parameters.get("suffix", ""),
                 parameters.get("layer_name"),
                 parameters.get("target_crs"),
+                parameters.get("fields"),
             )
         if operation == "load":
             path = self.config.vector_dir / f"{parameters['name']}.sqlite"
@@ -1165,7 +1166,9 @@ class Pipeline:
                 name, current, bool(parameters.get("main_flow", False))
             )
         if operation == "split_layer":
-            return self._split_layer(name, current)
+            return self._split_layer(
+                name, current, parameters.get("fields")
+            )
         if operation == "highway_integrity":
             if not highway_integrity.store(self.config.vector_dir, name):
                 # Без столбца фильтры дорог по интегритету не сработают.
@@ -1202,13 +1205,15 @@ class Pipeline:
                 raise PipelineError(f"{algorithm} produced an empty or unreadable layer")
         return output
 
-    def _save(self, name, current, suffix="", layer_name=None, target_crs=None):
+    def _save(self, name, current, suffix="", layer_name=None, target_crs=None,
+              fields=None):
         destination = self.config.vector_dir / f"{name}{suffix}.sqlite"
         save_vector(
             current,
             destination,
             layer_name or f"{name}{suffix}",
             target_crs=target_crs,
+            fields=fields,
         )
         self.progress(f"{name}: saved {destination.name}")
         return current
@@ -1370,7 +1375,7 @@ class Pipeline:
         self.progress(f"{name}: label lines for {built} objects")
         return writer.path
 
-    def _split_layer(self, name, current):
+    def _split_layer(self, name, current, fields=None):
         """Делит слой на три группы по значению тега layer."""
         from osgeo import ogr
 
@@ -1426,6 +1431,7 @@ class Pipeline:
                 writer.path,
                 self.config.vector_dir / f"{layer_name}.sqlite",
                 layer_name,
+                fields=fields,
             )
             if not suffix:
                 base_path = writer.path
@@ -1687,7 +1693,8 @@ def _source_fields(source):
         dataset = None
 
 
-def save_vector(source, destination, layer_name, target_crs=None):
+def save_vector(source, destination, layer_name, target_crs=None,
+                fields=None):
     from osgeo import gdal, ogr
 
     gdal.UseExceptions()
@@ -1706,10 +1713,13 @@ def save_vector(source, destination, layer_name, target_crs=None):
         "-unsetFid",
     ]
     names = _source_fields(source)
-    keep = [
-        name for name in names
-        if name.lower() not in ("ogc_fid", "fid", "objectid")
-    ]
+    if fields:
+        keep = field_subset.select(fields, names)
+    else:
+        keep = [
+            name for name in names
+            if name.lower() not in ("ogc_fid", "fid", "objectid")
+        ]
     if keep and len(keep) != len(names):
         options.extend(["-select", ",".join(keep)])
     creation_options = gdal.GetDriverByName("SQLite").GetMetadataItem("DMD_CREATIONOPTIONLIST") or ""

@@ -10,8 +10,11 @@ def step(operation, **params):
     return operation, params
 
 
-def save(suffix="", layer_name=None, target_crs=None):
-    return step("save", suffix=suffix, layer_name=layer_name, target_crs=target_crs)
+def save(suffix="", layer_name=None, target_crs=None, fields=None):
+    return step(
+        "save", suffix=suffix, layer_name=layer_name,
+        target_crs=target_crs, fields=fields,
+    )
 
 
 def load(name):
@@ -75,8 +78,8 @@ def label_axis(main_flow=False):
     return step("label_axis", main_flow=main_flow)
 
 
-def split_layer():
-    return step("split_layer")
+def split_layer(fields=None):
+    return step("split_layer", fields=fields)
 
 
 def store_highway_integrity():
@@ -162,8 +165,11 @@ RECIPES = {
         load("highway_main_bridge"), fix(), dissolve("highway"), singleparts(),
         fix(), save("_dissolved"),
     ]),
+    "building": Recipe([
+        save(fields="building"),
+    ]),
     "highway_main": Recipe([
-        split_layer(), store_highway_integrity(),
+        split_layer(fields="highway_main"), store_highway_integrity(),
     ]),
     "highway_main_tunnel": Recipe([
         save(), store_highway_integrity(),

@@ -13,12 +13,12 @@ from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
     Pipeline, PipelineError, _ProgressTracker,
-    _report_terrain_stage, progress_stages,
+    _report_terrain_stage, progress_stages, save_vector,
 )
 from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
 )
-from qgis_xtopo.core import highway_integrity
+from qgis_xtopo.core import field_subset, highway_integrity
 from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
 from qgis_xtopo.core.resources import query_names
 
@@ -2142,6 +2142,72 @@ class MemoryLimiterTest(unittest.TestCase):
                 pass
         # Место не занималось: acquire не дошёл до броска.
         self.assertEqual(limiter.used, 80)
+
+
+class FieldSubsetTest(unittest.TestCase):
+    """Тяжёлые слои пишутся без сотен неиспользуемых тегов OSM."""
+
+    def test_select_keeps_labels_and_style_fields(self):
+        available = [
+            "ogc_fid", "name", "name:en", "name:zh", "alt_name", "ref",
+            "addr:street", "building", "amenity", "height",
+        ]
+        selected = field_subset.select("building", available)
+        for field in ("name", "name:en", "name:zh", "alt_name", "ref",
+                      "building", "amenity"):
+            self.assertIn(field, selected)
+        for field in ("ogc_fid", "addr:street", "height"):
+            self.assertNotIn(field, selected)
+
+    def test_highway_preset_keeps_integrity_dependencies(self):
+        available = [
+            "highway", "service", "surface", "smoothness", "tracktype",
+            "ice_road", "winter_road", "embankment", "layer",
+            "highway_integrity", "name", "name:ru", "ref", "maxspeed",
+        ]
+        selected = field_subset.select("highway_main", available)
+        for field in ("surface", "smoothness", "tracktype", "highway",
+                      "highway_integrity", "name:ru", "ref"):
+            self.assertIn(field, selected)
+        self.assertNotIn("maxspeed", selected)
+
+    def test_recipes_request_subsets(self):
+        steps = dict(recipe_for("building").steps)
+        self.assertEqual(steps["save"]["fields"], "building")
+        steps = dict(recipe_for("highway_main").steps)
+        self.assertEqual(steps["split_layer"]["fields"], "highway_main")
+
+    def test_save_vector_writes_only_selected_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "building.geojson"
+            source.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {
+                        "name": "x", "addr:street": "y",
+                        "building": "yes", "height": 3,
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[7, 46], [7.1, 46],
+                                         [7.1, 46.1], [7, 46]]],
+                    },
+                }],
+            }), encoding="utf-8")
+            destination = Path(directory) / "building.sqlite"
+            save_vector(
+                source, destination, "building", fields="building")
+            dataset = ogr.Open(str(destination))
+            try:
+                layer = dataset.GetLayer(0)
+                names = {
+                    layer.GetLayerDefn().GetFieldDefn(index).GetName()
+                    for index in range(layer.GetLayerDefn().GetFieldCount())
+                }
+                self.assertEqual(names, {"name", "building"})
+            finally:
+                dataset = None
 
 
 class RouteHikingTest(unittest.TestCase):
