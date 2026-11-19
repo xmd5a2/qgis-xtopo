@@ -782,11 +782,13 @@ class ProjectPanel(QWidget):
             self._basemap_source_changed
         )
         self.basemap_invert_check = QCheckBox(
-            "Инверсия надписей", self.basemap_row
+            "Инверсия", self.basemap_row
         )
         self.basemap_invert_check.setToolTip(
-            "Инверсия надписей: цвет текста и цвет halo меняются местами; "
-            "надписи дорог и площадных дорог не меняются"
+            "Инверсия: дороги и тропы светлые, скалы светло-коричневые, "
+            "ЛЭП серые, подъёмники серо-белые, чёрные значки белые с "
+            "серо-белой обводкой; цвет текста и halo меняются местами. "
+            "Надписи дорог и площадных дорог не меняются"
         )
         self.basemap_invert_check.setEnabled(False)
         self.basemap_invert_check.toggled.connect(
@@ -2414,7 +2416,7 @@ class ProjectPanel(QWidget):
         self._repaint_canvas()
 
     def _basemap_inversion_toggled(self, checked):
-        """Галка инверсии надписей: цвет текста и halo меняются местами."""
+        """Галка инверсии: надписи и символы перекрашиваются для снимка."""
         if self._syncing:
             return
         project = QgsProject.instance()
@@ -2422,13 +2424,15 @@ class ProjectPanel(QWidget):
             return
         if checked:
             basemap.invert_labels(project)
+            basemap.invert_symbols(project)
         else:
             basemap.restore_labels(project)
+            basemap.restore_symbols(project)
         basemap.set_label_inversion(bool(checked), project)
         self._repaint_canvas()
 
     def _set_basemap_inversion(self, checked):
-        """Включает или выключает инверсию надписей вместе с галкой."""
+        """Включает или выключает инверсию вместе с галкой."""
         project = QgsProject.instance()
         self.basemap_invert_check.blockSignals(True)
         try:
@@ -2439,8 +2443,10 @@ class ProjectPanel(QWidget):
             self.basemap_invert_check.blockSignals(False)
         if checked:
             basemap.invert_labels(project)
+            basemap.invert_symbols(project)
         else:
             basemap.restore_labels(project)
+            basemap.restore_symbols(project)
         basemap.set_label_inversion(bool(checked), project)
         self._repaint_canvas()
 
@@ -2508,6 +2514,7 @@ class ProjectPanel(QWidget):
             self.basemap_invert_check.setEnabled(True)
             if inversion:
                 basemap.invert_labels()
+                basemap.invert_symbols()
             # Прежнее состояние отмывки лежит в слое подложки: после
             # выключения подложки отмывка вернётся в прежний вид.
             self._hillshade_before_basemap = basemap.hillshade_state()

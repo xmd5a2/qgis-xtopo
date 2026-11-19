@@ -1310,9 +1310,10 @@ class DockLanguageTest(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(panel.basemap_check.text(), "Raster basemap")
         self.assertEqual(
-            panel.basemap_invert_check.text(), "Label inversion"
+            panel.basemap_invert_check.text(), "Inversion"
         )
         self.assertIn("satellite", panel.basemap_combo.toolTip())
+        self.assertIn("light", panel.basemap_invert_check.toolTip())
 
     def test_inversion_checkbox_fits_panel_width(self):
         """Галка инверсии помещается в панель по ширине."""
@@ -1325,7 +1326,7 @@ class DockLanguageTest(unittest.TestCase):
             panel.basemap_row.sizeHint().width(), narrow
         )
         self.assertEqual(
-            panel.basemap_invert_check.text(), "Инверсия надписей"
+            panel.basemap_invert_check.text(), "Инверсия"
         )
 
     def test_label_inversion_checkbox_is_disabled_without_basemap(self):
@@ -1333,7 +1334,7 @@ class DockLanguageTest(unittest.TestCase):
         dock = self._dock()
         panel = dock.project_panel
         self.assertEqual(
-            panel.basemap_invert_check.text(), "Инверсия надписей"
+            panel.basemap_invert_check.text(), "Инверсия"
         )
         self.assertFalse(panel.basemap_invert_check.isEnabled())
         self.assertFalse(panel.basemap_invert_check.isChecked())
@@ -1378,6 +1379,60 @@ class DockLanguageTest(unittest.TestCase):
                 self.assertTrue(panel.hillshade_check.isEnabled())
                 self.assertFalse(panel.basemap_invert_check.isEnabled())
         finally:
+            self.basemap.remove(project)
+
+    def test_basemap_inversion_repaints_track(self):
+        """Галка инверсии перекрашивает дороги и возвращает цвета."""
+        from unittest import mock
+
+        from qgis.core import (
+            QgsProject,
+            QgsSimpleLineSymbolLayer,
+            QgsVectorLayer,
+        )
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        dock = self._dock()
+        panel = dock.project_panel
+        renderer, _labeling = projectpanel._template_layer_objects("track")
+        track = QgsVectorLayer(
+            "LineString?crs=EPSG:4326", "track", "memory"
+        )
+        track.setRenderer(renderer)
+        project.addMapLayer(track)
+
+        def colors():
+            return [
+                symbol_layer.color()
+                for symbol_layer in self.basemap._symbol_layers_by_key(
+                    track
+                ).values()
+                if isinstance(symbol_layer, QgsSimpleLineSymbolLayer)
+            ]
+
+        before = colors()
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                self.assertTrue(colors())
+                self.assertTrue(all(
+                    color == QColor(self.basemap.ROAD_COLOR)
+                    for color in colors()
+                ))
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+                self.assertEqual(colors(), before)
+        finally:
+            project.removeMapLayer(track.id())
             self.basemap.remove(project)
 
     def test_basemap_does_not_block_isoline_controls(self):

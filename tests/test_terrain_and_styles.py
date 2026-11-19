@@ -1130,6 +1130,337 @@ class BasemapLabelInversionTest(unittest.TestCase):
         self.project.removeMapLayer(layer.id())
 
 
+class BasemapSymbolInversionTest(unittest.TestCase):
+    """Инверсия символов: дороги, скалы, ЛЭП, подъёмники и значки."""
+
+    TEMPLATE_LAYERS = (
+        ("track", "LineString"),
+        ("path", "LineString"),
+        ("ridge, arete", "LineString"),
+        ("power line", "LineString"),
+        ("power minor line", "LineString"),
+        ("aerialway cable car, gondola", "LineString"),
+        ("alpine hut", "Point"),
+        ("places main", "Point"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+        from qgis_xtopo.gui import projectpanel as pp
+
+        cls.app = qgis_app()
+        cls.renderers = {}
+        for name, _geometry in cls.TEMPLATE_LAYERS:
+            renderer, _labeling = pp._template_layer_objects(name)
+            cls.renderers[name] = renderer
+
+    def setUp(self):
+        from unittest import mock
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.core import basemap
+
+        self.basemap = basemap
+        self.project = QgsProject.instance()
+        self.project.clear()
+        self._cache = tempfile.TemporaryDirectory()
+        self.addCleanup(self._cache.cleanup)
+        patcher = mock.patch.object(
+            self.basemap,
+            "_icon_cache_dir",
+            return_value=Path(self._cache.name),
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        self.layers = {}
+        for name, geometry in self.TEMPLATE_LAYERS:
+            layer = QgsVectorLayer(
+                f"{geometry}?crs=EPSG:4326", name, "memory"
+            )
+            layer.setRenderer(self.renderers[name].clone())
+            self.project.addMapLayer(layer)
+            self.layers[name] = layer
+
+    def tearDown(self):
+        self.project.clear()
+
+    def _of_type(self, layer, classes):
+        return [
+            (key, symbol_layer)
+            for key, symbol_layer
+            in self.basemap._symbol_layers_by_key(layer).items()
+            if isinstance(symbol_layer, classes)
+        ]
+
+    def _line_colors(self, layer):
+        from qgis.core import (
+            QgsHashedLineSymbolLayer,
+            QgsSimpleLineSymbolLayer,
+        )
+
+        return [
+            symbol_layer.color()
+            for _key, symbol_layer in self._of_type(
+                layer, (QgsSimpleLineSymbolLayer,
+                        QgsHashedLineSymbolLayer)
+            )
+        ]
+
+    def _all_line_colors(self, layer):
+        from qgis.core import (
+            QgsHashedLineSymbolLayer,
+            QgsSimpleLineSymbolLayer,
+            QgsSimpleMarkerSymbolLayer,
+        )
+
+        return [
+            symbol_layer.color()
+            for _key, symbol_layer in self._of_type(
+                layer, (QgsSimpleLineSymbolLayer, QgsHashedLineSymbolLayer,
+                        QgsSimpleMarkerSymbolLayer)
+            )
+        ]
+
+    def _enabled_effects(self, layer):
+        return [
+            key for key, symbol_layer
+            in self.basemap._symbol_layers_by_key(layer).items()
+            if symbol_layer.paintEffect() is not None
+            and symbol_layer.paintEffect().enabled()
+        ]
+
+    def test_roads_and_paths_become_light(self):
+        from qgis.PyQt.QtGui import QColor
+
+        expected = QColor(self.basemap.ROAD_COLOR)
+        for name in ("track", "path"):
+            layer = self.layers[name]
+            before = self._line_colors(layer)
+            self.assertTrue(before)
+            self.assertTrue(self.basemap.invert_symbols(self.project))
+            self.assertTrue(
+                all(color == expected for color in self._line_colors(layer)),
+                name,
+            )
+            self.assertTrue(self.basemap.restore_symbols(self.project))
+            self.assertEqual(self._line_colors(layer), before, name)
+
+    def test_ridge_is_light_brown(self):
+        from qgis.PyQt.QtGui import QColor
+
+        layer = self.layers["ridge, arete"]
+        before = self._line_colors(layer)
+        self.assertTrue(before)
+        self.basemap.invert_symbols(self.project)
+        expected = QColor(self.basemap.RIDGE_COLOR)
+        self.assertTrue(
+            all(color == expected for color in self._line_colors(layer))
+        )
+        self.basemap.restore_symbols(self.project)
+        self.assertEqual(self._line_colors(layer), before)
+
+    def test_power_lines_are_grey(self):
+        from qgis.PyQt.QtGui import QColor
+
+        expected = QColor(self.basemap.POWER_COLOR)
+        for name in ("power line", "power minor line"):
+            layer = self.layers[name]
+            before = self._all_line_colors(layer)
+            self.assertTrue(before)
+            self.basemap.invert_symbols(self.project)
+            self.assertTrue(
+                all(
+                    color == expected
+                    for color in self._all_line_colors(layer)
+                ),
+                name,
+            )
+            self.basemap.restore_symbols(self.project)
+            self.assertEqual(self._all_line_colors(layer), before, name)
+
+    def test_aerialways_are_grey_white(self):
+        from qgis.core import QgsSimpleLineSymbolLayer
+        from qgis.PyQt.QtGui import QColor
+
+        layer = self.layers["aerialway cable car, gondola"]
+        before = self._line_colors(layer)
+        self.basemap.invert_symbols(self.project)
+        colors = {
+            symbol_layer.width(): symbol_layer.color()
+            for _key, symbol_layer in self._of_type(
+                layer, QgsSimpleLineSymbolLayer
+            )
+        }
+        self.assertIn(QColor(self.basemap.AERIALWAY_CASING_COLOR),
+                      colors.values())
+        self.assertIn(QColor(self.basemap.AERIALWAY_LINE_COLOR),
+                      colors.values())
+        self.assertNotIn(QColor("#000000"), colors.values())
+        self.basemap.restore_symbols(self.project)
+        self.assertEqual(self._line_colors(layer), before)
+
+    def test_black_icons_get_white_effect(self):
+        from qgis.core import (
+            QgsColorEffect,
+            QgsOuterGlowEffect,
+            QgsSvgMarkerSymbolLayer,
+        )
+
+        layer = self.layers["alpine hut"]
+        self.assertEqual(self._enabled_effects(layer), [])
+        self.basemap.invert_symbols(self.project)
+        icons = self._of_type(layer, QgsSvgMarkerSymbolLayer)
+        self.assertTrue(icons)
+        for key, symbol_layer in icons:
+            effect = symbol_layer.paintEffect()
+            self.assertIsNotNone(effect, key)
+            self.assertTrue(effect.enabled(), key)
+            effects = [effect.effect(index)
+                       for index in range(effect.count())]
+            self.assertTrue(
+                any(isinstance(item, QgsOuterGlowEffect)
+                    for item in effects), key
+            )
+            color = next(
+                item for item in effects
+                if isinstance(item, QgsColorEffect)
+            )
+            self.assertEqual(color.brightness(), 255, key)
+        self.basemap.restore_symbols(self.project)
+        self.assertEqual(self._enabled_effects(layer), [])
+        self.assertIsNone(layer.customProperty(
+            self.basemap.ICON_EFFECTS_PROPERTY
+        ))
+
+    def test_colored_icons_are_not_touched(self):
+        from qgis.core import QgsSvgMarkerSymbolLayer
+
+        layer = self.layers["places main"]
+        self.basemap.invert_symbols(self.project)
+        icons = self._of_type(layer, QgsSvgMarkerSymbolLayer)
+        self.assertTrue(icons)
+        self.assertEqual(self._enabled_effects(layer), [])
+
+    def test_white_filled_icons_keep_their_drawing(self):
+        """Белая заливка не становится белой: рисунок сохраняется."""
+        from qgis.core import (
+            QgsColorEffect,
+            QgsMarkerSymbol,
+            QgsSingleSymbolRenderer,
+            QgsSvgMarkerSymbolLayer,
+            QgsVectorLayer,
+        )
+        from qgis_xtopo.core.resources import resource_path
+
+        layer = QgsVectorLayer(
+            "Point?crs=EPSG:4326", "station icons", "memory"
+        )
+        icon = QgsSvgMarkerSymbolLayer(
+            resource_path("icons", "aerialway_station.svg")
+        )
+        layer.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([icon])))
+        self.project.addMapLayer(layer)
+        original = icon.path()
+
+        self.basemap.invert_symbols(self.project)
+        rewritten = next(
+            iter(self.basemap._symbol_layers_by_key(layer).values())
+        )
+        self.assertNotEqual(rewritten.path(), original)
+        self.assertTrue(
+            rewritten.path().startswith(str(Path(self._cache.name)))
+        )
+        text = Path(rewritten.path()).read_text(encoding="utf-8")
+        self.assertIn("#ffffff", text)
+        self.assertIn(self.basemap.ICON_FILL_COLOR, text)
+        effect = rewritten.paintEffect()
+        effects = [effect.effect(index)
+                   for index in range(effect.count())]
+        self.assertFalse(
+            any(isinstance(item, QgsColorEffect) for item in effects)
+        )
+
+        self.basemap.restore_symbols(self.project)
+        self.assertEqual(rewritten.path(), original)
+
+    def test_white_fill_detection(self):
+        from qgis_xtopo.core.resources import resource_path
+
+        self.assertTrue(self.basemap._svg_needs_white_copy(
+            resource_path("icons", "aerialway_station.svg")
+        ))
+        # Серая заливка тоже требует копии: иначе она станет белой.
+        self.assertTrue(self.basemap._svg_needs_white_copy(
+            resource_path("icons", "castle.svg")
+        ))
+        self.assertFalse(self.basemap._svg_needs_white_copy(
+            resource_path("icons", "alpine_hut.svg")
+        ))
+
+    def test_black_svg_detection(self):
+        self.assertTrue(self.basemap._is_black_icon("peak.svg"))
+        self.assertTrue(
+            self.basemap._is_black_icon("../icons/alpine_hut.svg")
+        )
+        self.assertFalse(self.basemap._is_black_icon("place_1.svg"))
+        self.assertFalse(self.basemap._is_black_icon("water_point.svg"))
+
+    def test_inversion_is_not_applied_twice(self):
+        layer = self.layers["track"]
+        self.basemap.invert_symbols(self.project)
+        colors = self._line_colors(layer)
+        effects = self._enabled_effects(self.layers["alpine hut"])
+        self.basemap.invert_symbols(self.project)
+        self.assertEqual(self._line_colors(layer), colors)
+        self.assertEqual(
+            self._enabled_effects(self.layers["alpine hut"]), effects
+        )
+
+    def test_symbols_survive_project_save_and_restore(self):
+        from qgis.core import (
+            QgsMarkerSymbol,
+            QgsProject,
+            QgsSingleSymbolRenderer,
+            QgsSvgMarkerSymbolLayer,
+            QgsVectorLayer,
+        )
+        from qgis_xtopo.core.resources import resource_path
+
+        icon = QgsSvgMarkerSymbolLayer(
+            resource_path("icons", "aerialway_station.svg")
+        )
+        station = QgsVectorLayer(
+            "Point?crs=EPSG:4326", "station icons", "memory"
+        )
+        station.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol([icon])))
+        self.project.addMapLayer(station)
+        original = icon.path()
+
+        before = self._line_colors(self.layers["track"])
+        self.basemap.invert_symbols(self.project)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "demo.qgz"
+            self.assertTrue(self.project.write(str(path)))
+            saved = QgsProject()
+            self.assertTrue(saved.read(str(path)))
+            try:
+                layer = saved.mapLayersByName("track")[0]
+                self.assertTrue(self.basemap.restore_symbols(saved))
+                self.assertEqual(self._line_colors(layer), before)
+                hut = saved.mapLayersByName("alpine hut")[0]
+                self.assertEqual(self._enabled_effects(hut), [])
+                saved_station = saved.mapLayersByName("station icons")[0]
+                saved_icon = next(
+                    symbol_layer for symbol_layer
+                    in self.basemap._symbol_layers_by_key(
+                        saved_station
+                    ).values()
+                )
+                self.assertEqual(saved_icon.path(), original)
+            finally:
+                saved.clear()
+
+
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
 class BasemapIsolineStyleTest(unittest.TestCase):
     """На подложке изогипсы зелёные, толстые и со светлыми жирными подписями."""
