@@ -26,7 +26,7 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsRectangle
 
-from . import disk_space, geofabrik
+from . import disk_space, geofabrik, i18n
 
 
 USER_AGENT = "QGIS-xtopo/0.7 (+https://github.com/xmd5a2/qgis-xtopo)"
@@ -1106,12 +1106,12 @@ def _duration(seconds):
     """Время словами: «40 с», «7 мин», «1 ч 20 мин»."""
     seconds = max(0, int(round(seconds)))
     if seconds < 60:
-        return f"{seconds} с"
+        return i18n.trf("{} с", seconds)
     minutes = seconds // 60
     if minutes < 60:
-        return f"{minutes} мин"
+        return i18n.trf("{} мин", minutes)
     hours, minutes = divmod(minutes, 60)
-    return f"{hours} ч {minutes} мин"
+    return i18n.trf("{} ч {} мин", hours, minutes)
 
 
 class SliceOsm:

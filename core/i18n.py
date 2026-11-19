@@ -25,6 +25,14 @@ SETTINGS_KEY = "language"
 
 _PLACEHOLDER = re.compile(r"\{[^{}]*\}")
 
+# Префиксы уровня сообщения в журнале. Тело переводится отдельно: так
+# предупреждение вида «WARNING: Карта недоступна» переводится целиком,
+# а имена собственные внутри остаются как есть.
+_MESSAGE_PREFIXES = (
+    (("WARNING: ", "ПРЕДУПРЕЖДЕНИЕ: "), "WARNING: ", "ПРЕДУПРЕЖДЕНИЕ: "),
+    (("ERROR: ", "ОШИБКА: "), "ERROR: ", "ОШИБКА: "),
+)
+
 _language = DEFAULT_LANGUAGE
 _catalog = None
 _listeners = []
@@ -148,6 +156,28 @@ def _lookup_data(direction):
     return cached
 
 
+def _localized_prefix(text):
+    """Заменяет префикс журнала, не трогая уже переведённое тело."""
+    for variants, english, russian in _MESSAGE_PREFIXES:
+        for prefix in variants:
+            if text.startswith(prefix):
+                target = english if _language == "en" else russian
+                return target + text[len(prefix):]
+    return text
+
+
+def _translate_prefixed(text):
+    """Переводит префикс журнала и отдельно его тело."""
+    for variants, english, russian in _MESSAGE_PREFIXES:
+        for prefix in variants:
+            if not text.startswith(prefix):
+                continue
+            target = english if _language == "en" else russian
+            body = text[len(prefix):]
+            return target if not body else target + tr(body)
+    return None
+
+
 def tr(text):
     """Перевод строки на текущий язык; неизвестные строки не меняются."""
     if not isinstance(text, str) or not text:
@@ -159,14 +189,17 @@ def tr(text):
         exact, templates = _lookup_data("ru")
         translated = _reverse_choice(exact, text)
     if translated is not None:
-        return translated
+        return _localized_prefix(translated)
     for pattern, target in templates:
         match = pattern.match(text)
         if match is None:
             continue
         filled = _fill(target, match.groups())
         if filled is not None:
-            return filled
+            return _localized_prefix(filled)
+    prefixed = _translate_prefixed(text)
+    if prefixed is not None:
+        return prefixed
     return text
 
 

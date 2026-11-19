@@ -921,8 +921,8 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
         parts = []
         for key in order:
             if groups.get(key):
-                parts.append(f"{dem_sources.source(key).short}: "
-                             f"{len(groups[key])}")
+                short = i18n.tr(dem_sources.source(key).short)
+                parts.append(f"{short}: {len(groups[key])}")
         progress("Мозаика рельефа — " + ", ".join(parts))
 
     padded = _padded_bbox(bbox)

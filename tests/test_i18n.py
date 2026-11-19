@@ -216,6 +216,97 @@ class CatalogCoverageTest(unittest.TestCase):
                         missing.append(f"{path.name}:{first.lineno} {text}")
         self.assertEqual(missing, [])
 
+    @staticmethod
+    def _log_template(node):
+        """Текст сообщения журнала; None — сообщение собирается динамически."""
+        import ast
+
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return "".join(
+                value.value
+                if isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                else "{}"
+                for value in node.values
+            )
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = CatalogCoverageTest._log_template(node.left)
+            right = CatalogCoverageTest._log_template(node.right)
+            if left is not None and right is not None:
+                return left + right
+        if isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in ("tr", "trf")
+                and node.args
+            ):
+                return CatalogCoverageTest._log_template(node.args[0])
+        return None
+
+    @staticmethod
+    def _log_call_path(node):
+        import ast
+
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+        return ".".join(reversed(parts))
+
+    def test_log_messages_are_translated(self):
+        """Каждое сообщение журнала есть в каталоге или является именем."""
+        import ast
+
+        catalog = self._catalog()
+        shapes = {PLACEHOLDER.sub("{}", text) for text in catalog}
+        shapes |= {PLACEHOLDER.sub("{}", text) for text in catalog.values()}
+        # Служебные строки: префиксы переводятся отдельно, имя слоя в
+        # прогрессе — собственное имя и не переводится.
+        allowed = {
+            "[{}/{}] {}",
+            "WARNING: {}",
+            "ERROR: {}",
+            "WARNING: {}: {}",
+        }
+        missing = []
+        for folder in ("gui", "core"):
+            for path in sorted((self.ROOT / folder).glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call) or not node.args:
+                        continue
+                    call = self._log_call_path(node.func)
+                    if not (
+                        call.endswith(
+                            (
+                                "progress",
+                                "_append_log",
+                                "statusMessage.emit",
+                                "progress.emit",
+                                "status.emit",
+                            )
+                        )
+                        or call == "status"
+                    ):
+                        continue
+                    text = self._log_template(node.args[0])
+                    if text is None or text in allowed:
+                        continue
+                    candidates = {PLACEHOLDER.sub("{}", text)}
+                    for prefix in ("WARNING: ", "ERROR: "):
+                        if text.startswith(prefix):
+                            candidates.add(
+                                PLACEHOLDER.sub("{}", text[len(prefix):])
+                            )
+                    if not candidates & shapes:
+                        missing.append(f"{path.name}:{node.lineno} {text}")
+        self.assertEqual(missing, [])
+
 
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
 class TranslateTreeTest(unittest.TestCase):
@@ -1500,6 +1591,77 @@ class CoreMessagesTest(unittest.TestCase):
         "Снизить разрешение до 150 dpi?",
         "Прозрачность слоя «slope (steep)»",
         "Прозрачность теней рельефа: 50% — исходный вид, меньше — темнее (0% — тени непрозрачные), больше — светлее.",
+        "SliceOSM: скачано 12.3 МБ",
+        "Склейка вырезанных областей…",
+        "osmium: карт 2, память под вырезку 1.5 ГБ",
+        "osmium: вырезка области из switzerland-latest.osm.pbf (1/2)…",
+        "osmium: поиск горных массивов в switzerland-latest.osm.pbf (1/2)…",
+        "source.pbf: файл читается целиком (горные массивы, геометрия вне области)",
+        "PBF: индекс GDAL не справился с повторяющимися id, файл читается заново без индекса",
+        "wood: отброшено 3 объектов без полигональной геометрии",
+        "SliceOSM: загрузка карты плотности узлов",
+        "SliceOSM: в очереди 3 заданий",
+        "SliceOSM: вырез готов, switzerland",
+        "SliceOSM: сборка выреза… 50% (осталось ~1 min)",
+        "WARNING: сборка рельефа N42E044 не удалась: boom; повтор",
+        "Использован кэш рельефа: повторная обработка не требуется",
+        "Использован кэш изолиний: повторная обработка не требуется",
+        "WARNING: не удалось подписать ссылку source: boom",
+        "WARNING: мало места для предзагрузки рельефа — тайлы читаются по сети",
+        "WARNING: не удалось собрать source: boom",
+        "WARNING: Функция readable_name не зарегистрирована — подписи показаны без транслитерации. Перезапустите QGIS.",
+        "WARNING: поток worker не остановился — принудительное завершение",
+        "WARNING: Склеенный файл не читается драйвером GDAL, карты обработаны по отдельности",
+        "WARNING: Пики: boom; проверка пропущена",
+        "WARNING: POI: boom; подавление наложений пропущено",
+        "WARNING: cliff: слой water не найден, шаг пропущен — данные могут быть неполными",
+        "PBF: чтение идёт с грубым фильтром по области, остальные объекты файла пропускаются.",
+        "PBF: выгрузки объединены в один источник.",
+        "PBF: запросы по членам отношений не поддерживаются и пропущены: a, b. Для этих слоёв нужен источник Overpass.",
+    )
+
+    ENGLISH_SAMPLES = (
+        "Parsed 3 objects",
+        "cliff: cached",
+        "cliff: retrying another endpoint",
+        "cliff: downloaded",
+        "PBF: 3 objects, 2 feature matches",
+        "Opening source.pbf with GDAL OSM driver (1/2)",
+        "PBF: file 1/2 processed",
+        "PBF: processed 3 objects (12%)",
+        "cliff: saved out.sqlite",
+        "cliff: converted 3 closed lines to polygons",
+        "cliff: label lines for 3 objects",
+        "cliff: label lines restored from cache",
+        "cliff: saved base layer",
+        "cliff: skipped (source layer failed)",
+        "cliff: no objects, skipped",
+        "cliff: skipped (unresolved dependency)",
+        "cliff: skipped (boom)",
+        "cliff: skipped, source layer failed",
+        "cliff: skipped, unresolved dependency",
+        "cliff: boom; layer skipped",
+        "Reprojecting DEM to EPSG:3857",
+        "Generating slope",
+        "Writing slope",
+        "Generating hillshade",
+        "Generating contour lines",
+        "Contour lines cut by water: 3",
+        "Glacier contour lines ready: 3",
+        "Contour lines outside glaciers: 3",
+        "Preparing terrain",
+        "Merging 3 DEM tile(s)",
+        "Using cached reprojected DEM (EPSG:3857)",
+        "Contour lines: 3 segments",
+        "WARNING: DEM tile not found: N42E044.tif",
+        "Glacier contour lines skipped: 3",
+        "Using cached DEM tile N42E044.tif",
+        "WARNING: cannot download N42E044.tif: boom",
+        "Using N42E044.tif",
+        "Contour lines: tile 1 of 2",
+        "WARNING: expression slope.py failed: boom",
+        "ERROR: Parsed 3 objects",
+        "WARNING: cliff: skipped, source layer failed",
     )
 
     @classmethod
@@ -1524,6 +1686,66 @@ class CoreMessagesTest(unittest.TestCase):
             text for text in self.SAMPLES if cyrillic.search(self.i18n.tr(text))
         ]
         self.assertEqual(left, [])
+
+    def test_english_messages_are_translated(self):
+        """Английские сообщения журнала переводятся на русский."""
+        self.i18n.set_language("ru", save=False)
+        unchanged = [
+            text
+            for text in self.ENGLISH_SAMPLES
+            if self.i18n.tr(text) == text
+        ]
+        self.assertEqual(unchanged, [])
+
+    def test_log_prefixes_are_translated(self):
+        """Уровень сообщения переводится, тело остаётся своим."""
+        self.i18n.set_language("ru", save=False)
+        self.assertEqual(
+            self.i18n.tr("WARNING: Generating slope"),
+            "ПРЕДУПРЕЖДЕНИЕ: Расчёт уклона",
+        )
+        self.assertEqual(
+            self.i18n.tr("ERROR: Parsed 3 objects"),
+            "ОШИБКА: Разобрано 3 объектов",
+        )
+        self.i18n.set_language("en", save=False)
+        self.assertEqual(
+            self.i18n.tr("ПРЕДУПРЕЖДЕНИЕ: Расчёт уклона"),
+            "WARNING: Generating slope",
+        )
+        self.assertEqual(
+            self.i18n.tr("ОШИБКА: Разобрано 3 объектов"),
+            "ERROR: Parsed 3 objects",
+        )
+
+    def test_proper_names_are_kept(self):
+        """Имена собственные остаются в тексте сообщения."""
+        self.i18n.set_language("ru", save=False)
+        self.assertIn(
+            "switzerland", self.i18n.tr("Карта switzerland: доступна")
+        )
+        self.assertIn(
+            "N42E044.tif",
+            self.i18n.tr("WARNING: cannot download N42E044.tif: timeout"),
+        )
+        self.i18n.set_language("en", save=False)
+        self.assertIn(
+            "switzerland", self.i18n.tr("Карта switzerland: доступна")
+        )
+        self.assertIn(
+            "N42E044.tif",
+            self.i18n.tr("WARNING: cannot download N42E044.tif: timeout"),
+        )
+
+    def test_duration_units_are_translated(self):
+        from qgis_xtopo.core.extracts import _duration
+
+        self.i18n.set_language("ru", save=False)
+        self.assertEqual(_duration(40), "40 с")
+        self.assertEqual(_duration(90), "1 мин")
+        self.i18n.set_language("en", save=False)
+        self.assertEqual(_duration(40), "40 s")
+        self.assertEqual(_duration(90), "1 min")
 
     def test_eta_is_translated(self):
         from qgis_xtopo.core.geofabrik import _format_eta
