@@ -85,7 +85,12 @@ RIDGE_COLOR = "#c9a17a"
 POWER_COLOR = "#b8b8b8"
 AERIALWAY_CASING_COLOR = "#f2f2f2"
 AERIALWAY_LINE_COLOR = "#a8a8a8"
-ICON_GLOW_COLOR = (255, 255, 255, 170)
+ICON_GLOW_COLOR = (255, 255, 255, 220)
+# Обводка тонкая и почти без размытия: широкое гало затеняло снимок.
+# Значки в шаблоне имеют размер 2–3,2 мм, поэтому 0,35 мм — это
+# заметная, но узкая кайма, а 0,1 мм сглаживает только край.
+ICON_GLOW_SPREAD_MM = 0.35
+ICON_GLOW_BLUR_MM = 0.1
 
 SETTINGS_KEY = "basemap_source"
 DEFAULT_SOURCE = "google"
@@ -718,11 +723,11 @@ def _restore_icon_effects(layer, saved):
 
 
 def _icon_glow():
-    """Белая полупрозрачная обводка значка."""
+    """Узкая белая обводка значка."""
     glow = QgsOuterGlowEffect()
     glow.setColor(QColor(*ICON_GLOW_COLOR))
-    glow.setSpread(1.5)
-    glow.setBlurLevel(2)
+    glow.setSpread(ICON_GLOW_SPREAD_MM)
+    glow.setBlurLevel(ICON_GLOW_BLUR_MM)
     return glow
 
 

@@ -1307,6 +1307,13 @@ class BasemapSymbolInversionTest(unittest.TestCase):
                 effects[0].color(), QColor(*self.basemap.ICON_GLOW_COLOR)
             )
             self.assertLess(effects[0].color().alpha(), 255)
+            # Обводка остаётся узкой: широкое гало затеняет снимок.
+            self.assertEqual(
+                effects[0].spread(), self.basemap.ICON_GLOW_SPREAD_MM, key
+            )
+            self.assertEqual(
+                effects[0].blurLevel(), self.basemap.ICON_GLOW_BLUR_MM, key
+            )
             self.assertIsInstance(effects[-1], QgsDrawSourceEffect, key)
             self.assertFalse(
                 any(isinstance(item, QgsColorEffect) for item in effects),
