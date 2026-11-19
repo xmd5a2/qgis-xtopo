@@ -24,9 +24,38 @@ HIGHWAY = (
     "surface", "smoothness", "tracktype", "highway_integrity",
 )
 
+# Пункты: place/population нужны не только стилю, но и расчёту
+# приоритетов подавления значков (`poi_icons._settlement_priority`).
+PLACE_LOCALITY = ("place", "population", "capital", "hide")
+PLACES_MAIN = (
+    "place", "population", "capital", "admin_centre_2", "admin_centre_4",
+    "hide",
+)
+PATH = (
+    "highway", "embankment", "ice_road", "winter_road", "ref",
+    "surface", "smoothness", "tracktype",
+)
+WATER = ("natural", "water", "intermittent", "ref")
+TRACK = (
+    "highway", "highway_integrity", "embankment", "ice_road",
+    "winter_road", "ref", "surface", "smoothness", "tracktype",
+)
+# `ele_calc` — виртуальное поле шаблона; в данных его нет, `select`
+# пропустит имя.  `ele`, `height` и `@id` нужны проверке пиков.
+PEAK = (
+    "ele", "ele_calc", "height", "@id", "wikipedia", "wikidata", "hide",
+    "natural", "man_made", "place",
+)
+
 PRESETS = {
     "building": BUILDING,
     "highway_main": HIGHWAY,
+    "place_locality_point": PLACE_LOCALITY,
+    "places_main": PLACES_MAIN,
+    "path": PATH,
+    "water": WATER,
+    "track": TRACK,
+    "peak": PEAK,
 }
 
 

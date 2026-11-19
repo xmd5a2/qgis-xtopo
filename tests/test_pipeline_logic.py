@@ -2171,11 +2171,38 @@ class FieldSubsetTest(unittest.TestCase):
             self.assertIn(field, selected)
         self.assertNotIn("maxspeed", selected)
 
+    def test_select_keeps_settlement_priority_fields(self):
+        selected = field_subset.select(
+            "places_main",
+            ["place", "population", "hide", "name:ru", "addr:city"],
+        )
+        self.assertEqual(
+            set(selected), {"place", "population", "hide", "name:ru"})
+        selected = field_subset.select(
+            "track",
+            ["highway", "highway_integrity", "surface", "smoothness",
+             "tracktype", "name", "maxspeed"],
+        )
+        for field in ("highway_integrity", "surface", "smoothness",
+                      "tracktype", "name"):
+            self.assertIn(field, selected)
+        self.assertNotIn("maxspeed", selected)
+
     def test_recipes_request_subsets(self):
         steps = dict(recipe_for("building").steps)
         self.assertEqual(steps["save"]["fields"], "building")
         steps = dict(recipe_for("highway_main").steps)
         self.assertEqual(steps["split_layer"]["fields"], "highway_main")
+        for name in ("places_main", "path", "track"):
+            steps = dict(recipe_for(name).steps)
+            self.assertEqual(steps["save"]["fields"], name, name)
+        steps = dict(recipe_for("water").steps)
+        self.assertEqual(steps["save"]["fields"], "water")
+        steps = dict(recipe_for("place_locality_node").steps)
+        self.assertEqual(
+            steps["save"]["fields"], "place_locality_point")
+        steps = dict(recipe_for("peak").steps)
+        self.assertEqual(steps["save"]["fields"], "peak")
 
     def test_save_vector_writes_only_selected_fields(self):
         with tempfile.TemporaryDirectory() as directory:

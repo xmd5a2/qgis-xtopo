@@ -95,7 +95,8 @@ RECIPES = {
     "water": Recipe([
         # fix() после singleparts страхует от самопересечений dissolve:
         # native:difference пропускает такой объект как ошибочный.
-        fix(), save(), dissolve(), singleparts(), fix(), save("_dissolved"),
+        fix(), save(fields="water"), dissolve(), singleparts(), fix(),
+        save("_dissolved", fields="water"),
     ]),
     "water_intermittent": Recipe([
         fix(), save(), dissolve(), singleparts(), fix(), save("_dissolved"),
@@ -178,7 +179,16 @@ RECIPES = {
         save(), store_highway_integrity(),
     ]),
     "track": Recipe([
-        save(), store_highway_integrity(),
+        save(fields="track"), store_highway_integrity(),
+    ]),
+    "path": Recipe([
+        save(fields="path"),
+    ]),
+    "places_main": Recipe([
+        save(fields="places_main"),
+    ]),
+    "peak": Recipe([
+        save(fields="peak"),
     ]),
     "waterfall": Recipe([
         save(), polygonstolines(), save("_lines"),
@@ -198,7 +208,8 @@ RECIPES = {
         fix(), centroid(), reproject(), save("_reproj"),
     ]),
     "place_locality_node": Recipe([
-        difference("place_locality_way"), singleparts(), save("_diff"),
+        difference("place_locality_way"), singleparts(),
+        save("_diff", fields="place_locality_point"),
     ]),
     "island_node": Recipe([
         difference("island"), save(),
