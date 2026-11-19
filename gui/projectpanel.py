@@ -65,6 +65,14 @@ from .atlas import (
     SheetEditMapTool, SheetMapTool, SheetMarker, SheetSizeLabels,
 )
 from .exportpreview import ExportPreviewDialog
+from .layoutscalebar import (
+    DEFAULT_BOTTOM_MM,
+    DEFAULT_HEIGHT_MM,
+    DEFAULT_WIDTH_MM,
+    DEFAULT_X_MM,
+    DEFAULT_Z_VALUE,
+    LayoutScaleBarItem,
+)
 from .projecticons import terrain_icon
 from .translation import translate_tree
 
@@ -575,6 +583,8 @@ class ProjectPanel(QWidget):
         self._edit_sheet_tool = None
         self._atlas_layer = None
         self._layout_original_layers = None
+        self._layout_scale_bar = None
+        self._scale_bar_geometry = None
         self._export_progress = None
         self._export_preview = None
         self._opacity_baseline = {}
@@ -1559,6 +1569,7 @@ class ProjectPanel(QWidget):
         map_item.setLayers(filtered)
 
     def _restore_map_layers(self):
+        self._restore_layout_scale_bar()
         if self._layout_original_layers is None:
             return
         map_item, layers = self._layout_original_layers
@@ -1568,6 +1579,69 @@ class ProjectPanel(QWidget):
         except Exception:
             pass
         self._sync_from_project()
+
+    def _replace_layout_scale_bar(self, layout, map_item, page_height):
+        """Удаляет штатную шкалу макета и ставит гибкую шкалу окна охвата."""
+        self._restore_layout_scale_bar()
+        original = next(
+            (
+                item for item in layout.items()
+                if isinstance(item, QgsLayoutItemScaleBar)
+            ),
+            None,
+        )
+        if original is not None:
+            self._scale_bar_geometry = (
+                original.referencePoint(),
+                original.zValue(),
+                original.positionWithUnits(),
+                original.sizeWithUnits(),
+                page_height,
+            )
+            layout.removeLayoutItem(original)
+        geometry = self._scale_bar_geometry
+        if geometry is None:
+            self._scale_bar_geometry = (
+                _enum(QgsLayoutItem, "ReferencePoint", "MiddleLeft"),
+                DEFAULT_Z_VALUE,
+                QgsLayoutPoint(
+                    DEFAULT_X_MM,
+                    max(0.0, page_height - DEFAULT_BOTTOM_MM),
+                    QgsUnitTypes.LayoutMillimeters,
+                ),
+                QgsLayoutSize(
+                    DEFAULT_WIDTH_MM,
+                    DEFAULT_HEIGHT_MM,
+                    QgsUnitTypes.LayoutMillimeters,
+                ),
+                page_height,
+            )
+            geometry = self._scale_bar_geometry
+        reference, z_value, position, size, base_height = geometry
+        if abs(page_height - base_height) > 1e-6:
+            position = QgsLayoutPoint(
+                position.x(),
+                position.y() + page_height - base_height,
+                position.units(),
+            )
+        bar = LayoutScaleBarItem(layout, map_item)
+        bar.setReferencePoint(reference)
+        bar.setZValue(z_value)
+        bar.attemptMove(position)
+        bar.attemptResize(size)
+        layout.addLayoutItem(bar)
+        self._layout_scale_bar = (layout, bar)
+
+    def _restore_layout_scale_bar(self):
+        state = self._layout_scale_bar
+        if state is None:
+            return
+        self._layout_scale_bar = None
+        layout, bar = state
+        try:
+            layout.removeLayoutItem(bar)
+        except Exception:
+            pass
 
     def _create_atlas_layer(self, map_crs):
         self._remove_atlas_layer()
@@ -1697,6 +1771,7 @@ class ProjectPanel(QWidget):
             else:
                 union = map_item.extent()
         self._configure_map_layers(map_item, union)
+        self._replace_layout_scale_bar(layout, map_item, height)
         if self._sheets:
             layer = self._create_atlas_layer(map_item.crs())
             atlas.setCoverageLayer(layer)
@@ -1765,7 +1840,7 @@ class ProjectPanel(QWidget):
             )
         )
         self._export_preview = dialog
-        dialog.show()
+        dialog.showFullScreen()
         dialog.raise_()
         dialog.activateWindow()
 

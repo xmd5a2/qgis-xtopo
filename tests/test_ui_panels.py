@@ -1050,17 +1050,23 @@ class ExportPreviewDialogTest(unittest.TestCase):
         dialog._previous()
         self.assertEqual(dialog.current_index, 1)
 
-    def test_thumbnails_mode_opens_selected_sheet(self):
+    def test_thumbnails_panel_is_vertical_and_hidden_for_one_sheet(self):
         dialog = self._dialog()
         self.assertEqual(dialog.thumbnails.count(), 3)
-
-        dialog.thumbnails_button.setChecked(True)
-        self.assertIs(dialog.stack.currentWidget(), dialog.thumbnails)
+        self.assertEqual(dialog.thumbnails.iconSize().width(), 200)
+        self.assertTrue(dialog.thumbnails_button.isChecked())
+        self.assertTrue(dialog.thumbnail_panel.isVisibleTo(dialog))
 
         dialog._thumbnail_clicked(dialog.thumbnails.item(2))
         self.assertEqual(dialog.current_index, 2)
-        self.assertFalse(dialog.thumbnails_button.isChecked())
-        self.assertIs(dialog.stack.currentWidget(), dialog.canvas)
+        self.assertTrue(dialog.thumbnail_panel.isVisibleTo(dialog))
+
+        dialog.thumbnails_button.setChecked(False)
+        self.assertFalse(dialog.thumbnail_panel.isVisibleTo(dialog))
+
+        single = self._dialog(count=1)
+        self.assertFalse(single.thumbnails_button.isVisibleTo(single))
+        self.assertFalse(single.thumbnail_panel.isVisibleTo(single))
 
     def test_export_buttons_emit_extension(self):
         dialog = self._dialog()
@@ -1070,19 +1076,60 @@ class ExportPreviewDialogTest(unittest.TestCase):
         dialog.pdf_button.click()
         self.assertEqual(requested, ["png", "pdf"])
 
-    def test_mouse_wheel_zoom_is_bounded(self):
+    def test_keyboard_navigation(self):
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtTest import QTest
+
+        from qgis_xtopo.gui.exportpreview import _enum
+
+        dialog = self._dialog()
+        dialog.show()
+        dialog.canvas.setFocus()
+        self.app.processEvents()
+
+        def press(key):
+            QTest.keyClick(dialog.canvas, _enum(Qt, "Key", key))
+            self.app.processEvents()
+
+        press("Key_End")
+        self.assertEqual(dialog.current_index, 2)
+        press("Key_Home")
+        self.assertEqual(dialog.current_index, 0)
+        press("Key_Right")
+        self.assertEqual(dialog.current_index, 1)
+        press("Key_Left")
+        self.assertEqual(dialog.current_index, 0)
+        press("Key_Space")
+        self.assertEqual(dialog.current_index, 1)
+        dialog.close()
+
+    def test_zoom_is_smooth_and_fits_window(self):
+        from qgis.PyQt.QtCore import QPointF
+        from qgis.PyQt.QtTest import QTest
+
         dialog = self._dialog()
         dialog.show()
         self.app.processEvents()
         canvas = dialog.canvas
         fit = canvas.scale
         self.assertGreater(fit, 0)
-        canvas.zoom_at(2.0)
+
+        canvas.zoom_at(2.0, animate=False)
         self.assertGreater(canvas.scale, fit)
-        canvas.zoom_at(100.0)
+        canvas.zoom_at(100.0, animate=False)
         self.assertLessEqual(canvas.scale, fit * 8.0 + 1e-6)
-        canvas.reset_view()
+
+        canvas._offset = QPointF(40, 25)
+        canvas._target_offset = QPointF(40, 25)
+        canvas.zoom_at(0.001, animate=False)
         self.assertAlmostEqual(canvas.scale, fit)
+        self.assertEqual(canvas.offset, QPointF())
+
+        canvas.zoom_at(2.0)
+        self.assertTrue(canvas.is_animating)
+        QTest.qWait(300)
+        self.assertFalse(canvas.is_animating)
+        self.assertGreater(canvas.scale, fit * 1.5)
         dialog.close()
 
 

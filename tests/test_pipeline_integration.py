@@ -1260,9 +1260,9 @@ class PipelineIntegrationTest(unittest.TestCase):
 
     def test_export_preview_renders_hd_sheets(self):
         from qgis.core import (
-            QgsCoordinateReferenceSystem, QgsLayoutItemMap, QgsLayoutPoint,
-            QgsLayoutSize, QgsPrintLayout, QgsProject, QgsRectangle,
-            QgsUnitTypes,
+            QgsCoordinateReferenceSystem, QgsLayoutItem, QgsLayoutItemMap,
+            QgsLayoutItemScaleBar, QgsLayoutPoint, QgsLayoutSize,
+            QgsPrintLayout, QgsProject, QgsRectangle, QgsUnitTypes, Qgis,
         )
         from qgis.gui import QgsMapCanvas
         from qgis_xtopo.gui import projectpanel
@@ -1281,6 +1281,22 @@ class PipelineIntegrationTest(unittest.TestCase):
         )
         map_item.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
         layout.addLayoutItem(map_item)
+        scale_bar = QgsLayoutItemScaleBar(layout)
+        scale_bar.setLinkedMap(map_item)
+        scale_bar.setStyle("Single Box")
+        scale_bar.setUnits(Qgis.DistanceUnit.Meters)
+        scale_bar.setNumberOfSegments(5)
+        scale_bar.setUnitsPerSegment(500)
+        scale_bar.setReferencePoint(
+            QgsLayoutItem.ReferencePoint.MiddleLeft
+        )
+        scale_bar.attemptMove(
+            QgsLayoutPoint(5, 204, QgsUnitTypes.LayoutMillimeters)
+        )
+        scale_bar.attemptResize(
+            QgsLayoutSize(56, 12, QgsUnitTypes.LayoutMillimeters)
+        )
+        layout.addLayoutItem(scale_bar)
         project.layoutManager().addLayout(layout)
 
         class Iface:
@@ -1314,6 +1330,20 @@ class PipelineIntegrationTest(unittest.TestCase):
                     max(image.width(), image.height()),
                     projectpanel.PREVIEW_LONG_SIDE,
                 )
+            # Старая шкала удаляется из макета, новая снимается после рендера.
+            self.assertIsNotNone(panel._scale_bar_geometry)
+            self.assertFalse(
+                any(
+                    isinstance(item, QgsLayoutItemScaleBar)
+                    for item in layout.items()
+                )
+            )
+            self.assertIsNone(panel._layout_scale_bar)
+            # Повторный предпросмотр, как после переоткрытия проекта:
+            # старой шкалы уже нет, положение берётся из запасного.
+            panel._scale_bar_geometry = None
+            self.assertEqual(len(panel._render_export_preview()), 2)
+            self.assertIsNotNone(panel._scale_bar_geometry)
             # После рендера макет и атлас остаются в исходном состоянии.
             self.assertIsNone(panel._atlas_layer)
             self.assertFalse(layout.atlas().enabled())

@@ -1,15 +1,16 @@
 """Просмотр листов экспорта в пониженном разрешении.
 
 Листы рисуются тем же макетом и атласом, что и настоящий экспорт, но
-с длинной стороной около 1280 пикселей.  Просмотрщик — обычное окно:
-колесо мыши меняет масштаб, перетаскивание сдвигает лист, кнопки
-листают, отдельная кнопка показывает сетку миниатюр.  Экспорт в PNG/PDF
-запускается сигналом: саму запись и выбор файла делает панель проекта,
-поэтому качество и настройки те же, что и без просмотра.
+с длинной стороной около 1280 пикселей.  Просмотрщик — полноэкранное
+окно: колесо мыши плавно меняет масштаб, перетаскивание сдвигает лист,
+справа показывается вертикальная лента миниатюр, а PNG/PDF запускают
+обычный экспорт с настройками панели.
 """
 
+import math
+
 from qgis.core import QgsApplication
-from qgis.PyQt.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -19,16 +20,17 @@ from qgis.PyQt.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core import i18n
 
-THUMBNAIL_SIZE = QSize(150, 200)
+THUMBNAIL_WIDTH = 200
 MAX_ZOOM = 8.0
 WHEEL_FACTOR = 1.2
+ANIMATION_INTERVAL_MS = 16
+ANIMATION_EASING = 0.45
 
 
 def _enum(owner, group, name):
@@ -54,7 +56,7 @@ def _theme_icon(name):
 
 
 class PreviewCanvas(QWidget):
-    """Один лист: вписан в окно, с зумом и перетаскиванием."""
+    """Один лист: вписан в окно, с плавным зумом и перетаскиванием."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,8 +64,13 @@ class PreviewCanvas(QWidget):
         self._scale = 1.0
         self._fit_scale = 1.0
         self._offset = QPointF()
+        self._target_scale = 1.0
+        self._target_offset = QPointF()
         self._drag_from = None
         self._user_zoomed = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(ANIMATION_INTERVAL_MS)
+        self._timer.timeout.connect(self._step_animation)
         self.setMinimumSize(320, 240)
         self.setFocusPolicy(_enum(Qt, "FocusPolicy", "StrongFocus"))
         self.setCursor(_enum(Qt, "CursorShape", "OpenHandCursor"))
@@ -82,39 +89,90 @@ class PreviewCanvas(QWidget):
     def scale(self):
         return self._scale
 
+    @property
+    def offset(self):
+        return QPointF(self._offset)
+
+    @property
+    def is_animating(self):
+        return self._timer.isActive()
+
     def set_image(self, image):
         self._image = image if image is not None else QImage()
         self._reset_view()
 
-    def reset_view(self):
-        """Вписать лист в окно."""
-        self._reset_view()
+    def fit_to_window(self, animate=True):
+        """Вписать лист в окно, при желании плавно."""
+        self._user_zoomed = False
+        self._fit_scale = self._fit_scale_for(self._image)
+        if animate:
+            self._animate_to(self._fit_scale, QPointF())
+        else:
+            self._set_view(self._fit_scale, QPointF())
 
-    def zoom_at(self, factor, anchor=None):
+    def reset_view(self):
+        """Вписать лист в окно без анимации."""
+        self.fit_to_window(animate=False)
+
+    def zoom_at(self, factor, anchor=None, animate=True):
         """Увеличить/уменьшить изображение вокруг точки ``anchor``."""
         if self._image.isNull():
             return
         if anchor is None:
             anchor = QPointF(self.width() / 2.0, self.height() / 2.0)
+        animating = self._timer.isActive()
+        base_scale = self._target_scale if animating else self._scale
+        base_offset = self._target_offset if animating else self._offset
         scale = min(
-            max(self._scale * factor, self._fit_scale),
+            max(base_scale * factor, self._fit_scale),
             self._fit_scale * MAX_ZOOM,
         )
-        if abs(scale - self._scale) < 1e-6:
-            return
-        center = QPointF(self.width() / 2.0, self.height() / 2.0)
-        image_point = (anchor - center - self._offset) / self._scale
-        self._offset = anchor - center - image_point * scale
+        if scale <= self._fit_scale + 1e-9:
+            target_scale = self._fit_scale
+            target_offset = QPointF()
+            self._user_zoomed = False
+        else:
+            center = QPointF(self.width() / 2.0, self.height() / 2.0)
+            image_point = (anchor - center - base_offset) / base_scale
+            target_scale = scale
+            target_offset = anchor - center - image_point * scale
+            self._user_zoomed = True
+        if animate:
+            self._animate_to(target_scale, target_offset)
+        else:
+            self._set_view(target_scale, target_offset)
+
+    def _animate_to(self, scale, offset):
+        self._target_scale = scale
+        self._target_offset = QPointF(offset)
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _set_view(self, scale, offset):
+        self._timer.stop()
         self._scale = scale
-        self._user_zoomed = True
+        self._offset = QPointF(offset)
+        self._target_scale = scale
+        self._target_offset = QPointF(offset)
+        self.update()
+
+    def _step_animation(self):
+        scale_delta = self._target_scale - self._scale
+        offset_delta = self._target_offset - self._offset
+        close_scale = abs(scale_delta) < 1e-3
+        close_offset = math.hypot(offset_delta.x(), offset_delta.y()) < 0.5
+        if close_scale and close_offset:
+            self._set_view(self._target_scale, self._target_offset)
+            return
+        self._scale += scale_delta * ANIMATION_EASING
+        self._offset += offset_delta * ANIMATION_EASING
         self.update()
 
     def _reset_view(self):
         self._user_zoomed = False
         self._offset = QPointF()
         self._fit_scale = self._fit_scale_for(self._image)
-        self._scale = self._fit_scale
-        self.update()
+        self._set_view(self._fit_scale, QPointF())
 
     def _fit_scale_for(self, image):
         if image.isNull() or not image.width() or not image.height():
@@ -125,10 +183,11 @@ class PreviewCanvas(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._fit_scale = self._fit_scale_for(self._image)
         if not self._user_zoomed:
-            self._fit_scale = self._fit_scale_for(self._image)
-            self._scale = self._fit_scale
-            self._offset = QPointF()
+            self._set_view(self._fit_scale, QPointF())
+        elif self._scale < self._fit_scale:
+            self.fit_to_window(animate=False)
         self.update()
 
     def paintEvent(self, event):
@@ -162,7 +221,10 @@ class PreviewCanvas(QWidget):
             event.button() == _enum(Qt, "MouseButton", "LeftButton")
             and not self._image.isNull()
         ):
+            self._timer.stop()
             self._drag_from = _event_position(event)
+            self._target_scale = self._scale
+            self._target_offset = QPointF(self._offset)
             self.setCursor(_enum(Qt, "CursorShape", "ClosedHandCursor"))
             event.accept()
             return
@@ -172,6 +234,7 @@ class PreviewCanvas(QWidget):
         if self._drag_from is not None:
             position = _event_position(event)
             self._offset += position - self._drag_from
+            self._target_offset = QPointF(self._offset)
             self._drag_from = position
             self.update()
             event.accept()
@@ -187,12 +250,12 @@ class PreviewCanvas(QWidget):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        self._reset_view()
+        self.fit_to_window()
         event.accept()
 
 
 class ExportPreviewDialog(QDialog):
-    """Простый просмотрщик готовых листов и запуск экспорта."""
+    """Полноэкранный просмотрщик листов и запуск экспорта."""
 
     exportRequested = pyqtSignal(str)
 
@@ -205,8 +268,7 @@ class ExportPreviewDialog(QDialog):
         self.setAttribute(
             _enum(Qt, "WidgetAttribute", "WA_DeleteOnClose"), True
         )
-        self.setMinimumSize(640, 480)
-        self.resize(900, 720)
+        self.setMinimumSize(800, 560)
         self._build_ui()
         self._fill_thumbnails()
         if self._images:
@@ -221,11 +283,22 @@ class ExportPreviewDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.stack = QStackedWidget(self)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
         self.canvas = PreviewCanvas(self)
-        self.thumbnails = QListWidget(self)
+        body.addWidget(self.canvas, 1)
+
+        self.thumbnail_panel = QWidget(self)
+        self.thumbnail_panel.setFixedWidth(232)
+        panel_layout = QVBoxLayout(self.thumbnail_panel)
+        panel_layout.setContentsMargins(4, 4, 4, 4)
+        self.thumbnails = QListWidget(self.thumbnail_panel)
         self.thumbnails.setViewMode(
             _enum(QListView, "ViewMode", "IconMode")
+        )
+        self.thumbnails.setFlow(
+            _enum(QListView, "Flow", "TopToBottom")
         )
         self.thumbnails.setResizeMode(
             _enum(QListView, "ResizeMode", "Adjust")
@@ -233,19 +306,61 @@ class ExportPreviewDialog(QDialog):
         self.thumbnails.setMovement(
             _enum(QListView, "Movement", "Static")
         )
-        self.thumbnails.setWrapping(True)
-        self.thumbnails.setIconSize(THUMBNAIL_SIZE)
-        self.thumbnails.setGridSize(QSize(170, 236))
+        self.thumbnails.setWrapping(False)
+        self.thumbnails.setUniformItemSizes(True)
         self.thumbnails.setSpacing(4)
         self.thumbnails.setWordWrap(False)
+        self.thumbnails.setHorizontalScrollBarPolicy(
+            _enum(Qt, "ScrollBarPolicy", "ScrollBarAlwaysOff")
+        )
         self.thumbnails.itemClicked.connect(self._thumbnail_clicked)
-        self.stack.addWidget(self.canvas)
-        self.stack.addWidget(self.thumbnails)
-        layout.addWidget(self.stack, 1)
+        panel_layout.addWidget(self.thumbnails)
+        body.addWidget(self.thumbnail_panel)
+        layout.addLayout(body, 1)
 
-        bar = QHBoxLayout()
-        bar.setContentsMargins(8, 6, 8, 6)
-        bar.setSpacing(6)
+        tools = QHBoxLayout()
+        tools.setContentsMargins(8, 6, 8, 2)
+        tools.setSpacing(6)
+        self.zoom_out_button = QPushButton("−", self)
+        self.zoom_out_button.setFixedWidth(34)
+        self.zoom_out_button.setToolTip(i18n.tr("Уменьшить"))
+        self.zoom_in_button = QPushButton("+", self)
+        self.zoom_in_button.setFixedWidth(34)
+        self.zoom_in_button.setToolTip(i18n.tr("Увеличить"))
+        self.fit_button = QPushButton("Вписать в окно", self)
+        self.fit_button.setToolTip(i18n.tr("Вписать лист в окно"))
+        self.thumbnails_button = QPushButton("Миниатюры", self)
+        self.thumbnails_button.setCheckable(True)
+        self.thumbnails_button.setToolTip(
+            i18n.tr("Показать или скрыть панель миниатюр")
+        )
+        self.png_button = QPushButton(
+            _theme_icon("mActionFileSave.svg"), "PNG", self
+        )
+        self.pdf_button = QPushButton(
+            _theme_icon("mActionExport.svg"), "PDF", self
+        )
+        self.close_button = QPushButton("×", self)
+        self.close_button.setFixedWidth(34)
+        self.close_button.setToolTip(i18n.tr("Закрыть (Esc)"))
+        for button in (self.png_button, self.pdf_button):
+            button.setIconSize(QSize(16, 16))
+            button.setToolTip(i18n.tr("Экспортировать листы в {}…").format(
+                button.text()
+            ))
+        tools.addWidget(self.zoom_out_button)
+        tools.addWidget(self.zoom_in_button)
+        tools.addWidget(self.fit_button)
+        tools.addStretch(1)
+        tools.addWidget(self.thumbnails_button)
+        tools.addWidget(self.png_button)
+        tools.addWidget(self.pdf_button)
+        tools.addWidget(self.close_button)
+        layout.addLayout(tools)
+
+        navigation = QHBoxLayout()
+        navigation.setContentsMargins(8, 2, 8, 6)
+        navigation.setSpacing(6)
         self.previous_button = QPushButton("←", self)
         self.previous_button.setFixedWidth(34)
         self.previous_button.setToolTip(i18n.tr("Предыдущий лист"))
@@ -257,31 +372,31 @@ class ExportPreviewDialog(QDialog):
             _enum(Qt, "AlignmentFlag", "AlignCenter")
         )
         self.sheet_label.setMinimumWidth(64)
-        self.thumbnails_button = QPushButton("Миниатюры", self)
-        self.thumbnails_button.setCheckable(True)
-        self.thumbnails_button.setToolTip(
-            i18n.tr("Показать листы сеткой миниатюр")
-        )
-        self.png_button = QPushButton(
-            _theme_icon("mActionFileSave.svg"), "PNG", self
-        )
-        self.pdf_button = QPushButton(
-            _theme_icon("mActionExport.svg"), "PDF", self
-        )
-        for button in (self.png_button, self.pdf_button):
-            button.setIconSize(QSize(16, 16))
-            button.setToolTip(i18n.tr("Экспортировать листы в {}…").format(
-                button.text()
-            ))
-        bar.addWidget(self.previous_button)
-        bar.addWidget(self.sheet_label)
-        bar.addWidget(self.next_button)
-        bar.addStretch(1)
-        bar.addWidget(self.thumbnails_button)
-        bar.addWidget(self.png_button)
-        bar.addWidget(self.pdf_button)
-        layout.addLayout(bar)
+        navigation.addStretch(1)
+        navigation.addWidget(self.previous_button)
+        navigation.addWidget(self.sheet_label)
+        navigation.addWidget(self.next_button)
+        navigation.addStretch(1)
+        layout.addLayout(navigation)
 
+        no_focus = _enum(Qt, "FocusPolicy", "NoFocus")
+        for button in (
+            self.zoom_out_button, self.zoom_in_button, self.fit_button,
+            self.thumbnails_button, self.png_button, self.pdf_button,
+            self.close_button, self.previous_button, self.next_button,
+        ):
+            button.setFocusPolicy(no_focus)
+        self.thumbnails.setFocusPolicy(no_focus)
+
+        self.zoom_out_button.clicked.connect(
+            lambda: self.canvas.zoom_at(1.0 / WHEEL_FACTOR)
+        )
+        self.zoom_in_button.clicked.connect(
+            lambda: self.canvas.zoom_at(WHEEL_FACTOR)
+        )
+        self.fit_button.clicked.connect(
+            lambda: self.canvas.fit_to_window()
+        )
         self.previous_button.clicked.connect(self._previous)
         self.next_button.clicked.connect(self._next)
         self.thumbnails_button.toggled.connect(self._toggle_thumbnails)
@@ -291,6 +406,7 @@ class ExportPreviewDialog(QDialog):
         self.pdf_button.clicked.connect(
             lambda: self.exportRequested.emit("pdf")
         )
+        self.close_button.clicked.connect(lambda: self.close())
 
     @property
     def sheet_count(self):
@@ -300,10 +416,42 @@ class ExportPreviewDialog(QDialog):
     def current_index(self):
         return self._index
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.canvas.setFocus()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == _enum(Qt, "Key", "Key_Left"):
+            self._previous()
+        elif key == _enum(Qt, "Key", "Key_Right"):
+            self._next()
+        elif key == _enum(Qt, "Key", "Key_Home"):
+            self._show_index(0)
+        elif key == _enum(Qt, "Key", "Key_End"):
+            self._show_index(len(self._images) - 1)
+        elif key == _enum(Qt, "Key", "Key_Space"):
+            self._next()
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
     def _fill_thumbnails(self):
+        if not self._images:
+            return
+        first = self._images[0]
+        height = 200
+        if first.width():
+            height = max(80, round(
+                THUMBNAIL_WIDTH * first.height() / first.width()
+            ))
+        icon_size = QSize(THUMBNAIL_WIDTH, height)
+        self.thumbnails.setIconSize(icon_size)
+        self.thumbnails.setGridSize(QSize(216, height + 26))
         for number, image in enumerate(self._images, 1):
             thumbnail = image.scaled(
-                THUMBNAIL_SIZE,
+                icon_size,
                 _enum(Qt, "AspectRatioMode", "KeepAspectRatio"),
                 _enum(Qt, "TransformationMode", "SmoothTransformation"),
             )
@@ -314,6 +462,12 @@ class ExportPreviewDialog(QDialog):
                 _enum(Qt, "AlignmentFlag", "AlignHCenter")
             )
             self.thumbnails.addItem(item)
+        many = len(self._images) > 1
+        self.thumbnails_button.setVisible(many)
+        self.thumbnail_panel.setVisible(many)
+        self.thumbnails_button.blockSignals(True)
+        self.thumbnails_button.setChecked(many)
+        self.thumbnails_button.blockSignals(False)
 
     def _show_index(self, index):
         if not self._images:
@@ -344,12 +498,9 @@ class ExportPreviewDialog(QDialog):
         if index is None:
             return
         self._show_index(int(index))
-        self.thumbnails_button.setChecked(False)
 
     def _toggle_thumbnails(self, checked):
-        self.stack.setCurrentWidget(
-            self.thumbnails if checked else self.canvas
-        )
+        self.thumbnail_panel.setVisible(checked and len(self._images) > 1)
         if checked:
             self._show_index(self._index)
             item = self.thumbnails.item(self._index)

@@ -1,0 +1,137 @@
+"""Шкала масштаба для макета атласа.
+
+Повторяет шкалу из окна выбора охвата: четыре чередующихся чёрно-белых
+отрезка и подпись «круглого» расстояния над ними.  Длина полосы
+подбирается под ширину листа, поэтому на граничных масштабах подпись не
+превращается в нечитаемое число.
+"""
+
+from qgis.core import (
+    QgsDistanceArea,
+    QgsLayoutItem,
+    QgsLayoutMeasurement,
+    QgsPointXY,
+    QgsProject,
+    QgsUnitTypes,
+    Qgis,
+)
+from qgis.PyQt.QtCore import QRectF, Qt
+from qgis.PyQt.QtGui import QColor, QPainter, QPen
+
+from ..core.measure import scale_bar
+
+SCALE_BAR_MAX_MM = 45.0
+BAR_HEIGHT_MM = 1.5
+TEXT_POINT_SIZE = 7.0
+LINE_WIDTH_MM = 0.15
+
+# Положение и размер на случай, когда штатная шкала уже удалена из макета
+# (например, проект сохранён после первого предпросмотра).
+DEFAULT_X_MM = 5.0
+DEFAULT_BOTTOM_MM = 5.589
+DEFAULT_WIDTH_MM = 56.2955
+DEFAULT_HEIGHT_MM = 11.9
+DEFAULT_Z_VALUE = 2.0
+
+
+def _enum(owner, group, name):
+    try:
+        return getattr(getattr(owner, group), name)
+    except AttributeError:
+        return getattr(owner, name)
+
+
+class LayoutScaleBarItem(QgsLayoutItem):
+    """Шкала масштаба, привязанная к карте макета."""
+
+    def __init__(self, layout, map_item):
+        super().__init__(layout)
+        self.map_item = map_item
+
+    def _meters_per_mm(self):
+        """Метров на миллиметр листа для текущего охвата карты."""
+        layout = self.layout()
+        if layout is None or self.map_item is None:
+            return 0.0
+        units_per_mm = layout.convertToLayoutUnits(
+            QgsLayoutMeasurement(1.0, Qgis.LayoutUnit.Millimeters)
+        )
+        if units_per_mm <= 0:
+            return 0.0
+        map_width_mm = self.map_item.rect().width() / units_per_mm
+        extent = self.map_item.extent()
+        if map_width_mm <= 0 or extent.width() <= 0:
+            return 0.0
+        crs = self.map_item.crs()
+        if crs.isGeographic():
+            distance = QgsDistanceArea()
+            distance.setSourceCrs(
+                crs, QgsProject.instance().transformContext()
+            )
+            distance.setEllipsoid("WGS84")
+            middle = extent.center().y()
+            width_m = distance.measureLine(
+                QgsPointXY(extent.xMinimum(), middle),
+                QgsPointXY(extent.xMaximum(), middle),
+            )
+        else:
+            try:
+                factor = QgsUnitTypes.fromUnitToUnitFactor(
+                    crs.mapUnits(), Qgis.DistanceUnit.Meters
+                )
+            except Exception:
+                factor = 1.0
+            width_m = extent.width() * factor
+        return width_m / map_width_mm
+
+    def draw(self, context):
+        painter = context.renderContext().painter()
+        if painter is None or self.map_item is None:
+            return
+        meters_per_mm = self._meters_per_mm()
+        if meters_per_mm <= 0:
+            return
+        length_mm, text = scale_bar(meters_per_mm, SCALE_BAR_MAX_MM)
+        if not length_mm:
+            return
+
+        millimeters = context.renderContext().convertToPainterUnits(
+            1.0, Qgis.RenderUnit.Millimeters
+        )
+        length = length_mm * millimeters
+        height = self.rect().height() * millimeters
+        bar_height = BAR_HEIGHT_MM * millimeters
+        bottom = height - millimeters
+        top = bottom - bar_height
+        pen_width = max(1.0, LINE_WIDTH_MM * millimeters)
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            segment = length / 4.0
+            for index in range(4):
+                painter.setPen(QPen(QColor(25, 25, 25), pen_width))
+                painter.setBrush(
+                    QColor(25, 25, 25)
+                    if index % 2 == 0
+                    else QColor(255, 255, 255)
+                )
+                painter.drawRect(
+                    QRectF(index * segment, top, segment, bar_height)
+                )
+            font = painter.font()
+            font.setPointSizeF(TEXT_POINT_SIZE)
+            painter.setFont(font)
+            painter.setPen(QPen(QColor(25, 25, 25), 1))
+            painter.setBrush(QColor(255, 255, 255, 0))
+            alignment = (
+                _enum(Qt, "AlignmentFlag", "AlignHCenter")
+                | _enum(Qt, "AlignmentFlag", "AlignBottom")
+            )
+            painter.drawText(
+                QRectF(0, 0, length, top),
+                alignment,
+                text,
+            )
+        finally:
+            painter.restore()

@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 
 from qgis.core import (
@@ -139,32 +138,9 @@ def _right_button():
 
 # Подписи размеров — общие для окна выбора охвата и разметки листов
 # атласа, поэтому живут в core/measure.py.
-from ..core.measure import format_length, frame_sizes_km  # noqa: E402,F401
-
-
-def scale_bar(meters_per_pixel, max_length=140.0):
-    """Длина полосы шкалы в пикселях и её подпись.
-
-    Длина подбирается так, чтобы соответствовать «круглому»
-    расстоянию: 1, 2 или 5 × 10ⁿ метров.
-    """
-    if not meters_per_pixel or meters_per_pixel <= 0:
-        return 0.0, ""
-    target = meters_per_pixel * max_length
-    exponent = math.floor(math.log10(target)) if target > 0 else 0
-    best = 0.0
-    for factor in (1.0, 2.0, 5.0):
-        value = factor * (10 ** exponent)
-        if value <= target and value > best:
-            best = value
-    if best <= 0:
-        best = target
-    length = best / meters_per_pixel
-    if length < 10 or length > max_length:
-        return 0.0, ""
-    if best >= 1000:
-        return length, f"{best / 1000:g} км"
-    return length, f"{best:g} м"
+from ..core.measure import (  # noqa: E402,F401
+    format_length, frame_sizes_km, scale_bar,
+)
 
 
 class MeasuredCanvas(QgsMapCanvas):
