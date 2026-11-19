@@ -919,6 +919,86 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_unchecked_sheet_tools_restore_pan(self):
+        """Ручное снятие «Добавить»/«Изменить» включает прокрутку карты."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self._canvas = canvas
+
+            def mapCanvas(self):
+                return self._canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        panel = ProjectPanel(Iface(canvas))
+        try:
+            panel._connect_canvas(canvas)
+            panel.add_sheet_button.setChecked(True)
+            self.assertIs(canvas.mapTool(), panel._sheet_tool)
+            panel.add_sheet_button.setChecked(False)
+            self.assertTrue(panel.pan_action.isChecked())
+            self.assertIs(canvas.mapTool(), panel._pan_tool)
+
+            panel._sheet_drawn(QgsRectangle(0, 0, 100, 70))
+            panel.edit_sheet_button.setChecked(True)
+            self.assertIs(canvas.mapTool(), panel._edit_sheet_tool)
+            panel.edit_sheet_button.setChecked(False)
+            self.assertTrue(panel.pan_action.isChecked())
+            self.assertIs(canvas.mapTool(), panel._pan_tool)
+        finally:
+            panel.clear_atlas()
+            panel.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
+    def test_escape_cancels_sheet_tools(self):
+        """Esc выключает рисование и правку листов и возвращает прокрутку."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtTest import QTest
+        from qgis_xtopo.gui.projectpanel import ProjectPanel, _enum
+
+        class Iface:
+            def __init__(self, canvas):
+                self._canvas = canvas
+
+            def mapCanvas(self):
+                return self._canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        panel = ProjectPanel(Iface(canvas))
+        try:
+            panel._connect_canvas(canvas)
+            escape = _enum(Qt, "Key", "Key_Escape")
+
+            panel.add_sheet_button.setChecked(True)
+            QTest.keyClick(canvas, escape)
+            self.app.processEvents()
+            self.assertFalse(panel.add_sheet_button.isChecked())
+            self.assertIs(canvas.mapTool(), panel._pan_tool)
+
+            panel._sheet_drawn(QgsRectangle(0, 0, 100, 70))
+            panel.edit_sheet_button.setChecked(True)
+            QTest.keyClick(canvas.viewport(), escape)
+            self.app.processEvents()
+            self.assertFalse(panel.edit_sheet_button.isChecked())
+            self.assertIs(canvas.mapTool(), panel._pan_tool)
+        finally:
+            panel.clear_atlas()
+            panel.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
     def test_measure_dialog_close_activates_pan_tool(self):
         from unittest import mock
 

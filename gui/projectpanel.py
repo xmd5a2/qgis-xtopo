@@ -569,6 +569,7 @@ class ProjectPanel(QWidget):
         self._style_layer = None
         self._pan_tool = None
         self._canvas_object = None
+        self._canvas_filter_widgets = ()
         self._measure_dialogs_connected = False
         self._measure_dialog_timer = QTimer(self)
         self._measure_dialog_timer.setSingleShot(True)
@@ -1300,6 +1301,7 @@ class ProjectPanel(QWidget):
         elif self._sheet_tool is not None and canvas is not None:
             canvas.unsetMapTool(self._sheet_tool)
             self._sheet_tool._clear_preview()
+            self._activate_pan()
 
     def _toggle_edit_sheet_tool(self, active):
         if self._tool_syncing:
@@ -1327,6 +1329,7 @@ class ProjectPanel(QWidget):
                 canvas.unsetMapTool(self._edit_sheet_tool)
                 self._edit_sheet_tool._clear_operation()
             self._set_active_sheet(None)
+            self._activate_pan()
 
     def _sheet_activated(self, index):
         self._set_active_sheet(index)
@@ -2851,6 +2854,12 @@ class ProjectPanel(QWidget):
     def _connect_canvas(self, canvas):
         if canvas is self._canvas_object:
             return
+        for widget in self._canvas_filter_widgets:
+            try:
+                widget.removeEventFilter(self)
+            except Exception:
+                pass
+        self._canvas_filter_widgets = ()
         if self._canvas_object is not None:
             try:
                 self._canvas_object.mapToolSet.disconnect(
@@ -2860,6 +2869,13 @@ class ProjectPanel(QWidget):
                 pass
         self._canvas_object = canvas
         if canvas is not None:
+            widgets = [canvas]
+            viewport = getattr(canvas, "viewport", None)
+            if callable(viewport):
+                widgets.append(viewport())
+            for widget in widgets:
+                widget.installEventFilter(self)
+            self._canvas_filter_widgets = tuple(widgets)
             try:
                 canvas.mapToolSet.connect(self._map_tool_changed)
             except Exception:
@@ -2942,11 +2958,34 @@ class ProjectPanel(QWidget):
             pass
 
     def eventFilter(self, obj, event):
+        if (
+            obj in self._canvas_filter_widgets
+            and event.type() == _enum(QEvent, "Type", "KeyPress")
+            and event.key() == _enum(Qt, "Key", "Key_Escape")
+            and self._cancel_sheet_tools()
+        ):
+            event.accept()
+            return True
         if event.type() == QEvent.Close and self._is_measure_dialog(obj):
             # Инструмент снимается не сразу: проверяем холст, когда
             # обработка закрытия окна закончится.
             self._measure_dialog_timer.start(0)
         return super().eventFilter(obj, event)
+
+    def _cancel_sheet_tools(self):
+        """Esc выключает «Добавить»/«Изменить» и возвращает прокрутку."""
+        active = (
+            self.add_sheet_button.isChecked()
+            or self.edit_sheet_button.isChecked()
+        )
+        if not active:
+            return False
+        if self.add_sheet_button.isChecked():
+            self.add_sheet_button.setChecked(False)
+        if self.edit_sheet_button.isChecked():
+            self.edit_sheet_button.setChecked(False)
+        self._activate_pan()
+        return True
 
     def _measure_dialog_closed(self):
         """Возвращает перетаскивание после закрытия окна «Измерение»."""
