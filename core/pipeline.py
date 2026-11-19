@@ -7,9 +7,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, dem_sources, disk_space, gdal_log, i18n, icon_angles,
-    label_cache, osm_convert, peak_filter, poi_icons, polygon_overlaps,
-    project, sources, terrain,
+    coastline, dem_sources, disk_space, gdal_log, highway_integrity,
+    i18n, icon_angles, label_cache, osm_convert, peak_filter, poi_icons,
+    polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -1166,6 +1166,13 @@ class Pipeline:
             )
         if operation == "split_layer":
             return self._split_layer(name, current)
+        if operation == "highway_integrity":
+            if not highway_integrity.store(self.config.vector_dir, name):
+                # Без столбца фильтры дорог по интегритету не сработают.
+                self.warnings.append(
+                    f"{name}: highway_integrity не записан в данные"
+                )
+            return current
         raise PipelineError(f"Unknown pipeline operation: {operation}")
 
     def _algorithm(self, algorithm, parameters):

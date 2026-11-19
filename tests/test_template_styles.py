@@ -1006,6 +1006,18 @@ class TrackScaleTest(unittest.TestCase):
                 )
 
 
+class HighwayIntegrityFieldTest(unittest.TestCase):
+    """Дорожный интегритет читается из данных, а не считается на кадре."""
+
+    def test_integrity_is_not_a_virtual_field(self):
+        for layer in _template_root().iter("maplayer"):
+            for field in layer.findall("expressionfields/field"):
+                self.assertNotEqual(
+                    field.get("name"), "highway_integrity",
+                    f"{layer.findtext('layername')}: поле должно быть "
+                    "материализовано при подготовке")
+
+
 class ServiceRoadLodTest(unittest.TestCase):
     """Два уровня service: без service=* до 300k, с service=* до 100k."""
 

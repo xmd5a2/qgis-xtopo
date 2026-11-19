@@ -187,6 +187,15 @@
   должен быть символ в каждом диапазоне масштаба — иначе такие треки не
   рисуются. Диапазоны 50k+ дополнительно фильтруются по `@level_of_detail`
   (50–100k ≥3, 100–200k ≥3, 200–300k ≥4, 300k+ ≥5). Проверка — `TrackScaleTest`.
+- **`highway_integrity` хранится в данных**: поле пишет подготовка
+  (`core/highway_integrity.py`) после сохранения `track`, `highway_main`,
+  `highway_main_layer_1/-1`, `highway_main_tunnel`, `bridge_area`,
+  `highway_main_area` и `place_square_highway_area`. В шаблоне это обычный
+  столбец, а не виртуальное поле: виртуальное QGIS вычислял выражением с
+  Python-функцией на каждый объект при каждом кадре. Формула живёт в
+  `core/highway_integrity.py`, а `resources/expressions/
+  calculate_highway_integrity.py` вызывает её же для старых проектов.
+  Проверки — `HighwayIntegrityTest`, `HighwayIntegrityFieldTest`.
 - **Хутора и отдельные дворы: масштаб и уровень детализации**: в слое
   `places main` (правила значков и подписей) видимость задана диапазонами
   `0–100000`, `100000–200000` и `200000–500000`; дальше 1:500000 правил нет.

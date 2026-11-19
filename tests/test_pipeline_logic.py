@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -17,7 +18,8 @@ from qgis_xtopo.core.pipeline import (
 from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
 )
-from qgis_xtopo.core.query_recipes import RECIPES
+from qgis_xtopo.core import highway_integrity
+from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
 from qgis_xtopo.core.resources import query_names
 
 
@@ -400,7 +402,7 @@ class AreaRoadTest(unittest.TestCase):
         for name in ("highway_main_area", "place_square_highway_area"):
             steps = [operation for operation, _ in recipe_for(name).steps]
             self.assertIn("linestopolygons", steps)
-            self.assertEqual(steps[-1], "save")
+            self.assertEqual(steps[-2:], ["save", "highway_integrity"])
 
     def test_glacier_recipe_keeps_only_polygons(self):
         """В слое ледников — только полигоны: разомкнутые way отбрасываются."""
@@ -2148,6 +2150,88 @@ class RouteHikingTest(unittest.TestCase):
         self.assertNotIn("route_hiking", query_names())
         self.assertNotIn("route_hiking", RECIPES)
         self.assertNotIn("route_hiking", default_queries())
+
+
+class HighwayIntegrityTest(unittest.TestCase):
+    """Интегритет дорог считается при подготовке, а не на каждом кадре."""
+
+    def test_materialized_formula_matches_legacy(self):
+        cases = [
+            (("track", "", "", ""), 33),
+            (("path", None, None, None), 33),
+            (("motorway", "", "", ""), 33),
+            (("footway", None, None, None), 33),
+            (("track", "", "", "grade2"), 1),
+            (("track", "", "", "grade5"), 5),
+            (("track", "gravel", "", ""), 4),
+            (("track", "", "bad", ""), 3),
+            (("track", "", "excellent", ""), 2),
+            (("track", "", "very_horrible", ""), 6),
+            (("residential", "paved", "good", ""), 0),
+            (("residential", "sand", "excellent", ""), 3),
+            (("residential", "asphalt", "very_bad", ""), 4),
+            (("residential", "", "horrible", ""), 3),
+            (("primary", "", "impassable", ""), 4),
+            (("primary", "asphalt", "impassable", ""), 8),
+            ((None, None, None, None), 0),
+        ]
+        for arguments, expected in cases:
+            self.assertEqual(
+                highway_integrity.calculate(*arguments), expected, arguments)
+
+    def _roads(self, directory, name, rows):
+        connection = sqlite3.connect(str(Path(directory) / f"{name}.sqlite"))
+        connection.execute(
+            'CREATE TABLE "roads" (ogc_fid INTEGER PRIMARY KEY, '
+            "highway TEXT, surface TEXT, smoothness TEXT, tracktype TEXT)")
+        connection.executemany(
+            'INSERT INTO "roads" (ogc_fid, highway, surface, smoothness, '
+            "tracktype) VALUES (?, ?, ?, ?, ?)", rows)
+        connection.commit()
+        connection.close()
+
+    def _values(self, directory, name):
+        connection = sqlite3.connect(str(Path(directory) / f"{name}.sqlite"))
+        values = dict(connection.execute(
+            'SELECT "ogc_fid", "highway_integrity" FROM "roads"'))
+        connection.close()
+        return values
+
+    def test_store_adds_field_and_keeps_it_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._roads(directory, "track", [
+                (1, "track", "", "", ""),
+                (2, "track", "gravel", "", ""),
+                (3, "residential", "paved", "good", ""),
+            ])
+            self.assertEqual(highway_integrity.store(directory, "track"), 3)
+            self.assertEqual(
+                self._values(directory, "track"), {1: 33, 2: 4, 3: 0})
+            # Повторный запуск не ошибка и не меняет значения.
+            self.assertEqual(highway_integrity.store(directory, "track"), 0)
+            self.assertEqual(
+                self._values(directory, "track"), {1: 33, 2: 4, 3: 0})
+
+    def test_highway_main_covers_layer_split_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for suffix in ("", "_layer_1", "_layer_-1"):
+                self._roads(directory, f"highway_main{suffix}", [
+                    (1, "primary", "", "", ""),
+                ])
+            self.assertEqual(
+                highway_integrity.store(directory, "highway_main"), 3)
+
+    def test_recipes_store_field_after_saving(self):
+        for name in highway_integrity.INTEGRITY_LAYERS:
+            operations = [
+                operation for operation, _parameters in recipe_for(name).steps
+            ]
+            self.assertIn("highway_integrity", operations, name)
+            position = operations.index("highway_integrity")
+            self.assertTrue(
+                "save" in operations[:position]
+                or "split_layer" in operations[:position],
+                f"{name}: поле пишется до сохранения слоя")
 
 
 if __name__ == "__main__":

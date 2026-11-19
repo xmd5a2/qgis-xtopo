@@ -79,6 +79,11 @@ def split_layer():
     return step("split_layer")
 
 
+def store_highway_integrity():
+    """Дописывает highway_integrity в уже сохранённый слой."""
+    return step("highway_integrity")
+
+
 def linestopolygons(drop_others=False):
     return step("linestopolygons", drop_others=drop_others)
 
@@ -158,7 +163,16 @@ RECIPES = {
         fix(), save("_dissolved"),
     ]),
     "highway_main": Recipe([
-        split_layer(),
+        split_layer(), store_highway_integrity(),
+    ]),
+    "highway_main_tunnel": Recipe([
+        save(), store_highway_integrity(),
+    ]),
+    "bridge_area": Recipe([
+        save(), store_highway_integrity(),
+    ]),
+    "track": Recipe([
+        save(), store_highway_integrity(),
     ]),
     "waterfall": Recipe([
         save(), polygonstolines(), save("_lines"),
@@ -280,10 +294,10 @@ RECIPES = {
         fix(), save(),
     ]),
     "highway_main_area": Recipe([
-        linestopolygons(), fix(), save(),
+        linestopolygons(), fix(), save(), store_highway_integrity(),
     ]),
     "place_square_highway_area": Recipe([
-        linestopolygons(), fix(), save(),
+        linestopolygons(), fix(), save(), store_highway_integrity(),
     ]),
     "aerialway_station": Recipe([
         buffer(0.004), dissolve("name"), centroid(),
