@@ -915,22 +915,33 @@ class BasemapLabelInversionTest(unittest.TestCase):
             main.classes, frozenset({"motorway", "trunk", "primary"})
         )
         self.assertTrue(label_tags.excluded(main))
-        # Улицы нарисованы узкой полосой: инверсия их меняет.
+        # Улицы нарисованы полосой так же, как магистрали.
         streets = label_tags.profile(
             "\"highway='residential' OR highway='service'\""
         )
-        self.assertFalse(label_tags.excluded(streets))
+        self.assertTrue(label_tags.excluded(streets))
+        # Примыкания — тоже дороги.
+        links = label_tags.profile(
+            "\"highway='primary_link' OR highway='trunk_link'\""
+        )
+        self.assertTrue(label_tags.excluded(links))
+        # Тропы нарисованы линией: их надписи инверсия меняет.
+        paths = label_tags.profile(
+            "\"highway='track' OR highway='path' OR highway='footway' "
+            "OR highway='cycleway' OR highway='bridleway'\""
+        )
+        self.assertFalse(label_tags.excluded(paths))
         # Условие слоя «не улица» — это магистрали и второстепенные.
         major = label_tags.profile(
             "\"highway\" NOT IN ('residential','unclassified','living_street',"
             "'pedestrian','service')"
         )
         self.assertTrue(label_tags.excluded(major))
-        # Если исключён не весь узкий набор, в условии есть и улицы.
-        mixed = label_tags.profile(
+        # Дополнение к «NOT IN» тоже состоит из одних дорог.
+        complement = label_tags.profile(
             "\"highway\" NOT IN ('residential','unclassified','service')"
         )
-        self.assertFalse(label_tags.excluded(mixed))
+        self.assertTrue(label_tags.excluded(complement))
 
     def test_area_road_tags_are_recognized(self):
         """Площадная дорога отличается от площади по тегам."""
@@ -950,56 +961,63 @@ class BasemapLabelInversionTest(unittest.TestCase):
         )
         self.assertFalse(label_tags.excluded(both))
 
-    def test_wide_band_road_labels_are_not_inverted(self):
-        """Надписи дорог с широкой полосой инверсия не меняет."""
+    # Условия слоёв дорог в шаблоне: магистрали и улицы.
+    ROAD_LAYERS = (
+        (
+            "highway main",
+            "\"highway\" NOT IN ('residential','unclassified',"
+            "'living_street','pedestrian','service')",
+        ),
+        (
+            "highway main minor",
+            "\"highway\" IN ('residential','unclassified',"
+            "'living_street','pedestrian','service')",
+        ),
+    )
+
+    def test_road_labels_are_not_inverted(self):
+        """Надписи дорог инверсия не меняет: они лежат на самой полосе."""
         from qgis.core import QgsVectorLayer
         from qgis_xtopo.core import label_style, label_tags
         from qgis_xtopo.gui import projectpanel as pp
 
-        renderer, labeling = pp._template_layer_objects("highway main")
-        layer = QgsVectorLayer(
-            "LineString?crs=EPSG=4326", "highway main", "memory"
-        )
-        layer.setRenderer(renderer)
-        layer.setLabeling(labeling)
-        self.project.addMapLayer(layer)
-
-        def colors():
-            result = []
-            for _key, settings in label_style.label_settings(
-                layer.labeling()
-            ):
-                text, halo, _enabled = label_style.label_colors(settings)
-                result.append((text, halo))
-            return result
-
-        before = colors()
-        # Правила с тегами: магистрали, второстепенные дороги, улицы.
-        filters = label_tags.rule_filters(layer.labeling())
-        layer_item = label_tags.layer_profile(layer)
-        excluded = []
-        for key in layer.labeling().subProviders():
-            rule = label_tags.profile(filters[key])
-            excluded.append(
-                label_tags.excluded(label_tags.combine(rule, layer_item))
+        for name, subset in self.ROAD_LAYERS:
+            renderer, labeling = pp._template_layer_objects(name)
+            layer = QgsVectorLayer(
+                "LineString?crs=EPSG:4326", name, "memory"
             )
-        self.assertTrue(excluded)
-        self.assertTrue(
-            [i for i, item in enumerate(excluded) if not item]
-        )
+            layer.setRenderer(renderer)
+            layer.setLabeling(labeling)
+            layer.setSubsetString(subset)
+            self.project.addMapLayer(layer)
 
-        self.basemap.invert_labels(self.project)
-        after = colors()
-        # Магистрали и второстепенные дороги остались прежними.
-        for index, is_excluded in enumerate(excluded):
-            if is_excluded:
-                self.assertEqual(after[index], before[index])
-        # Улицы инверсия поменяла.
-        streets = next(
-            i for i, item in enumerate(excluded) if not item
-        )
-        self.assertNotEqual(after[streets], before[streets])
-        self.project.removeMapLayer(layer.id())
+            def colors():
+                result = []
+                for _key, settings in label_style.label_settings(
+                    layer.labeling()
+                ):
+                    text, halo, _enabled = label_style.label_colors(settings)
+                    result.append((text, halo))
+                return result
+
+            # Все правила слоя отбирают дороги: магистрали, улицы,
+            # примыкания, щиты с номером дороги.
+            filters = label_tags.rule_filters(layer.labeling())
+            layer_item = label_tags.layer_profile(layer)
+            for key in layer.labeling().subProviders():
+                rule = label_tags.profile(filters.get(key, ""))
+                self.assertTrue(
+                    label_tags.excluded(
+                        label_tags.combine(rule, layer_item)
+                    ),
+                    f"{name}: правило {key[:10]} не распознано как дорога",
+                )
+
+            before = colors()
+            self.assertTrue(before)
+            self.basemap.invert_labels(self.project)
+            self.assertEqual(colors(), before, f"{name}: цвета изменились")
+            self.project.removeMapLayer(layer.id())
 
     def test_blocking_road_layer_keeps_wide_band_labels(self):
         """Подписи слоя-блокировщика магистралей не инвертируются.

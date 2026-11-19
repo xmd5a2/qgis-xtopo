@@ -786,7 +786,7 @@ class ProjectPanel(QWidget):
         )
         self.basemap_invert_check.setToolTip(
             "Инверсия надписей: цвет текста и цвет halo меняются местами; "
-            "надписи дорог с широкой полосой не меняются"
+            "надписи дорог и площадных дорог не меняются"
         )
         self.basemap_invert_check.setEnabled(False)
         self.basemap_invert_check.toggled.connect(
