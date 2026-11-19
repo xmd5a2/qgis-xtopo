@@ -1018,6 +1018,21 @@ class HighwayIntegrityFieldTest(unittest.TestCase):
                     "материализовано при подготовке")
 
 
+class TextMaskReferencesTest(unittest.TestCase):
+    """Текстовая маска должна ссылаться на реальные symbol layer id."""
+
+    def test_masks_have_no_unresolved_symbol_layer_ids(self):
+        for layer in _template_root().iter("maplayer"):
+            for mask in layer.iter("text-mask"):
+                value = mask.get("maskedSymbolLayers") or ""
+                name = layer.findtext("layername")
+                # Формат QGIS 3.30+: layerId;symbolLayerId;...
+                # Пустой symbolLayerId даёт ";;" и маска ничего не режет.
+                self.assertNotIn(";;", value, name)
+                if not value:
+                    self.assertNotEqual(mask.get("maskEnabled"), "1", name)
+
+
 class ServiceRoadLodTest(unittest.TestCase):
     """Два уровня service: без service=* до 300k, с service=* до 100k."""
 

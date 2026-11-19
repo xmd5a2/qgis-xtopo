@@ -266,3 +266,11 @@
   не работало вовсе. Проверки —
   `test_service_layer_names_are_unique_and_referenced` и
   `test_all_icon_layers_use_one_crs`.
+- **Текстовая маска подписи не должна ссылаться на пустые symbol layer id.**
+  Начиная с QGIS 3.30 маска хранит пары `layerId;symbolLayerId`. В старом
+  списке масок `places main` после миграции остались только id слоёв, а id
+  символов стали пустыми (`layerId;;`). QGIS считал маску включённой, готовил
+  проходы масок и предупреждал «Different sets of symbol layers are masked by
+  different sources», но не вырезал ни одного символа: кадр с маской и без неё
+  совпадал побитово. Мёртвые ссылки из шаблона удалены, маска отключена.
+  Проверка — `TextMaskReferencesTest`.
