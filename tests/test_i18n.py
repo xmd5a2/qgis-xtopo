@@ -87,11 +87,24 @@ class TranslateTest(unittest.TestCase):
             "{} — {} с", i18n.tr("обработка слоёв"), "12.3"
         )
         self.assertEqual(
-            i18n.trf("Хронометраж: {}", timing),
-            "Timing: layer processing — 12.3 s",
+            i18n.trf("Хронометраж: по этапам — {}", timing),
+            "Timing: by stage — layer processing — 12.3 s",
         )
         i18n.set_language("ru", save=False)
         self.assertEqual(i18n.tr("Sheets: 3"), "Листов: 3")
+
+    def test_done_line_carries_total_time(self):
+        i18n = self.i18n
+        i18n.set_language("en", save=False)
+        self.assertEqual(
+            i18n.trf("Готово: {} (за {} с)", "/tmp/automap.qgz", "30.4"),
+            "Done: /tmp/automap.qgz (in 30.4 s)",
+        )
+        i18n.set_language("ru", save=False)
+        self.assertEqual(
+            i18n.trf("Готово: {} (за {} с)", "/tmp/automap.qgz", "30.4"),
+            "Готово: /tmp/automap.qgz (за 30.4 с)",
+        )
 
     def test_unknown_text_is_unchanged(self):
         self.i18n.set_language("en", save=False)

@@ -23,6 +23,14 @@ class PipelineError(RuntimeError):
     pass
 
 
+# Этап, в котором считается сумма времени операций по слоям.
+_LAYER_STAGE = "обработка слоёв"
+
+# Этапы, которые идут одновременно с обработкой слоёв: их времена не
+# складываются в общее время подготовки.
+_PARALLEL_STAGES = ("источник OSM", "рельеф")
+
+
 class Timings:
     """Хронометраж подготовки: время этапов и самых долгих шагов.
 
@@ -34,6 +42,7 @@ class Timings:
         self._lock = threading.Lock()
         self.stages = {}
         self.steps = []
+        self.workers = 0
 
     def add_stage(self, name, seconds):
         with self._lock:
@@ -43,6 +52,11 @@ class Timings:
         with self._lock:
             self.steps.append((seconds, name, operation))
 
+    def set_workers(self, count):
+        """Сколько слоёв обрабатывалось одновременно."""
+        with self._lock:
+            self.workers = max(int(count or 0), 0)
+
     def top_steps(self, limit=15):
         with self._lock:
             steps = sorted(self.steps, reverse=True)[:limit]
@@ -51,7 +65,8 @@ class Timings:
     def summary(self):
         with self._lock:
             stages = dict(self.stages)
-            total_steps = sum(item[0] for item in self.steps)
+            steps = list(self.steps)
+            workers = self.workers
         lines = []
         if stages:
             parts = ", ".join(
@@ -62,14 +77,49 @@ class Timings:
                 )
                 for name, seconds in sorted(stages.items(), key=lambda i: -i[1])
             )
-            lines.append(i18n.trf("Хронометраж: {}", parts))
-            lines.append(
-                i18n.trf(
-                    "Хронометраж: суммарно в слоях {} с",
-                    f"{total_steps:.1f}",
+            lines.append(i18n.trf("Хронометраж: по этапам — {}", parts))
+            parallel = [name for name in _PARALLEL_STAGES if name in stages]
+            if parallel:
+                lines.append(
+                    i18n.trf(
+                        "Хронометраж: {} идут параллельно со слоями, "
+                        "поэтому сумма этапов больше общего времени",
+                        ", ".join(i18n.tr(name) for name in parallel),
+                    )
                 )
-            )
+        if steps:
+            lines.append(self._layers_line(steps, workers, stages))
         return lines
+
+    def _layers_line(self, steps, workers, stages):
+        """Сумма времени операций по слоям и её отношение к этапу.
+
+        Слои готовятся параллельно, поэтому сумма времён отдельных
+        операций больше времени этапа: это объём работы, а не длительность
+        сборки.  Без пояснения число выглядит противоречивым.
+        """
+        total = sum(item[0] for item in steps)
+        stage = stages.get(_LAYER_STAGE)
+        if stage is None:
+            return i18n.trf(
+                "Хронометраж: слои — сумма операций {} с",
+                f"{total:.1f}",
+            )
+        if workers > 1:
+            return i18n.trf(
+                "Хронометраж: слои — сумма операций {} с при {} потоках, "
+                "этап «{}» занял {} с",
+                f"{total:.1f}",
+                f"{workers}",
+                i18n.tr(_LAYER_STAGE),
+                f"{stage:.1f}",
+            )
+        return i18n.trf(
+            "Хронометраж: слои — сумма операций {} с, этап «{}» занял {} с",
+            f"{total:.1f}",
+            i18n.tr(_LAYER_STAGE),
+            f"{stage:.1f}",
+        )
 
 
 _TERRAIN_STEPS = (
@@ -683,6 +733,9 @@ class Pipeline:
         if not query_names:
             return self.warnings
         workers = self._worker_count(len(query_names))
+        # Число потоков нужно хронометражу: сумма времени операций по
+        # слоям объясняется параллельной обработкой.
+        self.timings.set_workers(workers)
         if workers <= 1 or len(query_names) == 1:
             self._run_serial(source, query_names)
             return self.warnings
@@ -1861,7 +1914,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         )
         started = time.monotonic()
         warnings = pipeline.run(prepared, config.array_queries)
-        timings.add_stage("обработка слоёв", time.monotonic() - started)
+        timings.add_stage(_LAYER_STAGE, time.monotonic() - started)
         # Предупреждения конвейера не должны теряться: по ним видно,
         # какие слои собраны не полностью.
         for warning in warnings or ():
@@ -1967,13 +2020,16 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         timings.add_stage("очистка проекта", time.monotonic() - started)
         for line in timings.summary():
             report(line)
-        for seconds, name, operation in timings.top_steps():
-            report(
-                i18n.trf(
-                    "Хронометраж: {} [{}] — {} с",
-                    name, operation, f"{seconds:.1f}",
+        steps = timings.top_steps()
+        if steps:
+            report(i18n.tr("Хронометраж: самые долгие операции:"))
+            for seconds, name, operation in steps:
+                report(
+                    i18n.trf(
+                        "{} [{}] — {} с",
+                        name, operation, f"{seconds:.1f}",
+                    )
                 )
-            )
         for line in gdal_log.LOG.summary():
             report(line)
         # Готово: прежние слои заменяются собранными.

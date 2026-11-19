@@ -356,7 +356,7 @@ class PipelineWorker(QThread):
     status = pyqtSignal(str)
     # Не называть сигнал finished: он перекрывает встроенный
     # QThread.finished, по которому поток удаляется после возврата из run().
-    completed = pyqtSignal(str)
+    completed = pyqtSignal(str, float)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()
 
@@ -366,16 +366,19 @@ class PipelineWorker(QThread):
         self.cancel_event = threading.Event()
 
     def run(self):
+        # Общее время подготовки: от начала до готового проекта.
+        started = time.monotonic()
         try:
             path = run_project(
                 self.config, self.progress.emit, self.cancel_event,
                 percent=self.percent.emit, status=self.status.emit,
             )
-            self.completed.emit(str(path))
         except InterruptedError:
             self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
+        else:
+            self.completed.emit(str(path), time.monotonic() - started)
 
     def cancel(self):
         self.cancel_event.set()
@@ -3921,7 +3924,7 @@ class XtopoDockWidget(QDockWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(value)
 
-    def _finished(self, path):
+    def _finished(self, path, elapsed=0.0):
         worker = self.worker
         self.worker = None
         fallback = (
@@ -3934,7 +3937,10 @@ class XtopoDockWidget(QDockWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self._set_running(False)
-        self._append_log(f"Готово: {path}")
+        # Общее время подготовки — в последней строке журнала.
+        self._append_log(
+            i18n.trf("Готово: {} (за {} с)", path, f"{elapsed:.1f}")
+        )
         # После подготовки на диске осталось меньше места.
         self._update_disk_info()
         # В строке статуса путь не помещается: показываем короткий текст,

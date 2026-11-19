@@ -275,6 +275,26 @@ class TimingsTest(unittest.TestCase):
         top = timings.top_steps(1)
         self.assertEqual(top[0][1], "wood")
 
+    def test_layer_sum_is_explained(self):
+        """Сумма операций по слоям больше этапа: слои идут параллельно.
+
+        В строке должны быть и сумма операций, и время этапа, и число
+        потоков — иначе число выглядит противоречивым.
+        """
+        from qgis_xtopo.core.pipeline import Timings
+
+        timings = Timings()
+        timings.add_stage("обработка слоёв", 7.2)
+        timings.add_step("water", "dissolve", 3.0)
+        timings.add_step("wood", "buffer", 5.0)
+        timings.set_workers(3)
+        lines = timings.summary()
+        self.assertEqual(len(lines), 2)
+        line = lines[1]
+        self.assertIn("8.0", line)
+        self.assertIn("7.2", line)
+        self.assertIn("3", line)
+
 
 if __name__ == "__main__":
     unittest.main()
