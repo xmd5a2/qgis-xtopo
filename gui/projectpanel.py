@@ -781,10 +781,11 @@ class ProjectPanel(QWidget):
             self._basemap_source_changed
         )
         self.basemap_invert_check = QCheckBox(
-            "Инверсия", self.basemap_row
+            "Инверсия надписей", self.basemap_row
         )
         self.basemap_invert_check.setToolTip(
-            "Инверсия надписей: цвет текста и цвет halo меняются местами"
+            "Инверсия надписей: цвет текста и цвет halo меняются местами; "
+            "надписи дорог с широкой полосой не меняются"
         )
         self.basemap_invert_check.setEnabled(False)
         self.basemap_invert_check.toggled.connect(
@@ -3795,11 +3796,12 @@ class ProjectPanel(QWidget):
             )
 
     def _apply_basemap_isoline_style(self):
-        """Зелёные толстые изогипсы со светлыми жирными подписями.
+        """Зелёные изогипсы со светлыми подписями.
 
-        Подложка переключает ширину и цвет автоматически, но выбор
-        пользователя не отменяет: если ширину или цвет поменяли
-        вручную, подложка их больше не трогает.
+        Подложка переключает цвет автоматически, но выбор пользователя
+        не отменяет: если цвет поменяли вручную, подложка его больше
+        не трогает.  Ширину подложка не меняет вовсе — двойная ширина
+        контуров остаётся выбором пользователя.
         """
         project = QgsProject.instance()
         if basemap.active_source(project) is None:
@@ -3809,11 +3811,8 @@ class ProjectPanel(QWidget):
             return False
         self._capture_basemap_isoline_state()
         forced = self._basemap_overrides()
-        if "width" in forced:
-            bold = isolines_width_doubled(project)
-        else:
-            set_isolines_width_doubled(True, project)
-            bold = True
+        # Ширина изолиний — выбор пользователя: подложка её не трогает.
+        bold = isolines_width_doubled(project)
         if "color" in forced:
             # Цвет выбрал пользователь: подложка его не меняет, но
             # подписи оставляем светлыми — на снимке тёмные не видно.

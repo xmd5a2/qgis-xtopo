@@ -1156,13 +1156,32 @@ class DockLanguageTest(unittest.TestCase):
         dock._switch_language()
         self.app.processEvents()
         self.assertEqual(panel.basemap_check.text(), "Raster basemap")
+        self.assertEqual(
+            panel.basemap_invert_check.text(), "Label inversion"
+        )
         self.assertIn("satellite", panel.basemap_combo.toolTip())
+
+    def test_inversion_checkbox_fits_panel_width(self):
+        """Галка инверсии помещается в панель по ширине."""
+        dock = self._dock()
+        panel = dock.project_panel
+        # Панель сжимают до узкой ширины — строка подложки с галкой
+        # инверсии должна помещаться в неё целиком.
+        narrow = dock._narrow_minimum_width()
+        self.assertLessEqual(
+            panel.basemap_row.sizeHint().width(), narrow
+        )
+        self.assertEqual(
+            panel.basemap_invert_check.text(), "Инверсия надписей"
+        )
 
     def test_label_inversion_checkbox_is_disabled_without_basemap(self):
         """Без подложки галка инверсии есть, но недоступна."""
         dock = self._dock()
         panel = dock.project_panel
-        self.assertEqual(panel.basemap_invert_check.text(), "Инверсия")
+        self.assertEqual(
+            panel.basemap_invert_check.text(), "Инверсия надписей"
+        )
         self.assertFalse(panel.basemap_invert_check.isEnabled())
         self.assertFalse(panel.basemap_invert_check.isChecked())
 

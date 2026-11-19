@@ -11,6 +11,10 @@
 Подложка даёт ещё и инверсию надписей: цвет текста и цвет halo
 меняются местами, чтобы подписи читались на снимке.  Прежние цвета
 хранятся в свойстве слоя — по ним надписи возвращаются в исходный вид.
+
+Инверсия не трогает надписи дорог, нарисованных широкой полосой: у
+таких надписей halo совпадает с цветом полосы (см. `is_band_color`),
+и менять их местами нельзя — надпись рассыпается на самой дороге.
 """
 
 import json
@@ -38,6 +42,12 @@ EXCLUDED_LAYERS = (OSM_LAYER_NAME, "BBOX")
 
 SETTINGS_KEY = "basemap_source"
 DEFAULT_SOURCE = "google"
+
+# Насыщенность цвета, при которой его считают цветом широкой полосы
+# дороги.  В шаблоне полосы магистралей и второстепенных дорог —
+# оранжевая и светло-оранжевая; обычные улицы и площадные слои
+# нарисованы серым и белым.
+BAND_SATURATION = 0.25
 
 
 @dataclass(frozen=True)
@@ -325,17 +335,41 @@ def sync(project=None):
     return basemap
 
 
+def is_band_color(color):
+    """Цвет линии широкой полосы дороги.
+
+    Полоса в шаблоне — насыщенный цвет: оранжевый у магистралей,
+    светло-оранжевый у второстепенных дорог.  Надписи этих дорог
+    нарисованы с halo того же цвета, чтобы сливаться с полосой.
+    Обычные улицы и площадные слои нарисованы серым и белым — их
+    надписи инверсия меняет.
+    """
+    color = QColor(color)
+    if not color.isValid():
+        return False
+    _hue, saturation, value, _alpha = color.getHsvF()
+    return saturation >= BAND_SATURATION and value > 0.0
+
+
 def _label_pairs(layer):
     """Пары «ключ правила, настройки» для правил с включённым halo.
 
     Настройки — копии: иначе Python удалил бы внутренний объект правила
     и стиль слоя испортился бы (см. `core/label_style.py`).
+
+    Надписи дорог с широкой полосой пропускаются: их halo совпадает
+    с цветом полосы, и инверсия им не нужна.
     """
     pairs = []
     for key, settings in label_style.label_settings(layer.labeling()):
         if settings is None:
             continue
-        if not label_style.label_colors(settings)[2]:
+        _text_color, halo_color, halo_enabled = label_style.label_colors(
+            settings
+        )
+        if not halo_enabled:
+            continue
+        if is_band_color(halo_color):
             continue
         pairs.append((key, settings))
     return pairs
@@ -367,19 +401,58 @@ def _repaint(layer):
         pass
 
 
+def _saved_colors(layer):
+    """Сохранённые прежние цвета слоя: список «ключ, текст, halo»."""
+    raw = layer.customProperty(LABEL_COLORS_PROPERTY)
+    if not raw:
+        return []
+    try:
+        saved = json.loads(str(raw))
+    except ValueError:
+        return []
+    return [item for item in saved if len(item) == 3]
+
+
+def _apply_saved_colors(layer, saved):
+    """Возвращает слою сохранённые цвета текста и halo."""
+    labeling = layer.labeling()
+    for key, text_color, halo_color in saved:
+        settings = label_style.settings_by_key(labeling, key)
+        if settings is None:
+            continue
+        label_style.set_label_colors(
+            settings,
+            text_color=QColor(text_color),
+            halo_color=QColor(halo_color),
+        )
+        label_style.set_label_settings(labeling, key, settings)
+
+
 def invert_labels(project=None):
     """Меняет местами цвет надписей и цвет их halo.
 
     Прежние цвета сохраняются в свойстве слоя: по ним надписи
-    возвращаются в исходный вид.  Слои с уже применённой инверсией
-    пропускаются, поэтому повторный вызов ничего не портит.
+    возвращаются в исходный вид.  Перед обменом прежние цвета
+    возвращаются, поэтому все слои получают одинаковую картину,
+    даже если стиль слоя трогали стороной.  Надписи дорог с широкой
+    полосой не меняются (см. `is_band_color`).
     """
     project = project or QgsProject.instance()
-    changed = False
+    # Прежние цвета возвращаются: слой, стиль которого поменяли
+    # в стороне, иначе остался бы без инверсии.
+    restored = set()
     for layer in project.mapLayers().values():
         if not isinstance(layer, QgsVectorLayer):
             continue
-        if layer.customProperty(LABEL_COLORS_PROPERTY):
+        saved = _saved_colors(layer)
+        if not saved:
+            continue
+        _apply_saved_colors(layer, saved)
+        layer.removeCustomProperty(LABEL_COLORS_PROPERTY)
+        restored.add(layer.id())
+    changed = False
+    for layer in project.mapLayers().values():
+        if not isinstance(layer, QgsVectorLayer):
             continue
         labeling = layer.labeling()
         saved = []
@@ -401,6 +474,10 @@ def invert_labels(project=None):
             )
             label_style.set_label_settings(labeling, key, settings)
         if not saved:
+            # Инвертировать нечего: прежние цвета возвращены,
+            # слой нужно перерисовать.
+            if layer.id() in restored:
+                _repaint(layer)
             continue
         layer.setCustomProperty(LABEL_COLORS_PROPERTY, json.dumps(saved))
         _repaint(layer)
@@ -415,27 +492,10 @@ def restore_labels(project=None):
     for layer in project.mapLayers().values():
         if not isinstance(layer, QgsVectorLayer):
             continue
-        raw = layer.customProperty(LABEL_COLORS_PROPERTY)
-        if not raw:
+        saved = _saved_colors(layer)
+        if not saved:
             continue
-        try:
-            saved = json.loads(str(raw))
-        except ValueError:
-            saved = []
-        labeling = layer.labeling()
-        for item in saved:
-            if len(item) != 3:
-                continue
-            key, text_color, halo_color = item
-            settings = label_style.settings_by_key(labeling, key)
-            if settings is None:
-                continue
-            label_style.set_label_colors(
-                settings,
-                text_color=QColor(text_color),
-                halo_color=QColor(halo_color),
-            )
-            label_style.set_label_settings(labeling, key, settings)
+        _apply_saved_colors(layer, saved)
         layer.removeCustomProperty(LABEL_COLORS_PROPERTY)
         _repaint(layer)
         changed = True

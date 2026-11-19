@@ -855,6 +855,24 @@ class BasemapLabelInversionTest(unittest.TestCase):
         self.basemap.invert_labels(self.project)
         self.assertEqual(self._colors(), inverted)
 
+    def test_inversion_returns_changed_layer_to_uniform_state(self):
+        """Слой, стиль которого поменяли стороной, снова инвертируется."""
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.core import label_style
+
+        self.basemap.invert_labels(self.project)
+        inverted = self._colors()
+        # Стиль слоя поменяли стороной: цвет текста вернули прежним.
+        key, settings = next(
+            iter(label_style.label_settings(self.layer.labeling()))
+        )
+        label_style.set_label_colors(settings, text_color=QColor(0, 0, 0))
+        label_style.set_label_settings(self.layer.labeling(), key, settings)
+        self.assertNotEqual(self._colors(), inverted)
+        # Повторная инверсия снова делает все слои одинаковыми.
+        self.basemap.invert_labels(self.project)
+        self.assertEqual(self._colors(), inverted)
+
     def test_labels_without_halo_are_not_touched(self):
         """Подписи без halo инверсия не меняет: менять нечего."""
         from qgis.core import QgsProject, QgsVectorLayer
@@ -884,6 +902,55 @@ class BasemapLabelInversionTest(unittest.TestCase):
         self.assertIsNone(
             layer.customProperty(self.basemap.LABEL_COLORS_PROPERTY)
         )
+        self.project.removeMapLayer(layer.id())
+
+    def test_band_color_marks_road_band_colors(self):
+        """Цвет полосы дороги — насыщенный, а у улиц и слоёв серый."""
+        from qgis.PyQt.QtGui import QColor
+
+        self.assertTrue(self.basemap.is_band_color(QColor(255, 121, 0)))
+        self.assertTrue(self.basemap.is_band_color(QColor(255, 188, 128)))
+        self.assertFalse(self.basemap.is_band_color(QColor(255, 255, 255)))
+        self.assertFalse(self.basemap.is_band_color(QColor(243, 243, 243)))
+        self.assertFalse(self.basemap.is_band_color(QColor(0, 0, 0)))
+        self.assertFalse(self.basemap.is_band_color(QColor()))
+
+    def test_wide_band_road_labels_are_not_inverted(self):
+        """Надписи дорог с широкой полосой инверсия не меняет."""
+        from qgis.core import QgsVectorLayer
+        from qgis_xtopo.core import label_style
+        from qgis_xtopo.gui import projectpanel as pp
+
+        renderer, labeling = pp._template_layer_objects("highway main")
+        layer = QgsVectorLayer(
+            "LineString?crs=EPSG=4326", "highway main", "memory"
+        )
+        layer.setRenderer(renderer)
+        layer.setLabeling(labeling)
+        self.project.addMapLayer(layer)
+
+        def colors():
+            result = []
+            for _key, settings in label_style.label_settings(
+                layer.labeling()
+            ):
+                text, halo, _enabled = label_style.label_colors(settings)
+                result.append((text, halo))
+            return result
+
+        before = colors()
+        # Первые правила — магистрали, у них halo цвета полосы;
+        # следом идут второстепенные дороги с таким же halo.
+        self.assertTrue(self.basemap.is_band_color(before[0][1]))
+        self.assertTrue(self.basemap.is_band_color(before[2][1]))
+        # Дальше — улицы: halo белый, инверсия их меняет.
+        self.assertFalse(self.basemap.is_band_color(before[4][1]))
+
+        self.basemap.invert_labels(self.project)
+        after = colors()
+        self.assertEqual(after[0], before[0])
+        self.assertEqual(after[2], before[2])
+        self.assertNotEqual(after[4], before[4])
         self.project.removeMapLayer(layer.id())
 
 
@@ -929,18 +996,20 @@ class BasemapIsolineStyleTest(unittest.TestCase):
             for _rule, settings in pp._label_settings(self.layer.labeling())
         ]
 
-    def test_basemap_forces_green_thick_and_light_bold_labels(self):
+    def test_basemap_forces_green_and_light_labels(self):
+        """Подложка красит изогипсы в зелёный, ширину не меняет."""
         from qgis.PyQt.QtGui import QColor
         from qgis_xtopo.gui import projectpanel as pp
 
         self.assertTrue(self.panel._apply_basemap_isoline_style())
-        self.assertTrue(pp.isolines_width_doubled(self.project))
+        # Двойную ширину подложка не включает — это выбор пользователя.
+        self.assertFalse(pp.isolines_width_doubled(self.project))
         colors = pp._isoline_symbol_colors(self.layer)
         self.assertEqual(colors[0], QColor("#00ff00"))
         expected = pp.label_color_for(QColor("#00ff00"), light=True)
         for fmt in self._labels():
             self.assertEqual(fmt.color(), expected)
-            self.assertTrue(fmt.font().bold())
+            self.assertFalse(fmt.font().bold())
         self.assertEqual(
             self.layer.customProperty(pp.BASEMAP_WIDTH_PROPERTY), "0"
         )
@@ -959,6 +1028,22 @@ class BasemapIsolineStyleTest(unittest.TestCase):
         self.assertIsNone(
             self.layer.customProperty(pp.BASEMAP_COLOR_PROPERTY)
         )
+
+    def test_basemap_keeps_chosen_double_width(self):
+        """Выбранную пользователем двойную ширину подложка не сбрасывает."""
+        from qgis.PyQt.QtGui import QColor
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.panel._isoline_width_toggled(True)
+        self.assertTrue(pp.isolines_width_doubled(self.project))
+        self.assertTrue(self.panel._apply_basemap_isoline_style())
+        self.assertTrue(pp.isolines_width_doubled(self.project))
+        expected = pp.label_color_for(QColor("#00ff00"), light=True)
+        for fmt in self._labels():
+            self.assertEqual(fmt.color(), expected)
+            self.assertTrue(fmt.font().bold())
+        self.assertTrue(self.panel._restore_isoline_style_after_basemap())
+        self.assertTrue(pp.isolines_width_doubled(self.project))
 
     def test_double_width_makes_labels_bold(self):
         from qgis_xtopo.gui import projectpanel as pp

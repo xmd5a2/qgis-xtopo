@@ -620,7 +620,7 @@
   "Оценка выреза SliceOSM": "SliceOSM cutout estimate",
   "Обновить индекс выгрузок SliceOSM": "Refresh the SliceOSM extracts index",
   "Обновление индекса выгрузок SliceOSM…": "Refreshing the SliceOSM extracts index…",
-  "Инверсия": "Inversion",
-  "Инверсия надписей: цвет текста и цвет halo меняются местами": "Label inversion: the text and halo colours swap places",
+  "Инверсия надписей": "Label inversion",
+  "Инверсия надписей: цвет текста и цвет halo меняются местами; надписи дорог с широкой полосой не меняются": "Label inversion: the text and halo colours swap places; names of roads drawn as a wide band stay unchanged",
   "На растровой подложке отмывка не используется": "Hillshade is not used on a raster basemap"
 }
