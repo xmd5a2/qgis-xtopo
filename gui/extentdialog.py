@@ -15,8 +15,8 @@ from qgis.core import (
 from qgis.gui import QgsMapCanvas, QgsMapTool, QgsMapToolPan, QgsRubberBand
 from qgis.PyQt.QtCore import QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import (
-    QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
-    QStandardItem, QStandardItemModel,
+    QColor, QKeySequence, QPainter, QPainterPath, QPen, QStandardItem,
+    QStandardItemModel,
 )
 from qgis.PyQt.QtWidgets import (
     QApplication, QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel,
@@ -121,54 +121,9 @@ DRAW_TOOL_STYLE = (
     "}"
 )
 
-MOVE_BUTTON_STYLE = (
-    "QPushButton {"
-    " background-color: rgba(255, 255, 255, 220);"
-    " border: 1px solid #0078d7;"
-    " border-radius: 4px;"
-    " padding: 2px;"
-    "}"
-    "QPushButton:hover {"
-    " background-color: #ffffff;"
-    "}"
-    "QPushButton:checked {"
-    " background-color: rgba(0, 120, 215, 45);"
-    "}"
-)
-
 # Цвет рамки охвата и её подписей размеров.
 FRAME_COLOR = QColor(0, 120, 215)
 FRAME_FILL_COLOR = QColor(0, 120, 215, 40)
-
-
-def move_icon(size=22):
-    """Значок с четырьмя стрелками, расходящимися из центра."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    try:
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        pen = QPen(FRAME_COLOR, 2)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(pen)
-        center = size // 2
-        near = 4
-        far = size - 4
-        head = 4
-        painter.drawLine(center, near, center, far)
-        painter.drawLine(near, center, far, center)
-        painter.drawLine(center, near, center - head, near + head)
-        painter.drawLine(center, near, center + head, near + head)
-        painter.drawLine(center, far, center - head, far - head)
-        painter.drawLine(center, far, center + head, far - head)
-        painter.drawLine(near, center, near + head, center - head)
-        painter.drawLine(near, center, near + head, center + head)
-        painter.drawLine(far, center, far - head, center - head)
-        painter.drawLine(far, center, far - head, center + head)
-    finally:
-        painter.end()
-    return QIcon(pixmap)
 
 
 def _left_button():
@@ -207,25 +162,6 @@ class MeasuredCanvas(QgsMapCanvas):
         self._width_label = ""
         self._height_label = ""
         self._frame_provider = None
-        self._overlay_widget = None
-
-    def set_overlay_widget(self, widget):
-        """Виджет, который держится под нижней стороной рамки."""
-        self._overlay_widget = widget
-
-    def _place_overlay(self, left, top, right, bottom):
-        widget = self._overlay_widget
-        if widget is None:
-            return
-        size = widget.size()
-        if size.width() <= 0 or size.height() <= 0:
-            size = widget.sizeHint()
-        view = self.viewport()
-        x = (left + right - size.width()) / 2.0
-        y = bottom + 4.0
-        x = min(max(2.0, x), max(2.0, view.width() - size.width() - 2.0))
-        y = min(max(2.0, y), max(2.0, view.height() - size.height() - 2.0))
-        widget.move(round(x), round(y))
 
     def set_frame(self, rectangle, width_label="", height_label=""):
         """Задаёт рамку (в координатах холста) и подписи её сторон."""
@@ -284,7 +220,6 @@ class MeasuredCanvas(QgsMapCanvas):
         top += shift_y
         bottom += shift_y
         if not self._width_label or not self._height_label:
-            self._place_overlay(left, top, right, bottom)
             return
         # QgsMapCanvas рисует карту во viewport(): сам виджет — только рамка,
         # и на нём QPainter не активируется.
@@ -305,14 +240,6 @@ class MeasuredCanvas(QgsMapCanvas):
                 width_rect = QRectF(left, bottom + gap, right - left, height)
             else:
                 width_rect = QRectF(left, top - height - gap, right - left, height)
-            # Кнопка перетаскивания идёт под подписью ширины, чтобы не
-            # закрывать цифры, но остаётся под рамкой.
-            anchor = (
-                width_rect.bottom()
-                if width_rect.top() >= bottom
-                else bottom
-            )
-            self._place_overlay(left, top, right, anchor)
             self._draw_label(painter, width_rect, self._width_label, font, metrics)
             # Вертикальная ось: высота — одна подпись вплотную к левой
             # стороне рамки, текст повёрнут (если не помещается — к правой).
@@ -541,75 +468,89 @@ class RectangleMapTool(QgsMapTool):
         self.band.hide()
 
 
-class MoveExtentMapTool(QgsMapTool):
-    """Перетаскивание уже нарисованной рамки охвата."""
+class ExtentPanTool(QgsMapToolPan):
+    """Перетаскивание карты; начатая на рамке протяжка двигает саму рамку."""
 
-    rectangleChanged = pyqtSignal(object)
-    rectangleDrawn = pyqtSignal(object)
-
-    def __init__(self, canvas, extent_provider, extent_shower=None):
+    def __init__(self, canvas, extent_provider, extent_shower=None,
+                 extent_changed=None, extent_finished=None):
         super().__init__(canvas)
         self.canvas = canvas
         self._extent_provider = extent_provider
         self._show_extent = extent_shower
+        self._extent_changed = extent_changed
+        self._extent_finished = extent_finished
         self._start = None
         self._start_extent = None
         self._extent = None
 
-    def activate(self):
-        super().activate()
-        self.canvas.setCursor(Qt.SizeAllCursor)
-
-    def canvasPressEvent(self, event):
-        if event.button() != _left_button():
-            return
+    def _extent_at(self, position):
         rectangle = self._extent_provider()
         if rectangle is None or rectangle.isEmpty():
-            return
+            return None
         rectangle = QgsRectangle(rectangle)
         rectangle.normalize()
-        point = self.toMapCoordinates(event.pos())
-        if not rectangle.contains(point):
-            return
-        self._start = point
-        self._start_extent = rectangle
-        self._extent = QgsRectangle(rectangle)
-        self.canvas.setCursor(Qt.SizeAllCursor)
+        if not rectangle.contains(self.toMapCoordinates(position)):
+            return None
+        return rectangle
+
+    def canvasPressEvent(self, event):
+        if event.button() == _left_button():
+            rectangle = self._extent_at(event.pos())
+            if rectangle is not None:
+                self._start = self.toMapCoordinates(event.pos())
+                self._start_extent = rectangle
+                self._extent = QgsRectangle(rectangle)
+                self.canvas.setCursor(Qt.SizeAllCursor)
+                return
+        self._clear_move()
+        super().canvasPressEvent(event)
 
     def canvasMoveEvent(self, event):
-        if self._start is None or self._start_extent is None:
+        if self._start is not None and self._start_extent is not None:
+            point = self.toMapCoordinates(event.pos())
+            dx = point.x() - self._start.x()
+            dy = point.y() - self._start.y()
+            self._extent = QgsRectangle(
+                self._start_extent.xMinimum() + dx,
+                self._start_extent.yMinimum() + dy,
+                self._start_extent.xMaximum() + dx,
+                self._start_extent.yMaximum() + dy,
+            )
+            if self._show_extent is not None:
+                self._show_extent(self._extent)
+            if self._extent_changed is not None:
+                self._extent_changed(QgsRectangle(self._extent))
             return
-        point = self.toMapCoordinates(event.pos())
-        dx = point.x() - self._start.x()
-        dy = point.y() - self._start.y()
-        rectangle = QgsRectangle(
-            self._start_extent.xMinimum() + dx,
-            self._start_extent.yMinimum() + dy,
-            self._start_extent.xMaximum() + dx,
-            self._start_extent.yMaximum() + dy,
-        )
-        self._extent = rectangle
-        if self._show_extent is not None:
-            self._show_extent(rectangle)
-        self.rectangleChanged.emit(QgsRectangle(rectangle))
+        if not (event.buttons() & _left_button()):
+            inside = self._extent_at(event.pos()) is not None
+            self.canvas.setCursor(
+                Qt.SizeAllCursor if inside else Qt.OpenHandCursor
+            )
+        super().canvasMoveEvent(event)
 
     def canvasReleaseEvent(self, event):
-        if self._start is None:
+        if self._start is not None:
+            rectangle = self._extent
+            self._clear_move()
+            if rectangle is not None:
+                if self._show_extent is not None:
+                    self._show_extent(rectangle)
+                if self._extent_finished is not None:
+                    self._extent_finished(QgsRectangle(rectangle))
+            inside = self._extent_at(event.pos()) is not None
+            self.canvas.setCursor(
+                Qt.SizeAllCursor if inside else Qt.OpenHandCursor
+            )
             return
-        rectangle = self._extent
+        super().canvasReleaseEvent(event)
+
+    def _clear_move(self):
         self._start = None
         self._start_extent = None
         self._extent = None
-        if rectangle is not None:
-            if self._show_extent is not None:
-                self._show_extent(rectangle)
-            self.rectangleDrawn.emit(QgsRectangle(rectangle))
 
     def deactivate(self):
-        self._start = None
-        self._start_extent = None
-        self._extent = None
-        self.canvas.setCursor(Qt.ArrowCursor)
+        self._clear_move()
         super().deactivate()
 
 
@@ -676,7 +617,6 @@ class ExtentDialog(QDialog):
         self._bbox = None
         self._drawn_extent = None
         self._frame_labels = ("", "")
-        self._tool_syncing = False
         self._search_worker = None
         self._wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         self._mercator = QgsCoordinateReferenceSystem("EPSG:3857")
@@ -760,17 +700,16 @@ class ExtentDialog(QDialog):
         self.canvas.setDestinationCrs(self._mercator)
         self.layer = None
         self._basemap_changed(0)
-        self._pan_tool = QgsMapToolPan(self.canvas)
         self._draw_tool = RectangleMapTool(self.canvas)
         self._draw_tool.rectangleDrawn.connect(self._rectangle_drawn)
         self._draw_tool.rectangleChanged.connect(self._rectangle_changed)
-        self._move_tool = MoveExtentMapTool(
+        self._pan_tool = ExtentPanTool(
             self.canvas,
             lambda: self._drawn_extent,
             self._draw_tool.show_rectangle,
+            self._rectangle_changed,
+            self._rectangle_drawn,
         )
-        self._move_tool.rectangleDrawn.connect(self._rectangle_drawn)
-        self._move_tool.rectangleChanged.connect(self._rectangle_changed)
         self.canvas.setMapTool(self._pan_tool)
         initial, remembered = self._initial_extent(bbox_text)
         self.canvas.setExtent(
@@ -786,30 +725,11 @@ class ExtentDialog(QDialog):
         self.canvas.viewport().installEventFilter(self)
         layout.addWidget(self.canvas, 1)
 
-        self.move_button = QPushButton(self.canvas.viewport())
-        self.move_button.setCheckable(True)
-        self.move_button.setIcon(move_icon())
-        self.move_button.setIconSize(QSize(20, 20))
-        self.move_button.setFixedSize(30, 30)
-        self.move_button.setFocusPolicy(Qt.NoFocus)
-        self.move_button.setAccessibleName("Переместить рамку охвата")
-        self.move_button.setStyleSheet(MOVE_BUTTON_STYLE)
-        self.move_button.setCursor(Qt.SizeAllCursor)
-        if self.move_button.icon().isNull():
-            self.move_button.setText("↔")
-        self.move_button.setToolTip(
-            "Перетащить рамку охвата: включите кнопку и тяните рамку мышью"
-        )
-        self.move_button.setEnabled(self._drawn_extent is not None)
-        self.move_button.setVisible(self._drawn_extent is not None)
-        self.move_button.toggled.connect(self._toggle_move)
-        self.canvas.set_overlay_widget(self.move_button)
-
         hint = QLabel(
-            "Перетаскивайте карту мышью, колесом меняйте масштаб. Найдите "
-            "место в строке поиска или нажмите кнопку с иконкой прямоугольника: "
-            "левой кнопкой рисуется рамка, правой карта перемещается. Затем "
-            "нажмите «Использовать охват»."
+            "Перетаскивайте карту мышью, колесом меняйте масштаб. Готовую "
+            "рамку можно тянуть прямо за неё. Кнопка с иконкой прямоугольника "
+            "рисует новую рамку; при рисовании правая кнопка перемещает карту. "
+            "Затем нажмите «Использовать охват»."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -879,36 +799,9 @@ class ExtentDialog(QDialog):
         super().showEvent(event)
 
     def _toggle_draw(self, active):
-        if self._tool_syncing:
-            return
-        if active:
-            if self.move_button.isChecked():
-                self._tool_syncing = True
-                try:
-                    self.move_button.setChecked(False)
-                finally:
-                    self._tool_syncing = False
-            self.canvas.setMapTool(self._draw_tool)
-        elif not self.move_button.isChecked():
-            self.canvas.setMapTool(self._pan_tool)
-
-    def _toggle_move(self, active):
-        if self._tool_syncing:
-            return
-        if active:
-            if self._drawn_extent is None:
-                self.move_button.setChecked(False)
-                return
-            if self.draw_button.isChecked():
-                self._tool_syncing = True
-                try:
-                    self.draw_button.setChecked(False)
-                finally:
-                    self._tool_syncing = False
-            self.canvas.setMapTool(self._move_tool)
-            self.canvas.setFocus()
-        elif not self.draw_button.isChecked():
-            self.canvas.setMapTool(self._pan_tool)
+        self.canvas.setMapTool(
+            self._draw_tool if active else self._pan_tool
+        )
 
     def _basemap_changed(self, _index):
         """Сменить подложку карты."""
@@ -1100,8 +993,6 @@ class ExtentDialog(QDialog):
         self._drawn_extent.normalize()
         self.draw_button.setChecked(False)
         self.reset_button.setEnabled(True)
-        self.move_button.setEnabled(True)
-        self.move_button.setVisible(True)
         self._update_coords()
         self._update_measurement()
 
@@ -1111,8 +1002,6 @@ class ExtentDialog(QDialog):
             return
         self._drawn_extent = QgsRectangle(rectangle)
         self._drawn_extent.normalize()
-        self.move_button.setEnabled(True)
-        self.move_button.setVisible(True)
         self._update_coords()
         self._update_measurement()
 
@@ -1120,9 +1009,6 @@ class ExtentDialog(QDialog):
         self._drawn_extent = None
         self._draw_tool.clear()
         self.draw_button.setChecked(False)
-        self.move_button.setChecked(False)
-        self.move_button.setEnabled(False)
-        self.move_button.setVisible(False)
         self.reset_button.setEnabled(False)
         self._update_coords()
         self._update_measurement()

@@ -2983,7 +2983,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         dialog.done(0)
 
     def test_extent_dialog_moves_drawn_frame(self):
-        """Рамку можно тащить кнопкой со стрелками, подписи едут за сценой."""
+        """Рамку можно тащить прямо за неё, подписи едут за сценой."""
         from qgis.core import QgsRectangle
         from qgis.PyQt.QtCore import QPoint
         from qgis_xtopo.gui.extentdialog import (
@@ -3010,21 +3010,14 @@ class PipelineIntegrationTest(unittest.TestCase):
         dialog.show()
         self.app.processEvents()
         try:
-            self.assertTrue(dialog.move_button.isEnabled())
-            self.assertFalse(dialog.move_button.icon().isNull())
-            self.assertIs(
-                dialog.move_button.parent(), dialog.canvas.viewport()
-            )
-            self.assertTrue(dialog.move_button.isVisible())
+            self.assertIs(dialog.canvas.mapTool(), dialog._pan_tool)
             self.assertEqual(
                 dialog._draw_tool.band.strokeColor(), FRAME_COLOR
             )
-            dialog.move_button.click()
-            self.assertIs(dialog.canvas.mapTool(), dialog._move_tool)
 
             before = QgsRectangle(dialog._drawn_extent)
             center = dialog.canvas.viewport().rect().center()
-            tool = dialog._move_tool
+            tool = dialog._pan_tool
             tool.canvasPressEvent(
                 Event(_left_button(), center, _left_button())
             )
@@ -3043,7 +3036,33 @@ class PipelineIntegrationTest(unittest.TestCase):
             tool.canvasReleaseEvent(
                 Event(_left_button(), center + QPoint(30, 20))
             )
-            self.assertIs(dialog.canvas.mapTool(), dialog._move_tool)
+            self.assertIs(dialog.canvas.mapTool(), dialog._pan_tool)
+
+            # За пределами рамки тот же инструмент по-прежнему панорамирует.
+            from qgis.gui import QgsMapMouseEvent
+            from qgis.PyQt.QtCore import QEvent
+
+            event_type = getattr(QEvent, "Type", QEvent)
+            canvas_before = QgsRectangle(dialog.canvas.extent())
+            outside = QPoint(10, 10)
+            left = _left_button()
+            tool.canvasPressEvent(QgsMapMouseEvent(
+                dialog.canvas, event_type.MouseButtonPress,
+                outside, left, left,
+            ))
+            tool.canvasMoveEvent(QgsMapMouseEvent(
+                dialog.canvas, event_type.MouseMove,
+                outside + QPoint(30, 20), left, left,
+            ))
+            tool.canvasReleaseEvent(QgsMapMouseEvent(
+                dialog.canvas, event_type.MouseButtonRelease,
+                outside + QPoint(30, 20), left, left,
+            ))
+            self.assertNotAlmostEqual(
+                dialog.canvas.extent().center().x(),
+                canvas_before.center().x(),
+                places=2,
+            )
 
             # Подписи сдвигаются вместе со сценой во время перетаскивания.
             scene = dialog.canvas.sceneRect()
@@ -3051,9 +3070,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertEqual(dialog.canvas._scene_shift(), (40.0, 30.0))
 
             dialog._reset_drawn()
-            self.assertFalse(dialog.move_button.isEnabled())
-            self.assertFalse(dialog.move_button.isChecked())
-            self.assertFalse(dialog.move_button.isVisible())
+            self.assertIsNone(dialog._drawn_extent)
         finally:
             dialog.done(0)
 
