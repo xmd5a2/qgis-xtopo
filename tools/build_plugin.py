@@ -21,8 +21,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_NAME = "qgis_xtopo"
 DIST = ROOT / "dist"
-READY = DIST / "qgis-xtopo-ready"
-LAUNCHER = ROOT / "launcher" / "install-and-run.sh"
 # Шаблон проекта хранится один раз — в корне репозитория.  В собранный
 # пакет он попадает как resources/automap.qgz.
 TEMPLATE = ROOT / "automap.qgz"
@@ -128,18 +126,6 @@ def build_zip():
     return archive
 
 
-def build_bundle(archive):
-    """Готовый набор для новых пользователей: архив + лаунчер."""
-    READY.mkdir(parents=True, exist_ok=True)
-    for old in READY.glob(f"{PACKAGE_NAME}-*.zip"):
-        old.unlink()
-    shutil.copy2(archive, READY / archive.name)
-    target = READY / LAUNCHER.name
-    shutil.copy2(LAUNCHER, target)
-    target.chmod(0o755)
-    return READY
-
-
 def make_executables(target):
     """Возвращает бит исполнения поставляемым бинарникам.
 
@@ -181,7 +167,6 @@ def main():
 
     archive = build_zip()
     print(f"Архив: {archive} ({archive.stat().st_size} байт)")
-    print(f"Набор для новых пользователей: {build_bundle(archive)}")
     if arguments.install:
         target = install(archive)
         print(f"Установлено в: {target}")

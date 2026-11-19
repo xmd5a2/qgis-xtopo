@@ -115,6 +115,16 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("install-qgis.ps1", text)
         self.assertIn("check-qgis-install.py", text)
 
+    def test_launcher_installs_the_latest_dist_build(self):
+        text = _read(INSTALLER / "install-and-run.sh")
+        self.assertIn("QGIS_XTOPO_DIST", text)
+        self.assertIn('$ROOT/dist', text)
+        self.assertNotIn("qgis-xtopo-ready", text)
+
+    def test_build_does_not_make_a_ready_bundle(self):
+        text = _read(ROOT / "tools" / "build_plugin.py")
+        self.assertNotIn("qgis-xtopo-ready", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,8 +25,9 @@
 ```sh
 ./tools/run_tests.sh                      # все тесты, offscreen, ~20 с
 ./tools/run_tests.sh tests.test_project   # только выбранный модуль (можно несколько)
-python3 tools/build_plugin.py             # dist/qgis_xtopo-<версия>.zip + dist/qgis-xtopo-ready/
+python3 tools/build_plugin.py             # dist/qgis_xtopo-<версия>.zip
 python3 tools/build_plugin.py --install   # + установка в профиль QGIS
+./installer/install-and-run.sh            # последняя сборка из dist/ + запуск QGIS
 ./tools/run_qgis.sh                       # сборка + установка + QGIS с открытой панелью
 WINEPREFIX=~/.cache/wineprefix-inno ./installer/build-installer.sh  # Windows-инсталлятор
 QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверка полноты с osmium

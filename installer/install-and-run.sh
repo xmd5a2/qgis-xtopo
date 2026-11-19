@@ -1,13 +1,10 @@
 #!/bin/sh
-# Лаунчер для новых пользователей: устанавливает плагин в профиль QGIS
+# Устанавливает последнюю собранную версию плагина из dist/ в профиль QGIS
 # и сразу запускает QGIS с открытой панелью плагина.
 #
-# Работает из каталога, где лежит архив qgis_xtopo-<версия>.zip (например,
-# из готового набора dist/qgis-xtopo-ready/).
-#
 # Использование:
-#   ./install-and-run.sh                     # взять единственный архив рядом
-#   ./install-and-run.sh путь/к/архиву.zip   # конкретная версия
+#   ./installer/install-and-run.sh               # последний dist/qgis_xtopo-*.zip
+#   ./installer/install-and-run.sh архив.zip     # конкретная версия
 #
 # Переменные окружения (для тестов и нестандартных установок):
 #   QGIS_XTOPO_PROFILES   — каталог профилей QGIS (по умолчанию стандартный
@@ -16,6 +13,7 @@
 set -e
 
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(dirname "$DIR")
 
 # Установка в работающий QGIS бессмысленна: файлы прочитаны при старте,
 # а изменение профиля будет перезаписано при выходе. Разрешаем, только
@@ -34,7 +32,7 @@ case "${1-}" in
         shift
         ;;
 esac
-export QGIS_XTOPO_LAUNCHER_DIR="$DIR"
+export QGIS_XTOPO_DIST="$ROOT/dist"
 
 python3 - <<'PY'
 """Установка плагина из zip в профиль QGIS и включение его."""
@@ -55,6 +53,14 @@ def fail(message):
     raise SystemExit(1)
 
 
+def version_key(path):
+    """Версия из имени qgis_xtopo-<версия>.zip; неверсионные имена — в конец."""
+    match = re.search(r"-(\d+(?:\.\d+)*)\.zip$", path.name)
+    if not match:
+        return ()
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
 def find_archive():
     explicit = os.environ.get("QGIS_XTOPO_ZIP")
     if explicit:
@@ -62,14 +68,15 @@ def find_archive():
         if not archive.is_file():
             fail(f"Архив не найден: {archive}")
         return archive
-    directory = Path(os.environ["QGIS_XTOPO_LAUNCHER_DIR"])
+    directory = Path(os.environ["QGIS_XTOPO_DIST"])
     candidates = sorted(
-        directory.glob(f"{PLUGIN}-*.zip"), key=lambda p: p.stat().st_mtime
+        directory.glob(f"{PLUGIN}-*.zip"),
+        key=lambda p: (version_key(p), p.stat().st_mtime),
     )
     if not candidates:
         fail(
-            f"Рядом с лаунчером ({directory}) нет архива {PLUGIN}-<версия>.zip.\n"
-            "Передайте путь к архиву аргументом: ./install-and-run.sh архив.zip"
+            f"В dist ({directory}) нет архива {PLUGIN}-<версия>.zip.\n"
+            "Соберите его: python3 tools/build_plugin.py"
         )
     return candidates[-1]
 
