@@ -40,7 +40,9 @@ INCLUDE = (
     "tests",
     "vendor",
 )
-EXCLUDE_DIRS = {"__pycache__", ".pytest_cache"}
+# gui/build и gui/dist — остатки старой PyInstaller-сборки 2021 года (около
+# 140 МБ на двоих).  В дистрибутив они попадать не должны.
+EXCLUDE_DIRS = {"__pycache__", ".pytest_cache", "build", "dist"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
 
 
