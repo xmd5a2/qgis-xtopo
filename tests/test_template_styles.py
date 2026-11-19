@@ -1,9 +1,9 @@
 """Инварианты шаблона проекта.
 
-Стили задаются только в шаблоне (`automap.qgz`): ни инструментов, которые
-правят шаблон, ни механизма починки готовых проектов в плагине нет.
-Тесты проверяют, что нужные свойства в шаблоне есть — иначе карта будет
-нарисована не так, как задумано.
+Стили задаются только в шаблоне (`automap.qgz`); готовые проекты не
+чинятся, поэтому проверяем нужные свойства прямо в шаблоне — иначе карта
+будет нарисована не так, как задумано. Правки шаблона вносят скрипты в
+`tools/`.
 """
 
 import re
@@ -565,6 +565,77 @@ class LabelPriorityTest(unittest.TestCase):
         peak = max(self._priorities(self.PEAK_LAYER))
         for name in self.ISLAND_LAYERS:
             self.assertGreater(min(self._priorities(name)), peak)
+
+
+class BlockingRoadLabelsTest(unittest.TestCase):
+    """Подписи слоёв-блокировщиков дорог на карте не видны.
+
+    Слои группы «[blocking text]» — копии настоящих слоёв с нулевым
+    символом: они не рисуются, но подписывают те же объекты.  Их текст
+    занимает место и не даёт чужим подписям ложиться на дорогу, но сам
+    виден на карте, а стиль у дорог отличается от настоящего (серый
+    halo вместо цвета полосы).  Из-за этого одно и то же название
+    дороги выглядело по-разному.
+
+    Правку вносит `tools/blocking_text.py`.
+    """
+
+    LAYERS = (
+        "[blocking] highway main",
+        "[blocking] highway main minor",
+        "[blocking] highway main bridge",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _labelings(self, name):
+        layer = self.layers.get(name)
+        self.assertIsNotNone(layer, f"в шаблоне нет слоя {name}")
+        labelings = list(layer.iter("labeling"))
+        self.assertTrue(labelings, f"у слоя {name} нет подписей")
+        return labelings
+
+    def test_blocking_road_labels_are_invisible(self):
+        for name in self.LAYERS:
+            for labeling in self._labelings(name):
+                style = labeling.find(".//text-style")
+                self.assertEqual(
+                    style.get("textColor"), "0,0,0,0,rgb:0,0,0,0",
+                    f"текст слоя {name} виден на карте",
+                )
+                buffer = labeling.find(".//text-buffer")
+                self.assertEqual(
+                    buffer.get("bufferColor"),
+                    "243,243,243,0,rgb:0.9529412,0.9529412,0.9529412,0",
+                    f"halo слоя {name} виден на карте",
+                )
+
+    def test_blocking_road_labels_lose_to_real_ones(self):
+        """Приоритет копии ниже приоритета настоящих правил дорог."""
+        for name in self.LAYERS:
+            real = name[len("[blocking] "):]
+            real_priorities = set()
+            for real_labeling in self._labelings(real):
+                real_priorities |= {
+                    int(item.get("priority", 0))
+                    for item in real_labeling.iter("placement")
+                }
+            self.assertTrue(real_priorities, f"у слоя {real} нет размещения")
+            for labeling in self._labelings(name):
+                priorities = {
+                    int(item.get("priority", 0))
+                    for item in labeling.iter("placement")
+                }
+                self.assertTrue(priorities, f"у слоя {name} нет размещения")
+                self.assertLess(
+                    max(priorities), max(real_priorities),
+                    f"копия {name} может отнять подпись у {real}",
+                )
 
 
 class PeakLabelSizeTest(unittest.TestCase):
