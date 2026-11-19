@@ -961,18 +961,9 @@ class BasemapLabelInversionTest(unittest.TestCase):
         )
         self.assertFalse(label_tags.excluded(both))
 
-    # Условия слоёв дорог в шаблоне: магистрали и улицы.
+    # Условия слоёв дорог в шаблоне: вблизи все дороги в одном слое.
     ROAD_LAYERS = (
-        (
-            "highway main",
-            "\"highway\" NOT IN ('residential','unclassified',"
-            "'living_street','pedestrian','service')",
-        ),
-        (
-            "highway main minor",
-            "\"highway\" IN ('residential','unclassified',"
-            "'living_street','pedestrian','service')",
-        ),
+        ("highway main", ""),
     )
 
     def test_road_labels_are_not_inverted(self):

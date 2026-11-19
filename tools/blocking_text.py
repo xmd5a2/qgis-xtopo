@@ -33,7 +33,7 @@ TEMPLATE = ROOT / "automap.qgz"
 # Слои-блокировщики дорог: их подписи на карте не нужны.
 LAYERS = (
     "[blocking] highway main",
-    "[blocking] highway main minor",
+    "[blocking] highway main overview",
     "[blocking] highway main bridge",
 )
 

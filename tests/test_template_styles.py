@@ -582,7 +582,7 @@ class BlockingRoadLabelsTest(unittest.TestCase):
 
     LAYERS = (
         "[blocking] highway main",
-        "[blocking] highway main minor",
+        "[blocking] highway main overview",
         "[blocking] highway main bridge",
     )
 
@@ -1129,12 +1129,14 @@ class ServiceRoadLodTest(unittest.TestCase):
                 )
 
 
-class MinorRoadLayerTest(unittest.TestCase):
-    """Улицы отделены от магистралей, чтобы не читать их на обзорных масштабах.
+class RoadLayerScaleSplitTest(unittest.TestCase):
+    """Вблизи дороги рисуются одним слоем, на обзоре остаются магистрали.
 
     Правила рендерера скрывают улицы, но QGIS всё равно перебирает все
-    объекты слоя.  Отдельный слой с подмножеством в источнике позволяет
-    пропустить их чтение целиком, когда он вне диапазона масштаба.
+    объекты слоя.  Поэтому на обзорных масштабах виден слой с подмножеством
+    только магистралей, а улицы не читаются.  Вблизи, наоборот, нужен один
+    слой со всеми дорогами: symbol levels кладут casing всех дорог под
+    заливки, и на стыке магистрали с улицей нет видимой границы.
     """
 
     @classmethod
@@ -1149,34 +1151,51 @@ class MinorRoadLayerTest(unittest.TestCase):
         self.assertIsNotNone(layer, f"в шаблоне нет слоя {name}")
         return layer.findtext("datasource") or ""
 
-    def test_major_and_minor_layers_are_split_in_the_source(self):
-        major = self._datasource("highway main")
-        minor = self._datasource("highway main minor")
-        self.assertIn("highway_main.sqlite", major)
-        self.assertIn("highway_main.sqlite", minor)
-        self.assertIn("subset=", major)
-        self.assertIn("subset=", minor)
-        self.assertIn("NOT IN", major)
-        self.assertIn("'service'", major)
-        self.assertNotIn("NOT IN", minor)
-        self.assertIn("'service'", minor)
-
-    def test_minor_layer_is_limited_to_close_scales(self):
-        minor = self.layers.get("highway main minor")
-        self.assertIsNotNone(minor)
-        self.assertEqual(minor.get("hasScaleBasedVisibilityFlag"), "1")
-        self.assertEqual(minor.get("minScale"), "200000")
-        self.assertEqual(minor.get("maxScale"), "0")
-
-    def test_blocking_layer_is_split_too(self):
-        major = self._datasource("[blocking] highway main")
-        minor = self._datasource("[blocking] highway main minor")
-        self.assertIn("NOT IN", major)
-        self.assertNotIn("NOT IN", minor)
-        layer = self.layers.get("[blocking] highway main minor")
+    def test_close_layer_reads_all_roads(self):
+        layer = self.layers.get("highway main")
         self.assertIsNotNone(layer)
+        datasource = self._datasource("highway main")
+        self.assertIn("highway_main.sqlite", datasource)
+        self.assertNotIn("subset=", datasource)
         self.assertEqual(layer.get("hasScaleBasedVisibilityFlag"), "1")
         self.assertEqual(layer.get("minScale"), "200000")
+        self.assertEqual(layer.get("maxScale"), "0")
+        renderer = layer.find("renderer-v2")
+        self.assertIsNotNone(renderer)
+        self.assertEqual(renderer.get("symbollevels"), "1")
+
+    def test_overview_layer_reads_only_major_roads(self):
+        layer = self.layers.get("highway main overview")
+        self.assertIsNotNone(layer)
+        datasource = self._datasource("highway main overview")
+        self.assertIn("highway_main.sqlite", datasource)
+        self.assertIn("subset=", datasource)
+        self.assertIn("NOT IN", datasource)
+        self.assertIn("'service'", datasource)
+        self.assertEqual(layer.get("hasScaleBasedVisibilityFlag"), "1")
+        self.assertEqual(layer.get("minScale"), "0")
+        self.assertEqual(layer.get("maxScale"), "200000")
+
+    def test_separate_minor_layer_is_gone(self):
+        self.assertNotIn("highway main minor", self.layers)
+
+    def test_blocking_layers_follow_the_split(self):
+        close = self.layers.get("[blocking] highway main")
+        overview = self.layers.get("[blocking] highway main overview")
+        self.assertIsNotNone(close)
+        self.assertIsNotNone(overview)
+        self.assertNotIn("subset=", self._datasource("[blocking] highway main"))
+        self.assertIn(
+            "NOT IN",
+            self._datasource("[blocking] highway main overview"),
+        )
+        self.assertEqual(close.get("hasScaleBasedVisibilityFlag"), "1")
+        self.assertEqual(close.get("minScale"), "200000")
+        self.assertEqual(close.get("maxScale"), "0")
+        self.assertEqual(overview.get("hasScaleBasedVisibilityFlag"), "1")
+        self.assertEqual(overview.get("minScale"), "0")
+        self.assertEqual(overview.get("maxScale"), "200000")
+        self.assertNotIn("[blocking] highway main minor", self.layers)
 
     def test_building_is_hidden_on_overview_scales(self):
         building = self.layers.get("building")
