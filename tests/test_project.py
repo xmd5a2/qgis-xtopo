@@ -579,6 +579,14 @@ class ProjectBasemapTest(unittest.TestCase):
         ))
         self.project.addMapLayer(self.line)
 
+        self.tree_row = QgsVectorLayer(
+            "LineString?crs=EPSG:3857", "tree row", "memory"
+        )
+        self.tree_row.setRenderer(QgsSingleSymbolRenderer(
+            QgsLineSymbol.createSimple({"color": "149,219,138"})
+        ))
+        self.project.addMapLayer(self.tree_row)
+
         self.osm = QgsVectorLayer(
             "Polygon?crs=EPSG:3857", "OpenStreetMap", "memory"
         )
@@ -627,6 +635,12 @@ class ProjectBasemapTest(unittest.TestCase):
         self.assertEqual(self.polygon.renderer().type(), "nullSymbol")
         self.assertTrue(self.polygon.labelsEnabled())
         self.assertEqual(self.line.renderer().type(), before_line)
+        # Ряд деревьев — линейный слой без подписей: на снимке он скрыт.
+        self.assertEqual(
+            self.tree_row.styleManager().currentStyle(),
+            self.basemap.LABELS_STYLE,
+        )
+        self.assertEqual(self.tree_row.renderer().type(), "nullSymbol")
         self.assertEqual(self.bbox.renderer().type(), before_bbox)
         self.assertFalse(self._visible(self.osm))
         self.assertEqual(
@@ -655,6 +669,7 @@ class ProjectBasemapTest(unittest.TestCase):
         self.assertEqual(self.basemap.active_layers(self.project), [])
         self.assertEqual(self.polygon.renderer().type(), "singleSymbol")
         self.assertTrue(self.polygon.labelsEnabled())
+        self.assertEqual(self.tree_row.renderer().type(), "singleSymbol")
         self.assertTrue(self._visible(self.osm))
         self.assertEqual(self.bbox.renderer().type(), "singleSymbol")
 
@@ -686,11 +701,16 @@ class ProjectBasemapTest(unittest.TestCase):
                     self.basemap.LABELS_STYLE,
                 )
                 self.assertEqual(layer.renderer().type(), "nullSymbol")
+                tree_row = saved.mapLayersByName("tree row")[0]
+                self.assertEqual(tree_row.renderer().type(), "nullSymbol")
                 self.assertEqual(
                     self.basemap.active_source(saved).key, "google"
                 )
                 self.assertTrue(self.basemap.remove(saved))
                 self.assertEqual(layer.renderer().type(), "singleSymbol")
+                self.assertEqual(
+                    tree_row.renderer().type(), "singleSymbol"
+                )
             finally:
                 saved.clear()
 

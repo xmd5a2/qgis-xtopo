@@ -40,6 +40,9 @@ FULL_STYLE = "qgis_xtopo_full"
 LABELS_STYLE = "qgis_xtopo_labels"
 OSM_LAYER_NAME = "OpenStreetMap"
 EXCLUDED_LAYERS = (OSM_LAYER_NAME, "BBOX")
+# Линейные слои, которые на снимке только мешают: ряд деревьев рисуется
+# зелёной линией поверх снимка, и собственных подписей у него нет.
+HIDDEN_SYMBOL_LAYERS = ("tree row",)
 
 SETTINGS_KEY = "basemap_source"
 DEFAULT_SOURCE = "google"
@@ -163,6 +166,27 @@ def area_layers(project=None):
         yield layer
 
 
+def styled_layers(project=None):
+    """Слои, у которых подложка убирает символы, оставляя подписи.
+
+    Кроме площадных это отдельные линейные слои без подписей: их символ
+    на снимке не нужен.
+    """
+    project = project or QgsProject.instance()
+    seen = set()
+    for layer in area_layers(project):
+        seen.add(layer.id())
+        yield layer
+    for layer in project.mapLayers().values():
+        if not isinstance(layer, QgsVectorLayer):
+            continue
+        if layer.name() not in HIDDEN_SYMBOL_LAYERS:
+            continue
+        if layer.id() in seen:
+            continue
+        yield layer
+
+
 def _layer_node(project, layer):
     return project.layerTreeRoot().findLayer(layer.id())
 
@@ -219,8 +243,8 @@ def _store_style(manager, name, layer):
 
 
 def _apply_labels_only(project):
-    """Переключает площадные слои на стиль без символов, но с подписями."""
-    for layer in area_layers(project):
+    """Переключает слои на стиль без символов, но с подписями."""
+    for layer in styled_layers(project):
         renderer = layer.renderer()
         if renderer is None or renderer.type() == "nullSymbol":
             continue
@@ -246,8 +270,8 @@ def _apply_labels_only(project):
 
 
 def _restore_full(project):
-    """Возвращает площадным слоям обычный стиль."""
-    for layer in area_layers(project):
+    """Возвращает слоям обычный стиль."""
+    for layer in styled_layers(project):
         manager = layer.styleManager()
         if (FULL_STYLE in manager.styles()
                 and manager.currentStyle() == LABELS_STYLE):
