@@ -999,10 +999,11 @@ class Pipeline:
             writer.write("]}")
         return count
 
-    def _temp_path(self, name, suffix):
+    def _temp_path(self, name, suffix, extension=None):
         self.counter += 1
         return self.config.temp_dir / (
-            f"{name}_{suffix}_{self.counter}.{INTERMEDIATE_EXTENSION}"
+            f"{name}_{suffix}_{self.counter}."
+            f"{extension or INTERMEDIATE_EXTENSION}"
         )
 
     def _dissolve_fields(self, source, fields):
@@ -1048,7 +1049,9 @@ class Pipeline:
         if operation == "fix":
             return self._algorithm("native:fixgeometries", {
                 "INPUT": current,
-                "OUTPUT": self._temp_path(name, "fixed"),
+                "OUTPUT": self._temp_path(
+                    name, "fixed", parameters.get("extension")
+                ),
             })
         if operation == "dissolve":
             field = parameters.get("field")

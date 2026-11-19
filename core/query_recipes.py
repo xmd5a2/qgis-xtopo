@@ -18,8 +18,8 @@ def load(name):
     return step("load", name=name)
 
 
-def fix():
-    return step("fix")
+def fix(extension=None):
+    return step("fix", extension=extension)
 
 
 def dissolve(field=None):
@@ -255,8 +255,12 @@ RECIPES = {
     "barrier": Recipe([
         # Замкнутые барьеры GDAL/OSM может отнести к полигонам (например,
         # стена кладбища). Для слоя «barrier way» нужны линии: превращаем
-        # полигоны в их контуры.
-        save(), polygonstolines(), save("_lines"),
+        # полигоны в их контуры. Встречаются ещё мультиполигоны крепостных
+        # стен с вложенными внешними контурами: без fix() QGIS отбрасывает
+        # их как ошибочные. Слой смешанный (линии и полигоны), поэтому
+        # промежуточный файл — GeoJSON: GeoPackage объявил бы его линейным
+        # и предупредил о полигонах.
+        fix(extension="geojson"), save(), polygonstolines(), save("_lines"),
     ]),
     "railway_halt_icons": Recipe([
         buffer(0.004), dissolve("name"), centroid(),

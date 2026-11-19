@@ -162,10 +162,13 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         })
 
         notify("Береговая линия: разделение охвата")
+        # Разрезанные части и точки-вершины — GeoPackage: у GeoJSON нет
+        # пространственного индекса, и native:extractbylocation предупреждает
+        # о полном переборе вершин для каждой части области.
         split = _run(runner, "native:splitwithlines", {
             "INPUT": str(crop),
             "LINES": simplified,
-            "OUTPUT": _temp(config, "coastline_split.geojson"),
+            "OUTPUT": _temp(config, "coastline_split.gpkg"),
         })
 
         notify("Береговая линия: определение стороны океана")
@@ -218,7 +221,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         # принадлежит сразу двум частям, и океаном выбирался обломок.
         vertices = _run(runner, "native:pointonsurface", {
             "INPUT": clipped,
-            "OUTPUT": _temp(config, "coastline_side_vertices.geojson"),
+            "OUTPUT": _temp(config, "coastline_side_vertices.gpkg"),
         })
 
         ocean = _run(runner, "native:extractbylocation", {

@@ -855,6 +855,17 @@ class GeometryRepairRecipeTest(unittest.TestCase):
             self.assertEqual(steps[0], "fix", name)
             self.assertEqual(steps[1], "polygonstolines", name)
 
+    def test_barrier_repairs_invalid_relations(self):
+        """Крепостные стены — вложенные мультиполигоны, QGIS их отбрасывает."""
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        steps = recipe_for("barrier").steps
+        self.assertEqual(steps[0][0], "fix")
+        # Слой смешанный: GeoPackage объявил бы его линейным и предупредил
+        # о полигонах, поэтому промежуточный файл пишется в GeoJSON.
+        self.assertEqual(steps[0][1].get("extension"), "geojson")
+        self.assertEqual(steps[1][0], "save")
+
 
 class PolygonToLinesFallbackTest(unittest.TestCase):
     """Слой из одних линий не должен теряться на polygonstolines."""
@@ -922,6 +933,70 @@ class PolygonToLinesFallbackTest(unittest.TestCase):
         )
         self.assertNotEqual(result, str(path))
         self.assertEqual(len(calls), 1)
+
+    def test_fix_extension_controls_intermediate_format(self):
+        """Смешанному слою нужен GeoJSON: GPKG ругается на полигоны."""
+
+        def run(parameters):
+            Path(parameters["OUTPUT"]).write_text("", encoding="utf-8")
+            return {"OUTPUT": parameters["OUTPUT"]}
+
+        pipeline = Pipeline(
+            self.config, BBox(1, 2, 3, 4), _FakeRunner(run)
+        )
+        mixed = pipeline._step(
+            "barrier", "source", "fix", {"extension": "geojson"}
+        )
+        self.assertEqual(Path(mixed).suffix, ".geojson")
+        default = pipeline._step("barrier", "source", "fix", {})
+        self.assertEqual(Path(default).suffix, ".gpkg")
+
+
+class CoastlineIntermediateTest(unittest.TestCase):
+    """Части охвата и вершины нужны с пространственным индексом."""
+
+    def test_split_and_vertices_are_geopackages(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import coastline, pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            vector_dir = base / "vector"
+            temp_dir = base / "tmp"
+            vector_dir.mkdir()
+            temp_dir.mkdir()
+            (vector_dir / "coastline.sqlite").write_bytes(b"")
+            crop = base / "crop.geojson"
+            crop.write_text("{}", encoding="utf-8")
+            config = SimpleNamespace(
+                vector_dir=vector_dir,
+                temp_dir=temp_dir,
+                crop_path=crop,
+            )
+            recorded = {}
+
+            class FakeRunner:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def run(self, algorithm, parameters):
+                    recorded[algorithm] = parameters
+                    return {"OUTPUT": f"memory:{algorithm}"}
+
+            with mock.patch.object(pipeline, "ProcessingRunner", FakeRunner), \
+                    mock.patch.object(pipeline, "save_vector"), \
+                    mock.patch.object(
+                        coastline, "_write_lines",
+                        side_effect=lambda *args, **kwargs: base / "lines.geojson",
+                    ), \
+                    mock.patch.object(coastline, "_has_features", return_value=True):
+                self.assertTrue(coastline.prepare_coastline(config, None))
+
+        for algorithm in ("native:splitwithlines", "native:pointonsurface"):
+            self.assertEqual(
+                Path(recorded[algorithm]["OUTPUT"]).suffix, ".gpkg", algorithm
+            )
 
 
 class EmptySourceOutputsTest(unittest.TestCase):
