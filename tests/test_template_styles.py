@@ -990,6 +990,62 @@ class ServiceRoadLodTest(unittest.TestCase):
                 )
 
 
+class MinorRoadLayerTest(unittest.TestCase):
+    """Улицы отделены от магистралей, чтобы не читать их на обзорных масштабах.
+
+    Правила рендерера скрывают улицы, но QGIS всё равно перебирает все
+    объекты слоя.  Отдельный слой с подмножеством в источнике позволяет
+    пропустить их чтение целиком, когда он вне диапазона масштаба.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _datasource(self, name):
+        layer = self.layers.get(name)
+        self.assertIsNotNone(layer, f"в шаблоне нет слоя {name}")
+        return layer.findtext("datasource") or ""
+
+    def test_major_and_minor_layers_are_split_in_the_source(self):
+        major = self._datasource("highway main")
+        minor = self._datasource("highway main minor")
+        self.assertIn("highway_main.sqlite", major)
+        self.assertIn("highway_main.sqlite", minor)
+        self.assertIn("subset=", major)
+        self.assertIn("subset=", minor)
+        self.assertIn("NOT IN", major)
+        self.assertIn("'service'", major)
+        self.assertNotIn("NOT IN", minor)
+        self.assertIn("'service'", minor)
+
+    def test_minor_layer_is_limited_to_close_scales(self):
+        minor = self.layers.get("highway main minor")
+        self.assertIsNotNone(minor)
+        self.assertEqual(minor.get("hasScaleBasedVisibilityFlag"), "1")
+        self.assertEqual(minor.get("minScale"), "200000")
+        self.assertEqual(minor.get("maxScale"), "0")
+
+    def test_blocking_layer_is_split_too(self):
+        major = self._datasource("[blocking] highway main")
+        minor = self._datasource("[blocking] highway main minor")
+        self.assertIn("NOT IN", major)
+        self.assertNotIn("NOT IN", minor)
+        layer = self.layers.get("[blocking] highway main minor")
+        self.assertIsNotNone(layer)
+        self.assertEqual(layer.get("hasScaleBasedVisibilityFlag"), "1")
+        self.assertEqual(layer.get("minScale"), "200000")
+
+    def test_building_is_hidden_on_overview_scales(self):
+        building = self.layers.get("building")
+        self.assertIsNotNone(building)
+        self.assertEqual(building.get("hasScaleBasedVisibilityFlag"), "1")
+        self.assertEqual(building.get("minScale"), "120877")
+
+
 class AerialwayContrastTest(unittest.TestCase):
     """Серые линии подъёмников на 1:100000+ остаются различимыми."""
 
