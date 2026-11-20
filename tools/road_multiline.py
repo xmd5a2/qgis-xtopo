@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Переводит упакованные дорожные слои шаблона на MultiLineString.
 
-После упаковки `highway_main.sqlite`, `path.sqlite` и `track.sqlite`
-содержат именованные цепочки и упакованные безымянные дороги в виде
-MultiLineString.  Слои, которые читают эти файлы, должны объявлять тот
-же тип геометрии.
+После упаковки `highway_main.sqlite`, `path.sqlite`, `track.sqlite` и
+`railway_all.sqlite` содержат именованные цепочки и упакованные
+безымянные дороги в виде MultiLineString.  Слои, которые читают эти
+файлы, должны объявлять тот же тип геометрии.
 
 Скрипт правит `automap.qgz` и идемпотентен.
 
@@ -26,6 +26,8 @@ LAYERS = (
     "path",
     "track",
     "[blocking] track",
+    "railway all",
+    "[blocking] railway_all",
 )
 
 

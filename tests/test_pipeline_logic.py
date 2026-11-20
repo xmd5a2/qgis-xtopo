@@ -2542,12 +2542,16 @@ class RoadPackingTest(unittest.TestCase):
 
     FIELDS = (
         ("highway", ogr.OFTString),
+        ("railway", ogr.OFTString),
+        ("usage", ogr.OFTString),
         ("highway_integrity", ogr.OFTInteger),
         ("name", ogr.OFTString),
         ("name:de", ogr.OFTString),
         ("ref", ogr.OFTString),
         ("service", ogr.OFTString),
         ("embankment", ogr.OFTString),
+        ("winter_road", ogr.OFTString),
+        ("ice_road", ogr.OFTString),
         ("layer", ogr.OFTString),
         ("oneway", ogr.OFTString),
         ("surface", ogr.OFTString),
@@ -2822,6 +2826,54 @@ class RoadPackingTest(unittest.TestCase):
             )
             dataset = None
 
+    def test_road_keys_include_winter_and_ice_flags(self):
+        for name in ("highway_main", "path", "track"):
+            for field in ("embankment", "winter_road", "ice_road"):
+                self.assertIn(field, road_packing.KEY_FIELDS[name], name)
+        with tempfile.TemporaryDirectory() as directory:
+            rows = []
+            for value in ({}, {"winter_road": "yes"}, {"ice_road": "yes"}):
+                row = {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "", "oneway": "",
+                    "coords": [(0, len(rows) * 0.01), (1, len(rows) * 0.01)],
+                }
+                row.update(value)
+                rows.append(row)
+            self._source(directory, rows)
+            self.assertEqual(
+                road_packing.pack(directory, "highway_main"), 3
+            )
+
+    def test_railway_key_ignores_names_and_packs_by_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "railway": "rail", "service": "", "usage": "main",
+                    "name": "First", "coords": [(0, 0), (1, 0)],
+                },
+                {
+                    "railway": "rail", "service": "", "usage": "main",
+                    "name": "Second", "coords": [(0, 0.01), (1, 0.01)],
+                },
+                {
+                    "railway": "rail", "service": "", "usage": "industrial",
+                    "name": "Freight", "coords": [(0, 0.02), (1, 0.02)],
+                },
+            ], name="railway_all")
+            self.assertEqual(road_packing.pack(directory, "railway_all"), 2)
+            dataset, _layer, features = self._features(
+                directory, "railway_all"
+            )
+            self.assertEqual(len(features), 2)
+            main = next(
+                feature for feature in features
+                if feature.GetField("usage") == "main"
+            )
+            self.assertEqual(main.GetGeometryRef().GetGeometryCount(), 2)
+            self.assertEqual(main.GetField("name"), "First")
+            dataset = None
+
     def test_pack_is_idempotent_and_keeps_index(self):
         with tempfile.TemporaryDirectory() as directory:
             self._source(directory, [
@@ -2850,7 +2902,7 @@ class RoadPackingTest(unittest.TestCase):
             self.assertTrue(indexes)
 
     def test_recipes_pack_roads_after_preparation(self):
-        for name in ("highway_main", "path", "track"):
+        for name in ("highway_main", "path", "track", "railway_all"):
             operations = [
                 operation for operation, _parameters
                 in recipe_for(name).steps

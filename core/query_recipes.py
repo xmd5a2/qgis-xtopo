@@ -162,7 +162,7 @@ RECIPES = {
         dissolve(), singleparts(), save("_proc"),
     ]),
     "railway_all": Recipe([
-        save(), explode(), reproject(), save("_exploded"),
+        save(), explode(), reproject(), save("_exploded"), pack_roads(),
     ]),
     "ridge": Recipe([
         save(), explode(), reproject(), save("_exploded"),

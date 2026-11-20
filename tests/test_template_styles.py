@@ -1289,6 +1289,8 @@ class HighwayMultiLineTest(unittest.TestCase):
         "path",
         "track",
         "[blocking] track",
+        "railway all",
+        "[blocking] railway_all",
     )
     PLAIN = (
         "highway main layer >=1",
@@ -1296,6 +1298,10 @@ class HighwayMultiLineTest(unittest.TestCase):
         "highway main tunnel",
         "path bridge",
         "track bridge",
+        "railway_all_exploded",
+        "railway disused",
+        "rail tunnel",
+        "railway bridge",
     )
 
     @classmethod

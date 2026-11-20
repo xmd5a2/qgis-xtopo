@@ -18,17 +18,33 @@ import math
 import os
 from pathlib import Path
 
-PACK_LAYERS = ("highway_main", "path", "track")
+PACK_LAYERS = ("highway_main", "path", "track", "railway_all")
 
 # Ключ упаковки.  У path/track нет стрелок oneway, а highway_integrity
 # намеренно не входит в ключ: иначе мелкие различия дробят группы.
 KEY_FIELDS = {
     "highway_main": (
-        "highway", "highway_integrity", "service", "embankment", "layer",
-        "oneway",
+        "highway", "highway_integrity", "service", "embankment",
+        "winter_road", "ice_road", "layer", "oneway",
     ),
-    "path": ("highway", "service", "embankment", "layer"),
-    "track": ("highway", "service", "embankment", "layer"),
+    "path": (
+        "highway", "service", "embankment", "winter_road", "ice_road",
+        "layer",
+    ),
+    "track": (
+        "highway", "service", "embankment", "winter_road", "ice_road",
+        "layer",
+    ),
+    "railway_all": ("railway", "service", "usage"),
+}
+
+# У railway ключ задан только типом, service и usage; название и ref
+# в ключ не входят, поэтому именованные объекты тоже пакуются по тайлам.
+USE_NAMES = {
+    "highway_main": True,
+    "path": True,
+    "track": True,
+    "railway_all": False,
 }
 
 # Тайл 0.05° примерно 5.5 км на широте Гуаякиля.  Для проецированных
@@ -48,7 +64,9 @@ def pack(directory, name, cancel=None):
     path = Path(directory) / f"{name}.sqlite"
     if not path.exists():
         return 0
-    return _pack_file(path, KEY_FIELDS[name], cancel=cancel)
+    return _pack_file(
+        path, KEY_FIELDS[name], use_names=USE_NAMES[name], cancel=cancel
+    )
 
 
 def _feature_text(feature, index):
@@ -309,7 +327,7 @@ def _multi_geometry(parts):
     return multi if added else None
 
 
-def _pack_file(path, key_fields, cancel=None):
+def _pack_file(path, key_fields, use_names=True, cancel=None):
     from osgeo import ogr
 
     source = ogr.Open(str(path))
@@ -331,21 +349,28 @@ def _pack_file(path, key_fields, cancel=None):
     index_of = {
         name.lower(): index for index, name in enumerate(field_names)
     }
-    name_indexes = [
-        index_of[name.lower()] for name in _name_fields(field_names)
-        if name.lower() in index_of
-    ]
-    ref_index = index_of.get("ref")
-    name_index = index_of.get("name")
-    other_name_indexes = [
-        index for index in name_indexes
-        if index not in (name_index, ref_index)
-    ]
-    special_names = _special_name_ids(
-        source, layer, field_names, name_index, ref_index,
-        other_name_indexes,
-    )
-    check_all_names = special_names is None
+    if use_names:
+        name_indexes = [
+            index_of[name.lower()] for name in _name_fields(field_names)
+            if name.lower() in index_of
+        ]
+        ref_index = index_of.get("ref")
+        name_index = index_of.get("name")
+        other_name_indexes = [
+            index for index in name_indexes
+            if index not in (name_index, ref_index)
+        ]
+        special_names = _special_name_ids(
+            source, layer, field_names, name_index, ref_index,
+            other_name_indexes,
+        )
+        check_all_names = special_names is None
+    else:
+        name_indexes = []
+        ref_index = None
+        name_index = None
+        special_names = set()
+        check_all_names = False
     tile_size = TILE_SIZE
     if spatial_ref is not None and not spatial_ref.IsGeographic():
         tile_size = PROJECTED_TILE_SIZE
