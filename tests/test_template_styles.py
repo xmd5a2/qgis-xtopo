@@ -537,6 +537,37 @@ class IsolinesSchemeTest(unittest.TestCase):
                 for child in rule.iter("rule"):
                     self.assertEqual(child.get("active"), "0")
 
+    def test_overview_labels_are_limited(self):
+        """На 1:100 000 и мельче число подписей изолиний ограничено.
+
+        Движок подписей перебирает и размещает тысячи подписей; 500 на
+        кадр заметно ускоряют обзорный рендер.  Крупные масштабы не
+        затрагиваются.  Правку вносит `tools/isolines_label_limit.py`.
+        """
+        for name in self.LAYERS:
+            rules = self._rules(name, "labeling", "description")
+            for value in set(self.LABEL_MAX) | set(self.LABEL_OFF):
+                rule = rules[str(value)]
+                for child in rule.iter("rule"):
+                    rendering = child.find("./settings/rendering")
+                    if rendering is None:
+                        continue
+                    minimum = int(child.get("scalemindenom", "0"))
+                    if minimum >= 100000:
+                        self.assertEqual(
+                            rendering.get("limitNumLabels"), "1",
+                            f"{name}: подписи {value} на {minimum}+ "
+                            "должны быть ограничены")
+                        self.assertEqual(
+                            rendering.get("maxNumLabels"), "500",
+                            f"{name}: подписи {value} на {minimum}+ "
+                            "должны ограничиваться 500")
+                    else:
+                        self.assertEqual(
+                            rendering.get("limitNumLabels"), "0",
+                            f"{name}: крупный масштаб {value} "
+                            "не должен ограничиваться")
+
 
 class LabelPriorityTest(unittest.TestCase):
     """Название острова не должно вытесняться подписью пика."""
