@@ -1278,6 +1278,195 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertEqual(building.get("minScale"), "120877")
 
 
+class OnewayArrowTest(unittest.TestCase):
+    """Стрелки oneway только у крупных масштабов и по классу дороги."""
+
+    LAYERS = (
+        "highway main",
+        "highway main layer >=1",
+        "highway main layer <=-1",
+        "highway main tunnel",
+    )
+    THRESHOLDS = {
+        "motorway": 50000,
+        "trunk": 45000,
+        "primary": 40000,
+        "primary link": 40000,
+        "primary_link": 40000,
+        "secondary": 32000,
+        "tertiary": 25000,
+        "tertiary link": 25000,
+        "tertiary_link": 25000,
+        "residential": 16000,
+        "service": 12000,
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    @staticmethod
+    def _leaves(rule, parent_max=None):
+        maximum = rule.get("scalemaxdenom")
+        effective = int(maximum) if maximum else parent_max
+        children = rule.findall("rule")
+        if not children:
+            yield rule, effective
+            return
+        for child in children:
+            yield from OnewayArrowTest._leaves(child, effective)
+
+    @classmethod
+    def _branch(cls, layer, label):
+        renderer = layer.find("renderer-v2")
+        for rule in renderer.find("rules").findall("rule"):
+            if rule.get("label") == label:
+                return rule
+        return None
+
+    @staticmethod
+    def _symbol(layer, name):
+        for symbol in layer.findall("renderer-v2/symbols/symbol"):
+            if symbol.get("name") == name:
+                return symbol
+        return None
+
+    @staticmethod
+    def _has_marker(symbol):
+        if symbol is None:
+            return False
+        for item in symbol.iter("layer"):
+            if item.get("class") == "MarkerLine" and "oneway_arrow.svg" in \
+                    ElementTree.tostring(item, encoding="unicode"):
+                return True
+        return False
+
+    @classmethod
+    def _arrow_symbol(cls, layer, label):
+        branch = cls._branch(layer, label)
+        threshold = cls.THRESHOLDS[label]
+        if branch is None:
+            return None
+        for leaf, effective in cls._leaves(branch):
+            if effective == threshold:
+                return cls._symbol(layer, leaf.get("symbol"))
+        return None
+
+    def test_rules_split_at_class_threshold(self):
+        for name in self.LAYERS:
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            for label, threshold in self.THRESHOLDS.items():
+                branch = self._branch(layer, label)
+                if branch is None:
+                    continue
+                leaves = [
+                    (leaf, effective)
+                    for leaf, effective in self._leaves(branch)
+                    if effective is not None and effective <= 50000
+                ]
+                arrow = next(
+                    (leaf for leaf, effective in leaves
+                     if effective == threshold), None,
+                )
+                self.assertIsNotNone(
+                    arrow, f"{name}/{label}: нет правила 0–{threshold}")
+                self.assertTrue(
+                    self._has_marker(
+                        self._symbol(layer, arrow.get("symbol"))),
+                    f"{name}/{label}: нет стрелки",
+                )
+                if threshold < 50000:
+                    plain = next(
+                        (leaf for leaf, _effective in leaves
+                         if leaf.get("scalemindenom") == str(threshold)
+                         and leaf.get("scalemaxdenom") == "50000"),
+                        None,
+                    )
+                    self.assertIsNotNone(
+                        plain,
+                        f"{name}/{label}: нет правила {threshold}–50000",
+                    )
+                    self.assertFalse(
+                        self._has_marker(
+                            self._symbol(layer, plain.get("symbol"))),
+                        f"{name}/{label}: стрелка осталась после порога",
+                    )
+
+    def test_overview_and_bridge_have_no_arrows(self):
+        for name in ("highway main overview", "highway main bridge"):
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            self.assertFalse([
+                item for item in layer.iter("layer")
+                if item.get("class") == "MarkerLine"
+                and "oneway_arrow.svg" in ElementTree.tostring(
+                    item, encoding="unicode")
+            ], name)
+
+    def test_marker_style_and_reverse_angle(self):
+        symbol = self._arrow_symbol(self.layers["highway main"], "primary")
+        self.assertIsNotNone(symbol)
+        marker = next(
+            item for item in symbol.iter("layer")
+            if item.get("class") == "MarkerLine"
+        )
+        self.assertEqual(marker.get("pass"), "12")
+        self.assertEqual(_option_value(marker, "placements"), "Interval")
+        self.assertEqual(_option_value(marker, "rotate"), "1")
+        self.assertEqual(_option_value(marker, "interval"), "20")
+        self.assertEqual(_option_value(marker, "offset_along_line"), "10")
+        inner = next(
+            item for item in marker.iter("layer")
+            if item.get("class") == "SvgMarker"
+        )
+        self.assertEqual(
+            _option_value(inner, "name"), "../icons/oneway_arrow.svg")
+        self.assertIn("0,0,0", _option_value(inner, "color"))
+        self.assertEqual(_option_value(inner, "size"), "3.6")
+        enabled = _option_value(
+            _find_option(
+                inner.find("data_defined_properties"), "enabled"
+            ), "expression",
+        )
+        self.assertIn('"oneway"', enabled)
+        self.assertIn("IN ('yes', '-1')", enabled)
+        self.assertNotIn("@map_scale", enabled)
+        angle = _option_value(
+            _find_option(
+                inner.find("data_defined_properties"), "angle"
+            ), "expression",
+        )
+        self.assertIn('"oneway"', angle)
+        self.assertIn("'-1'", angle)
+        self.assertIn("0, 180", angle)
+
+    def test_arrow_size_follows_class_width(self):
+        expected = {
+            "motorway": "3.6",
+            "tertiary": "3.0",
+            "residential": "2.4",
+            "service": "2.0",
+        }
+        layer = self.layers["highway main"]
+        for label, size in expected.items():
+            symbol = self._arrow_symbol(layer, label)
+            self.assertIsNotNone(symbol, label)
+            inner = next(
+                item for item in symbol.iter("layer")
+                if item.get("class") == "SvgMarker"
+            )
+            self.assertEqual(_option_value(inner, "size"), size, label)
+
+    def test_arrow_icon_is_elongated(self):
+        path = PACKAGE_DIR / "resources" / "icons" / "oneway_arrow.svg"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('viewBox="0 0 4 2"', text)
+
+
 class AerialwayContrastTest(unittest.TestCase):
     """Серые линии подъёмников на 1:100000+ остаются различимыми."""
 

@@ -87,6 +87,11 @@ def store_highway_integrity():
     return step("highway_integrity")
 
 
+def store_oneway():
+    """Приводит oneway к yes/no и запоминает разворот."""
+    return step("oneway")
+
+
 def linestopolygons(drop_others=False):
     return step("linestopolygons", drop_others=drop_others)
 
@@ -171,9 +176,10 @@ RECIPES = {
     ]),
     "highway_main": Recipe([
         split_layer(fields="highway_main"), store_highway_integrity(),
+        store_oneway(),
     ]),
     "highway_main_tunnel": Recipe([
-        save(), store_highway_integrity(),
+        save(), store_highway_integrity(), store_oneway(),
     ]),
     "bridge_area": Recipe([
         save(), store_highway_integrity(),

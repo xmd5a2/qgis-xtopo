@@ -18,7 +18,7 @@ from qgis_xtopo.core.pipeline import (
 from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
 )
-from qgis_xtopo.core import field_subset, highway_integrity
+from qgis_xtopo.core import field_subset, highway_integrity, oneway
 from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
 from qgis_xtopo.core.resources import query_names
 
@@ -2269,10 +2269,12 @@ class FieldSubsetTest(unittest.TestCase):
             "highway", "service", "surface", "smoothness", "tracktype",
             "ice_road", "winter_road", "embankment", "layer",
             "highway_integrity", "name", "name:ru", "ref", "maxspeed",
+            "oneway", "junction",
         ]
         selected = field_subset.select("highway_main", available)
         for field in ("surface", "smoothness", "tracktype", "highway",
-                      "highway_integrity", "name:ru", "ref"):
+                      "highway_integrity", "oneway", "junction",
+                      "name:ru", "ref"):
             self.assertIn(field, selected)
         self.assertNotIn("maxspeed", selected)
 
@@ -2430,6 +2432,107 @@ class HighwayIntegrityTest(unittest.TestCase):
                 "save" in operations[:position]
                 or "split_layer" in operations[:position],
                 f"{name}: поле пишется до сохранения слоя")
+
+
+class OnewayTest(unittest.TestCase):
+    """Подготовка оставляет yes/-1, явный no очищается."""
+
+    def test_normalize_osm_values(self):
+        cases = [
+            ("yes", None, "yes"),
+            ("1", None, "yes"),
+            ("true", None, "yes"),
+            ("YES", None, "yes"),
+            ("-1", None, "-1"),
+            ("no", None, ""),
+            ("", None, ""),
+            (None, None, ""),
+            ("reversible", None, ""),
+            ("", "roundabout", "yes"),
+            (None, "circular", "yes"),
+            ("no", "roundabout", ""),
+            ("reversible", "roundabout", ""),
+        ]
+        for value, junction, expected in cases:
+            self.assertEqual(
+                oneway.normalize(value, junction), expected,
+                (value, junction),
+            )
+
+    def test_arrow_scales_follow_road_rank(self):
+        self.assertEqual(oneway.arrow_scale("motorway"), 50000)
+        self.assertEqual(oneway.arrow_scale("primary"), 40000)
+        self.assertEqual(oneway.arrow_scale("tertiary"), 25000)
+        self.assertEqual(oneway.arrow_scale("residential"), 16000)
+        self.assertEqual(oneway.arrow_scale("service"), 12000)
+        self.assertEqual(oneway.arrow_scale("pedestrian"), 0)
+
+    def _roads(self, directory, name, rows):
+        connection = sqlite3.connect(str(Path(directory) / f"{name}.sqlite"))
+        connection.execute(
+            'CREATE TABLE "roads" (ogc_fid INTEGER PRIMARY KEY, '
+            "highway TEXT, oneway TEXT, junction TEXT)")
+        connection.executemany(
+            'INSERT INTO "roads" (ogc_fid, highway, oneway, junction) '
+            "VALUES (?, ?, ?, ?)", rows)
+        connection.commit()
+        connection.close()
+
+    def _values(self, directory, name):
+        connection = sqlite3.connect(str(Path(directory) / f"{name}.sqlite"))
+        values = dict(connection.execute(
+            'SELECT "ogc_fid", "oneway" FROM "roads"'))
+        connection.close()
+        return values
+
+    def test_store_normalizes_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._roads(directory, "highway_main", [
+                (1, "primary", "yes", ""),
+                (2, "primary", "-1", ""),
+                (3, "service", None, "roundabout"),
+                (4, "residential", "no", ""),
+                (5, "service", "reversible", ""),
+            ])
+            self.assertEqual(oneway.store(directory, "highway_main"), 5)
+            self.assertEqual(self._values(directory, "highway_main"), {
+                1: "yes",
+                2: "-1",
+                3: "yes",
+                4: "",
+                5: "",
+            })
+            # Повторный запуск ничего не меняет.
+            self.assertEqual(oneway.store(directory, "highway_main"), 5)
+            self.assertEqual(self._values(directory, "highway_main"), {
+                1: "yes",
+                2: "-1",
+                3: "yes",
+                4: "",
+                5: "",
+            })
+
+    def test_highway_main_covers_layer_split_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for suffix in ("", "_layer_1", "_layer_-1"):
+                self._roads(directory, f"highway_main{suffix}", [
+                    (1, "primary", "yes", ""),
+                ])
+            self.assertEqual(
+                oneway.store(directory, "highway_main"), 3)
+
+    def test_recipes_store_oneway_after_saving(self):
+        for name in oneway.ONEWAY_LAYERS:
+            operations = [
+                operation for operation, _parameters in recipe_for(name).steps
+            ]
+            self.assertIn("oneway", operations, name)
+            position = operations.index("oneway")
+            self.assertTrue(
+                "save" in operations[:position]
+                or "split_layer" in operations[:position],
+                f"{name}: oneway пишется до сохранения слоя",
+            )
 
 
 class AreaFieldTest(unittest.TestCase):

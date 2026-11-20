@@ -22,8 +22,9 @@ BUILDING = (
 )
 
 HIGHWAY = (
-    "highway", "service", "ice_road", "winter_road", "embankment", "layer",
-    "surface", "smoothness", "tracktype", "highway_integrity",
+    "highway", "service", "oneway", "junction", "ice_road", "winter_road",
+    "embankment", "layer", "surface", "smoothness", "tracktype",
+    "highway_integrity",
 )
 
 # Пункты: place/population нужны не только стилю, но и расчёту

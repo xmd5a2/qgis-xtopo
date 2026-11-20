@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
-    highway_integrity, i18n, icon_angles, label_cache, osm_convert,
+    highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
     peak_filter, poi_icons, polygon_overlaps, project, sources, terrain,
 )
 from .bbox import parse_bbox
@@ -1214,6 +1214,12 @@ class Pipeline:
                 # Без столбца фильтры дорог по интегритету не сработают.
                 self.warnings.append(
                     f"{name}: highway_integrity не записан в данные"
+                )
+            return current
+        if operation == "oneway":
+            if not oneway.store(self.config.vector_dir, name):
+                self.warnings.append(
+                    f"{name}: oneway не нормализован в данных"
                 )
             return current
         raise PipelineError(f"Unknown pipeline operation: {operation}")
