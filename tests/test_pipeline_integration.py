@@ -928,6 +928,82 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_clear_atlas_can_be_silent(self):
+        """Тихая очистка не пишет сообщение в журнал подготовки."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        panel = ProjectPanel(Iface(canvas))
+        messages = []
+        panel.statusMessage.connect(messages.append)
+        try:
+            panel._sheet_drawn(QgsRectangle(0, 0, 100, 70))
+            panel.clear_atlas(notify=False)
+            self.assertEqual(panel._sheets, [])
+            self.assertFalse(
+                [m for m in messages if "Листы атласа очищены" in m]
+            )
+        finally:
+            panel.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
+    def test_prepare_clears_atlas_silently(self):
+        """Новая подготовка сбрасывает листы атласа без сообщения."""
+        from unittest import mock
+
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            dock.bbox.setText("1,2,3,4")
+            with mock.patch.object(
+                dock, "_build_config", return_value=object()
+            ), mock.patch.object(
+                dock.project_panel, "clear_atlas"
+            ) as clear, mock.patch(
+                "qgis_xtopo.gui.dockwidget.PipelineWorker"
+            ) as worker_class:
+                dock._prepare()
+            clear.assert_called_once_with(notify=False)
+            worker_class.return_value.start.assert_called_once()
+        finally:
+            dock.worker = None
+            dock._project_timer.stop()
+            dock.deleteLater()
+
+    def test_new_project_resets_atlas(self):
+        """Новый проект начинается без листов прежнего."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            panel = dock.project_panel
+            panel._sheets = [(
+                QgsRectangle(0, 0, 100, 70),
+                QgsCoordinateReferenceSystem("EPSG:3857"),
+            )]
+            panel._update_sheet_controls()
+            dock._new_project_created()
+            self.assertEqual(panel._sheets, [])
+            self.assertIsNone(panel._active_sheet_index)
+            self.assertIsNone(panel._atlas_layer)
+            self.assertIn("Листов: 0", panel.sheets_label.text())
+        finally:
+            dock._project_timer.stop()
+            dock.deleteLater()
+
     def test_clear_atlas_activates_pan_tool(self):
         from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
         from qgis.gui import QgsMapCanvas

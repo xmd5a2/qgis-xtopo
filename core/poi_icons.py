@@ -9,7 +9,9 @@ QGIS не разводит значки разных слоёв: кластер�
 друг на друга.
 
 Приоритет — порядок слоёв в дереве проекта: верхний в списке рисуется
-поверх и побеждает.  Раньше правило искало соседей само, выражением
+поверх и побеждает.  Исключение — пик без именных тегов: его ранг
+опускается ниже населённых пунктов, чтобы он не скрывал их значки и
+подписи.  Раньше правило искало соседей само, выражением
 ``overlay_nearest`` по служебному слою ``poi icons``; выражение
 вызывалось на каждый объект, а радиус поиска рос вместе с масштабом,
 и слой ``peak`` на мелком масштабе рисовался десятки секунд.  Теперь
@@ -55,6 +57,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .cpu import cpu_workers
+from .peak_placement import NAME_TAGS
 from .resources import RESOURCES_DIR, template_path
 
 AUX_LAYER_NAME = "poi icons"
@@ -107,6 +110,10 @@ ICON_HIDE_FIELD = "icon_hide"
 # только координатами: у населённых пунктов важнее город, чем посёлок,
 # а внутри одного типа — большее население.
 SELF_RANKED_LAYERS = ("places main", "places main major")
+
+# Слои населённых пунктов: безымянный пик не должен их подавлять.
+SETTLEMENT_LAYERS = ("places main", "places main major")
+PEAK_LAYER = "peak"
 
 # Ранг типа населённого пункта: меньше — важнее.  Порядок тот же, что
 # в иерархии place в OSM: город, посёлок, деревня, хутор; пригород и
@@ -187,6 +194,8 @@ class _Point:
     name: str = ""
     fid: int = -1
     geometry: str = "Point"
+    # Есть ли у объекта именной тег; для пиков без имени ранг понижается.
+    named: bool = True
     hidden: set = field(default_factory=set)
     bands: dict = field(default_factory=dict)  # диапазон -> минимальный LOD
     # диапазон -> размер значка в мм (радиус, в котором он вытесняет)
@@ -1361,6 +1370,11 @@ def _collect_points(config, layers, bands, cancel=None):
                 if anchor is None:
                     continue
                 lon, lat = anchor.x(), anchor.y()
+            named = (
+                _feature_is_named(feature)
+                if info.name == PEAK_LAYER
+                else True
+            )
             points.append(_Point(
                 rank=info.rank,
                 lon=lon,
@@ -1368,6 +1382,7 @@ def _collect_points(config, layers, bands, cancel=None):
                 name=info.name,
                 fid=feature.id(),
                 geometry=info.geometry,
+                named=named,
                 bands={index: level for index, level, _size in visible},
                 sizes={index: size for index, _level, size in visible},
             ))
@@ -1375,7 +1390,45 @@ def _collect_points(config, layers, bands, cancel=None):
                 priorities.append(_settlement_priority(feature))
         if ranked:
             _apply_priorities(points[start:], priorities, info.rank)
+    _lower_unnamed_peaks(points)
     return points
+
+
+def _feature_is_named(feature):
+    """Есть ли у объекта любой именной тег (включая ``name:*``)."""
+    fields = feature.fields()
+    for index in range(fields.count()):
+        key = fields.at(index).name().lower()
+        if key in NAME_TAGS or key.startswith("name:"):
+            if feature.attribute(index) not in (None, ""):
+                return True
+    return False
+
+
+def _lower_unnamed_peaks(points):
+    """Ставит безымянные пики после всех населённых пунктов.
+
+    Пик без имени не должен скрывать значок или подпись населённого
+    пункта.  Ранг остаётся меньше следующего целого — места
+    нижележащего слоя в дереве, — поэтому порядок относительно
+    остальных объектов не меняется.
+    """
+    unnamed = [
+        point for point in points
+        if point.name == PEAK_LAYER and not point.named
+    ]
+    if not unnamed:
+        return
+    ranks = [
+        point.rank for point in points
+        if point.name in SETTLEMENT_LAYERS
+    ]
+    if not ranks:
+        return
+    limit = max(ranks)
+    rank = (limit + math.floor(limit) + 1.0) / 2.0
+    for point in unnamed:
+        point.rank = rank
 
 
 def _apply_priorities(points, priorities, rank):

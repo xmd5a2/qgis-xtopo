@@ -1685,6 +1685,51 @@ class PoiSuppressionTest(unittest.TestCase):
         self.assertIn(("places main", 1), distances)
         self.assertNotIn(("peak", 2), distances)
 
+    def test_unnamed_peak_does_not_suppress_village(self):
+        """Безымянный пик не скрывает даже деревню."""
+        from qgis_xtopo.core.poi_icons import (
+            _Point, _lower_unnamed_peaks, _suppression_distances,
+        )
+
+        ranks = {layer.name: layer.rank for layer in self.layers}
+        village = _Point(
+            rank=ranks["places main"] + 0.1, lon=6.9, lat=46.05,
+            name="places main", fid=1, bands={0: 2}, sizes={0: 2.0},
+        )
+        peak = _Point(
+            rank=ranks["peak"], lon=6.9005, lat=46.05,
+            name="peak", fid=2, named=False,
+            bands={0: 2}, sizes={0: 2.0},
+        )
+        _lower_unnamed_peaks([village, peak])
+        self.assertGreater(peak.rank, village.rank)
+        distances = _suppression_distances(
+            [village, peak], {0: [village, peak]}, [(0.0, 20000.0)],
+        )
+        self.assertNotIn(("places main", 1), distances)
+        self.assertIn(("peak", 2), distances)
+
+    def test_peak_name_tags_detected(self):
+        """Именным считается пик с name, alt_name или name:*."""
+        from qgis.core import QgsFeature, QgsField, QgsFields
+        from qgis.PyQt.QtCore import QVariant
+
+        fields = QgsFields()
+        fields.append(QgsField("name", QVariant.String))
+        fields.append(QgsField("alt_name", QVariant.String))
+        fields.append(QgsField("name:ru", QVariant.String))
+        feature = QgsFeature(fields)
+        self.assertFalse(poi_icons._feature_is_named(feature))
+
+        feature.setAttribute("name:ru", "Эльбрус")
+        self.assertTrue(poi_icons._feature_is_named(feature))
+        feature.setAttribute("name:ru", None)
+        feature.setAttribute("alt_name", "Elbrus")
+        self.assertTrue(poi_icons._feature_is_named(feature))
+        feature.setAttribute("alt_name", "")
+        feature.setAttribute("name", "Matterhorn")
+        self.assertTrue(poi_icons._feature_is_named(feature))
+
     def test_all_icon_layers_use_one_crs(self):
         """Все слои со значками — в EPSG:4326.
 

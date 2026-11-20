@@ -1467,7 +1467,12 @@ class ProjectPanel(QWidget):
         self._remove_atlas_layer()
         self.statusMessage.emit(f"Лист {index + 1} удалён")
 
-    def clear_atlas(self):
+    def clear_atlas(self, notify=True):
+        """Убирает листы атласа и созданный для них слой.
+
+        ``notify`` выключает сообщение о очистке: при новой подготовке
+        журнал начинается заново, и строка об очистке в нём лишняя.
+        """
         if (
             self._sheets
             or self._sheet_items
@@ -1475,7 +1480,7 @@ class ProjectPanel(QWidget):
             or self.add_sheet_button.isChecked()
             or self.edit_sheet_button.isChecked()
         ):
-            self._clear_sheets()
+            self._clear_sheets(notify=notify)
 
     def reset_atlas_state(self):
         """Сбросить состояние атласа, не трогая очищаемый проект.
@@ -1497,7 +1502,7 @@ class ProjectPanel(QWidget):
         self._dispose_edit_sheet_tool()
         self._update_sheet_controls()
 
-    def _clear_sheets(self):
+    def _clear_sheets(self, notify=True):
         if self.add_sheet_button.isChecked():
             self.add_sheet_button.setChecked(False)
         if self.edit_sheet_button.isChecked():
@@ -1509,7 +1514,8 @@ class ProjectPanel(QWidget):
         self._dispose_sheet_tool()
         self._dispose_edit_sheet_tool()
         self._activate_pan()
-        self.statusMessage.emit("Листы атласа очищены")
+        if notify:
+            self.statusMessage.emit("Листы атласа очищены")
 
     def _remove_atlas_layer(self):
         layout = QgsProject.instance().layoutManager().layoutByName("Detailed")

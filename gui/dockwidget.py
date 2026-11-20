@@ -3459,12 +3459,15 @@ class XtopoDockWidget(QDockWidget):
                 pass
         if self.iface is None:
             return
-        for signal_name in ("projectRead", "newProjectCreated"):
+        for signal_name, slot in (
+            ("projectRead", self._schedule_project_refresh),
+            ("newProjectCreated", self._new_project_created),
+        ):
             signal = getattr(self.iface, signal_name, None)
             if signal is None:
                 continue
             try:
-                signal.connect(self._schedule_project_refresh)
+                signal.connect(slot)
             except Exception:
                 pass
 
@@ -3488,6 +3491,11 @@ class XtopoDockWidget(QDockWidget):
         self.project_panel.reset_atlas_state()
         # Проект закрыт — возвращаем стандартные панели QGIS.
         self.restore_panels()
+        self._schedule_project_refresh()
+
+    def _new_project_created(self, *_args):
+        """Новый проект не наследует листы атласа прежнего."""
+        self.project_panel.reset_atlas_state()
         self._schedule_project_refresh()
 
     def _schedule_project_refresh(self, *_args):
@@ -3844,6 +3852,9 @@ class XtopoDockWidget(QDockWidget):
         self._map_index_timer.stop()
         self._cancel_map_index()
         self._save_settings()
+        # Новая подготовка — прежние листы атласа к ней не относятся.
+        # Сообщение в журнал не нужно: он сейчас начнётся заново.
+        self.project_panel.clear_atlas(notify=False)
         # Новая обработка — прошлое сообщение о замене тайлов неактуально.
         self._terrain_fallback = ""
         self._update_dem_warning()
