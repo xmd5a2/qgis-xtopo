@@ -100,6 +100,10 @@ ICON_GLOW_COLOR = (255, 255, 255, 255)
 # заметная кайма, а 0,1 мм сглаживает только край.
 ICON_GLOW_SPREAD_MM = 0.5
 ICON_GLOW_BLUR_MM = 0.1
+# Столбы ЛЭП — мелкие значки: на снимке общая обводка выглядит вокруг
+# них слишком широкой, им хватает половины.
+POWER_POLE_LAYERS = ("power tower", "power pole")
+POWER_POLE_GLOW_SCALE = 0.5
 
 SETTINGS_KEY = "basemap_source"
 DEFAULT_SOURCE = "google"
@@ -743,21 +747,21 @@ def _restore_icon_effects(layer, saved):
     return changed
 
 
-def _icon_glow():
-    """Узкая белая обводка значка."""
+def _icon_glow(scale=1.0):
+    """Узкая белая обводка значка; ``scale`` уменьшает её для мелких."""
     glow = QgsOuterGlowEffect()
     glow.setColor(QColor(*ICON_GLOW_COLOR))
-    glow.setSpread(ICON_GLOW_SPREAD_MM)
-    glow.setBlurLevel(ICON_GLOW_BLUR_MM)
+    glow.setSpread(ICON_GLOW_SPREAD_MM * scale)
+    glow.setBlurLevel(ICON_GLOW_BLUR_MM * scale)
     return glow
 
 
-def _icon_effect():
+def _icon_effect(glow_scale=1.0):
     """Белая обводка под значком; сам значок не меняется."""
     effect = QgsEffectStack()
     # Стек рисует эффекты в порядке добавления: сначала обводку,
     # затем исходный значок поверх неё, поэтому рисунок не закрыт.
-    effect.appendEffect(_icon_glow())
+    effect.appendEffect(_icon_glow(glow_scale))
     source = QgsDrawSourceEffect()
     source.setOpacity(1.0)
     effect.appendEffect(source)
@@ -882,6 +886,9 @@ def _invert_layer_symbols(layer):
 def _outline_layer_icons(layer):
     """Добавляет чёрным значкам слоя плотную белую обводку."""
     point_layer = layer.geometryType() == Qgis.GeometryType.Point
+    glow_scale = (
+        POWER_POLE_GLOW_SCALE if layer.name() in POWER_POLE_LAYERS else 1.0
+    )
     saved = []
     for key, symbol_layer in _symbol_layers_by_key(layer).items():
         if isinstance(symbol_layer, QgsSvgMarkerSymbolLayer):
@@ -900,7 +907,7 @@ def _outline_layer_icons(layer):
             # Включённый чужой эффект не затираем: значок останется как есть.
             continue
         saved.append([key, None])
-        symbol_layer.setPaintEffect(_icon_effect())
+        symbol_layer.setPaintEffect(_icon_effect(glow_scale))
     if not saved:
         return False
     layer.setCustomProperty(ICON_EFFECTS_PROPERTY, json.dumps(saved))

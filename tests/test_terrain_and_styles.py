@@ -1167,6 +1167,8 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         ("railway all", "LineString"),
         ("rail tunnel", "LineString"),
         ("railway bridge", "LineString"),
+        ("power tower", "Point"),
+        ("power pole", "Point"),
         ("alpine hut", "Point"),
         ("places main", "Point"),
         ("admin level 2 (country borders)", "LineString"),
@@ -1340,6 +1342,34 @@ class BasemapSymbolInversionTest(unittest.TestCase):
             )
             self.basemap.restore_symbols(self.project)
             self.assertEqual(self._line_colors(layer), before, name)
+
+    def test_power_poles_have_smaller_halo(self):
+        """Столбам ЛЭП обводка вдвое уже общей."""
+        from qgis.core import QgsOuterGlowEffect
+
+        scale = self.basemap.POWER_POLE_GLOW_SCALE
+        expected_spread = self.basemap.ICON_GLOW_SPREAD_MM * scale
+        expected_blur = self.basemap.ICON_GLOW_BLUR_MM * scale
+        for name in self.basemap.POWER_POLE_LAYERS:
+            layer = self.layers[name]
+            self.basemap.invert_symbols(self.project)
+            effects = [
+                symbol_layer.paintEffect()
+                for _key, symbol_layer
+                in self.basemap._symbol_layers_by_key(layer).items()
+                if symbol_layer.paintEffect() is not None
+                and symbol_layer.paintEffect().enabled()
+            ]
+            self.assertTrue(effects, name)
+            for effect in effects:
+                glow = effect.effect(0)
+                self.assertIsInstance(glow, QgsOuterGlowEffect, name)
+                self.assertAlmostEqual(glow.spread(), expected_spread, msg=name)
+                self.assertAlmostEqual(
+                    glow.blurLevel(), expected_blur, msg=name
+                )
+            self.basemap.restore_symbols(self.project)
+            self.assertEqual(self._enabled_effects(layer), [], name)
 
     def test_black_icons_get_white_outline(self):
         from qgis.core import (
