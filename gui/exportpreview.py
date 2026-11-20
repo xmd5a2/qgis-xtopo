@@ -261,6 +261,16 @@ class ExportPreviewDialog(QDialog):
 
     def __init__(self, images, parent=None):
         super().__init__(parent)
+        flags = _enum(Qt, "WindowType", "Window")
+        for name in (
+            "WindowTitleHint",
+            "WindowSystemMenuHint",
+            "WindowMinimizeButtonHint",
+            "WindowMaximizeButtonHint",
+            "WindowCloseButtonHint",
+        ):
+            flags |= _enum(Qt, "WindowType", name)
+        self.setWindowFlags(flags)
         self._images = [image for image in images if not image.isNull()]
         self._index = 0
         self.setWindowTitle(i18n.tr("Предпросмотр экспорта"))
@@ -382,9 +392,6 @@ class ExportPreviewDialog(QDialog):
         self.pdf_button = QPushButton(
             _theme_icon("mActionExport.svg"), "PDF", self
         )
-        self.close_button = QPushButton("×", self)
-        self.close_button.setFixedWidth(34)
-        self.close_button.setToolTip(i18n.tr("Закрыть (Esc)"))
         for button in (self.png_button, self.pdf_button):
             button.setIconSize(QSize(16, 16))
             button.setToolTip(i18n.tr("Экспортировать листы в {}…").format(
@@ -394,7 +401,6 @@ class ExportPreviewDialog(QDialog):
         right_layout.addWidget(self.thumbnails_button)
         right_layout.addWidget(self.png_button)
         right_layout.addWidget(self.pdf_button)
-        right_layout.addWidget(self.close_button)
 
         self._control_row.addWidget(self._left_controls, 1)
         self._control_row.addWidget(self.navigation)
@@ -406,7 +412,7 @@ class ExportPreviewDialog(QDialog):
         for button in (
             self.zoom_out_button, self.zoom_in_button, self.fit_button,
             self.thumbnails_button, self.png_button, self.pdf_button,
-            self.close_button, self.previous_button, self.next_button,
+            self.previous_button, self.next_button,
         ):
             button.setFocusPolicy(no_focus)
         self.thumbnails.setFocusPolicy(no_focus)
@@ -429,7 +435,6 @@ class ExportPreviewDialog(QDialog):
         self.pdf_button.clicked.connect(
             lambda: self.exportRequested.emit("pdf")
         )
-        self.close_button.clicked.connect(lambda: self.close())
 
     def _balance_control_groups(self):
         """Одинаковая ширина боковых групп держит навигацию по центру."""

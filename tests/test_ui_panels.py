@@ -1069,6 +1069,27 @@ class ExportPreviewDialogTest(unittest.TestCase):
         self.assertFalse(single.thumbnail_panel.isVisibleTo(single))
         self.assertFalse(single.navigation.isVisibleTo(single))
 
+    def test_window_uses_standard_buttons_and_opens_maximized(self):
+        from qgis.PyQt.QtCore import Qt
+
+        from qgis_xtopo.gui.exportpreview import _enum
+
+        dialog = self._dialog()
+        flags = dialog.windowFlags()
+        for name in (
+            "WindowTitleHint",
+            "WindowMinimizeButtonHint",
+            "WindowMaximizeButtonHint",
+            "WindowCloseButtonHint",
+        ):
+            self.assertTrue(
+                flags & _enum(Qt, "WindowType", name), name
+            )
+        dialog.showMaximized()
+        self.app.processEvents()
+        self.assertTrue(dialog.isMaximized())
+        dialog.close()
+
     def test_export_buttons_emit_extension(self):
         dialog = self._dialog()
         requested = []
