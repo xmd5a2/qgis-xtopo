@@ -38,8 +38,8 @@ from qgis.PyQt.QtCore import (
     QEvent, QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal,
 )
 from qgis.PyQt.QtGui import (
-    QColor, QFontMetrics, QIcon, QImageWriter, QPainter, QPalette, QPen,
-    QPixmap,
+    QColor, QFontMetrics, QFontMetricsF, QIcon, QImageWriter, QPainter,
+    QPalette, QPen, QPixmap,
 )
 from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
@@ -1190,7 +1190,7 @@ class ProjectPanel(QWidget):
         self.export_pdf_button.clicked.connect(
             lambda: self._export("pdf")
         )
-        self.print_button.clicked.connect(self._print_atlas)
+        self.print_button.clicked.connect(lambda: self._print_atlas())
         self._update_sheet_controls()
 
     def _update_sheet_controls(self):
@@ -1733,11 +1733,32 @@ class ProjectPanel(QWidget):
             None,
         )
         if number_item is not None:
-            # В макете номер листа стоит в левом верхнем углу страницы.
+            # В макете номер листа стоит в левом верхнем углу, но подпись
+            # центрирована в своей рамке: слева от цифры пустого места
+            # больше, чем сверху. Прижимаем текст влево и добавляем к
+            # половине вертикального запаса тот же подъём цифры над
+            # строкой, что даёт верхний зазор.
             number_item.setReferencePoint(
                 _enum(QgsLayoutItem, "ReferencePoint", "UpperLeft")
             )
-            number_item.attemptMove(QgsLayoutPoint(0.0, 0.0, units))
+            line_height = number_item.sizeForText().height()
+            metrics = QFontMetricsF(number_item.textFormat().font())
+            correction = 0.0
+            if metrics.height() > 0 and line_height > 0:
+                tight = metrics.tightBoundingRect("1")
+                correction = line_height * (
+                    metrics.ascent() + tight.top() - tight.left()
+                ) / metrics.height()
+            gap = max(
+                0.0,
+                (number_item.sizeWithUnits().height() - line_height) / 2.0,
+            )
+            number_item.setHAlign(
+                _enum(Qt, "AlignmentFlag", "AlignLeft")
+            )
+            number_item.attemptMove(
+                QgsLayoutPoint(gap + max(0.0, correction), 0.0, units)
+            )
         copyright_item = self._fit_copyright_label(layout)
         if copyright_item is not None:
             # В макете копирайт прижат к правому нижнему углу страницы:
@@ -1833,8 +1854,8 @@ class ProjectPanel(QWidget):
             _enum(Qt, "WindowModality", "WindowModal")
         )
         dialog.exportRequested.connect(
-            lambda extension, window=dialog: self._export(
-                extension, parent=window
+            lambda extension, window=dialog: self._preview_export(
+                extension, window
             )
         )
         dialog.finished.connect(
@@ -1850,6 +1871,13 @@ class ProjectPanel(QWidget):
     def _export_preview_closed(self, window):
         if self._export_preview is window:
             self._export_preview = None
+
+    def _preview_export(self, extension, window):
+        """Запускает экспорт или печать из открытого предпросмотра."""
+        if extension == "print":
+            self._print_atlas(parent=window)
+        else:
+            self._export(extension, parent=window)
 
     def _render_export_preview(self):
         canvas = self._freeze_canvas()
@@ -1994,14 +2022,14 @@ class ProjectPanel(QWidget):
                 return dpi
         return 96
 
-    def _confirm_export_dpi(self, layout, preferred):
+    def _confirm_export_dpi(self, layout, preferred, parent=None):
         estimate = self._estimate_export_memory(layout, preferred)
         if estimate <= MEMORY_BUDGET:
             return preferred
         safe = self._safe_export_dpi(layout, preferred)
         if safe >= preferred:
             return preferred
-        box = QMessageBox(self)
+        box = QMessageBox(parent or self)
         box.setIcon(_enum(QMessageBox, "Icon", "Warning"))
         box.setWindowTitle("QGIS-xtopo")
         box.setText(
@@ -2241,24 +2269,26 @@ class ProjectPanel(QWidget):
             number = feature.id()
         self._notify(f"Экспорт {kind}: лист {number} из {total}…")
 
-    def _print_atlas(self):
+    def _print_atlas(self, parent=None):
         canvas = self._freeze_canvas()
         try:
-            self._print_atlas_impl()
+            self._print_atlas_impl(parent)
         finally:
             self._unfreeze_canvas(canvas)
 
-    def _print_atlas_impl(self):
+    def _print_atlas_impl(self, parent=None):
         try:
             layout, atlas = self._configure_layout()
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
+            QMessageBox.warning(
+                parent or self, "QGIS-xtopo", i18n.tr(str(exc))
+            )
             return
-        self._print_layout(layout, atlas)
+        self._print_layout(layout, atlas, parent)
 
-    def _print_layout(self, layout, atlas):
+    def _print_layout(self, layout, atlas, parent=None):
         dpi = self._confirm_export_dpi(
-            layout, int(self.export_dpi.currentData() or 150)
+            layout, int(self.export_dpi.currentData() or 150), parent
         )
         if dpi is None:
             self._remove_atlas_layer()
@@ -2269,7 +2299,7 @@ class ProjectPanel(QWidget):
             if mode is None:
                 mode = QPrinter.PrinterMode.HighResolution
             printer = QPrinter(mode)
-            dialog = QPrintDialog(printer, self)
+            dialog = QPrintDialog(printer, parent or self)
             if dialog.exec() != _enum(QDialog, "DialogCode", "Accepted"):
                 return
             settings = QgsLayoutExporter.PrintExportSettings()
@@ -2282,7 +2312,7 @@ class ProjectPanel(QWidget):
                 error = ""
         except Exception as exc:
             QMessageBox.critical(
-                self, "QGIS-xtopo",
+                parent or self, "QGIS-xtopo",
                 i18n.trf("Ошибка печати: {}", exc),
             )
             return

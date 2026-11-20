@@ -1054,20 +1054,49 @@ class ExportPreviewDialogTest(unittest.TestCase):
         dialog = self._dialog()
         self.assertEqual(dialog.thumbnails.count(), 3)
         self.assertEqual(dialog.thumbnails.iconSize().width(), 200)
-        self.assertTrue(dialog.thumbnails_button.isChecked())
         self.assertTrue(dialog.thumbnail_panel.isVisibleTo(dialog))
 
         dialog._thumbnail_clicked(dialog.thumbnails.item(2))
         self.assertEqual(dialog.current_index, 2)
         self.assertTrue(dialog.thumbnail_panel.isVisibleTo(dialog))
 
-        dialog.thumbnails_button.setChecked(False)
-        self.assertFalse(dialog.thumbnail_panel.isVisibleTo(dialog))
-
         single = self._dialog(count=1)
-        self.assertFalse(single.thumbnails_button.isVisibleTo(single))
         self.assertFalse(single.thumbnail_panel.isVisibleTo(single))
         self.assertFalse(single.navigation.isVisibleTo(single))
+
+    def test_wheel_on_thumbnails_switches_sheets(self):
+        from qgis.PyQt.QtCore import QPoint
+
+        dialog = self._dialog()
+
+        class WheelEvent:
+            def __init__(self, delta):
+                self.delta = delta
+
+            def angleDelta(self):
+                return QPoint(0, self.delta)
+
+            def accept(self):
+                pass
+
+        dialog.thumbnails.wheelEvent(WheelEvent(-120))
+        self.app.processEvents()
+        self.assertEqual(dialog.current_index, 1)
+        dialog.thumbnails.wheelEvent(WheelEvent(-120))
+        self.app.processEvents()
+        self.assertEqual(dialog.current_index, 2)
+        dialog.thumbnails.wheelEvent(WheelEvent(120))
+        self.app.processEvents()
+        self.assertEqual(dialog.current_index, 1)
+
+    def test_export_controls_are_explicit(self):
+        dialog = self._dialog()
+        self.assertFalse(hasattr(dialog, "thumbnails_button"))
+        self.assertEqual(dialog.png_button.text(), "Сохранить в PNG")
+        self.assertTrue(dialog.png_button.font().bold())
+        self.assertEqual(dialog.pdf_button.text(), "Сохранить в PDF")
+        self.assertFalse(dialog.pdf_button.font().bold())
+        self.assertEqual(dialog.print_button.text(), "Печать")
 
     def test_window_uses_standard_buttons_and_opens_maximized(self):
         from qgis.PyQt.QtCore import Qt
@@ -1096,7 +1125,8 @@ class ExportPreviewDialogTest(unittest.TestCase):
         dialog.exportRequested.connect(requested.append)
         dialog.png_button.click()
         dialog.pdf_button.click()
-        self.assertEqual(requested, ["png", "pdf"])
+        dialog.print_button.click()
+        self.assertEqual(requested, ["png", "pdf", "print"])
 
     def test_keyboard_navigation(self):
         from qgis.PyQt.QtCore import Qt

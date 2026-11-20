@@ -1189,6 +1189,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             QgsProject, QgsUnitTypes,
         )
         from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtCore import Qt
         from qgis_xtopo.gui.projectpanel import ProjectPanel, _enum
 
         project = QgsProject.instance()
@@ -1206,6 +1207,9 @@ class PipelineIntegrationTest(unittest.TestCase):
         layout.addLayoutItem(map_item)
         number_item = QgsLayoutItemLabel(layout)
         number_item.setText("[% @atlas_featurenumber %]")
+        number_item.attemptResize(
+            QgsLayoutSize(15.3739, 13.0516, QgsUnitTypes.LayoutMillimeters)
+        )
         layout.addLayoutItem(number_item)
         copyright_item = QgsLayoutItemLabel(layout)
         copyright_item.setText("Map data OpenStreetMap contributors")
@@ -1244,8 +1248,23 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertAlmostEqual(size.width(), expected.width(), places=3)
             self.assertAlmostEqual(size.height(), expected.height(), places=3)
             self.assertLess(size.width(), 210.0)
-            # номер листа — в левом верхнем углу, как в макете
-            self.assertAlmostEqual(number_item.pos().x(), 0.0, places=3)
+            # номер листа прижат к левому верхнему углу: текст выровнен
+            # влево, а рамка сдвинута на величину верхнего зазора
+            gap = max(
+                0.0,
+                (
+                    number_item.sizeWithUnits().height()
+                    - number_item.sizeForText().height()
+                ) / 2.0,
+            )
+            self.assertEqual(
+                number_item.hAlign(),
+                _enum(Qt, "AlignmentFlag", "AlignLeft"),
+            )
+            self.assertGreaterEqual(
+                number_item.pos().x(), gap - 1e-6
+            )
+            self.assertLess(number_item.pos().x(), 10.0)
             self.assertAlmostEqual(number_item.pos().y(), 0.0, places=3)
         finally:
             panel.deleteLater()

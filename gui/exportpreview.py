@@ -3,15 +3,16 @@
 Листы рисуются тем же макетом и атласом, что и настоящий экспорт, но
 с длинной стороной около 1280 пикселей.  Просмотрщик — полноэкранное
 окно: колесо мыши плавно меняет масштаб, перетаскивание сдвигает лист,
-справа показывается вертикальная лента миниатюр, а PNG/PDF запускают
-обычный экспорт с настройками панели.
+справа показывается вертикальная лента миниатюр (колесо над ней листает
+листы), а кнопки сохранения в PNG/PDF и печати запускают обычный экспорт
+с настройками панели.
 """
 
 import math
 
 from qgis.core import QgsApplication
 from qgis.PyQt.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from qgis.PyQt.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPixmap
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -29,6 +30,7 @@ from ..core import i18n
 THUMBNAIL_WIDTH = 200
 MAX_ZOOM = 8.0
 WHEEL_FACTOR = 1.2
+WHEEL_NOTCH = 120
 ANIMATION_INTERVAL_MS = 16
 ANIMATION_EASING = 0.45
 
@@ -254,6 +256,30 @@ class PreviewCanvas(QWidget):
         event.accept()
 
 
+class ThumbnailList(QListWidget):
+    """Список миниатюр: колесо переключает листы, а не прокручивает."""
+
+    wheelStep = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._wheel_delta = 0
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if not delta:
+            super().wheelEvent(event)
+            return
+        self._wheel_delta += delta
+        steps = int(self._wheel_delta / WHEEL_NOTCH)
+        if not steps:
+            event.accept()
+            return
+        self._wheel_delta -= steps * WHEEL_NOTCH
+        self.wheelStep.emit(steps)
+        event.accept()
+
+
 class ExportPreviewDialog(QDialog):
     """Полноэкранный просмотрщик листов и запуск экспорта."""
 
@@ -303,7 +329,7 @@ class ExportPreviewDialog(QDialog):
         self.thumbnail_panel.setFixedWidth(232)
         panel_layout = QVBoxLayout(self.thumbnail_panel)
         panel_layout.setContentsMargins(4, 4, 4, 4)
-        self.thumbnails = QListWidget(self.thumbnail_panel)
+        self.thumbnails = ThumbnailList(self.thumbnail_panel)
         self.thumbnails.setViewMode(
             _enum(QListView, "ViewMode", "IconMode")
         )
@@ -333,6 +359,7 @@ class ExportPreviewDialog(QDialog):
             "}"
         )
         self.thumbnails.itemClicked.connect(self._thumbnail_clicked)
+        self.thumbnails.wheelStep.connect(self._wheel_steps)
         panel_layout.addWidget(self.thumbnails)
         body.addWidget(self.thumbnail_panel)
         layout.addLayout(body, 1)
@@ -381,26 +408,33 @@ class ExportPreviewDialog(QDialog):
         right_layout = QHBoxLayout(self._right_controls)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
-        self.thumbnails_button = QPushButton("Миниатюры", self)
-        self.thumbnails_button.setCheckable(True)
-        self.thumbnails_button.setToolTip(
-            i18n.tr("Показать или скрыть панель миниатюр")
-        )
         self.png_button = QPushButton(
-            _theme_icon("mActionFileSave.svg"), "PNG", self
+            _theme_icon("mActionFileSave.svg"),
+            i18n.tr("Сохранить в PNG"),
+            self,
         )
+        png_font = QFont(self.png_button.font())
+        png_font.setBold(True)
+        self.png_button.setFont(png_font)
+        self.png_button.setToolTip(i18n.tr("Сохранить листы в PNG…"))
         self.pdf_button = QPushButton(
-            _theme_icon("mActionExport.svg"), "PDF", self
+            _theme_icon("mActionExport.svg"),
+            i18n.tr("Сохранить в PDF"),
+            self,
         )
-        for button in (self.png_button, self.pdf_button):
+        self.pdf_button.setToolTip(i18n.tr("Сохранить листы в PDF…"))
+        self.print_button = QPushButton(
+            _theme_icon("mActionFilePrint.svg"),
+            i18n.tr("Печать"),
+            self,
+        )
+        self.print_button.setToolTip(i18n.tr("Отправить листы на печать…"))
+        for button in (self.png_button, self.pdf_button, self.print_button):
             button.setIconSize(QSize(16, 16))
-            button.setToolTip(i18n.tr("Экспортировать листы в {}…").format(
-                button.text()
-            ))
         right_layout.addStretch(1)
-        right_layout.addWidget(self.thumbnails_button)
         right_layout.addWidget(self.png_button)
         right_layout.addWidget(self.pdf_button)
+        right_layout.addWidget(self.print_button)
 
         self._control_row.addWidget(self._left_controls, 1)
         self._control_row.addWidget(self.navigation)
@@ -411,7 +445,7 @@ class ExportPreviewDialog(QDialog):
         no_focus = _enum(Qt, "FocusPolicy", "NoFocus")
         for button in (
             self.zoom_out_button, self.zoom_in_button, self.fit_button,
-            self.thumbnails_button, self.png_button, self.pdf_button,
+            self.png_button, self.pdf_button, self.print_button,
             self.previous_button, self.next_button,
         ):
             button.setFocusPolicy(no_focus)
@@ -428,12 +462,14 @@ class ExportPreviewDialog(QDialog):
         )
         self.previous_button.clicked.connect(self._previous)
         self.next_button.clicked.connect(self._next)
-        self.thumbnails_button.toggled.connect(self._toggle_thumbnails)
         self.png_button.clicked.connect(
             lambda: self.exportRequested.emit("png")
         )
         self.pdf_button.clicked.connect(
             lambda: self.exportRequested.emit("pdf")
+        )
+        self.print_button.clicked.connect(
+            lambda: self.exportRequested.emit("print")
         )
 
     def _balance_control_groups(self):
@@ -509,11 +545,7 @@ class ExportPreviewDialog(QDialog):
             self.thumbnails.addItem(item)
         many = len(self._images) > 1
         self.navigation.setVisible(many)
-        self.thumbnails_button.setVisible(many)
         self.thumbnail_panel.setVisible(many)
-        self.thumbnails_button.blockSignals(True)
-        self.thumbnails_button.setChecked(many)
-        self.thumbnails_button.blockSignals(False)
         self._balance_control_groups()
 
     def _show_index(self, index):
@@ -540,16 +572,12 @@ class ExportPreviewDialog(QDialog):
     def _next(self):
         self._show_index(self._index + 1)
 
+    def _wheel_steps(self, steps):
+        """Колесо вверх — предыдущий лист, вниз — следующий."""
+        self._show_index(self._index - int(steps))
+
     def _thumbnail_clicked(self, item):
         index = item.data(_enum(Qt, "ItemDataRole", "UserRole"))
         if index is None:
             return
         self._show_index(int(index))
-
-    def _toggle_thumbnails(self, checked):
-        self.thumbnail_panel.setVisible(checked and len(self._images) > 1)
-        if checked:
-            self._show_index(self._index)
-            item = self.thumbnails.item(self._index)
-            if item is not None:
-                self.thumbnails.scrollToItem(item)
