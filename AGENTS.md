@@ -177,6 +177,7 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 |---|---|
 | Порядок слоёв, варианты slope/hillshade, правила по масштабу, изолинии, скорость рендеринга | `docs/agents/styles.md` |
 | Язык карты, подписи, сокращения, вытеснение значков POI | `docs/agents/labels.md` |
+| Правка `automap.qgz` без GUI: добавить или разделить слой, порядок в дереве | скилл `qgis-qgz-editing` |
 | Устройство правил подписей QGIS и их отладка (копии настроек, диапазоны масштаба, `QColor.lighter`, headless-рендер) | скилл `qgis-label-rules` |
 | Источники рельефа, мозаика, COG, Sonny, кэш DEM/изолиний | `docs/agents/terrain.md` |
 | GDAL, драйвер OSM, osmium, потери данных | `docs/agents/drivers.md` |
