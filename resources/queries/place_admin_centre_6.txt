@@ -1,4 +1,4 @@
-rel["admin_level"="6"]->.relations;
+rel["admin_level"="6"][!"building"]->.relations;
 (
   node(r.relations:"label")["place"="city"];
   node(r.relations:"admin_centre")["place"="city"];

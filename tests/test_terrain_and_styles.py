@@ -805,14 +805,13 @@ class BasemapLabelInversionTest(unittest.TestCase):
     def tearDown(self):
         self.project.clear()
 
-    def _colors(self):
+    def _colors(self, layer=None):
         """Цвета текста и halo всех правил подписей слоя."""
         from qgis_xtopo.core import label_style
 
+        layer = layer or self.layer
         colors = []
-        for _key, settings in label_style.label_settings(
-            self.layer.labeling()
-        ):
+        for _key, settings in label_style.label_settings(layer.labeling()):
             text, halo, _enabled = label_style.label_colors(settings)
             colors.append((text, halo))
         return colors
@@ -829,6 +828,28 @@ class BasemapLabelInversionTest(unittest.TestCase):
             # Прозрачность не трогаем.
             self.assertEqual(new_text.alpha(), text.alpha())
             self.assertEqual(new_halo.alpha(), halo.alpha())
+
+    def test_admin_level_labels_are_not_inverted(self):
+        """Подписи административных границ сохраняют свои цвета."""
+        from qgis.core import QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel as pp
+
+        name = "admin level 2 (country names)"
+        renderer, labeling = pp._template_layer_objects(name)
+        layer = QgsVectorLayer(
+            "Polygon?crs=EPSG:4326", name, "memory"
+        )
+        layer.setRenderer(renderer)
+        layer.setLabeling(labeling)
+        self.project.addMapLayer(layer)
+        before = self._colors(layer)
+        self.assertTrue(before)
+
+        self.basemap.invert_labels(self.project)
+        self.assertEqual(self._colors(layer), before)
+        self.assertIsNone(
+            layer.customProperty(self.basemap.LABEL_COLORS_PROPERTY)
+        )
 
     def test_halo_becomes_white_for_light_halo(self):
         """Не совсем белый halo усиливается до белого."""
@@ -1133,6 +1154,7 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         ("aerialway cable car, gondola", "LineString"),
         ("alpine hut", "Point"),
         ("places main", "Point"),
+        ("admin level 2 (country borders)", "LineString"),
     )
 
     @classmethod
@@ -1225,6 +1247,14 @@ class BasemapSymbolInversionTest(unittest.TestCase):
             )
             self.assertTrue(self.basemap.restore_symbols(self.project))
             self.assertEqual(self._line_colors(layer), before, name)
+
+    def test_admin_level_borders_are_not_inverted(self):
+        """Символы административных границ инверсия не перекрашивает."""
+        layer = self.layers["admin level 2 (country borders)"]
+        before = self._line_colors(layer)
+        self.assertTrue(before)
+        self.basemap.invert_symbols(self.project)
+        self.assertEqual(self._line_colors(layer), before)
 
     def test_ridge_is_light_brown(self):
         from qgis.PyQt.QtGui import QColor

@@ -857,6 +857,20 @@ class GeometryRepairRecipeTest(unittest.TestCase):
             self.assertEqual(steps[0], "fix", name)
             self.assertEqual(steps[1], "polygonstolines", name)
 
+    def test_admin_queries_skip_buildings(self):
+        """Здания с admin_level не попадают в административные слои."""
+        from qgis_xtopo.core.resources import read_query
+
+        for name in (
+            "admin_level_2", "admin_level_4", "admin_level_6",
+            "admin_level_2_relation", "admin_level_4_relation",
+            "place_admin_centre_2", "place_admin_centre_4",
+            "place_admin_centre_6",
+        ):
+            for line in read_query(name).splitlines():
+                if "admin_level" in line:
+                    self.assertIn('[!"building"]', line, name)
+
     def test_barrier_repairs_invalid_relations(self):
         """Крепостные стены — вложенные мультиполигоны, QGIS их отбрасывает."""
         from qgis_xtopo.core.query_recipes import recipe_for
@@ -914,6 +928,60 @@ class PolygonToLinesFallbackTest(unittest.TestCase):
         )
         self.assertEqual(result, str(path))
         self.assertEqual(calls, [])
+
+    def test_mixed_layer_keeps_lines(self):
+        """В смешанном слое контуры полигонов и линии сохраняются оба."""
+        path = self.config.temp_dir / "mixed.geojson"
+        path.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"id": 1},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[
+                                [0, 0], [0, 1], [1, 1], [1, 0], [0, 0],
+                            ]],
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"id": 2},
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[2, 0], [3, 1]],
+                        },
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        calls = []
+
+        def run(parameters):
+            calls.append(parameters)
+            return {"OUTPUT": parameters["OUTPUT"]}
+
+        pipeline = Pipeline(
+            self.config, BBox(1, 2, 3, 4), _FakeRunner(run)
+        )
+        result = pipeline._step(
+            "admin_level_2", str(path), "polygonstolines", {}
+        )
+        # Смешанный слой обрабатывается без native:polygonstolines.
+        self.assertEqual(calls, [])
+        dataset = ogr.Open(result)
+        layer = dataset.GetLayer(0)
+        shapes = {
+            feature.GetField("id"): feature.GetGeometryRef().Clone()
+            for feature in layer
+        }
+        self.assertEqual(sorted(shapes), [1, 2])
+        for geometry in shapes.values():
+            self.assertEqual(geometry.GetGeometryName(), "MULTILINESTRING")
+            self.assertFalse(geometry.IsEmpty())
 
     def test_polygon_layer_is_converted(self):
         path = self._layer(

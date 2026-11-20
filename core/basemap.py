@@ -63,6 +63,9 @@ FULL_STYLE = "qgis_xtopo_full"
 LABELS_STYLE = "qgis_xtopo_labels"
 OSM_LAYER_NAME = "OpenStreetMap"
 EXCLUDED_LAYERS = (OSM_LAYER_NAME, "BBOX")
+# Административные границы и их подписи сохраняют свои цвета на снимке:
+# инверсия их не трогает.
+ADMIN_LAYER_PREFIX = "admin level "
 # Слои, которые на снимке только мешают: ряд деревьев рисуется зелёной
 # линией, отдельные деревья — значками, и собственных подписей у них нет.
 HIDDEN_SYMBOL_LAYERS = ("tree row", "tree")
@@ -233,6 +236,11 @@ def styled_layers(project=None):
         if layer.id() in seen:
             continue
         yield layer
+
+
+def _is_admin_layer(layer):
+    """Слой административной границы или её подписей."""
+    return layer.name().startswith(ADMIN_LAYER_PREFIX)
 
 
 def _layer_node(project, layer):
@@ -514,6 +522,8 @@ def invert_labels(project=None):
     changed = False
     for layer in project.mapLayers().values():
         if not isinstance(layer, QgsVectorLayer):
+            continue
+        if _is_admin_layer(layer):
             continue
         labeling = layer.labeling()
         saved = []
@@ -900,6 +910,8 @@ def invert_symbols(project=None):
     changed = False
     for layer in project.mapLayers().values():
         if not isinstance(layer, QgsVectorLayer):
+            continue
+        if _is_admin_layer(layer):
             continue
         if layer.name() in INVERTED_SYMBOL_LAYERS:
             changed = _invert_layer_symbols(layer) or changed

@@ -553,43 +553,71 @@ def _layer_has_features(path):
         return True
 
 
-def _layer_has_polygons(path):
-    """Есть ли в слое площадные объекты.
+def _layer_geometry_families(path):
+    """Какие семейства геометрий есть в слое: (полигоны, линии).
 
     ``native:polygonstolines`` рассчитан на полигоны; линии он
-    превращает в пустые геометрии.  Для слоя из одних линий шаг нужно
-    пропустить, иначе следующие операции теряют весь слой.
+    превращает в пустые геометрии.  Слой из одних линий шаг нужно
+    пропустить, а смешанный — обработать отдельно, иначе следующие
+    операции теряют линейные объекты.
     """
     try:
         from osgeo import ogr
     except ImportError:
-        return True
+        return True, False
     try:
         dataset = ogr.Open(str(path))
     except Exception:
         dataset = None
     if dataset is None:
-        return True
+        return True, False
     try:
         layer = dataset.GetLayer(0)
         if layer is None:
-            return True
+            return True, False
         flatten = getattr(ogr, "wkbFlatten", None) or ogr.GT_Flatten
         polygon_types = (ogr.wkbPolygon, ogr.wkbMultiPolygon)
+        line_types = (ogr.wkbLineString, ogr.wkbMultiLineString)
+        polygons = lines = False
         # Заголовок слоя бывает неточным: после fixgeometries слой с
         # одной площадью и линиями объявляется линейным.  Поэтому
         # смотрим сами объекты, а не только GetGeomType().
         for feature in layer:
-            geometry = feature.GetGeometryRef()
-            if geometry is None or geometry.IsEmpty():
-                continue
-            if flatten(geometry.GetGeometryType()) in polygon_types:
-                return True
-        return False
+            has_polygons, has_lines = _geometry_family_flags(
+                feature.GetGeometryRef(), flatten,
+                polygon_types, line_types,
+            )
+            polygons = polygons or has_polygons
+            lines = lines or has_lines
+            if polygons and lines:
+                break
+        return polygons, lines
     except Exception:
-        return True
+        return True, False
     finally:
         dataset = None
+
+
+def _geometry_family_flags(geometry, flatten, polygon_types, line_types):
+    """Полигоны и линии внутри геометрии, включая коллекции."""
+    if geometry is None or geometry.IsEmpty():
+        return False, False
+    kind = flatten(geometry.GetGeometryType())
+    if kind in polygon_types:
+        return True, False
+    if kind in line_types:
+        return False, True
+    polygons = lines = False
+    for index in range(geometry.GetGeometryCount()):
+        has_polygons, has_lines = _geometry_family_flags(
+            geometry.GetGeometryRef(index), flatten,
+            polygon_types, line_types,
+        )
+        polygons = polygons or has_polygons
+        lines = lines or has_lines
+        if polygons and lines:
+            break
+    return polygons, lines
 
 
 def _recipe_outputs(name):
@@ -1105,12 +1133,19 @@ class Pipeline:
                 "OUTPUT": self._temp_path(name, "centroids"),
             })
         if operation == "polygonstolines":
-            if not _layer_has_polygons(current):
+            polygons, lines = _layer_geometry_families(current)
+            if not polygons:
                 # В вырезе PBF у границ остаются только пограничные
                 # линии, без полигонов.  Превращать в линии нечего:
                 # алгоритм вернул бы пустые геометрии, и слой пропал бы
                 # на следующем шаге.
                 return current
+            if lines:
+                # В смешанном слое линии уже есть (пограничная линия
+                # way и полигоны relation).  native:polygonstolines
+                # превращает их в пустые геометрии, поэтому контуры и
+                # линии собираются вместе вручную.
+                return self._polygonstolines_mixed(name, current)
             return self._algorithm("native:polygonstolines", {
                 "INPUT": current,
                 "OUTPUT": self._temp_path(name, "lines"),
@@ -1251,6 +1286,60 @@ class Pipeline:
             if candidate.exists():
                 return candidate
         return None
+
+    def _polygonstolines_mixed(self, name, current):
+        """Контуры полигонов и уже существующие линии в одном слое.
+
+        ``native:polygonstolines`` возвращает для линий пустые
+        геометрии, поэтому в смешанном слое пограничная линия way
+        пропадала рядом с полигонами relation.  Здесь контур полигона и
+        исходная линия пишутся в общий линейный слой.
+        """
+        from osgeo import ogr
+
+        source = ogr.Open(str(current))
+        if source is None:
+            raise PipelineError(f"Cannot open {current}")
+        layer = source.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        spatial_ref = layer.GetSpatialRef()
+        path = self._temp_path(name, "lines")
+        path.unlink(missing_ok=True)
+        writer = _GpkgWriter(
+            path, name, definition, spatial_ref,
+            geometry_type=ogr.wkbMultiLineString, cancel=self.cancel,
+        )
+        converted = 0
+        kept = 0
+        try:
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                parts = _line_parts(geometry)
+                if not parts:
+                    continue
+                multi = ogr.Geometry(ogr.wkbMultiLineString)
+                for part in parts:
+                    multi.AddGeometry(part)
+                writer.add(feature, multi)
+                if _is_polygonal(geometry):
+                    converted += 1
+                else:
+                    kept += 1
+            writer.close()
+        except Exception:
+            writer.close(commit=False)
+            raise
+        finally:
+            source = None
+        if not writer.count:
+            raise PipelineError(
+                "no objects left after converting polygons to lines"
+            )
+        self.progress(
+            f"{name}: полигонов преобразовано в линии: {converted}, "
+            f"линий сохранено: {kept}"
+        )
+        return writer.path
 
     def _lines_to_polygons(self, name, current, drop_others=False):
         """Замкнутые линии превращает в полигоны.
@@ -1464,6 +1553,28 @@ def _is_polygonal(geometry):
         and not geometry.IsEmpty()
         and geometry.GetGeometryName() in ("POLYGON", "MULTIPOLYGON")
     )
+
+
+def _line_parts(geometry):
+    """Линейные части геометрии; у полигонов — их границы."""
+    if geometry is None or geometry.IsEmpty():
+        return []
+    name = geometry.GetGeometryName()
+    if name in ("POLYGON", "MULTIPOLYGON"):
+        return _line_parts(geometry.Boundary())
+    if name == "LINESTRING":
+        return [geometry.Clone()]
+    if name == "MULTILINESTRING":
+        return [
+            geometry.GetGeometryRef(index).Clone()
+            for index in range(geometry.GetGeometryCount())
+        ]
+    if name == "GEOMETRYCOLLECTION":
+        parts = []
+        for index in range(geometry.GetGeometryCount()):
+            parts.extend(_line_parts(geometry.GetGeometryRef(index)))
+        return parts
+    return []
 
 
 def _polygon_from_geometry(geometry):

@@ -1,4 +1,4 @@
 (
-way["admin_level"="6"];
-relation["admin_level"="6"];
+way["admin_level"="6"][!"building"];
+relation["admin_level"="6"][!"building"];
 );
