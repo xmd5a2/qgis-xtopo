@@ -1456,8 +1456,8 @@ class OnewayArrowTest(unittest.TestCase):
         expected = {
             "motorway": "1.8",
             "tertiary": "1.5",
-            "residential": "1.2",
-            "service": "1.0",
+            "residential": "1.44",
+            "service": "1.5",
         }
         layer = self.layers["highway main"]
         for label, size in expected.items():

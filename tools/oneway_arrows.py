@@ -66,8 +66,8 @@ CLASS_SIZES = {
     "tertiary": 1.5,
     "tertiary link": 1.5,
     "tertiary_link": 1.5,
-    "residential": 1.2,
-    "service": 1.0,
+    "residential": 1.44,
+    "service": 1.5,
 }
 
 MARKER_PASS = 12
