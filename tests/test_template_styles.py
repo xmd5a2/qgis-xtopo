@@ -1037,6 +1037,13 @@ class TrackScaleTest(unittest.TestCase):
                     f"масштаб {scale_min}+ не зависит от level_of_detail",
                 )
 
+    def test_overview_skips_short_tracks(self):
+        """На 1:200 000+ короткие тропы не рисуются и не подписываются."""
+        rules = self.layer.find("renderer-v2").find("rules")
+        self.assertEqual(
+            rules.get("filter"),
+            "@map_scale <= 200000 OR $length > 70")
+
 
 class HighwayIntegrityFieldTest(unittest.TestCase):
     """Дорожный интегритет читается из данных, а не считается на кадре."""
