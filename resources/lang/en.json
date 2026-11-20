@@ -677,6 +677,7 @@
   "PBF: обработан файл {}/{}": "PBF: file {}/{} processed",
   "PBF: обработано {} объектов ({}%)": "PBF: processed {} objects ({}%)",
   "{}: сохранено {}": "{}: saved {}",
+  "{}: упаковано {} объектов": "{}: packed {} objects",
   "{}: замкнутых линий преобразовано в полигоны: {}": "{}: converted {} closed lines to polygons",
   "{}: полигонов преобразовано в линии: {}, линий сохранено: {}": "{}: converted {} polygons to lines, kept {} lines",
   "{}: линий подписи для {} объектов": "{}: label lines for {} objects",

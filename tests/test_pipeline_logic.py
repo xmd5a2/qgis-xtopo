@@ -18,7 +18,9 @@ from qgis_xtopo.core.pipeline import (
 from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
 )
-from qgis_xtopo.core import field_subset, highway_integrity, oneway
+from qgis_xtopo.core import (
+    field_subset, highway_integrity, oneway, road_packing,
+)
 from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
 from qgis_xtopo.core.resources import query_names
 
@@ -2533,6 +2535,337 @@ class OnewayTest(unittest.TestCase):
                 or "split_layer" in operations[:position],
                 f"{name}: oneway пишется до сохранения слоя",
             )
+
+
+class RoadPackingTest(unittest.TestCase):
+    """Упаковка дорог сохраняет направление и поля."""
+
+    FIELDS = (
+        ("highway", ogr.OFTString),
+        ("highway_integrity", ogr.OFTInteger),
+        ("name", ogr.OFTString),
+        ("name:de", ogr.OFTString),
+        ("ref", ogr.OFTString),
+        ("service", ogr.OFTString),
+        ("embankment", ogr.OFTString),
+        ("layer", ogr.OFTString),
+        ("oneway", ogr.OFTString),
+        ("surface", ogr.OFTString),
+    )
+
+    def _source(self, directory, rows, name="highway_main"):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(
+            name, srs, ogr.wkbLineString
+        )
+        for name, field_type in self.FIELDS:
+            layer.CreateField(ogr.FieldDefn(name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for name, _field_type in self.FIELDS:
+                value = row.get(name, "")
+                if value is not None:
+                    feature.SetField(name, value)
+            line = ogr.Geometry(ogr.wkbLineString)
+            for x, y in row["coords"]:
+                line.AddPoint_2D(x, y)
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    @staticmethod
+    def _features(directory, name="highway_main"):
+        dataset = ogr.Open(str(Path(directory) / f"{name}.sqlite"))
+        layer = dataset.GetLayer(0)
+        return dataset, layer, list(layer)
+
+    @staticmethod
+    def _points(geometry):
+        return [
+            (geometry.GetX(index), geometry.GetY(index))
+            for index in range(geometry.GetPointCount())
+        ]
+
+    def test_named_two_way_segments_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Main", "oneway": "",
+                    "coords": [(0, 0), (1, 0)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Main", "oneway": "",
+                    "coords": [(1, 0), (2, 0)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Main", "oneway": "",
+                    "coords": [(10, 0), (11, 0)],
+                },
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "highway_main"), 2
+            )
+            dataset, layer, features = self._features(directory)
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiLineString)
+            merged = [
+                feature for feature in features
+                if feature.GetGeometryRef().GetGeometryRef(0).GetPointCount() == 3
+            ]
+            self.assertEqual(len(merged), 1)
+            points = self._points(
+                merged[0].GetGeometryRef().GetGeometryRef(0)
+            )
+            self.assertEqual(points, [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)])
+            self.assertEqual(merged[0].GetField("name"), "Main")
+            self.assertEqual(merged[0].GetField("surface"), "")
+            dataset = None
+
+    def test_named_oneway_keeps_line_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Forward", "oneway": "yes",
+                    "coords": [(0, 0), (1, 0)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Forward", "oneway": "yes",
+                    "coords": [(1, 0), (2, 0)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Backtrack", "oneway": "yes",
+                    "coords": [(0, 1), (1, 1)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Backtrack", "oneway": "yes",
+                    "coords": [(1, 1), (0, 1)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Reverse", "oneway": "-1",
+                    "coords": [(0, 2), (1, 2)],
+                },
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "highway_main"), 4
+            )
+            dataset, _layer, features = self._features(directory)
+            forward = [
+                feature for feature in features
+                if feature.GetField("name") == "Forward"
+            ]
+            self.assertEqual(len(forward), 1)
+            points = self._points(
+                forward[0].GetGeometryRef().GetGeometryRef(0)
+            )
+            self.assertEqual(points, [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)])
+            backtrack = [
+                feature for feature in features
+                if feature.GetField("name") == "Backtrack"
+            ]
+            self.assertEqual(len(backtrack), 2)
+            reverse = [
+                feature for feature in features
+                if feature.GetField("name") == "Reverse"
+            ]
+            self.assertEqual(len(reverse), 1)
+            self.assertEqual(
+                self._points(reverse[0].GetGeometryRef().GetGeometryRef(0)),
+                [(0.0, 2.0), (1.0, 2.0)],
+            )
+            dataset = None
+
+    def test_unnamed_packing_groups_by_oneway_and_keeps_parts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "highway": "service", "highway_integrity": 10,
+                    "oneway": "", "coords": [(0, 0), (0.01, 0)],
+                },
+                {
+                    "highway": "service", "highway_integrity": 10,
+                    "oneway": "", "coords": [(0.01, 0.01), (0.02, 0.01)],
+                },
+                {
+                    "highway": "service", "highway_integrity": 10,
+                    "oneway": "yes", "coords": [(0, 0.02), (0.01, 0.02)],
+                },
+                {
+                    "highway": "service", "highway_integrity": 10,
+                    "oneway": "yes", "coords": [(0.02, 0.02), (0.01, 0.02)],
+                },
+                {
+                    "highway": "service", "highway_integrity": 10,
+                    "oneway": "-1", "coords": [(0.01, 0.03), (0.02, 0.03)],
+                },
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "highway_main"), 3
+            )
+            dataset, _layer, features = self._features(directory)
+            two_way = [
+                feature for feature in features
+                if feature.GetField("oneway") == ""
+            ]
+            self.assertEqual(len(two_way), 1)
+            geometry = two_way[0].GetGeometryRef()
+            self.assertEqual(geometry.GetGeometryCount(), 2)
+            first = self._points(geometry.GetGeometryRef(0))
+            self.assertEqual(first, [(0.0, 0.0), (0.01, 0.0)])
+            yes = [
+                feature for feature in features
+                if feature.GetField("oneway") == "yes"
+            ]
+            reverse = [
+                feature for feature in features
+                if feature.GetField("oneway") == "-1"
+            ]
+            self.assertEqual(len(yes), 1)
+            self.assertEqual(len(reverse), 1)
+            yes_geometry = yes[0].GetGeometryRef()
+            self.assertEqual(yes_geometry.GetGeometryCount(), 2)
+            self.assertEqual(
+                self._points(yes_geometry.GetGeometryRef(0)),
+                [(0.0, 0.02), (0.01, 0.02)],
+            )
+            self.assertEqual(
+                self._points(yes_geometry.GetGeometryRef(1)),
+                [(0.02, 0.02), (0.01, 0.02)],
+            )
+            self.assertEqual(
+                self._points(reverse[0].GetGeometryRef().GetGeometryRef(0)),
+                [(0.01, 0.03), (0.02, 0.03)],
+            )
+            dataset = None
+
+    def test_name_variant_without_name_is_named(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "", "name:de": "Nur Deutsch", "oneway": "",
+                    "coords": [(0, 0), (1, 0)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "", "name:de": "", "oneway": "",
+                    "coords": [(0, 0.01), (1, 0.01)],
+                },
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "highway_main"), 2
+            )
+            dataset, _layer, features = self._features(directory)
+            named = [
+                feature for feature in features
+                if feature.GetField("name:de") == "Nur Deutsch"
+            ]
+            self.assertEqual(len(named), 1)
+            self.assertEqual(named[0].GetField("name"), "")
+            unnamed = [
+                feature for feature in features
+                if not feature.GetField("name:de")
+            ]
+            self.assertEqual(len(unnamed), 1)
+            dataset = None
+
+    def test_path_and_track_ignore_integrity_and_oneway(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "highway": "path", "highway_integrity": 10,
+                    "name": "Trail", "oneway": "yes",
+                    "coords": [(0, 0), (1, 0)],
+                },
+                {
+                    "highway": "path", "highway_integrity": 20,
+                    "name": "Trail", "oneway": "-1",
+                    "coords": [(1, 0), (2, 0)],
+                },
+            ], name="path")
+            self.assertEqual(road_packing.pack(directory, "path"), 1)
+            dataset, _layer, features = self._features(directory, "path")
+            self.assertEqual(len(features), 1)
+            self.assertEqual(
+                self._points(features[0].GetGeometryRef().GetGeometryRef(0)),
+                [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)],
+            )
+            dataset = None
+
+            self._source(directory, [
+                {
+                    "highway": "track", "highway_integrity": 10,
+                    "name": "", "oneway": "yes",
+                    "coords": [(0, 1), (1, 1)],
+                },
+                {
+                    "highway": "track", "highway_integrity": 20,
+                    "name": "", "oneway": "-1",
+                    "coords": [(0, 1.01), (1, 1.01)],
+                },
+            ], name="track")
+            self.assertEqual(road_packing.pack(directory, "track"), 1)
+            dataset, _layer, features = self._features(directory, "track")
+            self.assertEqual(len(features), 1)
+            self.assertEqual(
+                features[0].GetGeometryRef().GetGeometryCount(), 2
+            )
+            dataset = None
+
+    def test_pack_is_idempotent_and_keeps_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._source(directory, [
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Main", "oneway": "yes",
+                    "coords": [(0, 0), (1, 0)],
+                },
+                {
+                    "highway": "residential", "highway_integrity": 10,
+                    "name": "Main", "oneway": "yes",
+                    "coords": [(1, 0), (2, 0)],
+                },
+            ])
+            first = road_packing.pack(directory, "highway_main")
+            second = road_packing.pack(directory, "highway_main")
+            self.assertEqual(first, second)
+            connection = sqlite3.connect(
+                str(Path(directory) / "highway_main.sqlite")
+            )
+            indexes = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'idx_%'"
+            ).fetchall()
+            connection.close()
+            self.assertTrue(indexes)
+
+    def test_recipes_pack_roads_after_preparation(self):
+        for name in ("highway_main", "path", "track"):
+            operations = [
+                operation for operation, _parameters
+                in recipe_for(name).steps
+            ]
+            self.assertIn("pack_roads", operations, name)
+            self.assertGreater(
+                operations.index("pack_roads"), 0, name
+            )
+        operations = [
+            operation for operation, _parameters
+            in recipe_for("highway_main").steps
+        ]
+        self.assertLess(
+            operations.index("oneway"), operations.index("pack_roads")
+        )
 
 
 class AreaFieldTest(unittest.TestCase):

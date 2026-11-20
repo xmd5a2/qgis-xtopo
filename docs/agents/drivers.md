@@ -45,6 +45,15 @@
   убрано. Дополнительно после `dissolve`/`singleparts` в рецептах `water`/
   `water_intermittent` стоит `fix()`, а сырые полигоны `bare_rock`/`scree`
   чинятся в начале рецепта.
+- **Упакованные дороги — MultiLineString.** После шага `pack_roads`
+  таблицы `highway_main.sqlite`, `path.sqlite` и `track.sqlite`
+  содержат и одиночные линии, и мультилинии, но SQLite объявляет слой
+  как `MultiLineString`. Семь слоёв шаблона, читающие эти файлы, должны
+  иметь `wkbType="MultiLineString"` и `geometrytype=MultiLineString` в
+  datasource; иначе QGIS может не нарисовать слой. Правку вносит
+  `tools/road_multiline.py`. Разбиения `highway_main_layer_1/_layer_-1`,
+  `highway_main_tunnel`, `path bridge` и `track bridge` не пакуются и
+  остаются `LineString`.
 - **`fix()` стоит там, где битая геометрия роняет операцию**: слои,
   которые идут накладкой (`island`, `place_locality_way`), и результаты
   `dissolve`/`linestopolygons` (`allotments`, `military`,

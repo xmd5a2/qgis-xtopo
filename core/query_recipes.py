@@ -92,6 +92,11 @@ def store_oneway():
     return step("oneway")
 
 
+def pack_roads():
+    """Сливает именованные дороги и пакует безымянные по тайлам."""
+    return step("pack_roads")
+
+
 def linestopolygons(drop_others=False):
     return step("linestopolygons", drop_others=drop_others)
 
@@ -176,7 +181,7 @@ RECIPES = {
     ]),
     "highway_main": Recipe([
         split_layer(fields="highway_main"), store_highway_integrity(),
-        store_oneway(),
+        store_oneway(), pack_roads(),
     ]),
     "highway_main_tunnel": Recipe([
         save(), store_highway_integrity(), store_oneway(),
@@ -185,10 +190,10 @@ RECIPES = {
         save(), store_highway_integrity(),
     ]),
     "track": Recipe([
-        save(fields="track"), store_highway_integrity(),
+        save(fields="track"), store_highway_integrity(), pack_roads(),
     ]),
     "path": Recipe([
-        save(fields="path"),
+        save(fields="path"), pack_roads(),
     ]),
     "places_main": Recipe([
         save(fields="places_main"),

@@ -1278,6 +1278,54 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertEqual(building.get("minScale"), "120877")
 
 
+class HighwayMultiLineTest(unittest.TestCase):
+    """Слои, читающие упакованные дороги, объявлены мультилинией."""
+
+    PACKED = (
+        "highway main",
+        "highway main overview",
+        "[blocking] highway main",
+        "[blocking] highway main overview",
+        "path",
+        "track",
+        "[blocking] track",
+    )
+    PLAIN = (
+        "highway main layer >=1",
+        "highway main layer <=-1",
+        "highway main tunnel",
+        "path bridge",
+        "track bridge",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def test_packed_layers_are_multiline(self):
+        for name in self.PACKED:
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            self.assertEqual(layer.get("wkbType"), "MultiLineString", name)
+            self.assertIn(
+                "geometrytype=MultiLineString",
+                layer.findtext("datasource") or "", name,
+            )
+
+    def test_split_layers_stay_linestring(self):
+        for name in self.PLAIN:
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            self.assertEqual(layer.get("wkbType"), "LineString", name)
+            self.assertIn(
+                "geometrytype=LineString",
+                layer.findtext("datasource") or "", name,
+            )
+
+
 class OnewayArrowTest(unittest.TestCase):
     """Стрелки oneway только у крупных масштабов и по классу дороги."""
 

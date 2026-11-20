@@ -9,7 +9,8 @@ from pathlib import Path
 from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
-    peak_filter, poi_icons, polygon_overlaps, project, sources, terrain,
+    peak_filter, poi_icons, polygon_overlaps, project, road_packing, sources,
+    terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -1221,6 +1222,15 @@ class Pipeline:
                 self.warnings.append(
                     f"{name}: oneway не нормализован в данных"
                 )
+            return current
+        if operation == "pack_roads":
+            packed = road_packing.pack(
+                self.config.vector_dir, name, cancel=self.cancel
+            )
+            if packed:
+                self.progress(f"{name}: упаковано {packed} объектов")
+            else:
+                self.warnings.append(f"{name}: дороги не упакованы")
             return current
         raise PipelineError(f"Unknown pipeline operation: {operation}")
 
