@@ -81,7 +81,7 @@
 
 ```sh
 ./installer/install-and-run.sh                 # последняя сборка из dist/
-./installer/install-and-run.sh dist/qgis_xtopo-0.13.85.zip
+./installer/install-and-run.sh dist/qgis_xtopo-0.13.86.zip
 ```
 
 Корень репозитория одновременно является корнем плагина: при установке
