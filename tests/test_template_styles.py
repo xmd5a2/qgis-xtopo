@@ -1619,10 +1619,17 @@ class PoiSuppressionTest(unittest.TestCase):
     def test_service_layers_are_not_poi_layers(self):
         names = [layer.name for layer in self.layers]
         self.assertFalse([name for name in names if name.startswith("poi icons")])
-        self.assertEqual(
-            [layer.rank for layer in self.layers],
-            list(range(1, len(self.layers) + 1)),
-        )
+        ranks = [layer.rank for layer in self.layers]
+        # Ранг — место слоя в дереве проекта, поэтому между соседними
+        # POI могут стоять другие слои и номера идут с пропусками.
+        self.assertEqual(ranks, sorted(ranks))
+        self.assertEqual(len(set(ranks)), len(ranks))
+
+    def test_places_main_is_below_peaks_and_volcanoes(self):
+        """Пока оставляем places main ниже пиков и вулканов."""
+        ranks = {layer.name: layer.rank for layer in self.layers}
+        for name in ("peak", "volcano", "volcano dirt"):
+            self.assertGreater(ranks["places main"], ranks[name], name)
 
     def test_all_icon_layers_use_one_crs(self):
         """Все слои со значками — в EPSG:4326.
@@ -1796,14 +1803,14 @@ class PoiPruneTest(unittest.TestCase):
         self.assertNotIn(low, kept)
 
     def test_obstacle_suppresses_nearby_point(self):
-        bridge = self._point(6.9, 46.05, rank=0.02)
+        bridge = self._point(6.9, 46.05, rank=3)
         shelter = self._point(6.9002, 46.05, rank=8)
         kept = self._kept([bridge, shelter])
         self.assertIn(bridge, kept)
         self.assertNotIn(shelter, kept)
 
     def test_obstacle_without_points_is_dropped(self):
-        bridge = self._point(6.9, 46.05, rank=0.02)
+        bridge = self._point(6.9, 46.05, rank=3)
         far = self._point(6.94, 46.05, rank=8)
         self.assertEqual(self._kept([bridge, far]), [])
 
@@ -1821,7 +1828,8 @@ class PoiSuppressionDataTest(unittest.TestCase):
     # размером значка и этой границей.
     BANDS = [(0.0, 20000.0)]
 
-    def _point(self, lon, lat, rank, fid, band=0, lod=2, name="peak"):
+    def _point(self, lon, lat, rank, fid, band=0, lod=2, name="peak",
+               geometry="Point"):
         from qgis_xtopo.core.poi_icons import _Point
 
         return _Point(
@@ -1830,6 +1838,7 @@ class PoiSuppressionDataTest(unittest.TestCase):
             lat=lat,
             name=name,
             fid=fid,
+            geometry=geometry,
             bands={band: lod},
             sizes={band: 2.0},
         )
@@ -1858,6 +1867,35 @@ class PoiSuppressionDataTest(unittest.TestCase):
         distances = self._distances([top, low])
         self.assertNotIn(("volcano", 1), distances)
         self.assertIn(("peak", 2), distances)
+
+    def test_lower_obstacle_does_not_suppress_point(self):
+        """Мост ниже слоя POI не скрывает его значок."""
+        bridge = self._point(
+            6.9, 46.05, 159, 1,
+            name="highway main bridge", geometry="Line",
+        )
+        settlement = self._point(
+            6.9005, 46.05, 5, 2, name="places main",
+        )
+        distances = self._distances([bridge, settlement])
+        self.assertNotIn(("places main", 2), distances)
+
+    def test_higher_obstacle_still_suppresses_point(self):
+        """Препятствие выше слоя POI по-прежнему его вытесняет."""
+        bridge = self._point(
+            6.9, 46.05, 3, 1,
+            name="highway main bridge", geometry="Line",
+        )
+        poi = self._point(6.9005, 46.05, 8, 2, name="peak")
+        distances = self._distances([bridge, poi])
+        self.assertIn(("peak", 2), distances)
+
+    def test_another_settlement_still_suppresses_city(self):
+        """Более важный населённый пункт город по-прежнему вытесняет."""
+        city = self._point(6.9, 46.05, 5.0, 1, name="places main")
+        town = self._point(6.9005, 46.05, 5.1, 2, name="places main")
+        distances = self._distances([city, town])
+        self.assertIn(("places main", 2), distances)
 
     def test_level_of_detail_hides_late_candidate(self):
         """Подавитель, видимый только на высоком уровне, не мешает.
@@ -2003,12 +2041,17 @@ class PoiObstacleTest(unittest.TestCase):
     def test_bridge_and_cemetery_layers(self):
         obstacles = poi_icons.read_template_obstacles()
         by_name = {layer.name: layer for layer in obstacles}
+        poi_ranks = {
+            layer.name: layer.rank
+            for layer in poi_icons.read_template_poi()
+        }
         for name in ("highway main bridge", "path bridge",
                      "railway bridge", "track bridge", "cemetery"):
             self.assertIn(name, by_name)
             layer = by_name[name]
-            # Выше любого POI (у них ранги с 1) и уникальны.
-            self.assertLess(layer.rank, 1.0)
+            # Ранг — место слоя в дереве проекта, а не «выше любого POI».
+            self.assertGreater(layer.rank, 0.0)
+            self.assertGreater(layer.rank, poi_ranks["places main"])
             self.assertGreater(layer.icon_size, 0.0)
             self.assertEqual(layer.crs, "EPSG:4326")
         self.assertEqual(by_name["cemetery"].geometry, "Polygon")
@@ -2489,8 +2532,9 @@ class PoiSuppressionExpressionTest(unittest.TestCase):
         return result
 
     def test_same_layer_tie_break_prefers_western_icon(self):
+        rank = int(self.layer.rank)
         visible = self._visible(
-            [(6.9000, 46.05, 6), (6.9001, 46.05, 6)],
+            [(6.9000, 46.05, rank), (6.9001, 46.05, rank)],
             [(6.9000, 46.05, "west"), (6.9001, 46.05, "east")],
         )
         self.assertTrue(visible["west"])
@@ -2506,7 +2550,7 @@ class PoiSuppressionExpressionTest(unittest.TestCase):
 
     def test_lonely_icon_stays_visible(self):
         visible = self._visible(
-            [(6.9000, 46.05, 6)],
+            [(6.9000, 46.05, int(self.layer.rank))],
             [(6.9200, 46.05, "far")],
         )
         self.assertTrue(visible["far"])

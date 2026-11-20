@@ -40,9 +40,10 @@ QGIS не разводит значки разных слоёв: кластер�
 В служебный слой попадают и значки, нарисованные на объектах линий и
 полигонов: MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).
 Фильтр правила скрыл бы весь объект вместе со значком, поэтому такие
-значки не вытесняются сами, а участвуют как препятствия с рангом выше
-любого POI.  На объект нужна одна точка — центр линии или площадки,
-так что ни подготовка, ни отрисовка не замедляются.
+значки не вытесняются сами, а участвуют как препятствия.  Их ранг —
+место слоя в дереве проекта, как у точечных POI.  На объект нужна одна
+точка — центр линии или площадки, так что ни подготовка, ни отрисовка
+не замедляются.
 """
 
 import heapq
@@ -91,10 +92,6 @@ _NEIGHBOUR_OFFSETS = tuple(
 # Ранг, который никого не подавляет: подставляется в подвыражении для
 # точек, скрытых текущим уровнем детализации.
 NEVER_RANK = 99999
-
-# Ранг значка-препятствия на линии/полигоне. Меньше 1 — выше любого POI;
-# шаг делает ранги уникальными для _prune_band.
-OBSTACLE_RANK_STEP = 0.01
 
 # Слои, у которых значок вытесняется соседом того же слоя через поле
 # icon_hide: мосты (значок в середине линии) и кладбища (значок в
@@ -501,9 +498,14 @@ def read_template_poi(path=None):
             maximum=maximum,
             labels=_label_rules(element),
         ))
-    layers.sort(key=lambda item: order.index(item.name) if item.name in order else 10**6)
+    positions = {
+        name: index for index, name in enumerate(order, start=1)
+    }
+    layers.sort(key=lambda item: positions.get(item.name, 10**6))
     for index, item in enumerate(layers, start=1):
-        item.rank = index
+        # Ранг — место слоя в дереве проекта: приоритет задаёт порядок
+        # слоёв, а не отдельная нумерация только среди POI.
+        item.rank = positions.get(item.name, 10**6 + index)
     return layers
 
 
@@ -592,9 +594,10 @@ def read_template_obstacles(path=None):
     фильтр правила действует на объект целиком, и вместе со значком
     пропала бы вся линия или полигон.  Поэтому такие значки не
     вытесняются сами, а участвуют как препятствия: центр линии или
-    площадки добавляется в служебный слой с рангом выше любого POI, и
-    обычные значки рядом с ними скрываются.  На объект нужна одна
-    точка, поэтому это не замедляет ни подготовку, ни отрисовку.
+    площадки добавляется в служебный слой с рангом по месту слоя в
+    дереве проекта, и обычные значки ниже него скрываются.  На объект
+    нужна одна точка, поэтому это не замедляет ни подготовку, ни
+    отрисовку.
     """
     root = _template_root(path)
 
@@ -641,10 +644,18 @@ def read_template_obstacles(path=None):
             maximum=maximum,
             geometry=kind,
         ))
-    # Ранг меньше 1: препятствие вытесняет любой POI, но остаются
-    # уникальными, чтобы _prune_band не путал их с точками того же слоя.
+    # Приоритет — место слоя в дереве проекта, как у точечных POI:
+    # мост, стоящий ниже населённого пункта, не должен его скрывать.
+    order = [
+        element.get("name")
+        for element in root.find("layer-tree-group").iter()
+        if element.tag == "layer-tree-layer" and element.get("name")
+    ]
+    positions = {
+        name: index for index, name in enumerate(order, start=1)
+    }
     for index, layer in enumerate(obstacles, start=1):
-        layer.rank = index * OBSTACLE_RANK_STEP
+        layer.rank = positions.get(layer.name, 10**6 + index)
     return obstacles
 
 
