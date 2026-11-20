@@ -1155,7 +1155,7 @@ class BasemapLabelInversionTest(unittest.TestCase):
 
 
 class BasemapSymbolInversionTest(unittest.TestCase):
-    """Инверсия символов: дороги, скалы, ЛЭП, подъёмники и значки."""
+    """Инверсия символов: дороги, скалы, ЛЭП, подъёмники, железные дороги."""
 
     TEMPLATE_LAYERS = (
         ("track", "LineString"),
@@ -1164,6 +1164,9 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         ("power line", "LineString"),
         ("power minor line", "LineString"),
         ("aerialway cable car, gondola", "LineString"),
+        ("railway all", "LineString"),
+        ("rail tunnel", "LineString"),
+        ("railway bridge", "LineString"),
         ("alpine hut", "Point"),
         ("places main", "Point"),
         ("admin level 2 (country borders)", "LineString"),
@@ -1321,6 +1324,22 @@ class BasemapSymbolInversionTest(unittest.TestCase):
         self.assertNotIn(QColor("#000000"), colors.values())
         self.basemap.restore_symbols(self.project)
         self.assertEqual(self._line_colors(layer), before)
+
+    def test_railways_are_white(self):
+        from qgis.PyQt.QtGui import QColor
+
+        expected = QColor(self.basemap.RAIL_COLOR)
+        for name in ("railway all", "rail tunnel", "railway bridge"):
+            layer = self.layers[name]
+            before = self._line_colors(layer)
+            self.assertTrue(before, name)
+            self.basemap.invert_symbols(self.project)
+            self.assertTrue(
+                all(color == expected for color in self._line_colors(layer)),
+                name,
+            )
+            self.basemap.restore_symbols(self.project)
+            self.assertEqual(self._line_colors(layer), before, name)
 
     def test_black_icons_get_white_outline(self):
         from qgis.core import (
