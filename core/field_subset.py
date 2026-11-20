@@ -7,6 +7,8 @@
 
 Названия (`name`, `name:en`, все `name:*`) и подписи (`ref`, `alt_name`,
 …) сохраняются целиком: от них зависит переключение языка карты.
+`@id` (`way/333333`) остаётся у каждого объекта: это идентификатор
+исходного объекта OSM.
 """
 
 # Подписи используют эти поля напрямую.
@@ -65,6 +67,7 @@ def select(preset, available):
     return [
         name for name in available
         if name in exact
+        or name == "@id"
         or name in LABEL_FIELDS
         or name.lower().startswith("name")
     ]

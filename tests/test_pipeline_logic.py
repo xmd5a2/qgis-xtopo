@@ -2149,11 +2149,11 @@ class FieldSubsetTest(unittest.TestCase):
 
     def test_select_keeps_labels_and_style_fields(self):
         available = [
-            "ogc_fid", "name", "name:en", "name:zh", "alt_name", "ref",
-            "addr:street", "building", "amenity", "height",
+            "ogc_fid", "@id", "name", "name:en", "name:zh", "alt_name",
+            "ref", "addr:street", "building", "amenity", "height",
         ]
         selected = field_subset.select("building", available)
-        for field in ("name", "name:en", "name:zh", "alt_name", "ref",
+        for field in ("@id", "name", "name:en", "name:zh", "alt_name", "ref",
                       "building", "amenity"):
             self.assertIn(field, selected)
         for field in ("ogc_fid", "addr:street", "height"):
@@ -2212,8 +2212,8 @@ class FieldSubsetTest(unittest.TestCase):
                 "features": [{
                     "type": "Feature",
                     "properties": {
-                        "name": "x", "addr:street": "y",
-                        "building": "yes", "height": 3,
+                        "@id": "way/333333", "name": "x",
+                        "addr:street": "y", "building": "yes", "height": 3,
                     },
                     "geometry": {
                         "type": "Polygon",
@@ -2232,7 +2232,7 @@ class FieldSubsetTest(unittest.TestCase):
                     layer.GetLayerDefn().GetFieldDefn(index).GetName()
                     for index in range(layer.GetLayerDefn().GetFieldCount())
                 }
-                self.assertEqual(names, {"name", "building"})
+                self.assertEqual(names, {"@id", "name", "building"})
             finally:
                 dataset = None
 
