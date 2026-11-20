@@ -2192,6 +2192,41 @@ class ContourTilingTest(unittest.TestCase):
             self.assertEqual(levels, reference_levels)
             self.assertAlmostEqual(length, reference_length, places=6)
 
+    def test_generate_isolines_merges_parallel_tiles(self):
+        """Полный проход с нарезкой склеивает слои тайлов, а не числа."""
+        from unittest import mock
+
+        from osgeo import ogr
+
+        from qgis_xtopo.core import terrain
+        from qgis_xtopo.core.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="tiles"
+            )
+            config.ensure_directories()
+            config.isolines_step = 50
+            shutil.copy2(
+                self.source, config.raster_dir / "merged_dem.tif"
+            )
+            # Малый DEM принудительно режется на 4 тайла: проверяется
+            # именно ветка склейки результатов.
+            with mock.patch.object(
+                terrain, "_contour_tile_side", return_value=2
+            ):
+                terrain.generate_isolines(
+                    config, BBox(0.0, 0.0, 0.6, 0.6)
+                )
+            dataset = ogr.Open(
+                str(config.vector_dir / "isolines_regular.sqlite")
+            )
+            self.assertIsNotNone(dataset)
+            try:
+                self.assertGreater(dataset.GetLayer(0).GetFeatureCount(), 0)
+            finally:
+                dataset = None
+
     def test_tile_simplification_reduces_vertices(self):
         """Упрощение в тайле уменьшает вершины, не теряя уровни."""
         from osgeo import gdal

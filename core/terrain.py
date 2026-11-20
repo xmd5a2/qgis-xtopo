@@ -2129,7 +2129,7 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
             }
             done = 0
             for future in as_completed(futures):
-                result = future.result()[1]
+                result, _count = future.result()
                 # Тайл склеивается сразу: держать все результаты в
                 # памяти до конца расчёта нельзя.
                 written = _merge_contour_tile(layer, result, written)
