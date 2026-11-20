@@ -1426,7 +1426,7 @@ class OnewayArrowTest(unittest.TestCase):
         self.assertEqual(
             _option_value(inner, "name"), "../icons/oneway_arrow.svg")
         self.assertIn("0,0,0", _option_value(inner, "color"))
-        self.assertEqual(_option_value(inner, "size"), "3.6")
+        self.assertEqual(_option_value(inner, "size"), "1.8")
         enabled = _option_value(
             _find_option(
                 inner.find("data_defined_properties"), "enabled"
@@ -1443,13 +1443,21 @@ class OnewayArrowTest(unittest.TestCase):
         self.assertIn('"oneway"', angle)
         self.assertIn("'-1'", angle)
         self.assertIn("0, 180", angle)
+        phase = _option_value(
+            _find_option(
+                marker.find("data_defined_properties"),
+                "offsetAlongLine",
+            ), "expression",
+        )
+        self.assertIn("$id", phase)
+        self.assertIn("% 17", phase)
 
     def test_arrow_size_follows_class_width(self):
         expected = {
-            "motorway": "3.6",
-            "tertiary": "3.0",
-            "residential": "2.4",
-            "service": "2.0",
+            "motorway": "1.8",
+            "tertiary": "1.5",
+            "residential": "1.2",
+            "service": "1.0",
         }
         layer = self.layers["highway main"]
         for label, size in expected.items():

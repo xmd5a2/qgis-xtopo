@@ -8,7 +8,9 @@
 
 Для `oneway=-1` стрелка разворачивается data-defined углом; сама
 геометрия дороги не меняется.  Размер стрелки зависит от класса дороги:
-толщина остаётся в пределах внешней обводки полосы.
+толщина остаётся в пределах внешней обводки полосы.  Начало отсчёта
+стрелок сдвигается по `$id`, поэтому на параллельных встречных дорогах
+треугольники не оказываются в одной точке и не пересекаются.
 
 Скрипт правит `automap.qgz` и идемпотентен: повторный запуск ничего не
 меняет.  Готовые проекты не чинятся, они готовятся заново.
@@ -55,22 +57,26 @@ CLASS_THRESHOLDS = {
 }
 
 CLASS_SIZES = {
-    "motorway": 3.6,
-    "trunk": 3.6,
-    "primary": 3.6,
-    "primary link": 3.6,
-    "primary_link": 3.6,
-    "secondary": 3.6,
-    "tertiary": 3.0,
-    "tertiary link": 3.0,
-    "tertiary_link": 3.0,
-    "residential": 2.4,
-    "service": 2.0,
+    "motorway": 1.8,
+    "trunk": 1.8,
+    "primary": 1.8,
+    "primary link": 1.8,
+    "primary_link": 1.8,
+    "secondary": 1.8,
+    "tertiary": 1.5,
+    "tertiary link": 1.5,
+    "tertiary_link": 1.5,
+    "residential": 1.2,
+    "service": 1.0,
 }
 
 MARKER_PASS = 12
 MARKER_INTERVAL_MM = 20
 MARKER_OFFSET_MM = 10
+# Детерминированная фаза вдоль линии: 2–18 мм вместо постоянных 10 мм.
+# Соседние встречные дороги получают разное положение стрелок, поэтому
+# треугольники не накладываются друг на друга.
+MARKER_PHASE = "10 + (($id * 7) % 17 - 8)"
 
 _SYMBOL_OPEN = re.compile(r"<symbol\b")
 _SYMBOL_CLOSE = re.compile(r"</symbol>")
@@ -180,7 +186,13 @@ def _marker_xml(layer_name, symbol_name, size):
   <data_defined_properties>
     <Option type="Map">
       <Option name="name" value="" type="QString"/>
-      <Option name="properties"/>
+      <Option name="properties" type="Map">
+        <Option name="offsetAlongLine" type="Map">
+          <Option name="active" value="true" type="bool"/>
+          <Option name="expression" value="{phase}" type="QString"/>
+          <Option name="type" value="3" type="int"/>
+        </Option>
+      </Option>
       <Option name="type" value="collection" type="QString"/>
     </Option>
   </data_defined_properties>
@@ -239,6 +251,7 @@ def _marker_xml(layer_name, symbol_name, size):
         marker_uuid=uuid.uuid5(uuid.NAMESPACE_URL, seed + "/marker"),
         interval=MARKER_INTERVAL_MM,
         offset=MARKER_OFFSET_MM,
+        phase=escape(MARKER_PHASE),
         size=size,
         visibility=escape(
             "coalesce(try(\"oneway\", ''), '') IN ('yes', '-1')"
