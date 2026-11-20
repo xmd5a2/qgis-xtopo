@@ -14,6 +14,14 @@ class CoastlineError(RuntimeError):
     pass
 
 
+# Полоса по водную сторону берега: положительный буфер задаёт её ширину,
+# отрицательный убирает кромку у самой линии. Сужение должно быть заметно
+# меньше половины ширины: при равенстве полоса вырождается в линию,
+# pointonsurface даёт единичные точки у концов, и океан не находится.
+SIDE_BUFFER_WIDTH = 0.0002
+SIDE_BUFFER_INSET = 0.3 * SIDE_BUFFER_WIDTH
+
+
 def _line_geometries(geometry):
     if geometry is None or geometry.IsEmpty():
         return []
@@ -190,7 +198,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         })
         one_side = _run(runner, "native:singlesidedbuffer", {
             "INPUT": open_simplified,
-            "DISTANCE": 0.0002,
+            "DISTANCE": SIDE_BUFFER_WIDTH,
             "SIDE": 1,
             "SEGMENTS": 5,
             "JOIN_STYLE": 0,
@@ -199,7 +207,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         })
         thin = _run(runner, "native:buffer", {
             "INPUT": one_side,
-            "DISTANCE": -0.0001,
+            "DISTANCE": -SIDE_BUFFER_INSET,
             "SEGMENTS": 5,
             "END_CAP_STYLE": 0,
             "JOIN_STYLE": 0,

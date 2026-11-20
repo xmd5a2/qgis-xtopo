@@ -955,13 +955,14 @@ class PolygonToLinesFallbackTest(unittest.TestCase):
 
 
 class CoastlineIntermediateTest(unittest.TestCase):
-    """Части охвата и вершины нужны с пространственным индексом."""
+    """Промежуточные слои береговой линии и полоса поиска океана."""
 
-    def test_split_and_vertices_are_geopackages(self):
+    def _recorded(self):
         from unittest import mock
 
         from qgis_xtopo.core import coastline, pipeline
 
+        recorded = {}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             vector_dir = base / "vector"
@@ -976,7 +977,6 @@ class CoastlineIntermediateTest(unittest.TestCase):
                 temp_dir=temp_dir,
                 crop_path=crop,
             )
-            recorded = {}
 
             class FakeRunner:
                 def __init__(self, *args, **kwargs):
@@ -994,11 +994,23 @@ class CoastlineIntermediateTest(unittest.TestCase):
                     ), \
                     mock.patch.object(coastline, "_has_features", return_value=True):
                 self.assertTrue(coastline.prepare_coastline(config, None))
+        return recorded
 
+    def test_split_and_vertices_are_geopackages(self):
+        recorded = self._recorded()
         for algorithm in ("native:splitwithlines", "native:pointonsurface"):
             self.assertEqual(
                 Path(recorded[algorithm]["OUTPUT"]).suffix, ".gpkg", algorithm
             )
+
+    def test_side_buffer_keeps_a_strip_along_the_coast(self):
+        """Сужение меньше половины ширины, иначе полоса вырождается."""
+        recorded = self._recorded()
+        width = recorded["native:singlesidedbuffer"]["DISTANCE"]
+        inset = recorded["native:buffer"]["DISTANCE"]
+        self.assertGreater(width, 0)
+        self.assertGreater(inset + width / 2, 0)
+        self.assertGreater(width + 2 * inset, width * 0.1)
 
 
 class EmptySourceOutputsTest(unittest.TestCase):
