@@ -311,6 +311,7 @@
   "Overpass доступен: {}": "Overpass is reachable: {}",
   "Overpass недоступен: {}: {}": "Overpass is unreachable: {}: {}",
   "WARNING: не удалось разделить ответ Overpass: {}": "WARNING: could not split the Overpass response: {}",
+  "WARNING: тайл рельефа {} имеет неожиданный размер": "WARNING: DEM tile {} has an unexpected size",
   "Все ответы Overpass уже в кэше, проверка сервера не требуется": "All Overpass responses are cached; no server check is needed",
   "Карта Geofabrik не найдена в индексе: {}": "Geofabrik map not found in the index: {}",
   "Ни один Overpass-сервер не прошёл тестовый запрос. ": "No Overpass server passed the test request. ",

@@ -38,13 +38,6 @@ def _grid():
         return None
 
 
-def grid_path():
-    """Путь к встроенной сетке высот."""
-    from .resources import resource_path
-
-    return Path(resource_path(*GRID_PARTS))
-
-
 def tile_relief(lat, lon, grid=None):
     """Перепад высот в тайле 1°×1°; None для океанского тайла."""
     grid = grid if grid is not None else _grid()

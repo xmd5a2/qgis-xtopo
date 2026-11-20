@@ -84,8 +84,8 @@ class TerrainCacheTest(unittest.TestCase):
         """Крупные растры возвращаются ссылкой: копия гигабайтов стоит
         больше 20 секунд.
 
-        Файл, который переживает очистку каталога проекта, копируется:
-        ссылка с ним пережила бы перезапись на месте.
+        Перед записью terrain.py удаляет прежний файл, поэтому ссылка
+        не даёт перезаписать кэш на месте.
         """
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(directory)
@@ -102,11 +102,7 @@ class TerrainCacheTest(unittest.TestCase):
                 restored = config.raster_dir / name
                 self.assertTrue(restored.exists(), name)
                 self.assertEqual(restored.read_bytes(), b"raster", name)
-                if name in terrain_cache.COPY_ONLY_FILES:
-                    self.assertFalse(
-                        os.path.samefile(restored, cache_dir / name), name,
-                    )
-                elif _links_supported(directory):
+                if _links_supported(directory):
                     self.assertTrue(
                         os.path.samefile(restored, cache_dir / name), name,
                     )
@@ -206,11 +202,6 @@ class TerrainCacheTest(unittest.TestCase):
                 (config.raster_dir / name).unlink()
             self.assertTrue(terrain_cache.restore_dem(config, key))
             self.assertGreater(entry.stat().st_mtime_ns, stale)
-
-    def test_plugin_version_is_read(self):
-        version = terrain_cache.plugin_version()
-        self.assertRegex(version, r"^\d+\.\d+")
-
 
 class SourceTimingTest(unittest.TestCase):
     def test_download_is_counted_separately(self):

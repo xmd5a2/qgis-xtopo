@@ -2,7 +2,7 @@
 
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
-    QSpinBox, QVBoxLayout, QWidget,
+    QSpinBox, QVBoxLayout,
 )
 
 from ..core import i18n, proxy

@@ -8,7 +8,6 @@ from pathlib import Path
 
 from .bbox import parse_bbox
 from . import dem_sources, text_size
-from .area_field import ensure_area_fields
 from .map_language import DETAIL_VARIABLE
 from .resources import resource_path, template_path
 
@@ -196,9 +195,6 @@ def prepare_project(config):
         Path(resource_path("icons")), config.projects_dir / "icons",
         overwrite=False, newer=True,
     )
-    # Фильтры рендерера по площади должны уходить в SQL, а не считаться
-    # для каждого объекта в кадре.
-    ensure_area_fields(config.vector_dir)
     _write_crop(config)
     path = project_file(config)
     # Always start from the pristine template: empty-layer cleanup removes

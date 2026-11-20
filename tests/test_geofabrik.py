@@ -438,8 +438,7 @@ class GeofabrikDownloadTest(unittest.TestCase):
         _dummy_pbf(first)
         merged = geofabrik.merged_path(self.config, [self.first], [first])
         _dummy_pbf(merged)
-        with mock.patch.object(geofabrik, "find_osmium", return_value=None):
-            paths = geofabrik.source_paths(self.config, [self.first])
+        paths = geofabrik.source_paths(self.config, [self.first])
         self.assertEqual(paths, [merged])
 
 
@@ -537,8 +536,6 @@ class GeofabrikSourcesTest(unittest.TestCase):
         ), mock.patch.object(
             sources.geofabrik, "ensure_maps", return_value=[Path("/tmp/x.pbf")]
         ) as ensure, mock.patch.object(
-            sources.geofabrik, "merge_if_available", return_value=""
-        ), mock.patch.object(
             sources.geofabrik, "source_paths", return_value=[Path("/tmp/x.pbf")]
         ), mock.patch.object(
             sources.pbf_source, "prepare_dataset", return_value=dataset

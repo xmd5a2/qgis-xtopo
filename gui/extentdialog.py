@@ -4,7 +4,6 @@ from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
-    QgsDistanceArea,
     QgsGeometry,
     QgsPointXY,
     QgsProject,
@@ -98,7 +97,6 @@ BASEMAPS = (
 
 BASEMAP_BY_KEY = {basemap.key: basemap for basemap in BASEMAPS}
 
-OSM_TILE_URI = BASEMAPS[0].uri
 MERCATOR_EXTENT = 20037508.342789244
 MAX_LATITUDE = 85.0511287798
 

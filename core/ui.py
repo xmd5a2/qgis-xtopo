@@ -76,11 +76,6 @@ def _widgets(iface):
     return _docks(iface) + _toolbars(iface)
 
 
-def dock_names(iface):
-    """Имена всех панелей и панелей инструментов главного окна."""
-    return [widget.objectName() for widget in _widgets(iface)]
-
-
 def visible_dock_names(iface, keep=()):
     """Имена видимых элементов, кроме перечисленных в keep."""
     return [

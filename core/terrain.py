@@ -113,6 +113,44 @@ def _cached_tile(cache_dir, tile):
     return Path(cache_dir) / _tile_directory(tile) / f"{tile}.hgt"
 
 
+def _hgt_size_ok(path):
+    """Целый ли файл ``.hgt``: 1201 или 3601 точка на сторону.
+
+    Обрезанный после аварийного завершения файл нельзя считать
+    готовым: GDAL прочитает его как растр другого размера или с мусором
+    на краю.
+    """
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        return False
+    return size in (1201 * 1201 * 2, 3601 * 3601 * 2)
+
+
+def _valid_raster(path):
+    """Открывается ли растровый файл и есть ли в нём данные."""
+    try:
+        if Path(path).stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    try:
+        gdal, _, _ = _gdal()
+        dataset = gdal.Open(str(path))
+    except Exception:  # noqa: BLE001 - битый файл считаем отсутствующим
+        return False
+    if dataset is None:
+        return False
+    try:
+        return (
+            dataset.RasterCount > 0
+            and dataset.RasterXSize > 0
+            and dataset.RasterYSize > 0
+        )
+    finally:
+        dataset = None
+
+
 class _Speed:
     """Скорость загрузки с усреднением по окну времени."""
 
@@ -151,17 +189,22 @@ def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
             raise InterruptedError("DEM download cancelled")
         target = destination / f"{tile}.hgt"
         if target.exists():
-            continue
+            if _hgt_size_ok(target):
+                continue
+            target.unlink(missing_ok=True)
         for existing in destination.glob(f"{tile}.*"):
             if existing.suffix.lower() in (".tif", ".hgt"):
                 break
         else:
             cached = _cached_tile(cache_dir, tile)
             if cached is not None and cached.exists():
-                shutil.copy2(cached, target)
-                if progress:
-                    progress(f"Using cached DEM tile {tile}")
-                continue
+                if _hgt_size_ok(cached):
+                    shutil.copy2(cached, target)
+                    if progress:
+                        progress(f"Using cached DEM tile {tile}")
+                    continue
+                # Обрезанный тайл не должен переиспользоваться вечно.
+                cached.unlink(missing_ok=True)
             pending.append((tile, target, cached))
     if not pending:
         return tiles
@@ -207,6 +250,12 @@ def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
             target.unlink(missing_ok=True)
         finally:
             temporary.unlink(missing_ok=True)
+        if target.exists() and not _hgt_size_ok(target):
+            if progress:
+                progress(i18n.trf(
+                    "WARNING: тайл рельефа {} имеет неожиданный размер", tile
+                ))
+            target.unlink(missing_ok=True)
         if cached is not None and target.exists():
             cached.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target, cached)
@@ -495,11 +544,14 @@ def download_cog_dem(source_key, bbox, destination, progress=None, cancel=None,
     destination.mkdir(parents=True, exist_ok=True)
     target = destination / f"dem_{source_key}.tif"
     cached = _cached_cog(cache_dir, source_key, bbox)
-    if cached is not None and cached.exists() and cached.stat().st_size > 0:
-        shutil.copy2(cached, target)
-        if progress:
-            progress(f"Использован кэш рельефа: {item.short}")
-        return target
+    if cached is not None and cached.exists():
+        if _valid_raster(cached):
+            shutil.copy2(cached, target)
+            if progress:
+                progress(f"Использован кэш рельефа: {item.short}")
+            return target
+        # Недописанный растр от прерванной загрузки не переиспользуем.
+        cached.unlink(missing_ok=True)
 
     padded = _padded_bbox(bbox)
     if progress:
@@ -541,14 +593,13 @@ def download_cog_dem(source_key, bbox, destination, progress=None, cancel=None,
         multithread=True,
         callback=_warp_callback(cancel, status, item.short),
     )
-    result = _warp_with_retry(
+    _warp_with_retry(
         gdal, temporary, sources, options, item.short,
         cancel=cancel, progress=progress,
         refresh=lambda: _cog_sources(
             source_key, bbox, progress=progress, cancel=cancel
         ),
     )
-    result = None
     temporary.replace(target)
     if cached is not None:
         cached.parent.mkdir(parents=True, exist_ok=True)
@@ -611,7 +662,9 @@ def _mosaic_grid(span_x, span_y, resolutions):
     factor = math.sqrt(width * height / MAX_DEM_PIXELS)
     width = max(1, int(width / factor))
     height = max(1, int(height / factor))
-    return span_x / width, width, height
+    # Шаг по длинной оси, а не всегда по X: для вытянутого охвата
+    # span_x / width занижает реальное разрешение.
+    return max(span_x / width, span_y / height), width, height
 
 
 def _layer_options(gdal, bounds, width, height, cancel, status, label):
@@ -679,14 +732,13 @@ def _warp_sources(gdal, sources, bounds, width, height, destination, name,
     temporary = target.with_name(target.name + ".part")
     options = _layer_options(gdal, bounds, width, height, cancel, status, label)
     try:
-        result = _warp_with_retry(
+        _warp_with_retry(
             gdal, temporary, datasets, options, label,
             cancel=cancel, progress=progress,
         )
     finally:
         for dataset in datasets:
             dataset = None
-    result = None
     temporary.replace(target)
     return target
 
@@ -1101,28 +1153,6 @@ def _download_cop30(config, bbox, progress=None, cancel=None, status=None):
     return used
 
 
-def _write_dem_attribution(config, used):
-    """Записывает в проект точную атрибуцию наборов мозаики.
-
-    Проект создаётся до рельефа, поэтому атрибуция сначала общая; после
-    сборки мозаики известно, какие наборы действительно вошли.
-
-    Вызывается в конце сборки проекта: переписывание архива проекта
-    из потока рельефа замедляло подготовку и дёргало Qt вне GUI-потока.
-    """
-    from . import project
-
-    attribution = dem_sources.attribution_for_keys(used)
-    if not attribution:
-        return
-    path = project.project_file(config)
-    if not path.exists():
-        return
-    project.rewrite_project_archive(
-        path, path, config.project_name, dem_attribution=attribution
-    )
-
-
 def _clear_terrain_input(config):
     """Убирает прошлые тайлы: иначе в сборку попадут данные другого набора."""
     try:
@@ -1161,7 +1191,7 @@ def _write_error(destination_path, exc):
 
 
 def _transform_raster(source_path, destination_path, operation, dtype=None,
-                      nodata=None):
+                      nodata=None, cancel=None):
     """Пишет растр поблочно, применяя поэлементную функцию.
 
     Читать весь растр в numpy нельзя: уклон и отмывка вдвое крупнее DEM,
@@ -1215,6 +1245,8 @@ def _transform_raster(source_path, destination_path, operation, dtype=None,
         target_band.SetNoDataValue(nodata)
     try:
         for y in range(0, height, RASTER_BLOCK_SIDE):
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Relief preparation cancelled")
             rows = min(RASTER_BLOCK_SIDE, height - y)
             for x in range(0, width, RASTER_BLOCK_SIDE):
                 columns = min(RASTER_BLOCK_SIDE, width - x)
@@ -1305,17 +1337,23 @@ def build_dem(config, bbox, progress=None, cancel=None):
             raise RuntimeError("Failed to build a VRT from DEM tiles")
     crop = config.crop_path
     merged = config.raster_dir / "merged_dem.tif"
+    # Прежний файл мог быть жёсткой ссылкой на кэш: перед записью его
+    # обязательно убираем, иначе GDAL перезапишет кэш на месте.
+    merged.unlink(missing_ok=True)
     options = gdal.WarpOptions(
         format="GTiff",
         cutlineDSName=str(crop),
         cropToCutline=True,
         creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        callback=_warp_callback(cancel, None, "DEM"),
     )
     result = gdal.Warp(str(merged), source, options=options)
     source = None
     if vrt_path is not None:
         vrt_path.unlink(missing_ok=True)
     if result is None:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM preparation cancelled")
         raise RuntimeError("Failed to crop and merge DEM tiles")
     result = None
 
@@ -1342,16 +1380,20 @@ def build_dem(config, bbox, progress=None, cancel=None):
 
     if progress:
         progress("Reprojecting DEM to EPSG:3857")
-    # Маркер удаляем до записи: прерванный Warp не должен оставить
-    # действительный кэш для частично записанного растра.
+    # Маркер и прежний растр удаляем до записи: прерванный Warp не должен
+    # оставить действительный кэш для частично записанного растра.
     cache_marker.unlink(missing_ok=True)
+    merged_3857.unlink(missing_ok=True)
     options = gdal.WarpOptions(
         dstSRS="EPSG:3857",
         outputType=gdal.GDT_Float32,
         creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
+        callback=_warp_callback(cancel, None, "DEM"),
     )
     result = gdal.Warp(str(merged_3857), str(merged), options=options)
     if result is None:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("DEM preparation cancelled")
         raise RuntimeError("Failed to reproject DEM")
     result = None
     cache_marker.write_text(cache_key + "\n", encoding="ascii")
@@ -1389,7 +1431,7 @@ def _dem_vertical_scale(path):
         dataset = None
 
 
-def _generate_slope(config, merged, progress=None):
+def _generate_slope(config, merged, progress=None, cancel=None):
     """Ветка уклона: считается по нативному DEM и пишется байтом."""
     gdal, _, _ = _gdal()
     if progress:
@@ -1400,11 +1442,14 @@ def _generate_slope(config, merged, progress=None):
         slopeFormat="degree",
         scale=_dem_vertical_scale(merged),
         creationOptions=_relief_creation_options(),
+        callback=_warp_callback(cancel, None, "slope"),
     )
     result = gdal.DEMProcessing(
         str(raw), str(merged), "slope", options=options
     )
     if result is None:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Relief preparation cancelled")
         raise RuntimeError("Failed to generate slope")
     result = None
 
@@ -1414,17 +1459,19 @@ def _generate_slope(config, merged, progress=None):
     if progress:
         progress("Writing slope")
     slope = config.raster_dir / "slope.tif"
+    # Прежний файл мог быть ссылкой на кэш: убираем перед записью.
+    slope.unlink(missing_ok=True)
     try:
         _transform_raster(
             raw, slope, lambda array: array * (array > 1.04),
-            dtype=gdal.GDT_Byte, nodata=255,
+            dtype=gdal.GDT_Byte, nodata=255, cancel=cancel,
         )
     finally:
         raw.unlink(missing_ok=True)
 
 
 def _generate_hillshade(config, merged, dem_width, dem_height,
-                        progress=None):
+                        progress=None, cancel=None):
     """Ветка отмывки: оттенок считается по нативному DEM."""
     gdal, _, _ = _gdal()
     numpy = _numpy()
@@ -1441,6 +1488,7 @@ def _generate_hillshade(config, merged, dem_width, dem_height,
         zFactor=1,
         scale=_dem_vertical_scale(merged),
         creationOptions=_relief_creation_options(),
+        callback=_warp_callback(cancel, None, "hillshade"),
     )
     disk_space.require_space(
         hillshade,
@@ -1448,10 +1496,13 @@ def _generate_hillshade(config, merged, dem_width, dem_height,
         "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
         "оттенок",
     )
+    hillshade.unlink(missing_ok=True)
     result = gdal.DEMProcessing(
         str(hillshade), str(merged), "hillshade", options=options
     )
     if result is None:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Relief preparation cancelled")
         raise RuntimeError("Failed to generate hillshade")
     result = None
 
@@ -1459,13 +1510,14 @@ def _generate_hillshade(config, merged, dem_width, dem_height,
     # Значения 0…255 помещаются в байт: растр вчетверо легче, а кэш
     # GDAL и память QGIS не растут вчетверо.
     composite_path = config.raster_dir / "hillshade_composite.tif"
+    composite_path.unlink(missing_ok=True)
     _transform_raster(
         hillshade,
         composite_path,
         lambda array: numpy.clip(
             255.0 * (0.10 + 0.90 * (array / 255.0)), 0, 255
         ),
-        dtype=gdal.GDT_Byte,
+        dtype=gdal.GDT_Byte, cancel=cancel,
     )
     hillshade.unlink(missing_ok=True)
 
@@ -1514,12 +1566,17 @@ def generate_hillshade_slope(config, bbox, progress=None, cancel=None):
     ) as pool:
         futures = [
             pool.submit(
-                guarded(lambda: _generate_slope(config, merged, progress))
+                guarded(
+                    lambda: _generate_slope(
+                        config, merged, progress, cancel=cancel
+                    )
+                )
             ),
             pool.submit(
                 guarded(
                     lambda: _generate_hillshade(
-                        config, merged, dem_width, dem_height, progress
+                        config, merged, dem_width, dem_height, progress,
+                        cancel=cancel,
                     )
                 )
             ),
@@ -1807,7 +1864,7 @@ def _clip_to_core(geometry, box):
             or envelope[3] < box[2] or envelope[2] > box[3]):
         # Ядро линия не задевает — обрезать нечего.
         return []
-    from osgeo import ogr, osr
+    from osgeo import ogr
 
     ring = ogr.Geometry(ogr.wkbLinearRing)
     ring.AddPoint(box[0], box[2])
@@ -2072,9 +2129,7 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
             }
             done = 0
             for future in as_completed(futures):
-                _index, result, _count = (
-                    futures[future], *future.result()
-                )
+                result = future.result()[1]
                 # Тайл склеивается сразу: держать все результаты в
                 # памяти до конца расчёта нельзя.
                 written = _merge_contour_tile(layer, result, written)

@@ -1407,11 +1407,6 @@ def auto_priority(bbox):
     return AUTO_PRIORITY
 
 
-# Наборы с собственным набором тайлов: покрытие берётся из локального
-# каталога, а не из STAC.
-LOCAL_SOURCES = (SONNY_SOURCE,)
-
-
 def _coverage(availability, key, sonny_tiles):
     """Множество тайлов 1°×1°, покрытых набором."""
     if key == SONNY_SOURCE:

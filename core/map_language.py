@@ -126,7 +126,6 @@ def _tags_for_code(code):
 MAP_LANGUAGE_TAGS = {
     code: _tags_for_code(code) for code, _label, _script in MAP_LANGUAGES
 }
-LANGUAGE_CODES = tuple(code for code, _label, _script in MAP_LANGUAGES)
 _language_labels = {code: label for code, label, _script in MAP_LANGUAGES}
 _language_scripts = {code: script for code, _label, script in MAP_LANGUAGES}
 

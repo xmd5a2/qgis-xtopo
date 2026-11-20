@@ -172,7 +172,7 @@ def ensure_nodes_image(config, cancel=None, progress=None, force=False):
 
 def slice_cache_path(config, bbox):
     """Путь готового выреза для рамки — тот же, что у подготовки данных."""
-    key = hashlib.sha1(bbox.as_csv().encode("utf-8")).hexdigest()[:12]
+    key = hashlib.sha1(bbox.as_key().encode("utf-8")).hexdigest()[:12]
     return config.geofabrik_dir / f"slice_{key}.osm.pbf"
 
 

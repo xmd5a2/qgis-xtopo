@@ -80,7 +80,7 @@ class _DownloadTimer:
 
 
 def _cache_dir(config, bbox):
-    key = hashlib.sha1(bbox.as_csv().encode("utf-8")).hexdigest()[:12]
+    key = hashlib.sha1(bbox.as_key().encode("utf-8")).hexdigest()[:12]
     path = config.cache_dir / key
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -245,26 +245,16 @@ def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
     """
     query_texts = {name: read_query(name) for name in query_names}
     warnings = []
-    # С osmium выгрузки обрабатываются по отдельности: склейка нужна
-    # только для чтения карт целиком драйвером GDAL.
+    # С osmium выгрузки режутся и читаются по отдельности: склейка
+    # нужна только для драйвера GDAL без osmium.
     osmium_ready = osmium_tool.find_osmium(config.temp_dir) is not None
     try:
         if not all(geofabrik.local_ready(config, item) for item in maps):
             with timer.measure():
-                downloaded = geofabrik.ensure_maps(
+                geofabrik.ensure_maps(
                     config, maps, progress=progress, percent=percent,
                     cancel=cancel,
                 )
-            if not osmium_ready:
-                try:
-                    geofabrik.merge_if_available(
-                        config, maps, downloaded,
-                        progress=progress, cancel=cancel,
-                    )
-                except InterruptedError:
-                    raise
-                except Exception as exc:
-                    warnings.append(f"Склейка osmium не удалась: {exc}")
         if osmium_ready:
             paths = geofabrik.source_paths(
                 config, maps, progress=progress, cancel=cancel,

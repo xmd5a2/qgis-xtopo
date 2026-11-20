@@ -13,7 +13,7 @@ class OverpassError(RuntimeError):
 
 def build_query(query_text, bbox):
     bbox_part = bbox.as_overpass() if bbox is not None else ""
-    header = f"[out:xml][timeout:3600][maxsize:2000000000]"
+    header = "[out:xml][timeout:3600][maxsize:2000000000]"
     if bbox_part:
         header += f"[bbox:{bbox_part}]"
     return f"{header};{query_text.strip()}\nout body;>;out skel qt;"

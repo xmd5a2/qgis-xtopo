@@ -2435,27 +2435,6 @@ HYPSO_STOPS = [
 ]
 
 
-def _elevation_colors(values):
-    """Гипсометрия по фиксированной шкале."""
-    if values is None:
-        return None
-    valid = ~np.isnan(values)
-    value = np.where(valid, values, 0.0).astype("float64")
-    rgb = np.zeros(value.shape + (3,), dtype="uint8")
-    for index in range(len(HYPSO_STOPS) - 1):
-        low, color_low = HYPSO_STOPS[index]
-        high, color_high = HYPSO_STOPS[index + 1]
-        mask = (value >= low) & (value < high)
-        if not mask.any():
-            continue
-        t = ((value[mask] - low) / (high - low))[:, None]
-        rgb[mask] = (np.array(color_low)[None, :] * (1 - t) +
-                     np.array(color_high)[None, :] * t).astype("uint8")
-    rgb[value >= HYPSO_STOPS[-1][0]] = HYPSO_STOPS[-1][1]
-    rgb[~valid] = (0, 0, 0)
-    return rgb
-
-
 def _contour_mask(values, step):
     """Маска горизонталей: полоса вокруг уровня шириной в половину шага.
 

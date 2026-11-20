@@ -111,11 +111,6 @@ def reset():
     mark_online()
 
 
-def last_error():
-    with _lock:
-        return _last_error
-
-
 class GuardedOpener:
     """Обёртка opener: таймаут по умолчанию и запрет после сбоя."""
 

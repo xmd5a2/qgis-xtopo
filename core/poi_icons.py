@@ -49,6 +49,7 @@ QGIS не разводит значки разных слоёв: кластер�
 """
 
 import heapq
+import io
 import math
 import re
 import zipfile
@@ -76,8 +77,9 @@ MIN_SUPPRESSION_DISTANCE = 0.001
 
 # Видимая часть холста SVG по имени файла: считается один раз за сеанс.
 _SVG_SCALE_CACHE = {}
-# Разобранный шаблон проекта: читается один раз за сеанс.
-_TEMPLATE_ROOTS = {}
+# Данные шаблона проекта: читаются один раз за сеанс.  Полное XML-дерево
+# не хранится — только слои со значками, препятствия и источники.
+_TEMPLATE_DATA = {}
 # Переменные проекта из шаблона: тоже читаются один раз за сеанс.
 _TEMPLATE_VARIABLES = {}
 
@@ -431,21 +433,62 @@ def _label_rules(element):
     return result
 
 
-def _template_root(path=None):
-    """Разобранный шаблон проекта.
+def _template_data(path=None):
+    """Компактные данные шаблона: значки, препятствия и источники.
 
-    Шаблон разбирается один раз за сеанс: XML в нём на десятки мегабайт,
-    а читать его приходится дважды — для значков и для препятствий.
+    XML шаблона занимает десятки мегабайт, а полное дерево — сотни.
+    Поэтому шаблон читается потоково: каждый ``maplayer`` разбирается и
+    сразу превращается в правила, после чего элемент освобождается.
+    В памяти остаются только нужные для подготовки данные.
     """
     path = Path(path or template_path())
-    cached = _TEMPLATE_ROOTS.get(path)
+    cached = _TEMPLATE_DATA.get(path)
     if cached is not None:
         return cached
     with zipfile.ZipFile(path) as archive:
         name = next(n for n in archive.namelist() if n.endswith(".qgs"))
-        root = ElementTree.fromstring(archive.read(name))
-    _TEMPLATE_ROOTS[path] = root
-    return root
+        payload = archive.read(name)
+    order = []
+    sources = {}
+    layers = []
+    obstacles = []
+    for _event, element in ElementTree.iterparse(
+        io.BytesIO(payload), events=("end",)
+    ):
+        if element.tag == "layer-tree-layer":
+            layer_name = element.get("name")
+            if layer_name:
+                order.append(layer_name)
+            element.clear()
+        elif element.tag == "maplayer":
+            name = element.findtext("layername")
+            if name and not name.startswith(AUX_LAYER_NAME):
+                sources[name] = element.findtext("datasource") or ""
+                layer = _poi_layer(element, name)
+                if layer is not None:
+                    layers.append(layer)
+                obstacle = _obstacle_layer(element, name)
+                if obstacle is not None:
+                    obstacles.append(obstacle)
+            element.clear()
+    positions = {
+        name: index for index, name in enumerate(order, start=1)
+    }
+    layers.sort(key=lambda item: positions.get(item.name, 10**6))
+    obstacles.sort(key=lambda item: positions.get(item.name, 10**6))
+    for index, item in enumerate(layers, start=1):
+        # Ранг — место слоя в дереве проекта: приоритет задаёт порядок
+        # слоёв, а не отдельная нумерация только среди POI.
+        item.rank = positions.get(item.name, 10**6 + index)
+    for index, layer in enumerate(obstacles, start=1):
+        layer.rank = positions.get(layer.name, 10**6 + index)
+    data = {
+        "poi": layers,
+        "obstacles": obstacles,
+        "sources": sources,
+    }
+    _TEMPLATE_DATA[path] = data
+    return data
 
 
 def read_template_poi(path=None):
@@ -456,66 +499,49 @@ def read_template_poi(path=None):
     которые действительно рисуют значки (маркер с ненулевым размером).
     Значки на линиях и полигонах читает :func:`read_template_obstacles`.
     """
-    root = _template_root(path)
+    return list(_template_data(path)["poi"])
 
-    order = [
-        element.get("name")
-        for element in root.find("layer-tree-group").iter()
-        if element.tag == "layer-tree-layer" and element.get("name")
-    ]
 
-    layers = []
-    for element in root.iter("maplayer"):
-        name = element.findtext("layername")
-        if not name or name.startswith(AUX_LAYER_NAME):
-            continue
-        renderer = _renderer_element(element)
-        if renderer is None:
-            continue
-        sizes = _symbol_sizes(renderer)
-        rules_element = renderer.find("rules")
-        minimum = maximum = 0.0
-        if element.get("hasScaleBasedVisibilityFlag") == "1":
-            # minScale — верхняя граница знаменателя (до какого масштаба
-            # слой виден), maxScale — нижняя.
-            maximum = float(element.get("minScale") or 0)
-            minimum = float(element.get("maxScale") or 0)
-            if minimum <= 1.0:
-                minimum = 0.0
-        if rules_element is not None:
-            tree = _parse_rules(rules_element, sizes, minimum, maximum)
-        else:
-            symbol = renderer.find("symbol")
-            if symbol is None:
-                symbol = renderer.find("symbols/symbol")
-            size = _marker_size(symbol)
-            if size <= 0:
-                continue
-            leaf = PoiRule(size=size, minimum=minimum, maximum=maximum)
-            tree = PoiRule(
-                minimum=minimum, maximum=maximum, children=[leaf],
-            )
-        if not _has_icon(tree):
-            continue
-        layers.append(PoiLayer(
-            name=name,
-            rank=0,
-            source=element.findtext("datasource") or "",
-            crs=_layer_crs(element),
-            root=tree,
-            minimum=minimum,
-            maximum=maximum,
-            labels=_label_rules(element),
-        ))
-    positions = {
-        name: index for index, name in enumerate(order, start=1)
-    }
-    layers.sort(key=lambda item: positions.get(item.name, 10**6))
-    for index, item in enumerate(layers, start=1):
-        # Ранг — место слоя в дереве проекта: приоритет задаёт порядок
-        # слоёв, а не отдельная нумерация только среди POI.
-        item.rank = positions.get(item.name, 10**6 + index)
-    return layers
+def _poi_layer(element, name):
+    """Слой значков из ``maplayer`` шаблона или None."""
+    renderer = _renderer_element(element)
+    if renderer is None:
+        return None
+    sizes = _symbol_sizes(renderer)
+    rules_element = renderer.find("rules")
+    minimum = maximum = 0.0
+    if element.get("hasScaleBasedVisibilityFlag") == "1":
+        # minScale — верхняя граница знаменателя (до какого масштаба
+        # слой виден), maxScale — нижняя.
+        maximum = float(element.get("minScale") or 0)
+        minimum = float(element.get("maxScale") or 0)
+        if minimum <= 1.0:
+            minimum = 0.0
+    if rules_element is not None:
+        tree = _parse_rules(rules_element, sizes, minimum, maximum)
+    else:
+        symbol = renderer.find("symbol")
+        if symbol is None:
+            symbol = renderer.find("symbols/symbol")
+        size = _marker_size(symbol)
+        if size <= 0:
+            return None
+        leaf = PoiRule(size=size, minimum=minimum, maximum=maximum)
+        tree = PoiRule(
+            minimum=minimum, maximum=maximum, children=[leaf],
+        )
+    if not _has_icon(tree):
+        return None
+    return PoiLayer(
+        name=name,
+        rank=0,
+        source=element.findtext("datasource") or "",
+        crs=_layer_crs(element),
+        root=tree,
+        minimum=minimum,
+        maximum=maximum,
+        labels=_label_rules(element),
+    )
 
 
 def _has_icon(tree):
@@ -608,64 +634,49 @@ def read_template_obstacles(path=None):
     нужна одна точка, поэтому это не замедляет ни подготовку, ни
     отрисовку.
     """
-    root = _template_root(path)
+    return list(_template_data(path)["obstacles"])
 
-    obstacles = []
-    for element in root.iter("maplayer"):
-        name = element.findtext("layername")
-        if not name or name.startswith(AUX_LAYER_NAME):
-            continue
-        kind = _obstacle_geometry(element)
-        if kind is None:
-            continue
-        renderer = _renderer_element(element)
-        if renderer is None:
-            continue
-        sizes = _obstacle_symbol_sizes(renderer)
-        rules_element = renderer.find("rules")
-        minimum = maximum = 0.0
-        if element.get("hasScaleBasedVisibilityFlag") == "1":
-            maximum = float(element.get("minScale") or 0)
-            minimum = float(element.get("maxScale") or 0)
-            if minimum <= 1.0:
-                minimum = 0.0
-        if rules_element is not None:
-            tree = _parse_rules(rules_element, sizes, minimum, maximum)
-        else:
-            symbol = renderer.find("symbol")
-            if symbol is None:
-                symbol = renderer.find("symbols/symbol")
-            size = _nested_marker_size(symbol)
-            if size <= 0:
-                continue
-            leaf = PoiRule(size=size, minimum=minimum, maximum=maximum)
-            tree = PoiRule(
-                minimum=minimum, maximum=maximum, children=[leaf],
-            )
-        if not _has_icon(tree):
-            continue
-        obstacles.append(PoiLayer(
-            name=name,
-            source=element.findtext("datasource") or "",
-            crs=_layer_crs(element),
-            root=tree,
-            minimum=minimum,
-            maximum=maximum,
-            geometry=kind,
-        ))
-    # Приоритет — место слоя в дереве проекта, как у точечных POI:
-    # мост, стоящий ниже населённого пункта, не должен его скрывать.
-    order = [
-        element.get("name")
-        for element in root.find("layer-tree-group").iter()
-        if element.tag == "layer-tree-layer" and element.get("name")
-    ]
-    positions = {
-        name: index for index, name in enumerate(order, start=1)
-    }
-    for index, layer in enumerate(obstacles, start=1):
-        layer.rank = positions.get(layer.name, 10**6 + index)
-    return obstacles
+
+def _obstacle_layer(element, name):
+    """Препятствие со значка линии или полигона или None."""
+    kind = _obstacle_geometry(element)
+    if kind is None:
+        return None
+    renderer = _renderer_element(element)
+    if renderer is None:
+        return None
+    sizes = _obstacle_symbol_sizes(renderer)
+    rules_element = renderer.find("rules")
+    minimum = maximum = 0.0
+    if element.get("hasScaleBasedVisibilityFlag") == "1":
+        maximum = float(element.get("minScale") or 0)
+        minimum = float(element.get("maxScale") or 0)
+        if minimum <= 1.0:
+            minimum = 0.0
+    if rules_element is not None:
+        tree = _parse_rules(rules_element, sizes, minimum, maximum)
+    else:
+        symbol = renderer.find("symbol")
+        if symbol is None:
+            symbol = renderer.find("symbols/symbol")
+        size = _nested_marker_size(symbol)
+        if size <= 0:
+            return None
+        leaf = PoiRule(size=size, minimum=minimum, maximum=maximum)
+        tree = PoiRule(
+            minimum=minimum, maximum=maximum, children=[leaf],
+        )
+    if not _has_icon(tree):
+        return None
+    return PoiLayer(
+        name=name,
+        source=element.findtext("datasource") or "",
+        crs=_layer_crs(element),
+        root=tree,
+        minimum=minimum,
+        maximum=maximum,
+        geometry=kind,
+    )
 
 
 def _icon_anchor(geometry, kind):
@@ -1058,17 +1069,6 @@ def layer_suppression_expression(layer, bands, minimum=None, maximum=None):
     return "(" + " OR ".join(expressions) + ")"
 
 
-def extend_label_filter(filter_text, layer, bands, minimum=None, maximum=None):
-    """Скрывает подпись вместе со значком того же объекта."""
-    suppression = layer_suppression_expression(layer, bands, minimum, maximum)
-    if suppression == "false":
-        return filter_text
-    condition = f"NOT ({suppression})"
-    if filter_text:
-        return f"({filter_text}) AND {condition}"
-    return condition
-
-
 def restore_base_filters(layers, bands):
     """Убирает автоматическое подавление из прочитанных правил шаблона.
 
@@ -1165,13 +1165,8 @@ def _overlay_sources(layers):
     if not names:
         return {}
     # Шаблон уже разобран для значков: второй раз 54 МБ XML не читаем.
-    root = _template_root()
-    sources = {}
-    for element in root.iter("maplayer"):
-        name = element.findtext("layername")
-        if name in names:
-            sources[name] = element.findtext("datasource") or ""
-    return sources
+    sources = _template_data()["sources"]
+    return {name: sources[name] for name in names if name in sources}
 
 
 def _evaluation_context(project, layer, level):
@@ -2073,7 +2068,7 @@ def _write_aux(config, records, crs, file_name):
                 feature = ogr.Feature(definition)
                 feature.SetField(indexes["rank"], point.rank)
                 feature.SetField(indexes["lod"], point.bands[index])
-                feature.SetField(indexes["layer"], str(point.rank))
+                feature.SetField(indexes["layer"], point.name)
                 feature.SetGeometry(ogr.CreateGeometryFromWkt(
                     f"POINT ({point.lon:.9f} {point.lat:.9f})"))
                 layer.CreateFeature(feature)

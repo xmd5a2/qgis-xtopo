@@ -1,5 +1,4 @@
 import html
-import json
 import threading
 import time
 from dataclasses import replace

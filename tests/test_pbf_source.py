@@ -7,12 +7,26 @@ from unittest import mock
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config
 from qgis_xtopo.core.pbf_source import (
-    QueryIndex, _apply_spatial_filter, _filter_delivered, parse_tags,
-    prepare_dataset,
+    QueryIndex, _apply_spatial_filter, _count_features, _filter_delivered,
+    parse_tags, prepare_dataset,
 )
 
 
 class PbfSourceTest(unittest.TestCase):
+    def test_count_features_uses_passed_bbox(self):
+        """Счётчик не должен искать bbox в области видимости."""
+
+        class _EmptyDataset:
+            def GetNextFeature(self, include_layer=True):
+                return None, None
+
+        counts = _count_features(
+            _EmptyDataset(), {}, QueryIndex({}), None,
+            BBox(1.0, 2.0, 3.0, 4.0), None, None, False, set(),
+        )
+        self.assertEqual(counts["total"], 0)
+        self.assertTrue(counts["delivered"])
+
     def test_json_tags(self):
         tags = parse_tags('{"natural":"water","name:ru":"Озеро"}')
         self.assertEqual(tags["natural"], "water")

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsRectangle
 
-from . import i18n, osmium_tool
+from . import i18n
 
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
@@ -278,7 +278,11 @@ def _read_meta(path):
 
 def _write_meta(path, meta):
     path = Path(path)
-    temp = path.with_suffix(path.suffix + ".part")
+    # Уникальное имя: fetch_index вызывается и из подготовки, и из
+    # панели карт — общий *.part два потока могут писать одновременно.
+    temp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.part"
+    )
     temp.parent.mkdir(parents=True, exist_ok=True)
     temp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
@@ -342,10 +346,13 @@ def fetch_index(config, progress=None, cancel=None):
         )
 
     headers = {}
-    if meta.get("etag"):
-        headers["If-None-Match"] = str(meta["etag"])
-    if meta.get("last_modified"):
-        headers["If-Modified-Since"] = str(meta["last_modified"])
+    # Условные заголовки имеют смысл только при наличии локального
+    # индекса: иначе сервер ответит 304, а читать будет нечего.
+    if cached:
+        if meta.get("etag"):
+            headers["If-None-Match"] = str(meta["etag"])
+        if meta.get("last_modified"):
+            headers["If-Modified-Since"] = str(meta["last_modified"])
 
     if progress:
         progress("Загрузка индекса Geofabrik (3.8 МБ)…")
@@ -374,6 +381,10 @@ def fetch_index(config, progress=None, cancel=None):
         raise GeofabrikError(f"Не удалось загрузить индекс Geofabrik: {exc}") from exc
 
     if status == 304:
+        if not cached:
+            raise GeofabrikError(
+                "Geofabrik вернул 304, но локального индекса нет"
+            )
         meta["fetched_at"] = now
         meta["warning"] = ""
         _write_meta(meta_path, meta)
@@ -391,7 +402,9 @@ def fetch_index(config, progress=None, cancel=None):
     except Exception as exc:
         raise GeofabrikError("Geofabrik вернул повреждённый индекс") from exc
 
-    temp = index_path.with_suffix(index_path.suffix + ".part")
+    temp = index_path.with_name(
+        f"{index_path.name}.{os.getpid()}.{threading.get_ident()}.part"
+    )
     temp.write_bytes(data)
     os.replace(temp, index_path)
     last_modified = response_headers.get("Last-Modified", "")
@@ -818,46 +831,7 @@ def merged_path(config, maps, paths):
     return config.geofabrik_dir / f"merged_{_merged_key(maps, paths)}.osm.pbf"
 
 
-def find_osmium():
-    return osmium_tool.find_osmium()
-
-
-def merge_if_available(config, maps, paths, progress=None, cancel=None):
-    executable = find_osmium()
-    if not executable:
-        return ""
-    destination = merged_path(config, maps, paths)
-    if destination.exists() and _looks_like_pbf(destination):
-        return str(destination)
-    temporary = destination.with_suffix(destination.suffix + ".part")
-    if progress:
-        progress(f"Склейка карт osmium ({len(paths)} шт.)…")
-    command = [executable, "merge", "--overwrite", "-o", str(temporary)]
-    command.extend(str(path) for path in paths)
-    try:
-        code, _stdout, stderr = osmium_tool.run_process(
-            command, timeout=osmium_tool.DEFAULT_TIMEOUT, cancel=cancel
-        )
-    except InterruptedError:
-        temporary.unlink(missing_ok=True)
-        raise
-    except osmium_tool.OsmiumError as exc:
-        temporary.unlink(missing_ok=True)
-        raise GeofabrikError(f"osmium merge failed: {exc}") from exc
-    if code != 0:
-        temporary.unlink(missing_ok=True)
-        message = stderr.decode("utf-8", "replace").strip()
-        raise GeofabrikError(f"osmium merge failed: {message}")
-    if not _looks_like_pbf(temporary):
-        temporary.unlink(missing_ok=True)
-        raise GeofabrikError("osmium создал файл, не похожий на PBF")
-    os.replace(temporary, destination)
-    if progress:
-        progress("Карты склеены osmium")
-    return str(destination)
-
-
-def source_paths(config, maps, merge=False, progress=None, cancel=None,
+def source_paths(config, maps, progress=None, cancel=None,
                  prefer_separate=False):
     """Файлы выгрузок для чтения.
 
@@ -872,7 +846,9 @@ def source_paths(config, maps, merge=False, progress=None, cancel=None,
             "Карты не скачаны: " + ", ".join(missing)
             + ". Запустите «Подготовить данные» ещё раз."
         )
-    if not merge and not prefer_separate:
+    if not prefer_separate:
+        # Склеенный файл остаётся только в старых кэшах: новый osmium
+        # merge сейчас не создаётся, но готовый читается как раньше.
         cached = merged_path(config, maps, paths)
         if cached.exists() and _looks_like_pbf(cached):
             return [cached]
@@ -882,10 +858,6 @@ def source_paths(config, maps, merge=False, progress=None, cancel=None,
             "Повреждённые карты: " + ", ".join(broken)
             + ". Запустите «Подготовить данные» ещё раз."
         )
-    if merge:
-        merged = merge_if_available(config, maps, paths, progress=progress, cancel=cancel)
-        if merged:
-            return [Path(merged)]
     return paths
 
 

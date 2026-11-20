@@ -774,7 +774,6 @@ class ProjectAttributionTest(unittest.TestCase):
         from qgis.core import QgsProject
         from qgis_xtopo.core.config import Config
         from qgis_xtopo.core.project import prepare_project
-        from qgis_xtopo.core.terrain import _write_dem_attribution
 
         with tempfile.TemporaryDirectory() as directory:
             config = Config(
@@ -787,7 +786,6 @@ class ProjectAttributionTest(unittest.TestCase):
                 download_terrain_tiles=True,
             )
             path = prepare_project(config)
-            _write_dem_attribution(config, ["cop30"])
             project = QgsProject()
             try:
                 self.assertTrue(project.read(str(path)))

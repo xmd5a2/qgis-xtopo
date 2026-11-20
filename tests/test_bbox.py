@@ -14,6 +14,11 @@ class BBoxTest(unittest.TestCase):
         bbox = parse_bbox("44.123456,42.654321,45.987654,42.987654")
         self.assertEqual(bbox.as_csv(), "44.1235,42.6543,45.9877,42.9877")
 
+    def test_cache_key_keeps_full_precision(self):
+        first = parse_bbox("44.123456,42.654321,45.987654,42.987654")
+        second = parse_bbox("44.123457,42.654321,45.987654,42.987654")
+        self.assertNotEqual(first.as_key(), second.as_key())
+
     def test_osm_link(self):
         bbox = parse_bbox("https://www.openstreetmap.org/#map=15/44.8/34.9")
         self.assertLess(bbox.lon_min, 34.9)

@@ -26,7 +26,6 @@ from qgis.core import (
     QgsRasterLayer,
     QgsReadWriteContext,
     QgsRectangle,
-    QgsRuleBasedLabeling,
     QgsRuleBasedRenderer,
     Qgis,
     QgsUnitTypes,
@@ -35,11 +34,11 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapToolPan, QgsRubberBand
 from qgis.PyQt.QtCore import (
-    QEvent, QPoint, QRectF, QSize, Qt, QTimer, pyqtSignal,
+    QEvent, QRectF, QSize, Qt, QTimer, pyqtSignal,
 )
 from qgis.PyQt.QtGui import (
     QColor, QFontMetrics, QFontMetricsF, QIcon, QImageWriter, QPainter,
-    QPalette, QPen, QPixmap,
+    QPen, QPixmap,
 )
 from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
@@ -172,12 +171,6 @@ LAYER_NAMES = (
     MOUNTAIN_LAYER,
     NATURE_RESERVE_LAYER,
 )
-
-# Слои, у которых в панели есть шкала прозрачности.
-OPACITY_LAYERS = (STEEP_LAYER, SLIGHT_LAYER, HILLSHADE_LAYER)
-
-# Слой пересыхающей воды: стиль берётся из шаблона проекта.
-WATER_LAYER_NAME = "water intermittent"
 
 # Шкала затенения рельефа задаёт прозрачность теней: 50% — исходный вид
 # шаблона, меньше — темнее (0% — тени непрозрачные), больше — светлее.
@@ -2063,7 +2056,7 @@ class ProjectPanel(QWidget):
             i18n.trf("Снизить до {} dpi", safe),
             _enum(QMessageBox, "ButtonRole", "AcceptRole"),
         )
-        proceed = box.addButton(
+        box.addButton(
             i18n.tr("Продолжить"),
             _enum(QMessageBox, "ButtonRole", "DestructiveRole"),
         )

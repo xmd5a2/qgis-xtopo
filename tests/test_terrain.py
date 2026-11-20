@@ -116,7 +116,8 @@ class TerrainTest(unittest.TestCase):
             destination = root / "input_terrain"
             cached = terrain._cached_tile(cache, tile)
             cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(b"cached tile")
+            payload = b"cached tile" + b"\0" * (1201 * 1201 * 2 - 11)
+            cached.write_bytes(payload)
             messages = []
             terrain.download_srtm(
                 bbox,
@@ -124,8 +125,10 @@ class TerrainTest(unittest.TestCase):
                 progress=messages.append,
                 cache_dir=cache,
             )
-            self.assertTrue((destination / f"{tile}.hgt").exists())
-            self.assertEqual((destination / f"{tile}.hgt").read_bytes(), b"cached tile")
+            target = destination / f"{tile}.hgt"
+            self.assertTrue(target.exists())
+            self.assertEqual(target.stat().st_size, len(payload))
+            self.assertEqual(target.read_bytes()[:11], b"cached tile")
             self.assertTrue(any("cached" in item for item in messages))
 
     def test_cache_dir_is_shared_between_projects(self):
@@ -263,7 +266,7 @@ class TerrainTest(unittest.TestCase):
 
         from qgis_xtopo.core import terrain
 
-        payload = gzip.compress(b"0" * 4096)
+        payload = gzip.compress(b"0" * (1201 * 1201 * 2))
 
         class FakeResponse:
             def __init__(self, data):

@@ -1187,7 +1187,6 @@ def main(argv=None):
         "far_drop": arguments.far_drop,
         "far_divide": arguments.far_divide,
         "valley_summit_min": arguments.valley_summit_min,
-        "deep_drop": arguments.deep_ring_drop,
         "no_crest_450": arguments.no_crest_450,
         "valley_cross900": arguments.valley_cross900,
         "valley_drop_high": arguments.valley_drop_high,

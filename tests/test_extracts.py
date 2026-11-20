@@ -434,6 +434,65 @@ class DownloadTest(unittest.TestCase):
         self.assertTrue(result.exists())
         self.assertEqual(result.stat().st_size, len(payload))
         self.assertGreater(len(calls), 1)
+        # Продолжение запрашивается открытым диапазоном: закрытый кусок
+        # в 64 КБ на большом файле означал бы тысячи запросов.
+        self.assertTrue(all(
+            span is None or span.endswith("-") for span in calls
+        ), calls)
+
+    def test_retries_with_closed_range_after_416(self):
+        """Сервер не принимает открытый диапазон: повторяем закрытым."""
+        payload = self._pbf(40000)
+        calls = []
+
+        def fake_urlopen(request, timeout=None):
+            span = request.headers.get("Range")
+            calls.append(span)
+            if span and span.endswith("-"):
+                raise urllib.error.HTTPError(
+                    "http://example.org/map.osm.pbf", 416,
+                    "Range Not Satisfiable", {}, None,
+                )
+            start = 0
+            if span:
+                start = int(span.split("=")[1].split("-")[0])
+            response = _FakeResponse(payload[start:start + 16384])
+            if span:
+                response.status = 206
+            return response
+
+        with mock.patch.object(
+            extracts, "_urlopen", side_effect=fake_urlopen
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(True, len(payload), "")
+        ):
+            result = extracts.download_file(
+                "http://example.org/map.osm.pbf", self.destination
+            )
+        self.assertEqual(result.read_bytes(), payload)
+        self.assertTrue(any(
+            span and not span.endswith("-") for span in calls
+        ), calls)
+
+    def test_uses_content_length_without_head(self):
+        """HEAD запрещён: размер берётся из Content-Length ответа 200."""
+        payload = self._pbf(40000)
+        calls = []
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request.headers.get("Range"))
+            return _FakeResponse(payload)
+
+        with mock.patch.object(
+            extracts, "_urlopen", side_effect=fake_urlopen
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(False, 0, "HEAD не разрешён")
+        ):
+            result = extracts.download_file(
+                "http://example.org/map.osm.pbf", self.destination
+            )
+        self.assertEqual(result.read_bytes(), payload)
+        self.assertEqual(len(calls), 1)
 
     def test_rejects_non_pbf(self):
         with mock.patch.object(extracts, "_urlopen", return_value=_FakeResponse(b"not pbf")):
@@ -868,7 +927,7 @@ class SliceEstimateTest(unittest.TestCase):
         import hashlib
 
         bbox = BBox(1.0, 2.0, 3.0, 4.0)
-        expected = hashlib.sha1(bbox.as_csv().encode("utf-8")).hexdigest()[:12]
+        expected = hashlib.sha1(bbox.as_key().encode("utf-8")).hexdigest()[:12]
         self.assertEqual(
             slice_estimate.slice_cache_path(Config(), bbox).name,
             f"slice_{expected}.osm.pbf",

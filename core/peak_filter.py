@@ -476,7 +476,7 @@ def _peak_cache_key(config, bbox, layer_path, dem_key):
     digest = hashlib.sha1()
     parts = (
         PEAK_FILTER_VERSION,
-        bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         config.resolved_terrain_source(),
         dem_key,
         terrain_cache.layer_digest(layer_path),
@@ -640,6 +640,9 @@ def _filter_layer(layer_path, dem, config, report, cancel, fraction,
         removal_thresholds = dict(thresholds)
         removal_thresholds["ele_diff"] = float("inf")
 
+        # Безымянные пики нужны и с ele: у них проверяется и при
+        # необходимости исправляется высота, но положение не трогается
+        # (classify возвращает skipped).
         work = [
             peak for peak in peaks
             if not peak.named and not math.isnan(dem_values[peak.osm_id])

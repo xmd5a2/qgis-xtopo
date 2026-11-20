@@ -3696,6 +3696,24 @@ class PipelineIntegrationTest(unittest.TestCase):
             ):
                 self.assertTrue((config.vector_dir / f"{name}.sqlite").exists(), name)
 
+            # Фильтры рендерера используют area_m2: после полной сборки
+            # поле должно быть заполнено у всех объектов.
+            import sqlite3
+
+            with sqlite3.connect(
+                config.vector_dir / "water_dissolved.sqlite"
+            ) as database:
+                columns = {
+                    row[1] for row in database.execute(
+                        "PRAGMA table_info(water_dissolved)")
+                }
+                total, filled = database.execute(
+                    'SELECT COUNT(*), COUNT("area_m2") FROM water_dissolved'
+                ).fetchone()
+            self.assertIn("area_m2", columns)
+            self.assertGreater(total, 0)
+            self.assertEqual(filled, total)
+
             with zipfile.ZipFile(project_path) as archive:
                 name = next(
                     item for item in archive.namelist() if item.endswith(".qgs")

@@ -7,7 +7,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    coastline, dem_sources, disk_space, field_subset, gdal_log,
+    area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, osm_convert,
     peak_filter, poi_icons, polygon_overlaps, project, sources, terrain,
 )
@@ -1088,7 +1088,12 @@ class Pipeline:
                 field = [field] if field else []
             elif field is None:
                 field = []
+            requested = bool(field)
             field = self._dissolve_fields(current, list(field))
+            if requested and not field:
+                # Растворять не по чему: пустой FIELD слил бы весь слой
+                # в один объект.  Оставляем объекты раздельными.
+                return current
             return self._algorithm("native:dissolve", {
                 "INPUT": current,
                 "FIELD": list(field),
@@ -2140,6 +2145,13 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # собирается, поворот пересчитается при следующей сборке.
             report(f"WARNING: углы значков: {exc}; поворот пропущен")
         timings.add_stage("углы значков", time.monotonic() - started)
+        # Фильтры рендерера по площади должны уходить в SQL, а не
+        # считаться для каждого объекта в кадре.  Поле добавляется после
+        # всех шагов, которые переписывают слои, и до очистки проекта.
+        report("Поле площади")
+        started = time.monotonic()
+        area_field.ensure_area_fields(config.vector_dir)
+        timings.add_stage("поле площади", time.monotonic() - started)
         report("Удаление пустых слоёв")
         started = time.monotonic()
         # Атрибуция наборов DEM пишется здесь же: отдельная перезапись

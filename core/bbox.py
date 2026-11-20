@@ -28,6 +28,12 @@ class BBox:
             self.lon_min, self.lat_min, self.lon_max, self.lat_max
         ))
 
+    def as_key(self):
+        """Точный ключ кэша: без округления, которое есть в ``as_csv``."""
+        return ",".join(repr(value) for value in (
+            self.lon_min, self.lat_min, self.lon_max, self.lat_max
+        ))
+
     def as_overpass(self):
         return f"{self.lat_min},{self.lon_min},{self.lat_max},{self.lon_max}"
 
@@ -128,17 +134,3 @@ def bbox_from_location(lat, lon, zoom):
     east = min(180.0, round(lon + degrees_east, 3))
     west = max(-180.0, round(lon - degrees_east, 3))
     return BBox(west, south, east, north)
-
-
-def bbox_from_canvas(iface):
-    canvas = iface.mapCanvas()
-    from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
-
-    source_crs = canvas.mapSettings().destinationCrs()
-    wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
-    if source_crs.isValid() and source_crs != wgs84:
-        transform = QgsCoordinateTransform(source_crs, wgs84, QgsProject.instance())
-        extent = transform.transformBoundingBox(canvas.extent())
-    else:
-        extent = canvas.extent()
-    return BBox(extent.xMinimum(), extent.yMinimum(), extent.xMaximum(), extent.yMaximum())

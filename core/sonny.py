@@ -464,6 +464,9 @@ def download_tile(dataset, file_id, name, destination, progress=None):
         hgt = _extract(archive, work)
         target = destination / hgt.name
         shutil.move(str(hgt), str(target))
+    if target.stat().st_size != dataset.samples * dataset.samples * 2:
+        target.unlink(missing_ok=True)
+        raise RuntimeError(f"unexpected DEM tile size: {target.name}")
     if dataset.samples in SRTMHGT_SAMPLES:
         return target
     return hgt_vrt(target, dataset.step, dataset.samples)
@@ -484,9 +487,15 @@ def tile_paths(catalogue, tile_dir, dataset_key, tiles, progress=None,
             raise InterruptedError("DEM download cancelled")
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"{tile_name(*tile)}.hgt"
-        if target.exists():
+        expected_size = dataset.samples * dataset.samples * 2
+        try:
+            ready = target.stat().st_size == expected_size
+        except OSError:
+            ready = False
+        if ready:
             path = target
         else:
+            target.unlink(missing_ok=True)
             path = download_tile(
                 dataset, file_id, f"{tile_name(*tile)}.zip",
                 folder, progress=progress,

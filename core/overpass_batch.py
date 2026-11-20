@@ -12,10 +12,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-class BatchError(RuntimeError):
-    pass
-
-
 _STATEMENT = re.compile(
     r"\b(node|way|relation)\s*((?:\[[^\]]*\]\s*)*);"
 )
@@ -31,11 +27,18 @@ class Selector:
     def __init__(self, kind, conditions):
         self.kind = kind
         self.conditions = list(conditions)
+        # Регулярки компилируются один раз: matches вызывается на каждом
+        # объекте PBF, и re.search каждый раз искал бы шаблон в кэше.
+        self._patterns = {
+            index: re.compile(value)
+            for index, (_key, operator, value) in enumerate(self.conditions)
+            if operator in ("~", "!~")
+        }
 
     def matches(self, kind, tags):
         if kind != self.kind:
             return False
-        for key, operator, value in self.conditions:
+        for index, (key, operator, value) in enumerate(self.conditions):
             actual = tags.get(key)
             if operator == "exists":
                 if key not in tags:
@@ -47,10 +50,10 @@ class Selector:
                 if actual == value:
                     return False
             elif operator == "~":
-                if actual is None or not re.search(value, actual):
+                if actual is None or not self._patterns[index].search(actual):
                     return False
             elif operator == "!~":
-                if actual is not None and re.search(value, actual):
+                if actual is not None and self._patterns[index].search(actual):
                     return False
         return True
 

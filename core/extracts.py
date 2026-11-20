@@ -200,22 +200,27 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
     progress_step = (
         max(1024 * 1024, total // 20) if total else 2 * 1024 * 1024
     )
-    open_ended = False
+    closed_range = False
     while True:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Загрузка прервана")
+        if total and received >= total:
+            break
+        if total and received:
+            # Открытый диапазон: сервер отдаст весь остаток одним
+            # ответом.  Закрытый кусок в 64 КБ на большом файле означал
+            # бы тысячи запросов после каждого обрыва.
+            if closed_range:
+                end = min(total - 1, received + RANGE_CHUNK - 1)
+                span = f"bytes={received}-{end}"
+            else:
+                span = f"bytes={received}-"
+            headers = {"User-Agent": USER_AGENT, "Range": span}
+        else:
+            headers = {"User-Agent": USER_AGENT}
         attempts += 1
         if attempts > 5000:
             raise ExtractError(f"{url}: слишком много попыток загрузки")
-        headers = {"User-Agent": USER_AGENT}
-        if received:
-            if total:
-                end = min(total - 1, received + RANGE_CHUNK - 1)
-            else:
-                end = received + RANGE_CHUNK - 1
-            headers["Range"] = (
-                f"bytes={received}-" if open_ended else f"bytes={received}-{end}"
-            )
         body_read = 0
         body_expected = 0
         try:
@@ -232,6 +237,15 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                     # Размер файла из ответа сервера точнее, чем из
                     # проверки HEAD: тот мог устареть.
                     total = whole
+                elif code == 200 and body_expected and (
+                    not total or body_expected > total
+                ):
+                    # HEAD может быть запрещён, а Content-Length полного
+                    # ответа есть: без этого total оставался нулём и
+                    # загрузка повторялась до предела попыток.  Меньший
+                    # известный размер не перезаписываем: сервер мог
+                    # отдать только часть файла с кодом 200.
+                    total = body_expected
                 mode = "ab" if received else "wb"
                 with temporary.open(mode) as handle:
                     while True:
@@ -253,9 +267,22 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                                 f"{received / 1048576:.1f} МБ"
                             )
         except urllib.error.HTTPError as exc:
-            if exc.code == 416 and not open_ended:
-                # Некоторые серверы ждут явную правую границу диапазона.
-                open_ended = True
+            if exc.code == 416 and received:
+                if total and received >= total:
+                    break
+                if not closed_range:
+                    # Некоторые серверы не принимают открытый диапазон:
+                    # повторяем с явной правой границей.
+                    closed_range = True
+                    continue
+                # И закрытый не принят: начинаем файл заново.
+                received = 0
+                reported = 0
+                temporary.unlink(missing_ok=True)
+                closed_range = False
+                stall += 1
+                if stall > 20:
+                    raise ExtractError(f"{url}: HTTP 416") from exc
                 continue
             raise ExtractError(f"{url}: HTTP {exc.code}") from exc
         except InterruptedError:
@@ -269,6 +296,11 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                 raise ExtractError(f"{url}: загрузка прерывается ({exc})") from exc
             idle = IDLE_TIMEOUT_SHORT
             continue
+        complete = not body_expected or body_read >= body_expected
+        if body_read and complete:
+            # Данные пришли: счётчик обрывов относится к неудачным
+            # попыткам подряд, а не ко всему файлу.
+            stall = 0
         if body_expected and body_read < body_expected:
             # Сервер обещал больше, чем прислал: файл неполный.
             stall += 1

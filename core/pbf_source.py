@@ -1107,7 +1107,7 @@ def _probe_source(gdal, source, temp_dir, index, bbox_geometry, bbox, cancel,
                 # считаться дважды.
                 local = set()
                 counts = _count_features(
-                    dataset, definitions, index, bbox_geometry, cancel,
+                    dataset, definitions, index, bbox_geometry, bbox, cancel,
                     progress, filtered, local,
                 )
                 if filtered and not counts["delivered"]:
@@ -1127,7 +1127,7 @@ def _probe_source(gdal, source, temp_dir, index, bbox_geometry, bbox, cancel,
     )
 
 
-def _count_features(dataset, definitions, index, bbox_geometry, cancel,
+def _count_features(dataset, definitions, index, bbox_geometry, bbox, cancel,
                     progress, filtered, seen):
     """Счётчики объектов файла и признак, что фильтр отдал область."""
     total = 0

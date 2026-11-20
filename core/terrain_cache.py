@@ -27,16 +27,10 @@ DEM_FILES = (
     "hillshade_composite.tif",
 )
 
-# Эти файлы переживают очистку каталога проекта и могут быть перезаписаны
-# на месте: связать их с кэшем жёсткой ссылкой нельзя, запись прошла бы
-# в кэш.  Остальные файлы удаляются перед каждой подготовкой, поэтому
-# ссылка безопасна и копия не нужна.
-COPY_ONLY_FILES = (
-    "merged_dem.tif",
-    "merged_dem_3857.tif",
-    "slope.tif",
-    "hillshade_composite.tif",
-)
+# Все файлы рельефа возвращаются из кэша жёсткой ссылкой: перед записью
+# terrain.py убирает прежний файл, поэтому GDAL не может переписать
+# кэш на месте.  Копирование гигабайтов при каждой подготовке больше
+# не нужно.
 
 # Версия расчёта рельефа (формат растров, сборка мозаики, репроекция).
 # Меняя результат, поднимайте число: иначе старый кэш отдаст устаревший
@@ -72,22 +66,6 @@ KEEP_ENTRIES = 1
 KEEP_HINTS = 16
 
 _CHUNK = 1024 * 1024
-
-
-def plugin_version():
-    """Версия плагина из metadata.txt."""
-    from .resources import PACKAGE_DIR
-
-    path = Path(PACKAGE_DIR) / "metadata.txt"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return "0"
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("version="):
-            return line.split("=", 1)[1].strip()
-    return "0"
 
 
 def _digest(parts):
@@ -197,7 +175,7 @@ def dem_signature(config, bbox, source_digest=None):
         source_digest = dem_source_digest(config)
     parts = [
         DEM_VERSION,
-        bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         config.resolved_terrain_source(),
         config.terrain_resample_method,
         config.generate_terrain_hillshade_slope,
@@ -237,7 +215,7 @@ def dem_hint(config, bbox):
     source = config.resolved_terrain_source()
     parts = [
         DEM_VERSION,
-        bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         source,
         config.terrain_resample_method,
         config.generate_terrain_hillshade_slope,
@@ -331,7 +309,7 @@ def isolines_signature(config, bbox, dem_key):
         dem_key,
         config.isolines_step,
         config.smooth_isolines,
-        bbox.as_csv() if hasattr(bbox, "as_csv") else str(bbox),
+        bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         # Слои, по которым режутся изолинии: отпечаток файла вместо
         # полного обхода геометрии и атрибутов.
         _file_stat(config.vector_dir / "water_dissolved.sqlite"),
@@ -372,10 +350,10 @@ def _restore_item(item, target):
     """Восстанавливает файл кэша без лишнего копирования.
 
     Крупные растры занимают гигабайты, и каждый прогон переписывал их
-    заново: восстановление рельефа занимало больше 20 секунд.  Файлы,
-    которые удаляются перед каждой подготовкой, связываются с кэшем
-    жёсткой ссылкой — места на диске не расходуется, а данные те же.
-    Те, что могут быть перезаписаны на месте, копируются.
+    заново: восстановление рельефа занимало больше 20 секунд.  Все файлы
+    связываются с кэшем жёсткой ссылкой — места на диске не расходуется,
+    а данные те же.  Перед записью terrain.py удаляет прежний файл,
+    поэтому кэш не может быть перезаписан через ссылку.
     """
     if target.exists():
         if _same_file(item, target):
@@ -388,12 +366,11 @@ def _restore_item(item, target):
                 return
         except OSError:
             pass
-    if item.name not in COPY_ONLY_FILES:
-        try:
-            os.link(item, target)
-            return
-        except OSError:
-            pass
+    try:
+        os.link(item, target)
+        return
+    except OSError:
+        pass
     shutil.copy2(item, target)
 
 
@@ -435,16 +412,13 @@ def _store(config, group, signature, names, source_dir):
         if _same_file(item, destination):
             stored = True
             continue
-        if name in COPY_ONLY_FILES:
+        # Ссылка вместо копии: файл только читается, а перед следующей
+        # записью terrain.py удаляет его из каталога проекта.
+        destination.unlink(missing_ok=True)
+        try:
+            os.link(item, destination)
+        except OSError:
             shutil.copy2(item, destination)
-        else:
-            # Ссылка вместо копии: файл только читается, а перед
-            # следующей подготовкой он удаляется из каталога проекта.
-            destination.unlink(missing_ok=True)
-            try:
-                os.link(item, destination)
-            except OSError:
-                shutil.copy2(item, destination)
         stored = True
     if stored:
         _prune(target.parent)

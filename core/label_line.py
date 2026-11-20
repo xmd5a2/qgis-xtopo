@@ -30,8 +30,6 @@ from osgeo import ogr
 CELL_METRES = 50.0
 MIN_CELLS = 18
 MAX_CELLS = 128
-# Доля наибольшего зазора, из которой строится ядро.
-CORE_SHARE = 0.2
 # Мелкая дыра: не больше стольких ячеек по площади или доли площади объекта.
 HOLE_CELLS = 4.0
 HOLE_SHARE = 0.02
@@ -432,7 +430,6 @@ def _geodesic_far(mask, start):
     padded = np.zeros((height + 2, width + 2), dtype=bool)
     padded[1:-1, 1:-1] = mask
     distance = _distance_field(padded)[1:-1, 1:-1]
-    flat_distance = distance.ravel().tolist()
     width_map = local_max_map(distance, 2).ravel().tolist()
     best = [-1] * (height * width)
     start_index = start[0] * width + start[1]

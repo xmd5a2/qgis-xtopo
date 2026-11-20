@@ -883,15 +883,19 @@ def classify(peak, metrics, thresholds, neighbour=None):
     ok — безымянный пик стоит на вершине.
     """
     flags = []
-    drop = metrics.drop_at(thresholds["radius"])
     deep = metrics.drop_at(thresholds["deep_radius"])
     # Расстояние до ближайшего соседнего пика OSM, который выше данного.
     neighbour_nearest = float("nan")
     if neighbour is not None:
         neighbour_nearest = neighbour[2]
 
-    if peak.category == "named":
-        return "skipped", ["не проверяется (с названием)"], None
+    if peak.category != "anonymous":
+        reason = (
+            "не проверяется (с названием)"
+            if peak.category == "named"
+            else "не проверяется (указана высота ele)"
+        )
+        return "skipped", [reason], None
 
     if not math.isnan(deep) and deep >= thresholds["deep_drop"]:
         flags.append(
