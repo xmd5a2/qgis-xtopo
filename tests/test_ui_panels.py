@@ -1128,6 +1128,83 @@ class ExportPreviewDialogTest(unittest.TestCase):
         dialog.print_button.click()
         self.assertEqual(requested, ["png", "pdf", "print"])
 
+    def test_successful_export_closes_preview(self):
+        from qgis.core import QgsLayoutExporter
+
+        from qgis_xtopo.gui.exportpreview import _enum
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        panel = ProjectPanel(None)
+        self.addCleanup(panel.deleteLater)
+        dialog = self._dialog(count=1)
+        panel._export_preview = dialog
+        dialog.finished.connect(
+            lambda _result=0, window=dialog:
+            panel._export_preview_closed(window)
+        )
+        dialog.show()
+        self.app.processEvents()
+        self.assertTrue(dialog.isVisible())
+
+        success = _enum(QgsLayoutExporter, "ExportResult", "Success")
+        panel._export_result(
+            success, "", "/tmp/map.png", "png", elapsed=0.1, parent=dialog
+        )
+        self.app.processEvents()
+
+        self.assertFalse(dialog.isVisible())
+        self.assertIsNone(panel._export_preview)
+
+    def test_failed_export_shows_message_above_preview(self):
+        from qgis.core import QgsLayoutExporter
+
+        from qgis_xtopo.gui.exportpreview import _enum
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        panel = ProjectPanel(None)
+        self.addCleanup(panel.deleteLater)
+        dialog = self._dialog(count=1)
+        panel._export_preview = dialog
+        shown = []
+        panel._export_error = (
+            lambda parent, message: shown.append((parent, message))
+        )
+
+        failure = _enum(QgsLayoutExporter, "ExportResult", "FileError")
+        panel._export_result(
+            failure, "нет доступа к файлу", "/tmp/map.png", "png",
+            parent=dialog,
+        )
+
+        self.assertEqual(
+            shown,
+            [(dialog, "Не удалось выполнить экспорт: нет доступа к файлу")],
+        )
+        box = panel._export_error_box(dialog, "нет доступа к файлу")
+        self.addCleanup(box.deleteLater)
+        self.assertIs(box.parent(), dialog)
+        self.assertEqual(box.text(), "нет доступа к файлу")
+
+    def test_preview_export_passes_window_to_action(self):
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        panel = ProjectPanel(None)
+        self.addCleanup(panel.deleteLater)
+        window = object()
+        exported = []
+        printed = []
+        panel._export = (
+            lambda extension, parent=None:
+            exported.append((extension, parent))
+        )
+        panel._print_atlas = lambda parent=None: printed.append(parent)
+
+        panel._preview_export("png", window)
+        panel._preview_export("print", window)
+
+        self.assertEqual(exported, [("png", window)])
+        self.assertEqual(printed, [window])
+
     def test_keyboard_navigation(self):
         from qgis.PyQt.QtCore import Qt
         from qgis.PyQt.QtTest import QTest

@@ -1883,7 +1883,11 @@ class ProjectPanel(QWidget):
             self._export_preview = None
 
     def _preview_export(self, extension, window):
-        """Запускает экспорт или печать из открытого предпросмотра."""
+        """Запускает экспорт или печать из открытого предпросмотра.
+
+        Успешный экспорт закрывает просмотрщик; при ошибке уведомление
+        показывается поверх него.
+        """
         if extension == "print":
             self._print_atlas(parent=window)
         else:
@@ -1993,7 +1997,7 @@ class ProjectPanel(QWidget):
         files = dialog.selectedFiles()
         if not files or not files[0]:
             return
-        self._export_to(files[0], extension)
+        self._export_to(files[0], extension, parent)
 
     def _estimate_export_memory(self, layout, dpi):
         width, height = self._page_size_mm()
@@ -2079,24 +2083,24 @@ class ProjectPanel(QWidget):
             return safe
         return preferred
 
-    def _export_to(self, path, extension):
+    def _export_to(self, path, extension, parent=None):
         canvas = self._freeze_canvas()
         try:
-            self._export_to_impl(path, extension)
+            self._export_to_impl(path, extension, parent)
         finally:
             self._unfreeze_canvas(canvas)
 
-    def _export_to_impl(self, path, extension):
+    def _export_to_impl(self, path, extension, parent=None):
         try:
             layout, atlas = self._configure_layout(Path(path).stem)
         except Exception as exc:
-            QMessageBox.warning(self, "QGIS-xtopo", i18n.tr(str(exc)))
+            QMessageBox.warning(parent or self, "QGIS-xtopo", i18n.tr(str(exc)))
             return
-        self._export_layout(layout, atlas, path, extension)
+        self._export_layout(layout, atlas, path, extension, parent)
 
-    def _export_layout(self, layout, atlas, path, extension):
+    def _export_layout(self, layout, atlas, path, extension, parent=None):
         dpi = self._confirm_export_dpi(
-            layout, int(self.export_dpi.currentData() or 150)
+            layout, int(self.export_dpi.currentData() or 150), parent
         )
         if dpi is None:
             self._remove_atlas_layer()
@@ -2133,7 +2137,7 @@ class ProjectPanel(QWidget):
                     error = ""
         except Exception as exc:
             QMessageBox.critical(
-                self, "QGIS-xtopo",
+                parent or self, "QGIS-xtopo",
                 i18n.trf("Ошибка экспорта: {}", exc),
             )
             return
@@ -2147,7 +2151,10 @@ class ProjectPanel(QWidget):
             QApplication.restoreOverrideCursor()
             self._remove_atlas_layer()
             self._restore_map_layers()
-        self._export_result(result, error, path, extension, elapsed=time.monotonic() - started)
+        self._export_result(
+            result, error, path, extension,
+            elapsed=time.monotonic() - started, parent=parent,
+        )
 
     def _export_png(self, exporter, layout, atlas, path, settings):
         """Экспорт PNG без геопривязки QGIS.
@@ -2329,9 +2336,10 @@ class ProjectPanel(QWidget):
         finally:
             self._remove_atlas_layer()
             self._restore_map_layers()
-        self._export_result(result, error, "", "print")
+        self._export_result(result, error, "", "print", parent=parent)
 
-    def _export_result(self, result, error, path, kind, elapsed=None):
+    def _export_result(self, result, error, path, kind, elapsed=None,
+                       parent=None):
         if result == _enum(QgsLayoutExporter, "ExportResult", "Success"):
             if kind == "print":
                 message = i18n.tr("Печать отправлена")
@@ -2340,12 +2348,34 @@ class ProjectPanel(QWidget):
                 if elapsed is not None:
                     message += i18n.trf(" ({} с)", f"{elapsed:.1f}")
             self._notify(message)
+            # Экспорт запускали кнопкой просмотрщика: после успеха он
+            # больше не нужен, а строка уведомления пряталась за ним.
+            if parent is not None and parent is self._export_preview:
+                parent.close()
             return
         detail = error or i18n.trf("код {}", int(result))
-        QMessageBox.critical(
-            self, "QGIS-xtopo",
-            i18n.trf("Не удалось выполнить экспорт: {}", detail),
+        self._export_error(
+            parent, i18n.trf("Не удалось выполнить экспорт: {}", detail)
         )
+
+    def _export_error(self, parent, message):
+        """Показывает ошибку поверх предпросмотра, если он открыт."""
+        window = parent
+        if window is None or window is self:
+            window = self._export_preview or self
+        box = self._export_error_box(window, message)
+        if hasattr(box, "exec"):
+            box.exec()
+        else:
+            box.exec_()
+
+    @staticmethod
+    def _export_error_box(parent, message):
+        box = QMessageBox(parent)
+        box.setIcon(_enum(QMessageBox, "Icon", "Critical"))
+        box.setWindowTitle("QGIS-xtopo")
+        box.setText(message)
+        return box
 
     def _notify(self, message):
         """Сообщение в журнал и всплывающее уведомление QGIS."""
