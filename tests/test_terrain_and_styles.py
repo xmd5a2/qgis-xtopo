@@ -45,12 +45,16 @@ class SlopeResolutionTest(unittest.TestCase):
 
             generate_hillshade_slope(config, None)
             for name in (
-                "slope_upscaled.tif",
+                "slope.tif",
                 "hillshade_composite.tif",
             ):
                 raster = gdal.Open(str(root / name))
                 self.assertEqual(raster.RasterXSize, 40, name)
                 self.assertEqual(raster.RasterYSize, 40, name)
+                if name == "slope.tif":
+                    band = raster.GetRasterBand(1)
+                    self.assertEqual(band.DataType, gdal.GDT_Byte)
+                    self.assertEqual(band.GetNoDataValue(), 255)
                 raster = None
             self.assertFalse((root / "merged_dem_upscaled.tif").exists())
             self.assertFalse((root / "merged_dem_x2.tif").exists())
@@ -202,13 +206,17 @@ class NativeTerrainResolutionTest(unittest.TestCase):
             generate_hillshade_slope(config, None)
 
             for name in (
-                "slope_upscaled.tif",
+                "slope.tif",
                 "hillshade_composite.tif",
             ):
                 raster = gdal.Open(str(root / name))
                 self.assertIsNotNone(raster, name)
                 self.assertEqual(raster.RasterXSize, 40, name)
                 self.assertEqual(raster.RasterYSize, 40, name)
+                if name == "slope.tif":
+                    band = raster.GetRasterBand(1)
+                    self.assertEqual(band.DataType, gdal.GDT_Byte)
+                    self.assertEqual(band.GetNoDataValue(), 255)
                 raster = None
             self.assertFalse((root / "merged_dem_upscaled.tif").exists())
             self.assertFalse((root / "merged_dem_downscaled.tif").exists())
@@ -245,13 +253,17 @@ class NativeTerrainResolutionTest(unittest.TestCase):
             generate_hillshade_slope(config, None)
 
             for name in (
-                "slope_upscaled.tif",
+                "slope.tif",
                 "hillshade_composite.tif",
             ):
                 raster = gdal.Open(str(root / name))
                 self.assertIsNotNone(raster, name)
                 self.assertEqual(raster.RasterXSize, 40, name)
                 self.assertEqual(raster.RasterYSize, 40, name)
+                if name == "slope.tif":
+                    band = raster.GetRasterBand(1)
+                    self.assertEqual(band.DataType, gdal.GDT_Byte)
+                    self.assertEqual(band.GetNoDataValue(), 255)
                 raster = None
             self.assertFalse((root / "merged_dem_upscaled.tif").exists())
 
@@ -1662,7 +1674,7 @@ class SlopeVariantChoiceTest(unittest.TestCase):
         from osgeo import gdal
         import numpy as np
 
-        path = Path(self.directory.name) / "slope_upscaled.tif"
+        path = Path(self.directory.name) / "slope.tif"
         rows, cols = values.shape
         dataset = gdal.GetDriverByName("GTiff").Create(
             str(path), cols, rows, 1, gdal.GDT_Float32,
@@ -1736,12 +1748,29 @@ class SlopeVariantChoiceTest(unittest.TestCase):
 
         root = Path(self.directory.name)
         (root / "raster").mkdir()
-        raster = root / "raster" / "slope_upscaled.tif"
+        raster = root / "raster" / "slope.tif"
         raster.touch()
         self.assertEqual(
             slope_style.project_raster(str(root / "map.qgz")), raster,
         )
         self.assertIsNone(slope_style.project_raster(""))
+
+    def test_legacy_project_raster_path(self):
+        """Старые проекты ещё читают slope_upscaled.tif."""
+        from qgis_xtopo.core import slope_style
+
+        root = Path(self.directory.name)
+        (root / "raster").mkdir()
+        raster = root / "raster" / "slope_upscaled.tif"
+        raster.touch()
+        self.assertEqual(
+            slope_style.project_raster(str(root / "map.qgz")), raster,
+        )
+        (root / "raster" / "slope.tif").touch()
+        self.assertEqual(
+            slope_style.project_raster(str(root / "map.qgz")),
+            root / "raster" / "slope.tif",
+        )
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
 """Выбор варианта окраски крутых склонов по характеру рельефа.
 
 У слоёв ``[TERRAIN] slope (steep) var1/var2/var3`` общая подложка
-``slope_upscaled.tif``, но разные шкалы: горы 20–70°, предгорья 10–35°,
-равнины 5–30°. Вариант выбирается по 90-му процентилю уклона: он
-показывает, насколько круты самые крутые 10 % площади, поэтому шкала не
-остаётся пустой на равнине и не упирается в последний цвет в горах.
-Пользователь по-прежнему может выбрать вариант вручную.
+``slope.tif``, но разные шкалы: горы 20–70°, предгорья 10–35°, равнины
+5–30°. Вариант выбирается по 90-му процентилю уклона: он показывает,
+насколько круты самые крутые 10 % площади, поэтому шкала не остаётся
+пустой на равнине и не упирается в последний цвет в горах. Пользователь
+по-прежнему может выбрать вариант вручную.
 """
 
 from pathlib import Path
@@ -20,7 +20,9 @@ PLAINS = 3
 MOUNTAIN_P90 = 30.0
 FOOTHILL_P90 = 12.0
 
-SLOPE_FILE = Path("raster") / "slope_upscaled.tif"
+SLOPE_FILE = Path("raster") / "slope.tif"
+# Проекты, подготовленные до переименования, ещё читают старый файл.
+LEGACY_SLOPE_FILE = Path("raster") / "slope_upscaled.tif"
 
 # Горизонтальную выборку можно прореживать дёшево, а высоту — нет:
 # у полосового TIFF (блок — одна строка на всю ширину) каждая строка
@@ -35,8 +37,12 @@ def project_raster(project_file):
     """Путь к растру уклонов рядом с проектом или None, если его нет."""
     if not project_file:
         return None
-    path = Path(project_file).parent / SLOPE_FILE
-    return path if path.exists() else None
+    root = Path(project_file).parent
+    for name in (SLOPE_FILE, LEGACY_SLOPE_FILE):
+        path = root / name
+        if path.exists():
+            return path
+    return None
 
 
 def slope_percentile(path, percent=90, width=SAMPLE_WIDTH, rows=SAMPLE_ROWS):

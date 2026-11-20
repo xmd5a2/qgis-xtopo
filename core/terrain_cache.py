@@ -23,7 +23,7 @@ from pathlib import Path
 DEM_FILES = (
     "merged_dem.tif",
     "merged_dem_3857.tif",
-    "slope_upscaled.tif",
+    "slope.tif",
     "hillshade_composite.tif",
 )
 
@@ -34,7 +34,7 @@ DEM_FILES = (
 COPY_ONLY_FILES = (
     "merged_dem.tif",
     "merged_dem_3857.tif",
-    "slope_upscaled.tif",
+    "slope.tif",
     "hillshade_composite.tif",
 )
 
@@ -48,7 +48,8 @@ DEM_VERSION = 3
 # Меняя направление света, преувеличение, подсветку теней или правило
 # укрупнения DEM, поднимайте число: иначе кэш вернёт старые растры.
 # 5 — уклон и оттенок считаются по нативному DEM; укрупнение убрано.
-HILLSHADE_STYLE_VERSION = 5
+# 6 — уклон пишется байтом (1°) в slope.tif.
+HILLSHADE_STYLE_VERSION = 6
 
 # Версия расчёта изолиний: 2 — DEM режется на тайлы с нахлёстом,
 # контуры считаются параллельно, в результат попадает середина тайла.
@@ -63,8 +64,9 @@ ISOLINES_FILES = (
     "isolines_glacier.sqlite",
 )
 
-# Сколько последних записей кэша оставляем в каждой группе.
-KEEP_ENTRIES = 3
+# Сколько последних записей кэша оставляем в каждой группе.  Рельеф
+# занимает сотни мегабайт, поэтому храним только последнюю.
+KEEP_ENTRIES = 1
 # Сколько подсказок «эта область уже посчитана» храним.  Подсказка
 # избавляет от скачивания тайлов DEM перед проверкой кэша.
 KEEP_HINTS = 16
@@ -453,7 +455,7 @@ def dem_required(config):
     """Растры, которые должны быть в кэше при текущих настройках."""
     names = ["merged_dem.tif", "merged_dem_3857.tif"]
     if config.generate_terrain_hillshade_slope:
-        names.extend(["slope_upscaled.tif", "hillshade_composite.tif"])
+        names.extend(["slope.tif", "hillshade_composite.tif"])
     return tuple(names)
 
 

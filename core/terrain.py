@@ -1390,11 +1390,11 @@ def _dem_vertical_scale(path):
 
 
 def _generate_slope(config, merged, progress=None):
-    """Ветка уклона: считается по нативному DEM."""
+    """Ветка уклона: считается по нативному DEM и пишется байтом."""
     gdal, _, _ = _gdal()
     if progress:
         progress("Generating slope")
-    slope = config.raster_dir / "slope.tif"
+    raw = config.temp_dir / "slope_raw.tif"
     options = gdal.DEMProcessingOptions(
         computeEdges=True,
         slopeFormat="degree",
@@ -1402,21 +1402,25 @@ def _generate_slope(config, merged, progress=None):
         creationOptions=_relief_creation_options(),
     )
     result = gdal.DEMProcessing(
-        str(slope), str(merged), "slope", options=options
+        str(raw), str(merged), "slope", options=options
     )
     if result is None:
         raise RuntimeError("Failed to generate slope")
     result = None
 
-    # Отсечение пологих склонов пишется сразу в итоговый растр: отдельный
-    # файл с обрезкой только раздувал бы подготовку.
+    # Отсечение пологих склонов и квантование до градуса: шкалы уклонов
+    # дискретные с шагом 5° и 2°, поэтому байта достаточно, а файл
+    # вчетверо легче Float32. 255 — nodata; уклон не бывает выше 90°.
     if progress:
         progress("Writing slope")
-    slope_up = config.raster_dir / "slope_upscaled.tif"
-    _transform_raster(
-        slope, slope_up, lambda array: array * (array > 1.04)
-    )
-    slope.unlink(missing_ok=True)
+    slope = config.raster_dir / "slope.tif"
+    try:
+        _transform_raster(
+            raw, slope, lambda array: array * (array > 1.04),
+            dtype=gdal.GDT_Byte, nodata=255,
+        )
+    finally:
+        raw.unlink(missing_ok=True)
 
 
 def _generate_hillshade(config, merged, dem_width, dem_height,

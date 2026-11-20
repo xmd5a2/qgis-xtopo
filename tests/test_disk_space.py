@@ -95,6 +95,6 @@ class DiskSpaceTest(unittest.TestCase):
 
     def test_out_of_space_names_the_file(self):
         with mock.patch.object(disk_space, "free_bytes", return_value=0):
-            error = disk_space.out_of_space("slope_upscaled.tif")
+            error = disk_space.out_of_space("slope.tif")
         self.assertIsInstance(error, disk_space.InsufficientSpace)
-        self.assertIn("slope_upscaled.tif", str(error))
+        self.assertIn("slope.tif", str(error))
