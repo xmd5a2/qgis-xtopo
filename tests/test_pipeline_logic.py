@@ -2432,5 +2432,57 @@ class HighwayIntegrityTest(unittest.TestCase):
                 f"{name}: поле пишется до сохранения слоя")
 
 
+class AreaFieldTest(unittest.TestCase):
+    """Поле площади заполняется в SQL и не считается при каждом кадре."""
+
+    @staticmethod
+    def _polygon(path):
+        path.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"id": 1},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [7.0, 46.0], [7.001, 46.0],
+                            [7.001, 46.001], [7.0, 46.001],
+                            [7.0, 46.0],
+                        ]],
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_adds_and_fills_area(self):
+        from qgis_xtopo.core.area_field import (
+            DEGREE_TO_METER, add_area_field,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self._polygon(root / "polygon.geojson")
+            destination = root / "demo.sqlite"
+            save_vector(source, destination, "demo")
+            self.assertTrue(add_area_field(destination))
+            with sqlite3.connect(destination) as connection:
+                value = connection.execute(
+                    'SELECT "area_m2" FROM demo').fetchone()[0]
+            expected = 1e-6 * DEGREE_TO_METER ** 2
+            self.assertAlmostEqual(value, expected, delta=expected * 0.01)
+            # Повторный вызов не переписывает готовый слой.
+            self.assertFalse(add_area_field(destination))
+
+    def test_missing_layers_are_skipped(self):
+        from qgis_xtopo.core.area_field import ensure_area_fields
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                ensure_area_fields(Path(directory) / "missing"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

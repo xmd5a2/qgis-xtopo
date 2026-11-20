@@ -13,6 +13,7 @@ from collections import Counter
 from xml.etree import ElementTree
 
 from qgis_xtopo.core import poi_icons
+from qgis_xtopo.core.area_field import AREA_LAYERS
 from qgis_xtopo.core.resources import PACKAGE_DIR, template_path
 
 # Слой пересыхающей воды рисуется горизонтальной штриховкой.
@@ -2793,6 +2794,30 @@ class IconAngleTest(unittest.TestCase):
                 continue
             self.assertIn("icon_angle", expression)
             self.assertNotIn("geomdistance", expression)
+
+
+class AreaFieldFilterTest(unittest.TestCase):
+    """Фильтры по площади должны уходить в SQL, а не считаться в кадре."""
+
+    def test_polygon_renderer_filters_use_area_field(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        for name in AREA_LAYERS:
+            layer = layers.get(name)
+            self.assertIsNotNone(layer, name)
+            renderer = layer.find("renderer-v2")
+            self.assertIsNotNone(renderer, name)
+            filters = [
+                rule.get("filter") or "" for rule in renderer.iter("rule")
+            ]
+            self.assertTrue(
+                any("area_m2" in value for value in filters),
+                f"{name}: фильтр рендерера должен использовать area_m2")
+            self.assertFalse(
+                any("$area" in value for value in filters),
+                f"{name}: $area в фильтре рендерера не уходит в SQL")
 
 
 if __name__ == "__main__":
