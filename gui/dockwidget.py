@@ -1380,28 +1380,6 @@ class XtopoDockWidget(QDockWidget):
             )
         )
         terrain_form.addRow(self.hillshade_slope)
-        self.resample_method = QComboBox()
-        self.resample_method.addItem("cubicspline — мягче", "cubicspline")
-        self.resample_method.addItem("lanczos — резче", "lanczos")
-        self.resample_method.setToolTip(
-            "Terrain resample method: влияет на детальность затенения "
-            "рельефа и уклонов.\n"
-            "cubicspline — мягче, меньше деталей; "
-            "lanczos — резче, возможны артефакты"
-        )
-        # Список не должен занимать всю ширину панели: из-за этого
-        # подпись «Масштабирование» не помещалась.
-        try:
-            self.resample_method.setSizeAdjustPolicy(
-                QComboBox.SizeAdjustPolicy.AdjustToContents
-            )
-        except AttributeError:
-            self.resample_method.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.resample_method.setMaximumWidth(170)
-        terrain_form.addRow("Масштабирование:", self.resample_method)
-        self.resample_label = terrain_form.labelForField(
-            self.resample_method
-        )
         separator = QFrame()
         try:
             separator.setFrameShape(QFrame.Shape.HLine)
@@ -2506,9 +2484,9 @@ class XtopoDockWidget(QDockWidget):
             generate_terrain_hillshade_slope=(
                 self.hillshade_slope.isChecked()
             ),
-            terrain_resample_method=(
-                self.resample_method.currentData() or "cubicspline"
-            ),
+            # Метод масштабирования рельефа не настраивается: cubicspline
+            # даёт мягкую картинку без колец lanczos.
+            terrain_resample_method="cubicspline",
             generate_terrain_isolines=self.isolines.isChecked(),
             isolines_step=self._current_isolines_step(),
             smooth_isolines=self.smooth_isolines.isChecked(),
@@ -3013,8 +2991,7 @@ class XtopoDockWidget(QDockWidget):
         ):
             widget.setEnabled(enabled)
         for label in (
-            self.dem_source_label, self.resample_label,
-            self.isolines_steps_label,
+            self.dem_source_label, self.isolines_steps_label,
         ):
             if label is not None:
                 label.setEnabled(enabled)
@@ -3026,9 +3003,6 @@ class XtopoDockWidget(QDockWidget):
         self.dem_dir_row.setVisible(enabled and manual)
         if self.dem_dir_label is not None:
             self.dem_dir_label.setVisible(enabled and manual)
-        self.resample_method.setEnabled(
-            enabled and self.hillshade_slope.isChecked()
-        )
         steps_enabled = enabled and self.isolines.isChecked()
         for box in self.isolines_steps.values():
             box.setEnabled(steps_enabled)
@@ -3393,10 +3367,6 @@ class XtopoDockWidget(QDockWidget):
             except (TypeError, ValueError):
                 step = 10
             self._set_isolines_step(step)
-        method = str(self.settings.value("terrain_resample_method", "cubicspline"))
-        self.resample_method.setCurrentIndex(
-            max(0, self.resample_method.findData(method))
-        )
         self.generate_terrain.setChecked(
             self.settings.value("generate_terrain", "true") == "true"
         )
@@ -3434,10 +3404,6 @@ class XtopoDockWidget(QDockWidget):
             if box.isChecked()
         )
         self.settings.setValue("isolines_steps", checked_steps)
-        self.settings.setValue(
-            "terrain_resample_method",
-            self.resample_method.currentData() or "cubicspline",
-        )
         if self._hidden_panels:
             self.settings.setValue("hidden_panels", list(self._hidden_panels))
         else:
@@ -3821,9 +3787,7 @@ class XtopoDockWidget(QDockWidget):
             get_terrain_tiles=manual,
             terrain_src_dir=dem_dir,
             generate_terrain_hillshade_slope=self.hillshade_slope.isChecked(),
-            terrain_resample_method=(
-                self.resample_method.currentData() or "cubicspline"
-            ),
+            terrain_resample_method="cubicspline",
             generate_terrain_isolines=self.isolines.isChecked(),
             isolines_step=self._current_isolines_step(),
             smooth_isolines=self.smooth_isolines.isChecked(),

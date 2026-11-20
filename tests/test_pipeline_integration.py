@@ -701,13 +701,8 @@ class PipelineIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(dock.isolines.text(), "Контуры высот")
             self.assertEqual(dock.smooth_isolines.text(), "Сглаживать контуры")
-            self.assertEqual(
-                [
-                    dock.resample_method.itemData(index)
-                    for index in range(dock.resample_method.count())
-                ],
-                ["cubicspline", "lanczos"],
-            )
+            # Метод масштабирования рельефа больше не выбирается.
+            self.assertFalse(hasattr(dock, "resample_method"))
             dock.generate_terrain.setChecked(True)
             dock.dem_source.setCurrentIndex(
                 dock.dem_source.findData("srtm")
@@ -1696,15 +1691,14 @@ class PipelineIntegrationTest(unittest.TestCase):
             dock.generate_terrain.setChecked(False)
             for widget in (
                 dock.dem_source, dock.dem_refresh, dock.dem_source_label,
-                dock.dem_info, dock.dem_warning, dock.resample_method,
-                dock.resample_label, dock.isolines_steps_label,
+                dock.dem_info, dock.dem_warning, dock.isolines_steps_label,
             ):
                 self.assertFalse(widget.isEnabled(), widget)
             # После включения блок снова доступен.
             dock.generate_terrain.setChecked(True)
             for widget in (
                 dock.dem_source, dock.dem_refresh, dock.dem_source_label,
-                dock.dem_info, dock.resample_label,
+                dock.dem_info,
             ):
                 self.assertTrue(widget.isEnabled(), widget)
         finally:
