@@ -172,6 +172,12 @@ def parse_query(query_text):
         conditions = []
         for raw in re.findall(r"\[([^\]]*)\]", match.group(2)):
             raw = raw.strip()
+            missing = re.match(r'^!\s*"([^"]+)"$', raw)
+            if missing:
+                # [!"key"] — тега нет; в отличие от [key!="value"],
+                # отсутствие тега здесь как раз и требуется.
+                conditions.append((missing.group(1), "!", None, None, None))
+                continue
             condition = re.match(
                 r'^"([^"]+)"\s*(?:(!?=)\s*"([^"]*)"|(!?~)\s*"([^"]*)")?$',
                 raw,
@@ -189,6 +195,8 @@ def parse_query(query_text):
 
 def _condition_matches(properties, condition):
     key, operator, value, regex_operator, regex = condition
+    if operator == "!":
+        return key not in properties
     if key not in properties:
         return operator == "!=" or regex_operator == "!~"
     actual = str(properties[key])

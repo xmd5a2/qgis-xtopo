@@ -186,6 +186,21 @@ class OsmConvertTest(unittest.TestCase):
         selected = filter_features(features, query)
         self.assertEqual(len(selected), 1)
 
+    def test_missing_tag_filter(self):
+        """[!"building"] отбирает объекты без тега building."""
+        query = 'way["admin_level"="2"][!"building"];'
+        features = [
+            {"properties": {"@type": "way", "admin_level": "2",
+                            "boundary": "administrative"},
+             "geometry": {"type": "LineString"}},
+            {"properties": {"@type": "way", "admin_level": "2",
+                            "building": "yes"},
+             "geometry": {"type": "Polygon"}},
+        ]
+        selected = filter_features(features, query)
+        self.assertEqual(len(selected), 1)
+        self.assertNotIn("building", selected[0]["properties"])
+
     def test_field_names_are_unique_ignoring_case(self):
         """SQLite не различает регистр имён колонок."""
         names = FieldNames()
