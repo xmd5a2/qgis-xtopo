@@ -3528,6 +3528,7 @@ class PipelineIntegrationTest(unittest.TestCase):
  <node id="4" lat="42.86" lon="44.98"/>
  <node id="5" lat="42.88" lon="44.98"/>
  <node id="6" lat="42.88" lon="44.96"/>
+ <node id="7" lat="42.92" lon="45.00"><tag k="place" v="village"/></node>
  <way id="10"><nd ref="3"/><nd ref="4"/><nd ref="5"/><nd ref="6"/><nd ref="3"/>
    <tag k="natural" v="water"/></way>
  <way id="11"><nd ref="4"/><nd ref="5"/><tag k="waterway" v="river"/></way>
@@ -3541,7 +3542,10 @@ class PipelineIntegrationTest(unittest.TestCase):
                 qgis_projects_dir=str(root / "projects"),
                 project_name="test",
                 bbox="44.95,42.85,45.05,42.95",
-                array_queries=["peak", "water", "river", "places_main"],
+                array_queries=[
+                    "peak", "water", "river", "places_main",
+                    "places_main_major",
+                ],
                 source_mode="pbf",
                 pbf_path=str(source),
             )
@@ -3556,7 +3560,10 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertTrue(project_path.exists())
             self.assertFalse(stale_vector.exists())
             self.assertFalse(stale_raster.exists())
-            for name in ("peak", "water", "water_dissolved", "river", "places_main"):
+            for name in (
+                "peak", "water", "water_dissolved", "river",
+                "places_main", "places_main_major",
+            ):
                 self.assertTrue((config.vector_dir / f"{name}.sqlite").exists(), name)
 
             with zipfile.ZipFile(project_path) as archive:
@@ -3599,7 +3606,9 @@ class PipelineIntegrationTest(unittest.TestCase):
                 qgis_projects_dir=str(root / "projects"),
                 project_name="poi",
                 bbox="44.95,42.85,45.05,42.95",
-                array_queries=["peak", "places_main"],
+                array_queries=[
+                    "peak", "places_main", "places_main_major",
+                ],
                 source_mode="pbf",
                 pbf_path=str(source),
             )

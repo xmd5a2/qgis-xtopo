@@ -187,6 +187,9 @@ RECIPES = {
     "places_main": Recipe([
         save(fields="places_main"),
     ]),
+    "places_main_major": Recipe([
+        save(fields="places_main"),
+    ]),
     "peak": Recipe([
         save(fields="peak"),
     ]),

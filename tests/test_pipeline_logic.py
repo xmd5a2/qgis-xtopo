@@ -1550,6 +1550,31 @@ class PoiRecipeCrsTest(unittest.TestCase):
         self.assertEqual(saves[-1].get("suffix"), "")
 
 
+class PlacesQuerySplitTest(unittest.TestCase):
+    """city и town отделены от остальных населённых пунктов."""
+
+    def test_major_query_has_only_city_and_town(self):
+        from qgis_xtopo.core.resources import read_query
+
+        major = read_query("places_main_major")
+        for place in ("city", "town"):
+            self.assertIn(f'["place"="{place}"]', major)
+        for place in (
+            "suburb", "neighbourhood", "village", "hamlet",
+            "isolated_dwelling",
+        ):
+            self.assertNotIn(f'["place"="{place}"]', major)
+
+    def test_minor_query_excludes_city_and_town(self):
+        from qgis_xtopo.core.resources import read_query
+
+        minor = read_query("places_main")
+        for place in ("city", "town"):
+            self.assertNotIn(f'["place"="{place}"]', minor)
+        for place in ("suburb", "neighbourhood", "village", "hamlet"):
+            self.assertIn(f'["place"="{place}"]', minor)
+
+
 class RailwayQueryTest(unittest.TestCase):
     """Фуникулёр и грузовая канатная дорога попадают в запросы подготовки."""
 

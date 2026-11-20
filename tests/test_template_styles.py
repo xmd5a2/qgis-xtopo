@@ -1625,11 +1625,65 @@ class PoiSuppressionTest(unittest.TestCase):
         self.assertEqual(ranks, sorted(ranks))
         self.assertEqual(len(set(ranks)), len(ranks))
 
-    def test_places_main_is_below_peaks_and_volcanoes(self):
-        """Пока оставляем places main ниже пиков и вулканов."""
+    def test_places_main_major_is_above_mountains(self):
+        """Города и посёлки не вытесняются пиками и вулканами.
+
+        Приоритет значка задаёт место слоя в дереве проекта.  Слой
+        city/town стоит выше volcano, volcano dirt и peak.
+        """
         ranks = {layer.name: layer.rank for layer in self.layers}
-        for name in ("peak", "volcano", "volcano dirt"):
+        for name in ("volcano", "volcano dirt", "peak"):
+            self.assertLess(
+                ranks["places main major"], ranks[name], name,
+            )
+
+    def test_places_main_stays_below_peaks(self):
+        """Деревни и хутора по-прежнему уступают пикам."""
+        ranks = {layer.name: layer.rank for layer in self.layers}
+        for name in ("volcano", "volcano dirt", "peak"):
             self.assertGreater(ranks["places main"], ranks[name], name)
+
+    def test_city_is_not_suppressed_by_peak(self):
+        """Город рядом с пиком остаётся, пик уступает городу."""
+        from qgis_xtopo.core.poi_icons import (
+            _Point, _suppression_distances,
+        )
+
+        ranks = {layer.name: layer.rank for layer in self.layers}
+        city = _Point(
+            rank=ranks["places main major"] + 0.1, lon=6.9, lat=46.05,
+            name="places main major", fid=1, bands={0: 2}, sizes={0: 2.0},
+        )
+        peak = _Point(
+            rank=ranks["peak"], lon=6.9005, lat=46.05,
+            name="peak", fid=2, bands={0: 2}, sizes={0: 2.0},
+        )
+        distances = _suppression_distances(
+            [city, peak], {0: [city, peak]}, [(0.0, 20000.0)],
+        )
+        self.assertNotIn(("places main major", 1), distances)
+        self.assertIn(("peak", 2), distances)
+
+    def test_village_is_still_suppressed_by_peak(self):
+        """Деревня рядом с пиком по-прежнему уступает ему."""
+        from qgis_xtopo.core.poi_icons import (
+            _Point, _suppression_distances,
+        )
+
+        ranks = {layer.name: layer.rank for layer in self.layers}
+        village = _Point(
+            rank=ranks["places main"] + 0.1, lon=6.9, lat=46.05,
+            name="places main", fid=1, bands={0: 2}, sizes={0: 2.0},
+        )
+        peak = _Point(
+            rank=ranks["peak"], lon=6.9005, lat=46.05,
+            name="peak", fid=2, bands={0: 2}, sizes={0: 2.0},
+        )
+        distances = _suppression_distances(
+            [village, peak], {0: [village, peak]}, [(0.0, 20000.0)],
+        )
+        self.assertIn(("places main", 1), distances)
+        self.assertNotIn(("peak", 2), distances)
 
     def test_all_icon_layers_use_one_crs(self):
         """Все слои со значками — в EPSG:4326.
@@ -2033,6 +2087,7 @@ class SettlementPriorityTest(unittest.TestCase):
 
     def test_layer_is_in_the_list(self):
         self.assertIn("places main", poi_icons.SELF_RANKED_LAYERS)
+        self.assertIn("places main major", poi_icons.SELF_RANKED_LAYERS)
 
 
 class PoiObstacleTest(unittest.TestCase):
