@@ -591,6 +591,7 @@ class ProjectPanel(QWidget):
         self._opacity_baseline = {}
         self._hillshade_baseline = {}
         self._hillshade_before_basemap = False
+        self._slope_before_basemap = (False, False)
         self._isoline_color = None
         self._isoline_baseline = {}
         self._basemap_isoline_forced = False
@@ -2637,6 +2638,13 @@ class ProjectPanel(QWidget):
         if not self.is_xtopo_project(project):
             return
         if checked:
+            # Состояние уклонов запоминаем до добавления слоя подложки:
+            # добавление вызывает синхронизацию панели, а она уже видит
+            # подложку и успевает снять галки.
+            slope_before = (
+                self.steep_check.isChecked(),
+                self.slight_check.isChecked(),
+            )
             key = self.basemap_combo.currentData() or basemap.DEFAULT_SOURCE
             if basemap.apply(key, project) is None:
                 self.basemap_check.blockSignals(True)
@@ -2651,11 +2659,13 @@ class ProjectPanel(QWidget):
             self._apply_basemap_isoline_style()
             self._set_basemap_inversion(True)
             self._block_hillshade()
+            self._block_slope(slope_before)
         else:
             self._set_basemap_inversion(False)
             self._restore_isoline_style_after_basemap()
             basemap.remove(project)
             self._unblock_hillshade()
+            self._unblock_slope()
         self._update_isoline_controls()
         self._repaint_canvas()
 
@@ -2744,6 +2754,71 @@ class ProjectPanel(QWidget):
         else:
             self.hillshade_check.setToolTip("Затенение рельефа")
 
+    def _block_slope(self, before=None):
+        """На подложке раскраска уклонов выключена.
+
+        Снимок сам показывает рельеф, а цветные уклоны его закрывают.
+        Прежнее состояние запоминается в слое подложки и возвращается
+        после её выключения.  ``before`` передаётся, если подложка уже
+        добавлена и синхронизация панели успела снять галки.
+        """
+        if before is None:
+            before = (
+                self.steep_check.isChecked(),
+                self.slight_check.isChecked(),
+            )
+        self._slope_before_basemap = before
+        basemap.set_slope_state(*before)
+        previous = self._syncing
+        self._syncing = True
+        try:
+            self._apply_steep_visibility(False)
+            self._set_layer_visible(SLIGHT_LAYER, False)
+            self.steep_check.setChecked(False)
+            self.slight_check.setChecked(False)
+        finally:
+            self._syncing = previous
+        self._update_slope_block()
+
+    def _unblock_slope(self):
+        """Подложка выключена — раскраска уклонов возвращается."""
+        steep, slight = self._slope_before_basemap
+        self._slope_before_basemap = (False, False)
+        previous = self._syncing
+        self._syncing = True
+        try:
+            self._apply_steep_visibility(steep)
+            self._set_layer_visible(SLIGHT_LAYER, slight)
+            self.steep_check.setChecked(steep)
+            self.slight_check.setChecked(slight)
+        finally:
+            self._syncing = previous
+        self._update_slope_block()
+
+    def _update_slope_block(self):
+        """Пока подложка включена, раскраску уклонов включить нельзя."""
+        blocked = basemap.active_source() is not None
+        steep_available = bool(self._steep_variant_names())
+        slight_available = self._layer(SLIGHT_LAYER) is not None
+        self.steep_check.setEnabled(not blocked and steep_available)
+        self.slight_check.setEnabled(not blocked and slight_available)
+        if blocked:
+            tooltip = (
+                "На растровой подложке раскраска уклонов не используется"
+            )
+            self.steep_check.setToolTip(tooltip)
+            self.slight_check.setToolTip(tooltip)
+            # Раскраска на снимке не нужна: слои прячем, даже если их
+            # включили в дереве слоёв QGIS.
+            self._apply_steep_visibility(False)
+            self._set_layer_visible(SLIGHT_LAYER, False)
+            self.steep_check.setChecked(False)
+            self.slight_check.setChecked(False)
+        else:
+            self.steep_check.setToolTip("")
+            self.slight_check.setToolTip("")
+        self._update_steep_variant_state()
+
     def _sync_basemap_state(self):
         """Показывает в панели подложку, сохранённую в проекте."""
         active = basemap.active_source()
@@ -2779,12 +2854,15 @@ class ProjectPanel(QWidget):
             # Прежнее состояние отмывки лежит в слое подложки: после
             # выключения подложки отмывка вернётся в прежний вид.
             self._hillshade_before_basemap = basemap.hillshade_state()
+            # Так же хранится состояние раскраски уклонов.
+            self._slope_before_basemap = basemap.slope_state()
         else:
             # Если слой подложки удалили вручную, вернуть обычные стили.
             basemap.remove()
             self._restore_isoline_style_after_basemap()
             self._apply_isoline_bold()
             self._hillshade_before_basemap = False
+            self._slope_before_basemap = (False, False)
             self.basemap_invert_check.blockSignals(True)
             try:
                 self.basemap_invert_check.setChecked(False)
@@ -2793,6 +2871,7 @@ class ProjectPanel(QWidget):
             self.basemap_invert_check.setEnabled(False)
         combo.setEnabled(check.isChecked())
         self._update_hillshade_block()
+        self._update_slope_block()
         self._update_isoline_controls()
 
     def _repaint_canvas(self):
@@ -3272,9 +3351,10 @@ class ProjectPanel(QWidget):
             self._update_rule_checks(available[ISOLINES_LAYER])
             self._sync_glacier_rules()
             self._update_isoline_controls()
-            # Подложка запрещает отмывку: галку нельзя включить, пока
-            # подложка стоит.
+            # Подложка запрещает отмывку и раскраску уклонов: галки нельзя
+            # включить, пока подложка стоит.
             self._update_hillshade_block()
+            self._update_slope_block()
         finally:
             self._syncing = False
 

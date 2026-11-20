@@ -1300,6 +1300,149 @@ class DockLanguageTest(unittest.TestCase):
         finally:
             self.basemap.remove(project)
 
+    def test_slope_returns_after_basemap(self):
+        """Раскраска уклонов возвращается, когда подложку выключили."""
+        from unittest import mock
+
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        steep = QgsVectorLayer(
+            "Point?crs=EPSG:4326",
+            "[TERRAIN] slope (steep) var1",
+            "memory",
+        )
+        slight = QgsVectorLayer(
+            "Point?crs=EPSG:4326",
+            "[TERRAIN] slope (slight)",
+            "memory",
+        )
+        project.addMapLayer(steep)
+        project.addMapLayer(slight)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.steep_check.setChecked(True)
+                panel.slight_check.setChecked(True)
+                self.app.processEvents()
+                self.assertTrue(
+                    panel._layer_visible("[TERRAIN] slope (steep) var1")
+                )
+                self.assertTrue(
+                    panel._layer_visible("[TERRAIN] slope (slight)")
+                )
+
+                panel.basemap_check.setChecked(True)
+                self.app.processEvents()
+                # На подложке обе раскраски выключены и заблокированы.
+                self.assertFalse(panel.steep_check.isChecked())
+                self.assertFalse(panel.slight_check.isChecked())
+                self.assertFalse(panel.steep_check.isEnabled())
+                self.assertFalse(panel.slight_check.isEnabled())
+                self.assertFalse(panel.steep_variant_button.isEnabled())
+                self.assertFalse(
+                    panel._layer_visible("[TERRAIN] slope (steep) var1")
+                )
+                self.assertFalse(
+                    panel._layer_visible("[TERRAIN] slope (slight)")
+                )
+                self.assertEqual(
+                    self.basemap.slope_state(project), (True, True)
+                )
+
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+                # После выключения подложки обе раскраски вернулись.
+                self.assertTrue(panel.steep_check.isChecked())
+                self.assertTrue(panel.slight_check.isChecked())
+                self.assertTrue(panel.steep_check.isEnabled())
+                self.assertTrue(panel.slight_check.isEnabled())
+                self.assertTrue(
+                    panel._layer_visible("[TERRAIN] slope (steep) var1")
+                )
+                self.assertTrue(
+                    panel._layer_visible("[TERRAIN] slope (slight)")
+                )
+        finally:
+            self.basemap.remove(project)
+            project.removeMapLayer(steep.id())
+            project.removeMapLayer(slight.id())
+
+    def test_saved_slope_state_returns_after_basemap(self):
+        """Сохранённое состояние уклонов переживает открытие проекта."""
+        from unittest import mock
+
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        steep = QgsVectorLayer(
+            "Point?crs=EPSG:4326",
+            "[TERRAIN] slope (steep) var1",
+            "memory",
+        )
+        slight = QgsVectorLayer(
+            "Point?crs=EPSG:4326",
+            "[TERRAIN] slope (slight)",
+            "memory",
+        )
+        project.addMapLayer(steep)
+        project.addMapLayer(slight)
+        self.basemap.apply("arcgis", project)
+        self.basemap.set_slope_state(True, True)
+        dock = self._dock()
+        panel = dock.project_panel
+        try:
+            with mock.patch.object(
+                projectpanel.ProjectPanel,
+                "is_xtopo_project",
+                staticmethod(lambda *args, **kwargs: True),
+            ):
+                panel.setEnabled(True)
+                panel.refresh()
+                self.app.processEvents()
+                self.assertFalse(panel.steep_check.isChecked())
+                self.assertFalse(panel.slight_check.isChecked())
+                self.assertFalse(panel.steep_check.isEnabled())
+                self.assertFalse(panel.slight_check.isEnabled())
+
+                panel.basemap_check.setChecked(False)
+                self.app.processEvents()
+            self.assertTrue(panel.steep_check.isChecked())
+            self.assertTrue(panel.slight_check.isChecked())
+            self.assertTrue(panel.steep_check.isEnabled())
+            self.assertTrue(panel.slight_check.isEnabled())
+        finally:
+            self.basemap.remove(project)
+            project.removeMapLayer(steep.id())
+            project.removeMapLayer(slight.id())
+
+    def test_basemap_remembers_slope_state(self):
+        """Состояние уклонов хранится в слое подложки."""
+        from qgis.core import QgsProject
+
+        project = QgsProject.instance()
+        self.basemap.remove(project)
+        try:
+            self.basemap.apply("bing", project)
+            self.assertEqual(self.basemap.slope_state(project), (False, False))
+            self.basemap.set_slope_state(True, False)
+            self.assertEqual(self.basemap.slope_state(project), (True, False))
+            # Смена источника подложки состояние не теряет.
+            self.basemap.apply("arcgis", project)
+            self.assertEqual(self.basemap.slope_state(project), (True, False))
+        finally:
+            self.basemap.remove(project)
+
     def test_basemap_labels_follow_interface_language(self):
         dock = self._dock()
         panel = dock.project_panel

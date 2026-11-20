@@ -59,6 +59,7 @@ LABEL_COLORS_PROPERTY = "qgis_xtopo/basemap_label_colors"
 SYMBOL_COLORS_PROPERTY = "qgis_xtopo/basemap_symbol_colors"
 ICON_EFFECTS_PROPERTY = "qgis_xtopo/basemap_icon_effects"
 HILLSHADE_PROPERTY = "qgis_xtopo/basemap_hillshade"
+SLOPE_PROPERTY = "qgis_xtopo/basemap_slope"
 FULL_STYLE = "qgis_xtopo_full"
 LABELS_STYLE = "qgis_xtopo_labels"
 OSM_LAYER_NAME = "OpenStreetMap"
@@ -359,6 +360,7 @@ def apply(key, project=None):
     osm_flags = ""
     inversion = ""
     hillshade = ""
+    slope = ""
     if existing:
         osm_flags = existing[0].customProperty(
             OSM_VISIBLE_PROPERTY
@@ -369,6 +371,7 @@ def apply(key, project=None):
         hillshade = str(
             existing[0].customProperty(HILLSHADE_PROPERTY) or ""
         )
+        slope = str(existing[0].customProperty(SLOPE_PROPERTY) or "")
         for layer in existing:
             project.removeMapLayer(layer.id())
     layer = _create_layer(basemap)
@@ -381,6 +384,7 @@ def apply(key, project=None):
     layer.setCustomProperty(OSM_VISIBLE_PROPERTY, osm_flags)
     layer.setCustomProperty(LABEL_INVERSION_PROPERTY, inversion)
     layer.setCustomProperty(HILLSHADE_PROPERTY, hillshade)
+    layer.setCustomProperty(SLOPE_PROPERTY, slope)
     project.addMapLayer(layer, False)
     project.layerTreeRoot().addLayer(layer)
     _apply_labels_only(project)
@@ -985,4 +989,31 @@ def set_hillshade_state(enabled, project=None):
     if layer is None:
         return False
     layer.setCustomProperty(HILLSHADE_PROPERTY, "1" if enabled else "0")
+    return True
+
+
+def slope_state(project=None):
+    """Была ли раскраска уклонов включена до подложки.
+
+    Возвращает пару (крутые склоны, равнинные участки).  Подложка
+    выключает обе раскраски, а после её выключения они возвращаются
+    в прежний вид.  Состояние хранится в слое подложки, поэтому
+    переживает смену источника и перезагрузку проекта.
+    """
+    layer = active_layer(project)
+    if layer is None:
+        return False, False
+    raw = str(layer.customProperty(SLOPE_PROPERTY) or "")
+    return raw[:1] == "1", raw[1:2] == "1"
+
+
+def set_slope_state(steep, slight, project=None):
+    """Запоминает состояние раскраски уклонов в слое подложки."""
+    layer = active_layer(project)
+    if layer is None:
+        return False
+    layer.setCustomProperty(
+        SLOPE_PROPERTY,
+        ("1" if steep else "0") + ("1" if slight else "0"),
+    )
     return True
