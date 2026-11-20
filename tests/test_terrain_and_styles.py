@@ -814,9 +814,6 @@ class BasemapLabelInversionTest(unittest.TestCase):
         self.layer.setLabeling(labeling)
         self.project.addMapLayer(self.layer)
 
-    def tearDown(self):
-        self.project.clear()
-
     def _colors(self, layer=None):
         """Цвета текста и halo всех правил подписей слоя."""
         from qgis_xtopo.core import label_style
@@ -827,6 +824,16 @@ class BasemapLabelInversionTest(unittest.TestCase):
             text, halo, _enabled = label_style.label_colors(settings)
             colors.append((text, halo))
         return colors
+
+    def _buffer_effects(self, layer=None):
+        """Состояние paint effect у буфера каждого правила."""
+        from qgis_xtopo.core import label_style
+
+        layer = layer or self.layer
+        return [
+            label_style.label_buffer_effect(settings)
+            for _key, settings in label_style.label_settings(layer.labeling())
+        ]
 
     def test_inversion_swaps_text_and_halo_colors(self):
         before = self._colors()
@@ -862,6 +869,40 @@ class BasemapLabelInversionTest(unittest.TestCase):
         self.assertIsNone(
             layer.customProperty(self.basemap.LABEL_COLORS_PROPERTY)
         )
+
+    def test_inversion_removes_outer_buffer_glow(self):
+        """Внешнее свечение буфера на подложке выключается."""
+        before = self._buffer_effects()
+        self.assertTrue(any(before), before)
+        self.assertTrue(self.basemap.invert_labels(self.project))
+        after = self._buffer_effects()
+        for old, new in zip(before, after):
+            if old is not None:
+                self.assertFalse(new)
+        self.assertTrue(self.basemap.restore_labels(self.project))
+        self.assertEqual(self._buffer_effects(), before)
+
+    def test_pre_disabled_buffer_glow_stays_disabled(self):
+        """Если свечение было выключено, инверсия его не включает."""
+        from qgis_xtopo.core import label_style
+
+        for key, settings in label_style.label_settings(
+            self.layer.labeling()
+        ):
+            label_style.set_label_buffer_effect(settings, False)
+            label_style.set_label_settings(
+                self.layer.labeling(), key, settings
+            )
+        before = self._buffer_effects()
+        self.assertTrue(before)
+        self.assertTrue(all(effect is not True for effect in before))
+
+        self.basemap.invert_labels(self.project)
+        self.assertTrue(
+            all(effect is not True for effect in self._buffer_effects())
+        )
+        self.basemap.restore_labels(self.project)
+        self.assertEqual(self._buffer_effects(), before)
 
     def test_halo_becomes_white_for_light_halo(self):
         """Не совсем белый halo усиливается до белого."""

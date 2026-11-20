@@ -12,7 +12,9 @@
 железные дороги перекрашиваются, чтобы читаться на снимке.  Цвет текста
 и цвет halo меняются местами, дороги и тропы становятся светлыми, скалы —
 светло-коричневыми, ЛЭП — серыми, подъёмники — серо-белыми, железные
-дороги — белыми.  Чёрным значкам добавляется плотная белая обводка,
+дороги — белыми.  Внешнее мягкое свечение буфера надписей на подложке
+выключается, иначе оно остаётся светлым при чёрной обводке.  Чёрным
+значкам добавляется плотная белая обводка,
 сами значки остаются исходными.  Прежние цвета хранятся в свойствах слоя — по ним всё
 возвращается в исходный вид.
 
@@ -484,7 +486,11 @@ def _repaint(layer):
 
 
 def _saved_colors(layer):
-    """Сохранённые прежние цвета слоя: список «ключ, текст, halo»."""
+    """Сохранённые прежние цвета слоя.
+
+    Элемент — «ключ, текст, halo, состояние свечения буфера».  Четвёртого
+    элемента нет в проектах старых версий: там свечение не выключалось.
+    """
     raw = layer.customProperty(LABEL_COLORS_PROPERTY)
     if not raw:
         return []
@@ -492,13 +498,15 @@ def _saved_colors(layer):
         saved = json.loads(str(raw))
     except ValueError:
         return []
-    return [item for item in saved if len(item) == 3]
+    return [item for item in saved if len(item) in (3, 4)]
 
 
 def _apply_saved_colors(layer, saved):
-    """Возвращает слою сохранённые цвета текста и halo."""
+    """Возвращает слою сохранённые цвета текста, halo и свечение буфера."""
     labeling = layer.labeling()
-    for key, text_color, halo_color in saved:
+    for item in saved:
+        key, text_color, halo_color = item[:3]
+        effect_enabled = item[3] if len(item) > 3 else None
         settings = label_style.settings_by_key(labeling, key)
         if settings is None:
             continue
@@ -507,14 +515,20 @@ def _apply_saved_colors(layer, saved):
             text_color=QColor(text_color),
             halo_color=QColor(halo_color),
         )
+        if effect_enabled is not None:
+            label_style.set_label_buffer_effect(
+                settings, bool(effect_enabled)
+            )
         label_style.set_label_settings(labeling, key, settings)
 
 
 def invert_labels(project=None):
     """Меняет местами цвет надписей и цвет их halo.
 
-    Прежние цвета сохраняются в свойстве слоя: по ним надписи
-    возвращаются в исходный вид.  Перед обменом прежние цвета
+    Внешнее свечение буфера на подложке выключается: после обмена
+    цветов оно осталось бы светлым и рисовало вторую обводку.  Прежние
+    цвета и состояние свечения сохраняются в свойстве слоя: по ним
+    надписи возвращаются в исходный вид.  Перед обменом прежние цвета
     возвращаются, поэтому все слои получают одинаковую картину,
     даже если стиль слоя трогали стороной.  Надписи дорог с широкой
     полосой и площадных дорог не меняются (см. `core/label_tags.py`).
@@ -548,10 +562,17 @@ def invert_labels(project=None):
             if inverted is None:
                 continue
             new_text, new_halo = inverted
+            # Внешнее свечение буфера не инвертируется: после смены
+            # цвета halo оно осталось бы светлым и рисовало вторую
+            # обводку. На снимке оно лишнее — выключаем до возврата.
+            effect_enabled = label_style.label_buffer_effect(settings)
+            if effect_enabled is not None:
+                label_style.set_label_buffer_effect(settings, False)
             saved.append([
                 key,
                 text_color.name(QColor.HexArgb),
                 halo_color.name(QColor.HexArgb),
+                None if effect_enabled is None else int(effect_enabled),
             ])
             label_style.set_label_colors(
                 settings, text_color=new_text, halo_color=new_halo

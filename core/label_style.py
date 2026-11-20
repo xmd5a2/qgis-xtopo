@@ -70,6 +70,37 @@ def label_colors(settings):
     return fmt.color(), buffer.color(), buffer.enabled()
 
 
+def label_buffer_effect(settings):
+    """Включён ли paint effect у буфера подписи; None — эффекта нет.
+
+    В шаблоне буфер несёт стек эффектов с внешним свечением: он делает
+    подпись мягче, но у инвертированной подписи цвет свечения остаётся
+    прежним и рисует вторую, светлую обводку.
+    """
+    fmt = settings.format()
+    buffer = fmt.buffer()
+    effect = buffer.paintEffect()
+    if effect is None:
+        return None
+    return effect.enabled()
+
+
+def set_label_buffer_effect(settings, enabled):
+    """Включает или выключает paint effect буфера подписи.
+
+    Эффект меняется на месте: ``buffer.setPaintEffect`` вместе с
+    последующей сменой цветов оставляет висячий указатель и роняет QGIS.
+    """
+    fmt = settings.format()
+    buffer = fmt.buffer()
+    effect = buffer.paintEffect()
+    if effect is None or effect.enabled() == bool(enabled):
+        return False
+    effect.setEnabled(bool(enabled))
+    settings.setFormat(fmt)
+    return True
+
+
 def set_label_colors(settings, text_color=None, halo_color=None,
                      halo_enabled=None, bold=None):
     """Меняет цвета и жирность подписей в копии настроек.
