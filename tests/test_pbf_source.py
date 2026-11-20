@@ -49,6 +49,64 @@ class PbfSourceTest(unittest.TestCase):
             keys = [item.strip() for item in ignore[len("ignore="):].split(",")]
             self.assertNotIn("ele", keys)
 
+    def test_osm_config_adds_area_man_made(self):
+        from qgis_xtopo.core.osm_convert import AREA_MAN_MADE
+        from qgis_xtopo.core.pbf_source import ensure_osm_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="osm",
+                bbox="1,2,3,4",
+            )
+            config.ensure_directories()
+            path = ensure_osm_config(config)
+            text = path.read_text(encoding="utf-8")
+            line = next(
+                line for line in text.splitlines()
+                if line.startswith("closed_ways_are_polygons=")
+            )
+            tokens = [
+                item.strip() for item in line.split("=", 1)[1].split(",")
+            ]
+            # Существующие площадные ключи не потеряны.
+            self.assertIn("building", tokens)
+            self.assertIn("highway=platform", tokens)
+            for value in AREA_MAN_MADE:
+                self.assertIn(f"man_made={value}", tokens)
+            self.assertEqual(len(tokens), len(set(tokens)))
+            # Повторный вызов не дублирует пары.
+            self.assertEqual(
+                text, ensure_osm_config(config).read_text(encoding="utf-8")
+            )
+
+    def test_osm_config_creates_polygon_line_without_system_config(self):
+        from qgis_xtopo.core.pbf_source import ensure_osm_config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="osm",
+                bbox="1,2,3,4",
+            )
+            config.ensure_directories()
+            with mock.patch(
+                "qgis_xtopo.core.pbf_source._system_osm_config",
+                return_value=None,
+            ):
+                path = ensure_osm_config(config)
+            text = path.read_text(encoding="utf-8")
+            line = next(
+                line for line in text.splitlines()
+                if line.startswith("closed_ways_are_polygons=")
+            )
+            tokens = [
+                item.strip() for item in line.split("=", 1)[1].split(",")
+            ]
+            self.assertIn("building", tokens)
+            self.assertIn("man_made=storage_tank", tokens)
+            self.assertIn("man_made=bunker_silo", tokens)
+
     def test_query_index(self):
         index = QueryIndex({
             "water": 'way["natural"="water"]["intermittent"!="yes"];',

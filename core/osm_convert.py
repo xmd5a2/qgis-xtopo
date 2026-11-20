@@ -15,11 +15,14 @@ AREA_KEYS = frozenset({
 # Точные пары «ключ=значение» из того же списка GDAL.
 AREA_PAIRS = frozenset({"highway=platform", "public_transport=platform"})
 
-# Расширения списка GDAL: эти way в GDAL остаются линиями, но слой
-# строит по ним площади.
+# Площадные значения man_made сверх списка GDAL.  Те же пары дописывает
+# ensure_osm_config в closed_ways_are_polygons, иначе в режиме PBF
+# замкнутые резервуары и силосы приходили бы линиями и пропадали в
+# полигональных слоях.
 AREA_MAN_MADE = {
     "pier", "breakwater", "bridge", "tower", "water_tower", "reservoir_covered",
-    "wastewater_plant", "works", "lighthouse",
+    "wastewater_plant", "works", "lighthouse", "storage_tank", "bunker_silo",
+    "monitoring_station",
 }
 AREA_POWER = {"plant", "substation", "generator"}
 

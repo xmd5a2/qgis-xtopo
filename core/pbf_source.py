@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import osmium_prefilter
-from .osm_convert import FieldNames
+from .osm_convert import AREA_MAN_MADE, FieldNames
 
 
 # Порядок слоёв драйвера OSM: драйвер читает файл потоково
@@ -59,6 +59,15 @@ unsignificant=created_by,converted_by,source,time,ele,attribution
 ignore=created_by,converted_by,source,time,note,todo,openGeoDB:,fixme,FIXME
 """
 
+# Стандартный список closed_ways_are_polygons из osmconf.ini.  Нужен,
+# только если строки в конфиге нет вовсе: создавать её надо целиком,
+# иначе GDAL потеряет площадные ключи по умолчанию.
+_DEFAULT_POLYGON_KEYS = (
+    "aeroway", "amenity", "boundary", "building", "craft", "geological",
+    "historic", "landuse", "leisure", "military", "natural", "office", "place",
+    "shop", "sport", "tourism", "highway=platform", "public_transport=platform",
+)
+
 
 def _system_osm_config():
     """Путь к системному osmconf.ini, если он доступен."""
@@ -91,30 +100,61 @@ def _system_osm_config():
 
 
 def ensure_osm_config(config):
-    """Готовит osmconf.ini, сохраняющий тег ele у точек.
+    """Готовит osmconf.ini для чтения PBF.
 
-    Стандартный конфиг GDAL перечисляет ele в ``ignore``, поэтому
-    ``other_tags`` его не содержит.  Копия системного конфига без этого
-    тега возвращает высоту в слой пиков.
+    Копия системного конфига без ``ele`` в ``ignore`` возвращает высоту
+    в слой пиков.  В ``closed_ways_are_polygons`` дописываются площадные
+    ``man_made`` из ``AREA_MAN_MADE``: без них замкнутые резервуары и
+    силосы приходили линиями и пропадали в полигональных слоях.
     """
     source = _system_osm_config()
     if source is not None:
         text = source.read_text(encoding="utf-8", errors="replace")
     else:
         text = _FALLBACK_OSM_CONFIG
+    additions = [f"man_made={value}" for value in sorted(AREA_MAN_MADE)]
+    present = any(
+        line.strip().startswith("closed_ways_are_polygons=")
+        for line in text.splitlines()
+    )
+    inserted = present
     lines = []
     in_points = False
     for line in text.splitlines():
         stripped = line.strip()
+        if stripped.startswith("[") and not inserted:
+            # Строки нет в конфиге: создаём её в общей секции, иначе
+            # GDAL останется без площадных ключей по умолчанию.
+            lines.append(
+                "closed_ways_are_polygons="
+                + ",".join(_DEFAULT_POLYGON_KEYS + tuple(additions))
+            )
+            inserted = True
         if stripped.startswith("["):
             in_points = stripped == "[points]"
-        if in_points and line.startswith("ignore="):
+        if stripped.startswith("closed_ways_are_polygons="):
+            tokens = [
+                token.strip()
+                for token in stripped.split("=", 1)[1].split(",")
+                if token.strip()
+            ]
+            for pair in additions:
+                if pair not in tokens:
+                    tokens.append(pair)
+            line = "closed_ways_are_polygons=" + ",".join(tokens)
+            inserted = True
+        if in_points and stripped.startswith("ignore="):
             keys = [
-                key for key in line[len("ignore="):].split(",")
+                key for key in stripped[len("ignore="):].split(",")
                 if key.strip() != "ele"
             ]
             line = "ignore=" + ",".join(keys)
         lines.append(line)
+    if not inserted:
+        lines.append(
+            "closed_ways_are_polygons="
+            + ",".join(_DEFAULT_POLYGON_KEYS + tuple(additions))
+        )
     content = "\n".join(lines) + "\n"
     target = Path(config.config_dir) / "osmconf.ini"
     target.parent.mkdir(parents=True, exist_ok=True)

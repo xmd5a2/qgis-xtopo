@@ -70,8 +70,15 @@ class AreaTagsTest(unittest.TestCase):
             {"barrier": "fence"},
             {"waterway": "stream"},
             {"man_made": "cutline"},
+            {"man_made": "pipeline"},
+            {"man_made": "embankment"},
         ):
             self.assertFalse(_is_area(tags), tags)
+
+    def test_area_man_made_values(self):
+        """Резервуары и силосы площадные в обоих режимах чтения."""
+        for value in ("storage_tank", "bunker_silo", "monitoring_station"):
+            self.assertTrue(_is_area({"man_made": value}), value)
 
     def test_area_tag_wins(self):
         self.assertFalse(_is_area({"place": "island", "area": "no"}))

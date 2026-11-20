@@ -107,6 +107,13 @@
 - **`ele` у точек сохраняется только с `osmconf.ini` без `ele` в `ignore`**
   (`pbf_source.ensure_osm_config`): стандартный конфиг GDAL выбрасывает тег,
   и подписи высот не работают.
+- **Площадные `man_made` дописываются в `closed_ways_are_polygons`**
+  (`pbf_source.ensure_osm_config`): GDAL по умолчанию не считает площадями
+  `storage_tank`, `bunker_silo` и остальные значения из
+  `osm_convert.AREA_MAN_MADE`. Без этого замкнутый силос приходил линией и
+  не отображался в слое зданий, который читается с
+  `geometrytype=Polygon`. Тег `area=no` по-прежнему оставляет way линией,
+  а линейные `man_made` (pipeline, cutline, embankment) в список не входят.
 
 ## osmium
 
