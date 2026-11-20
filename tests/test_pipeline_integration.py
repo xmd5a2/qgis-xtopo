@@ -519,8 +519,17 @@ class PipelineIntegrationTest(unittest.TestCase):
         # Невозможные значения не дают полосы.
         self.assertEqual(scale_bar(0)[0], 0.0)
 
+    def test_sheet_scale_label(self):
+        """Масштаб листа — ширина местности, делённая на ширину страницы."""
+        from qgis_xtopo.core.measure import format_scale
+
+        self.assertEqual(format_scale(10.0, 297.0), "1:33 670")
+        self.assertEqual(format_scale(1.0, 100.0), "1:10 000")
+        self.assertEqual(format_scale(0, 297.0), "")
+        self.assertEqual(format_scale(10.0, 0), "")
+
     def test_atlas_sheet_shows_its_size(self):
-        """Вдоль границ листа атласа показывается его размер."""
+        """Вдоль границ листа атласа показывается его размер и масштаб."""
         from qgis.core import (
             QgsCoordinateReferenceSystem, QgsRectangle,
         )
@@ -529,7 +538,7 @@ class PipelineIntegrationTest(unittest.TestCase):
 
         canvas = QgsMapCanvas()
         canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
-        labels = SheetSizeLabels(canvas)
+        labels = SheetSizeLabels(canvas, page_width_mm=297.0)
         # Прямоугольник примерно 10 x 10 км в метрах EPSG:3857.
         labels.set_rectangle(
             QgsRectangle(0, 0, 10000, 10000),
@@ -537,6 +546,9 @@ class PipelineIntegrationTest(unittest.TestCase):
         )
         self.assertIn("км", labels.width_text)
         self.assertIn("км", labels.height_text)
+        # После трёх пробелов — масштаб, который получится при экспорте.
+        self.assertIn("   1:", labels.width_text)
+        self.assertNotIn("   ", labels.height_text)
         # 10 000 метров в EPSG:3857 — это ровно 10 км на местности.
         value = float(labels.width_text.split()[0].replace(",", "."))
         self.assertGreater(value, 9.5)
@@ -830,6 +842,28 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertEqual(tool._cursor_for_hit(0, 1), "SizeFDiagCursor")
             self.assertEqual(tool._cursor_for_hit(0, 3), "SizeFDiagCursor")
             self.assertEqual(tool._cursor_for_hit(0, None), "SizeAllCursor")
+
+            # При перетаскивании подписи размеров должны получать
+            # текущий прямоугольник, а не ждать отпускания мыши.
+            from qgis.PyQt.QtCore import QPoint
+
+            previews = []
+            tool.sheetPreview.connect(
+                lambda index, rectangle: previews.append(
+                    (index, QgsRectangle(rectangle))
+                )
+            )
+            tool._corner = None
+            tool._operation = "move"
+
+            class MoveEvent:
+                def pos(self):
+                    return QPoint(400, 300)
+
+            tool.canvasMoveEvent(MoveEvent())
+            self.assertEqual(previews[0][0], 0)
+            self.assertFalse(previews[0][1].isEmpty())
+            self.assertNotEqual(previews[0][1], original)
         finally:
             tool.deactivate()
             tool.dispose()
@@ -861,6 +895,12 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertIn("выбран 2", panel.sheets_label.text())
             self.assertEqual(panel._sheet_items[1][0].strokeColor(), QColor(220, 140, 20))
             self.assertEqual(panel._sheet_items[0][0].strokeColor(), QColor(0, 120, 215))
+            self.assertEqual(panel._sheet_items[1][2].color, QColor(220, 140, 20))
+            self.assertEqual(panel._sheet_items[0][2].color, QColor(0, 120, 215))
+
+            moved = QgsRectangle(10, 10, 80, 60)
+            panel._sheet_preview(0, moved)
+            self.assertEqual(panel._sheet_items[0][2].rectangle, moved)
 
             panel._remove_last_sheet()
             self.assertEqual(
@@ -878,6 +918,7 @@ class PipelineIntegrationTest(unittest.TestCase):
 
             panel.edit_sheet_button.setChecked(False)
             self.assertIsNone(panel._active_sheet_index)
+            self.assertEqual(panel._sheet_items[0][2].color, QColor(0, 120, 215))
             panel._remove_last_sheet()
             self.assertEqual(len(panel._sheets), 1)
             self.assertEqual(panel._sheets[0][0].xMaximum(), 100)

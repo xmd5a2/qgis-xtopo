@@ -80,3 +80,18 @@ def format_length(km):
     else:
         text = f"{value:.0f}"
     return f"{text} {i18n.tr('км')}"
+
+
+def format_scale(width_km, page_width_mm):
+    """Знаменатель масштаба листа при экспорте, например ``1:50 000``.
+
+    Ширина листа на местности делится на ширину страницы: карта в макете
+    занимает страницу целиком.
+    """
+    if width_km <= 0 or page_width_mm <= 0:
+        return ""
+    denominator = float(width_km) * 1_000_000.0 / float(page_width_mm)
+    if denominator < 1:
+        return ""
+    digits = f"{round(denominator):,}".replace(",", " ")
+    return f"1:{digits}"

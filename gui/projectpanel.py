@@ -1319,11 +1319,11 @@ class ProjectPanel(QWidget):
                 self._edit_sheet_tool.sheetActivated.connect(
                     self._sheet_activated
                 )
+                self._edit_sheet_tool.sheetPreview.connect(
+                    self._sheet_preview
+                )
             self._edit_sheet_tool.set_aspect(self._page_aspect())
             canvas.setMapTool(self._edit_sheet_tool)
-            self.statusMessage.emit(
-                "Перетащите рамку листа или потяните за маркер угла"
-            )
         else:
             if self._edit_sheet_tool is not None and canvas is not None:
                 canvas.unsetMapTool(self._edit_sheet_tool)
@@ -1333,6 +1333,13 @@ class ProjectPanel(QWidget):
 
     def _sheet_activated(self, index):
         self._set_active_sheet(index)
+
+    def _sheet_preview(self, index, rectangle):
+        """Двигает подписи размеров вместе с рамкой при перетаскивании."""
+        if index < 0 or index >= len(self._sheet_items):
+            return
+        _old, crs = self._sheets[index]
+        self._sheet_items[index][2].set_rectangle(rectangle, crs)
 
     def _set_active_sheet(self, index):
         if index is not None and (index < 0 or index >= len(self._sheets)):
@@ -1347,11 +1354,12 @@ class ProjectPanel(QWidget):
         return QColor(0, 120, 215), QColor(0, 120, 215, 30)
 
     def _update_sheet_colors(self):
-        for index, (band, _marker, _labels) in enumerate(self._sheet_items):
+        for index, (band, _marker, labels) in enumerate(self._sheet_items):
             color, fill = self._sheet_band_colors(index)
             band.setColor(color)
             band.setFillColor(fill)
             band.update()
+            labels.set_color(color)
 
     def _sheet_edited(self, index, rectangle):
         if index < 0 or index >= len(self._sheets):
@@ -1361,7 +1369,6 @@ class ProjectPanel(QWidget):
         self._sheets[index] = (QgsRectangle(rectangle), crs)
         self._rebuild_sheet_items()
         self._remove_atlas_layer()
-        self.statusMessage.emit(f"Лист {index + 1} изменён")
 
     def _sheet_drawn(self, rectangle):
         crs = QgsCoordinateReferenceSystem(
@@ -1391,7 +1398,10 @@ class ProjectPanel(QWidget):
         marker.set_map_point(rectangle.center())
         marker.show()
         # Размеры страницы вдоль границ прямоугольника.
-        labels = SheetSizeLabels(canvas)
+        labels = SheetSizeLabels(
+            canvas, page_width_mm=self._page_size_mm()[0]
+        )
+        labels.set_color(color)
         labels.set_rectangle(rectangle, crs)
         labels.show()
         self._sheet_items.append((band, marker, labels))

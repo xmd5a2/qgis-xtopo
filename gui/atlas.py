@@ -10,7 +10,7 @@ from qgis.gui import QgsMapCanvasItem, QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 
-from ..core.measure import distance_area, format_length
+from ..core.measure import distance_area, format_length, format_scale
 
 
 def _enum(owner, group, name):
@@ -71,20 +71,28 @@ class SheetSizeLabels(QgsMapCanvasItem):
 
     Подписи показывают, сколько местности покрывает лист: ширину —
     под нижней стороной, высоту — сбоку от левой.  Рисуются так же,
-    как размеры рамки в окне выбора охвата: тёмные буквы с белой
-    обводкой, без подложки.
+    как размеры рамки в окне выбора охвата: буквы с белой обводкой,
+    без подложки.  Цвет букв повторяет цвет рамки листа, а рядом с
+    шириной показывается масштаб, который получится при экспорте.
     """
 
-    def __init__(self, canvas, parent=None):
+    def __init__(self, canvas, parent=None, page_width_mm=None):
         super().__init__(canvas)
         self.canvas = canvas
         self.rectangle = None
         self.crs = None
+        self.page_width_mm = page_width_mm
         self.width_text = ""
         self.height_text = ""
+        self.color = QColor(0, 120, 215)
         self._size = QRectF()
         self.setZValue(999)
         self.setVisible(False)
+
+    def set_color(self, color):
+        """Цвет подписей: тот же, что у рамки листа."""
+        self.color = QColor(color)
+        self.update()
 
     def set_rectangle(self, rectangle, crs):
         """Задаёт прямоугольник листа и подписи его сторон."""
@@ -108,6 +116,9 @@ class SheetSizeLabels(QgsMapCanvasItem):
             QgsPointXY(left, bottom), QgsPointXY(left, self.rectangle.yMaximum())
         ) / 1000.0
         self.width_text = format_length(width)
+        scale = format_scale(width, self.page_width_mm or 0)
+        if scale:
+            self.width_text += "   " + scale
         self.height_text = format_length(height)
 
     def updatePosition(self):
@@ -168,7 +179,7 @@ class SheetSizeLabels(QgsMapCanvasItem):
             painter.setBrush(_enum(Qt, "BrushStyle", "NoBrush"))
             painter.drawPath(path)
             painter.setPen(_enum(Qt, "PenStyle", "NoPen"))
-            painter.setBrush(QColor(25, 25, 25))
+            painter.setBrush(self.color)
             painter.drawPath(path)
             painter.restore()
 
@@ -223,6 +234,7 @@ class SheetEditMapTool(QgsMapTool):
 
     sheetEdited = pyqtSignal(int, object)
     sheetActivated = pyqtSignal(int)
+    sheetPreview = pyqtSignal(int, object)
 
     def __init__(self, canvas, sheets, aspect=210.0 / 297.0):
         super().__init__(canvas)
@@ -367,7 +379,10 @@ class SheetEditMapTool(QgsMapTool):
             cursor = self._cursor_for_hit(index, corner)
             self.canvas.setCursor(_enum(Qt, "CursorShape", cursor))
             return
-        self._show_preview(self._current_rectangle(map_point))
+        rectangle = self._current_rectangle(map_point)
+        self._show_preview(rectangle)
+        if self._index is not None and not rectangle.isEmpty():
+            self.sheetPreview.emit(self._index, rectangle)
 
     def canvasReleaseEvent(self, event):
         if (
