@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+from . import field_subset
+
 
 @dataclass
 class Recipe:
@@ -365,3 +367,24 @@ def recipe_for(name):
     if name in POINT_ONLY:
         return Recipe([save()])
     return Recipe([save()])
+
+
+def source_fields(name):
+    """Поля источника, которые нужны рецепту слоя.
+
+    Объединение наборов ``fields`` из всех шагов: промежуточные операции
+    читают те же поля, что и сохранение.  ``None`` — рецепт сохраняет
+    слой без ограничения полей, и фильтровать источник нельзя: стиль
+    может читать любое поле.
+    """
+    presets = []
+    for _operation, params in recipe_for(name).steps:
+        preset = params.get("fields")
+        if preset in field_subset.PRESETS:
+            presets.append(preset)
+    if not presets:
+        return None
+    allowed = {"@id", "@type"} | set(field_subset.LABEL_FIELDS)
+    for preset in presets:
+        allowed.update(field_subset.PRESETS[preset])
+    return frozenset(allowed)

@@ -430,6 +430,20 @@ def _field(feature, name):
     return feature.GetField(index) if index >= 0 else None
 
 
+def _source_properties(properties, allowed):
+    """Свойства для записи в источник: только нужные рецепту.
+
+    ``allowed`` — точные имена полей; названия (``name``, ``name:*``)
+    сохраняются всегда: от них зависит переключение языка карты.
+    """
+    if allowed is None:
+        return properties
+    return {
+        key: value for key, value in properties.items()
+        if key in allowed or key.lower().startswith("name")
+    }
+
+
 def _feature_properties(feature, definition, kind):
     # Сначала известные поля драйвера OSM: они важнее одноимённых тегов из
     # other_tags, иначе тег в другом регистре переименовал бы «name».
@@ -757,7 +771,8 @@ def _expected_objects(source, bbox):
 
 
 def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
-                    progress=None, sources=None, use_osmium=True):
+                    progress=None, sources=None, use_osmium=True,
+                    field_sets=None):
     """Читает объекты OSM из PBF и раскладывает их по слоям.
 
     Собственный индекс GDAL для узлов требует строго возрастающих id.
@@ -793,6 +808,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                 config, bbox, query_names, query_texts=query_texts,
                 cancel=cancel, progress=progress, sources=paths,
                 _custom_indexing=True, unfiltered=unfiltered,
+                field_sets=field_sets,
             )
         except RuntimeError:
             if progress:
@@ -804,6 +820,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                 config, bbox, query_names, query_texts=query_texts,
                 cancel=cancel, progress=progress, sources=paths,
                 _custom_indexing=False, unfiltered=unfiltered,
+                field_sets=field_sets,
             )
         dataset.temp_files.extend(temporary)
         return dataset
@@ -813,7 +830,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
 
 def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                       progress=None, sources=None, _custom_indexing=True,
-                      unfiltered=None):
+                      unfiltered=None, field_sets=None):
     gdal, ogr = _gdal()
     paths = [Path(item).expanduser() for item in (sources or [config.pbf_path])]
     for source in paths:
@@ -824,6 +841,12 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
 
     config.ensure_directories()
     query_texts = query_texts or {}
+    if field_sets is None:
+        from . import query_recipes
+
+        field_sets = {
+            name: query_recipes.source_fields(name) for name in query_names
+        }
     index = QueryIndex({name: query_texts[name] for name in query_names if name in query_texts})
     bbox_geometry = _bbox_geometry(ogr, bbox)
     pbf_dir = config.temp_dir / "pbf"
@@ -969,9 +992,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                                 continue
                             seen.add(identity)
                             file_ids.add(identity)
-                        base_json = json.dumps(
-                            properties, ensure_ascii=False, separators=(",", ":")
-                        )
+                        base_json = None
                         for name in matched:
                             handle = handles.get(name)
                             if handle is None:
@@ -982,12 +1003,35 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                                 handle = path.open("wb")
                                 handles[name] = handle
                                 feature_files[name] = path
+                            # В источник пишем только поля, которые нужны
+                            # рецепту: GeoJSON-драйвер разбирает все
+                            # свойства, и сотни лишних тегов стоили
+                            # десятки секунд на каждом сохранении.
+                            allowed = field_sets.get(name)
+                            if allowed is None:
+                                source_properties = properties
+                                if base_json is None:
+                                    base_json = json.dumps(
+                                        properties, ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                source_json = base_json
+                            else:
+                                source_properties = _source_properties(
+                                    properties, allowed,
+                                )
+                                source_json = json.dumps(
+                                    source_properties, ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
                             # Имена полей приводятся к уникальным без учёта
                             # регистра: иначе SQLite не создаёт таблицу.
-                            resolved = field_names[name].apply(properties)
+                            resolved = field_names[name].apply(
+                                source_properties
+                            )
                             properties_json = (
-                                base_json
-                                if resolved is properties
+                                source_json
+                                if resolved is source_properties
                                 else json.dumps(
                                     resolved, ensure_ascii=False,
                                     separators=(",", ":"),

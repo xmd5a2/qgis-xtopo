@@ -716,15 +716,14 @@ class _GpkgWriter:
         if self.cancel is not None and self.count % 64 == 0 and self.cancel.is_set():
             raise InterruptedError("Preparation cancelled")
         definition = self.layer.GetLayerDefn()
-        output = ogr.Feature(definition)
         if geometry is None:
             geometry = feature.GetGeometryRef()
+        output = ogr.Feature(definition)
+        # Копирование полей в C++ в разы дешевле цикла по сотням
+        # колонок: на смешанных слоях этот цикл держал GIL.
+        output.SetFrom(feature)
         if geometry is not None:
             output.SetGeometry(geometry)
-        for index in range(definition.GetFieldCount()):
-            value = feature.GetField(index)
-            if value is not None:
-                output.SetField(index, value)
         self.layer.CreateFeature(output)
         self.count += 1
 
@@ -1486,66 +1485,45 @@ class Pipeline:
         return writer.path
 
     def _split_layer(self, name, current, fields=None):
-        """Делит слой на три группы по значению тега layer."""
+        """Делит слой на три группы по значению тега layer.
+
+        Фильтр по слою уходит в GDAL, и каждая группа сразу пишется в
+        SQLite.  Промежуточный GeoPackage со всей копией слоя стоил
+        дороже самого деления: его приходилось читать трижды.
+        """
         from osgeo import ogr
 
         source = ogr.Open(str(current))
         if source is None:
             raise PipelineError(f"Cannot open {current}")
         layer = source.GetLayer(0)
-        definition = layer.GetLayerDefn()
-        spatial_ref = layer.GetSpatialRef()
-        writers = {}
-        try:
-            for suffix in ("", "layer_1", "layer_-1"):
-                path = self.config.temp_dir / (
-                    f"{name}{('_' + suffix) if suffix else ''}.gpkg"
-                )
-                path.unlink(missing_ok=True)
-                writers[suffix] = _GpkgWriter(
-                    path, name, definition, spatial_ref, cancel=self.cancel
-                )
-            processed = 0
-            for feature in layer:
-                if self.cancel is not None and processed % 500 == 0 and self.cancel.is_set():
-                    raise InterruptedError("Preparation cancelled")
-                processed += 1
-                index = feature.GetFieldIndex("layer")
-                value = feature.GetField(index) if index >= 0 else None
-                try:
-                    value = int(value)
-                except (TypeError, ValueError):
-                    value = 0
-                if value > 0:
-                    suffix = "layer_1"
-                elif value < 0:
-                    suffix = "layer_-1"
-                else:
-                    suffix = ""
-                writers[suffix].add(feature)
-            for writer in writers.values():
-                writer.close()
-        except Exception:
-            for writer in writers.values():
-                writer.close(commit=False)
-            raise
-        finally:
-            source = None
-
-        base_path = current
-        for suffix, writer in writers.items():
-            if not writer.count:
-                continue
+        has_layer = layer.GetLayerDefn().GetFieldIndex("layer") >= 0
+        source = None
+        groups = (
+            ("", '(CAST("layer" AS INTEGER) = 0 OR "layer" IS NULL)'),
+            ("layer_1", 'CAST("layer" AS INTEGER) > 0'),
+            ("layer_-1", 'CAST("layer" AS INTEGER) < 0'),
+        )
+        if not has_layer:
+            groups = (("", None),)
+        base_path = None
+        for suffix, where in groups:
             layer_name = name if not suffix else f"{name}_{suffix}"
-            save_vector(
-                writer.path,
-                self.config.vector_dir / f"{layer_name}.sqlite",
-                layer_name,
-                fields=fields,
+            destination = (
+                self.config.vector_dir / f"{layer_name}.sqlite"
             )
+            save_vector(
+                current, destination, layer_name,
+                fields=fields, where=where,
+            )
+            if not _layer_has_features(destination):
+                destination.unlink(missing_ok=True)
+                continue
             if not suffix:
-                base_path = writer.path
+                base_path = destination
             self.progress(f"{name}: saved {suffix or 'base'} layer")
+        if base_path is None:
+            raise PipelineError("no features left after splitting by layer")
         return base_path
 
 
@@ -1826,7 +1804,8 @@ def _source_fields(source):
 
 
 def save_vector(source, destination, layer_name, target_crs=None,
-                fields=None):
+                fields=None, where=None):
+    """Переводит источник в SQLite, при необходимости с фильтром и полями."""
     from osgeo import gdal, ogr
 
     gdal.UseExceptions()
@@ -1862,6 +1841,8 @@ def save_vector(source, destination, layer_name, target_crs=None,
         options.extend(["-dsco", "SPATIALITE=YES"])
     if target_crs:
         options.extend(["-t_srs", target_crs])
+    if where:
+        options.extend(["-where", where])
     try:
         result = gdal.VectorTranslate(str(temporary), str(source), options=options)
     except Exception:

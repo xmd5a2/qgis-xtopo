@@ -169,6 +169,50 @@ class PbfSourceTest(unittest.TestCase):
         self.assertLess(max_x, max_y)
 
 
+class SourceFieldsTest(unittest.TestCase):
+    """В источник пишутся только поля, нужные рецепту слоя."""
+
+    def test_building_keeps_style_fields_and_names(self):
+        from qgis_xtopo.core import query_recipes
+        from qgis_xtopo.core.pbf_source import _source_properties
+
+        allowed = query_recipes.source_fields("building")
+        self.assertIsNotNone(allowed)
+        properties = {
+            "building": "yes",
+            "name": "Дом",
+            "name:en": "House",
+            "ref": "1",
+            "roof:shape": "gabled",
+            "@id": "way/1",
+            "@type": "way",
+        }
+        filtered = _source_properties(properties, allowed)
+        self.assertIn("building", filtered)
+        self.assertIn("name:en", filtered)
+        self.assertIn("ref", filtered)
+        self.assertIn("@id", filtered)
+        self.assertIn("@type", filtered)
+        self.assertNotIn("roof:shape", filtered)
+
+    def test_highway_keeps_split_and_integrity_fields(self):
+        from qgis_xtopo.core import query_recipes
+
+        allowed = query_recipes.source_fields("highway_main")
+        for name in (
+            "highway", "highway_integrity", "layer", "oneway", "junction",
+            "surface", "smoothness", "tracktype",
+        ):
+            self.assertIn(name, allowed, name)
+
+    def test_recipe_without_field_preset_is_not_filtered(self):
+        from qgis_xtopo.core import query_recipes
+
+        # Barrier сохраняется без набора полей: стиль может читать любое.
+        self.assertIsNone(query_recipes.source_fields("barrier"))
+        self.assertIsNone(query_recipes.source_fields("railway_all"))
+
+
 class CleanGeometryTest(unittest.TestCase):
     """Пустые части составной геометрии не должны попадать в слой."""
 
