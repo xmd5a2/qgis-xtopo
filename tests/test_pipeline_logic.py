@@ -2920,6 +2920,217 @@ class RoadPackingTest(unittest.TestCase):
         )
 
 
+class PackedGeometryTest(unittest.TestCase):
+    """Площади и простые линии пакуются без слияния частей."""
+
+    POLYGON_FIELDS = (
+        ("name", ogr.OFTString),
+        ("name:de", ogr.OFTString),
+        ("residential", ogr.OFTString),
+        ("area_m2", ogr.OFTReal),
+        ("wood:damage", ogr.OFTString),
+        ("wood:age", ogr.OFTString),
+        ("wood:density", ogr.OFTString),
+    )
+    LINE_FIELDS = (
+        ("name", ogr.OFTString),
+        ("waterway", ogr.OFTString),
+    )
+
+    @staticmethod
+    def _square(x, y, size=0.002):
+        return [
+            (x, y), (x + size, y), (x + size, y + size),
+            (x, y + size), (x, y),
+        ]
+
+    def _polygon_source(self, directory, rows, name="grass"):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(name, srs, ogr.wkbPolygon)
+        for field_name, field_type in self.POLYGON_FIELDS:
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for field_name, _field_type in self.POLYGON_FIELDS:
+                if field_name in row:
+                    feature.SetField(field_name, row[field_name])
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in row["coords"]:
+                ring.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    def _line_source(self, directory, rows, name="stream"):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(name, srs, ogr.wkbLineString)
+        for field_name, field_type in self.LINE_FIELDS:
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for field_name, _field_type in self.LINE_FIELDS:
+                if field_name in row:
+                    feature.SetField(field_name, row[field_name])
+            line = ogr.Geometry(ogr.wkbLineString)
+            for x, y in row["coords"]:
+                line.AddPoint_2D(x, y)
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    @staticmethod
+    def _features(directory, name):
+        dataset = ogr.Open(str(Path(directory) / f"{name}.sqlite"))
+        layer = dataset.GetLayer(0)
+        return dataset, layer, list(layer)
+
+    def test_unnamed_polygons_pack_by_tile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {"coords": self._square(0.001, 0.001)},
+                {"coords": self._square(0.005, 0.005)},
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "grass"), 1
+            )
+            dataset, layer, features = self._features(directory, "grass")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPolygon)
+            self.assertEqual(len(features), 1)
+            self.assertEqual(
+                features[0].GetGeometryRef().GetGeometryCount(), 2
+            )
+            dataset = None
+
+    def test_named_polygons_stay_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {"name": "First", "coords": self._square(0.001, 0.001)},
+                {"name": "Second", "coords": self._square(0.005, 0.005)},
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "grass"), 2
+            )
+            dataset, _layer, features = self._features(directory, "grass")
+            self.assertEqual(
+                sorted(feature.GetField("name") for feature in features),
+                ["First", "Second"],
+            )
+            dataset = None
+
+    def test_landuse_key_splits_residential(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "residential": "rural",
+                    "coords": self._square(0.001, 0.001),
+                },
+                {
+                    "residential": "urban",
+                    "coords": self._square(0.005, 0.005),
+                },
+            ], name="landuse_residential")
+            self.assertEqual(
+                road_packing.pack(directory, "landuse_residential"), 2
+            )
+            dataset, _layer, features = self._features(
+                directory, "landuse_residential"
+            )
+            self.assertEqual(
+                sorted(
+                    feature.GetField("residential")
+                    for feature in features
+                ),
+                ["rural", "urban"],
+            )
+            dataset = None
+
+    def test_area_class_splits_wood(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "area_m2": 5000.0,
+                    "coords": self._square(0.001, 0.001),
+                },
+                {
+                    "area_m2": 100000.0,
+                    "coords": self._square(0.005, 0.005),
+                },
+            ], name="wood")
+            self.assertEqual(
+                road_packing.pack(directory, "wood"), 2
+            )
+            dataset, _layer, features = self._features(directory, "wood")
+            self.assertEqual(len(features), 2)
+            dataset = None
+
+    def test_area_pack_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {"coords": self._square(0.001, 0.001)},
+                {"coords": self._square(0.005, 0.005)},
+            ])
+            first = road_packing.pack(directory, "grass")
+            second = road_packing.pack(directory, "grass")
+            self.assertEqual(first, second)
+            dataset, layer, _features = self._features(directory, "grass")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPolygon)
+            dataset = None
+
+    def test_stream_packs_by_waterway_without_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_source(directory, [
+                {
+                    "name": "First", "waterway": "stream",
+                    "coords": [(0.001, 0.001), (0.005, 0.001)],
+                },
+                {
+                    "name": "Second", "waterway": "ditch",
+                    "coords": [(0.001, 0.005), (0.005, 0.005)],
+                },
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "stream"), 2
+            )
+            dataset, layer, features = self._features(directory, "stream")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiLineString)
+            self.assertEqual(
+                sorted(feature.GetField("waterway") for feature in features),
+                ["ditch", "stream"],
+            )
+            dataset = None
+
+    def test_pack_all_runs_post_pass_layers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {"coords": self._square(0.001, 0.001)},
+            ], name="grass")
+            self._line_source(directory, [
+                {
+                    "waterway": "stream",
+                    "coords": [(0.001, 0.001), (0.005, 0.001)],
+                },
+            ])
+            self.assertEqual(
+                road_packing.pack_all(directory), 2
+            )
+            dataset, layer, _features = self._features(directory, "grass")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPolygon)
+            dataset = None
+            dataset, layer, _features = self._features(directory, "stream")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiLineString)
+            dataset = None
+
+
 class AreaFieldTest(unittest.TestCase):
     """Поле площади заполняется в SQL и не считается при каждом кадре."""
 

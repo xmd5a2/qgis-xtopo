@@ -1278,10 +1278,10 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertEqual(building.get("minScale"), "120877")
 
 
-class HighwayMultiLineTest(unittest.TestCase):
-    """Слои, читающие упакованные дороги, объявлены мультилинией."""
+class PackedGeometryTest(unittest.TestCase):
+    """Слои, читающие упакованные файлы, объявляют составную геометрию."""
 
-    PACKED = (
+    PACKED_LINES = (
         "highway main",
         "highway main overview",
         "[blocking] highway main",
@@ -1291,8 +1291,21 @@ class HighwayMultiLineTest(unittest.TestCase):
         "[blocking] track",
         "railway all",
         "[blocking] railway_all",
+        "stream",
+        "tree row",
+        "power minor line",
+        "embankment",
+        "cutline",
     )
-    PLAIN = (
+    PACKED_POLYGONS = (
+        "wood",
+        "grass",
+        "farmland",
+        "scrub",
+        "landuse residential",
+        "[blocking] landuse residential",
+    )
+    PLAIN_LINES = (
         "highway main layer >=1",
         "highway main layer <=-1",
         "highway main tunnel",
@@ -1302,6 +1315,10 @@ class HighwayMultiLineTest(unittest.TestCase):
         "railway disused",
         "rail tunnel",
         "railway bridge",
+        "cliff",
+        "steps",
+        "power line",
+        "barrier way",
     )
 
     @classmethod
@@ -1311,8 +1328,8 @@ class HighwayMultiLineTest(unittest.TestCase):
             for layer in _template_root().iter("maplayer")
         }
 
-    def test_packed_layers_are_multiline(self):
-        for name in self.PACKED:
+    def test_packed_lines_are_multiline(self):
+        for name in self.PACKED_LINES:
             layer = self.layers.get(name)
             self.assertIsNotNone(layer, name)
             self.assertEqual(layer.get("wkbType"), "MultiLineString", name)
@@ -1321,8 +1338,18 @@ class HighwayMultiLineTest(unittest.TestCase):
                 layer.findtext("datasource") or "", name,
             )
 
+    def test_packed_polygons_are_multipolygon(self):
+        for name in self.PACKED_POLYGONS:
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            self.assertEqual(layer.get("wkbType"), "MultiPolygon", name)
+            self.assertIn(
+                "geometrytype=MultiPolygon",
+                layer.findtext("datasource") or "", name,
+            )
+
     def test_split_layers_stay_linestring(self):
-        for name in self.PLAIN:
+        for name in self.PLAIN_LINES:
             layer = self.layers.get(name)
             self.assertIsNotNone(layer, name)
             self.assertEqual(layer.get("wkbType"), "LineString", name)

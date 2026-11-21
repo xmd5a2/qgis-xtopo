@@ -160,6 +160,7 @@ def progress_stages(config):
         stages.append(("Пересечения полигонов", 3))
     stages.append(("Размещение значков POI", 2))
     stages.append(("Углы поворота значков", 1))
+    stages.append(("Упаковка площадей и линий", 3))
     stages.append(("Удаление пустых слоёв", 2))
     return stages
 
@@ -2149,6 +2150,14 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         started = time.monotonic()
         area_field.ensure_area_fields(config.vector_dir)
         timings.add_stage("поле площади", time.monotonic() - started)
+        report("Упаковка площадей и линий")
+        started = time.monotonic()
+        road_packing.pack_all(
+            config.vector_dir, cancel=cancel, progress=report,
+        )
+        timings.add_stage(
+            "упаковка площадей и линий", time.monotonic() - started
+        )
         report("Удаление пустых слоёв")
         started = time.monotonic()
         # Атрибуция наборов DEM пишется здесь же: отдельная перезапись

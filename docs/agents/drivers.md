@@ -45,16 +45,19 @@
   убрано. Дополнительно после `dissolve`/`singleparts` в рецептах `water`/
   `water_intermittent` стоит `fix()`, а сырые полигоны `bare_rock`/`scree`
   чинятся в начале рецепта.
-- **Упакованные дороги — MultiLineString.** После шага `pack_roads`
-  таблицы `highway_main.sqlite`, `path.sqlite`, `track.sqlite` и
-  `railway_all.sqlite` содержат и одиночные линии, и мультилинии, но
-  SQLite объявляет слой как `MultiLineString`. Девять слоёв шаблона,
-  читающие эти файлы, должны иметь `wkbType="MultiLineString"` и
-  `geometrytype=MultiLineString` в datasource; иначе QGIS может не
-  нарисовать слой. Правку вносит `tools/road_multiline.py`. Разбиения
+- **Упакованные слои — MultiLineString/MultiPolygon.** После шагов
+  `pack_roads` и `pack_all` дорожные и простые линии
+  (`highway_main`, `path`, `track`, `railway_all`, `stream`, `tree_row`,
+  `power_minor_line`, `embankment`, `cutline`) объявляются в SQLite как
+  `MultiLineString`, площади (`grass`, `farmland`, `landuse_residential`,
+  `wood`, `scrub`) — как `MultiPolygon`. Все слои шаблона, читающие эти
+  файлы, должны иметь соответствующий `wkbType` и `geometrytype` в
+  datasource; иначе QGIS может не нарисовать слой. Правку вносит
+  `tools/road_multiline.py`; `wood` уже был `MultiPolygon`. Разбиения
   `highway_main_layer_1/_layer_-1`, `highway_main_tunnel`, `path bridge`,
-  `track bridge`, `railway_all_exploded`, `rail tunnel` и
-  `railway bridge` не пакуются и остаются `LineString`.
+  `track bridge`, `railway_all_exploded`, `rail tunnel`, `railway bridge`,
+  `cemetery`, `quarry` и `power line` не пакуются и остаются с прежним
+  типом геометрии.
 - **`fix()` стоит там, где битая геометрия роняет операцию**: слои,
   которые идут накладкой (`island`, `place_locality_way`), и результаты
   `dissolve`/`linestopolygons` (`allotments`, `military`,
@@ -183,6 +186,11 @@
   `highway_main` шаг занимал 14 с вместо 171. `_GpkgWriter.add` копирует
   поля через `Feature.SetFrom`, поэтому `barrier [polygonstolines]` на
   13 тыс. объектов занимает 19 с вместо 112.
+- **Безымянные дороги упаковываются как OGR-геометрии.**
+  `road_packing._geometry_parts` не переводит вершины в Python-списки;
+  `path` (61 тыс. сегментов) и `track` (43 тыс.) упаковываются за 6–7 с
+  вместо 90–107 с в общем прогоне. Именованные дороги по-прежнему
+  сливаются по общим концам.
 - **Следующий узкий этап — `stream [difference]`.** После ускорения записи
   он занимает около 74 с из 106 с этапа слоёв: 15 тыс. ручьёв, из них
   около 1,3 тыс. пересекают воду. Оптимизировать, не меняя геометрию
