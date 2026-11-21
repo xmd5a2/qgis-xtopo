@@ -3081,6 +3081,57 @@ class IconAngleTest(unittest.TestCase):
             self.assertNotIn("geomdistance", expression)
 
 
+class BuildingLodTest(unittest.TestCase):
+    """Мелкие здания скрываются по уровню детализации."""
+
+    THRESHOLDS = {5: 50, 4: 100, 3: 175}
+    FALLBACK = 300
+
+    @classmethod
+    def setUpClass(cls):
+        layer = next(
+            element for element in _template_root().iter("maplayer")
+            if element.findtext("layername") == "building"
+        )
+        cls.rules = layer.find("renderer-v2").find("rules")
+        cls.parent = cls.rules.find("rule")
+        cls.children = {
+            rule.get("label"): rule.get("filter") or ""
+            for rule in cls.parent.findall("rule")
+        }
+
+    def test_single_parent_rule_depends_on_lod(self):
+        self.assertEqual(
+            [rule.get("label") for rule in self.rules.findall("rule")],
+            ["lod"],
+        )
+        text = self.parent.get("filter") or ""
+        self.assertIn("@map_scale <= 32000", text)
+        self.assertIn('coalesce("area_m2", 0) >=', text)
+        self.assertIn("CASE", text)
+
+    def test_lod_six_shows_every_building(self):
+        self.assertIn(
+            "WHEN coalesce(@level_of_detail, 6) >= 6 THEN 0",
+            self.parent.get("filter") or "",
+        )
+
+    def test_area_thresholds(self):
+        text = self.parent.get("filter") or ""
+        for level, threshold in self.THRESHOLDS.items():
+            self.assertIn(
+                f"WHEN @level_of_detail >= {level} THEN {threshold}",
+                text,
+            )
+        self.assertIn(f"ELSE {self.FALLBACK} END", text)
+
+    def test_children_keep_their_filters(self):
+        self.assertEqual(set(self.children), {"abandoned", "ruins", "else"})
+        self.assertEqual(self.children["else"], "ELSE")
+        self.assertNotIn("@level_of_detail", self.children["abandoned"])
+        self.assertNotIn("@level_of_detail", self.children["ruins"])
+
+
 class AreaFieldFilterTest(unittest.TestCase):
     """Фильтры по площади должны уходить в SQL, а не считаться в кадре."""
 
