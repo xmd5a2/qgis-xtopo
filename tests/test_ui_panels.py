@@ -479,6 +479,86 @@ class SourceModeTest(unittest.TestCase):
             dock.pbf_info.textFormat(), Qt.TextFormat.RichText
         )
 
+    def test_extent_estimate_uses_slice_worker(self):
+        """Окно охвата получает оценку SliceOSM тем же воркером."""
+        import time
+        from unittest import mock
+
+        from qgis.PyQt.QtCore import QThread, pyqtSignal
+
+        from qgis_xtopo.core.bbox import parse_bbox
+        from qgis_xtopo.gui import dockwidget
+
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))
+        dock._slice_estimate_timer.stop()
+        estimate = self._slice_estimate()
+        calls = []
+
+        class FakeWorker(QThread):
+            result = pyqtSignal(object)
+            failed = pyqtSignal(str)
+
+            def __init__(self, _config, _bbox, _cached, _cpu, _workers,
+                         _terrain, parent=None):
+                super().__init__(parent)
+
+            def run(self):
+                self.result.emit(estimate)
+
+            def cancel(self):
+                pass
+
+        with mock.patch.object(
+            dockwidget, "SliceEstimateWorker", FakeWorker
+        ):
+            dock._extent_estimate(
+                parse_bbox("1,2,3,4"),
+                lambda *args: calls.append(args),
+            )
+            deadline = time.time() + 10
+            while not calls and time.time() < deadline:
+                self.app.processEvents()
+        self.assertTrue(calls)
+        text, critical, tooltip = calls[0]
+        self.assertIn("Объём", text)
+        self.assertFalse(critical)
+        self.assertIn("сборка", tooltip)
+        self.assertFalse(dock._extent_estimate_workers)
+
+    def test_extent_estimate_for_maps_is_compact(self):
+        from types import SimpleNamespace
+
+        from qgis_xtopo.core.bbox import parse_bbox
+
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(
+            dock.source_mode.findData("geofabrik")
+        )
+        dock._selected_map_statuses = lambda: [
+            SimpleNamespace(size=10 * 1048576)
+        ]
+        text, critical = dock._quick_extent_estimate(
+            parse_bbox("1,2,3,4"), "geofabrik"
+        )
+        self.assertIn("Карты ≈", text)
+        self.assertIn("подготовка ≈", text)
+        self.assertFalse(critical)
+
+    def test_slice_limit_warning_is_short_in_extent_dialog(self):
+        dock = self._dock()
+        estimate = self._slice_estimate(
+            nodes=120_000_000, nodes_limit=100_000_000
+        )
+        text, critical, tooltip = dock._slice_extent_text(estimate)
+        self.assertTrue(critical)
+        self.assertIn("Предел SliceOSM!", text)
+        self.assertNotIn("Уменьшите охват", text)
+        self.assertIn("Объём", text)
+        # Полная расшифровка остаётся в подсказке.
+        self.assertIn("Уменьшите охват", tooltip)
+        self.assertIn("сборка", tooltip)
+
     def test_slice_estimate_failure_does_not_hide_mode(self):
         dock = self._dock()
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))

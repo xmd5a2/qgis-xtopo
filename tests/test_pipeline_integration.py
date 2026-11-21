@@ -3227,6 +3227,106 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             dialog.done(0)
 
+    def test_extent_dialog_requires_drawn_extent(self):
+        """Без рамки «Использовать охват» не закрывает окно."""
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        dialog = ExtentDialog("")
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
+        accepted = []
+        dialog.accepted.connect(lambda: accepted.append(True))
+        try:
+            dialog.accept()
+            self.app.processEvents()
+            self.assertEqual(accepted, [])
+            self.assertTrue(dialog.notice.full_text())
+            self.assertIn("охват", dialog.notice.full_text())
+            self.assertIn("охват", dialog.notice.text())
+            self.assertTrue(dialog.draw_button.isChecked())
+            self.assertIs(dialog.canvas.mapTool(), dialog._draw_tool)
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_right_button_pans_without_draw_tool(self):
+        """Без инструмента выбора охвата карта тянется и правой кнопкой."""
+        from qgis.core import QgsRectangle
+        from qgis.PyQt.QtCore import QPoint
+        from qgis_xtopo.gui.extentdialog import ExtentDialog, _right_button
+
+        class Event:
+            def __init__(self, button, position, buttons=0):
+                self._button = button
+                self._position = position
+                self._buttons = buttons
+
+            def button(self):
+                return self._button
+
+            def pos(self):
+                return self._position
+
+            def buttons(self):
+                return self._buttons
+
+        dialog = ExtentDialog("")
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
+        try:
+            tool = dialog._pan_tool
+            self.assertIs(dialog.canvas.mapTool(), tool)
+            before = QgsRectangle(dialog.canvas.extent())
+            start = QPoint(300, 300)
+            move = QPoint(340, 330)
+            tool.canvasPressEvent(
+                Event(_right_button(), start, _right_button())
+            )
+            tool.canvasMoveEvent(
+                Event(_right_button(), move, _right_button())
+            )
+            after = QgsRectangle(dialog.canvas.extent())
+            self.assertNotAlmostEqual(
+                after.center().x(), before.center().x(), places=2
+            )
+            self.assertNotAlmostEqual(
+                after.center().y(), before.center().y(), places=2
+            )
+            tool.canvasReleaseEvent(Event(_right_button(), move))
+            self.assertIsNone(tool._pan_point)
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_estimate_stays_one_line(self):
+        """Оценка не переносится и не расширяет нижнюю строку."""
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        calls = []
+
+        def provider(bbox, callback):
+            calls.append(bbox)
+            callback("Объём ≈ 1 ГБ · " * 30, False)
+
+        dialog = ExtentDialog("", estimate_provider=provider)
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
+        try:
+            dialog._rectangle_changed(dialog.canvas.extent())
+            dialog._request_estimate()
+            self.app.processEvents()
+            self.assertTrue(calls)
+            self.assertFalse(dialog.estimate.wordWrap())
+            self.assertIn("Объём", dialog.estimate.full_text())
+            self.assertIn("Объём", dialog.estimate.toolTip())
+            self.assertLess(
+                dialog.estimate.height(),
+                dialog.estimate.fontMetrics().height() * 2,
+            )
+        finally:
+            dialog.done(0)
+
     def test_extent_dialog_moves_drawn_frame(self):
         """Рамку можно тащить прямо за неё, подписи едут за сценой."""
         from qgis.core import QgsRectangle

@@ -766,6 +766,7 @@ class XtopoDockWidget(QDockWidget):
         self.slice_estimate_worker = None
         self.slice_estimate_workers = []
         self._slice_estimate_state = None
+        self._extent_estimate_workers = []
         self._slice_estimate_timer = QTimer(self)
         self._slice_estimate_timer.setSingleShot(True)
         self._slice_estimate_timer.timeout.connect(self._start_slice_estimate)
@@ -913,6 +914,8 @@ class XtopoDockWidget(QDockWidget):
             workers.append(("map_index_worker", worker))
         for worker in list(getattr(self, "slice_estimate_workers", [])):
             workers.append(("slice_estimate_worker", worker))
+        for worker in list(getattr(self, "_extent_estimate_workers", [])):
+            workers.append(("extent_estimate", worker))
         for worker in list(self.server_workers):
             workers.append(("server", worker))
         for _name, worker in workers:
@@ -966,6 +969,7 @@ class XtopoDockWidget(QDockWidget):
         self.server_workers = []
         self.slice_estimate_workers = []
         self.slice_estimate_worker = None
+        self._extent_estimate_workers = []
         self._pbf_probe_workers = []
         self._map_index_workers = []
         for name in (
@@ -1622,7 +1626,10 @@ class XtopoDockWidget(QDockWidget):
 
     def _bbox_from_picker(self):
         """Открывает окно выбора охвата. True, если охват выбран."""
-        dialog = ExtentDialog(self.bbox.text().strip(), self)
+        dialog = ExtentDialog(
+            self.bbox.text().strip(), self,
+            estimate_provider=self._extent_estimate,
+        )
         translate_tree(dialog)
         try:
             accepted = dialog.exec()
@@ -1636,6 +1643,165 @@ class XtopoDockWidget(QDockWidget):
             self.bbox.setText(bbox)
             return True
         return False
+
+    def _extent_estimate(self, bbox, callback):
+        """Оценка объёма и времени для окна выбора охвата.
+
+        Для SliceOSM расчёт идёт в фоне (карта плотности и статус
+        сервиса); для готовых выгрузок достаточно текущего размера карт
+        и формулы оценки.  Текст собирается теми же функциями, что и
+        подпись в «Источнике OSM».
+        """
+        mode = self.source_mode.currentData()
+        if mode == "slice":
+            return self._start_extent_slice_estimate(bbox, callback)
+        text, critical = self._quick_extent_estimate(bbox, mode)
+        callback(text, critical)
+        return None
+
+    def _quick_extent_estimate(self, bbox, mode):
+        """Быстрая оценка без фоновой пробы PBF."""
+        cpu = performance.cpu_score(self.settings)
+        workers = performance.layer_worker_count(
+            len(self.queries) if hasattr(self, "queries") else 0,
+            terrain=self.generate_terrain.isChecked(),
+        )
+        terrain_seconds = self._terrain_estimate_seconds(cpu=cpu, bbox=bbox)
+        if mode in FILE_MODES:
+            total = sum(
+                status.size or 0 for status in self._selected_map_statuses()
+            )
+            if not total:
+                return i18n.tr("Оценка появится после выбора карт."), False
+            seconds = performance.estimate_map_seconds(
+                total / 1048576,
+                cpu=cpu,
+                workers=workers,
+                terrain_seconds=terrain_seconds,
+            )
+            text = i18n.trf(
+                "Карты ≈ {} · подготовка ≈ {}",
+                self._slice_size_text(total),
+                _estimate_duration(seconds),
+            )
+            return text, seconds > ESTIMATE_CRITICAL_SECONDS
+        if mode == "pbf":
+            value = self.source_value.text().strip()
+            if not value:
+                return i18n.tr("Выберите файл для оценки."), False
+            path = Path(value).expanduser()
+            try:
+                size = path.stat().st_size
+            except OSError:
+                return i18n.trf("Файл не найден: {}", path), False
+            seconds = performance.estimate_map_seconds(
+                size / 1048576,
+                cpu=cpu,
+                workers=workers,
+                terrain_seconds=terrain_seconds,
+            )
+            text = i18n.trf(
+                "PBF {} · подготовка ≈ {}",
+                self._slice_size_text(size),
+                _estimate_duration(seconds),
+            )
+            return text, seconds > ESTIMATE_CRITICAL_SECONDS
+        return "", False
+
+    def _start_extent_slice_estimate(self, bbox, callback):
+        """Оценка SliceOSM для выбранной в окне рамки."""
+        self._cancel_extent_estimates()
+        config = self._slice_config(bbox)
+        cached = slice_estimate.cached_slice_size(config, bbox)
+        cpu = performance.cpu_score(self.settings)
+        workers = performance.layer_worker_count(
+            len(self.queries) if hasattr(self, "queries") else 0,
+            terrain=self.generate_terrain.isChecked(),
+        )
+        terrain_seconds = self._terrain_estimate_seconds(cpu=cpu, bbox=bbox)
+        worker = SliceEstimateWorker(
+            config, bbox, cached, cpu, workers, terrain_seconds,
+            parent=self,
+        )
+        worker._extent_callback = callback
+        worker.result.connect(self._extent_slice_result)
+        worker.failed.connect(self._extent_slice_failed)
+        worker.finished.connect(self._extent_estimate_done)
+        worker.finished.connect(worker.deleteLater)
+        self._extent_estimate_workers.append(worker)
+        worker.start()
+
+        def cancel():
+            try:
+                worker.cancel()
+            except RuntimeError:
+                pass
+
+        return cancel
+
+    def _slice_extent_text(self, estimate):
+        """Компактная строка оценки и полная подсказка для окна охвата."""
+        full = self._slice_estimate_line(estimate)
+        if estimate.cached_bytes:
+            text = i18n.trf(
+                "Вырез: {} · подготовка ≈ {}",
+                self._slice_size_text(estimate.cached_bytes),
+                _estimate_duration(estimate.prepare_seconds),
+            )
+        else:
+            text = i18n.trf(
+                "Объём ≈ {} · всего ≈ {}",
+                self._slice_size_text(estimate.size_bytes),
+                _estimate_duration(estimate.total_seconds),
+            )
+        critical = estimate.over_limit
+        if critical:
+            text = i18n.tr("Предел SliceOSM! ") + text
+            full = i18n.trf(
+                "Предел SliceOSM превышен: ≈ {} узлов при пределе {}. "
+                "Уменьшите охват или выберите Geofabrik.",
+                _spaced(estimate.nodes),
+                _spaced(estimate.nodes_limit),
+            ) + " " + full
+        return text, critical, full
+
+    def _extent_slice_result(self, estimate):
+        worker = self.sender()
+        if worker not in self._extent_estimate_workers:
+            return
+        callback = getattr(worker, "_extent_callback", None)
+        if callback is None:
+            return
+        text, critical, tooltip = self._slice_extent_text(estimate)
+        callback(text, critical, tooltip)
+
+    def _extent_slice_failed(self, message):
+        worker = self.sender()
+        if worker not in self._extent_estimate_workers:
+            return
+        callback = getattr(worker, "_extent_callback", None)
+        if callback is None:
+            return
+        message = " ".join(str(message).split())
+        callback(i18n.trf("Оценка недоступна: {}", message), False)
+
+    def _extent_estimate_done(self):
+        worker = self.sender()
+        try:
+            self._extent_estimate_workers.remove(worker)
+        except ValueError:
+            pass
+
+    def _cancel_extent_estimates(self):
+        # Список не очищаем: отменённый поток ещё работает, и его надо
+        # дождаться при закрытии панели.  Завершившись, он удалит себя
+        # из списка.
+        for worker in list(self._extent_estimate_workers):
+            try:
+                if worker.isRunning():
+                    worker.cancel()
+            except RuntimeError:
+                pass
 
     def _apply_example(self, mode):
         example = MODE_EXAMPLES.get(mode)
@@ -2501,12 +2667,13 @@ class XtopoDockWidget(QDockWidget):
             smooth_isolines=self.smooth_isolines.isChecked(),
         )
 
-    def _terrain_estimate_seconds(self, cpu=None):
-        """Сколько примерно займёт растровый рельеф для текущего охвата."""
+    def _terrain_estimate_seconds(self, cpu=None, bbox=None):
+        """Сколько примерно займёт растровый рельеф для охвата."""
         if not self.generate_terrain.isChecked():
             return 0.0
         try:
-            bbox = parse_bbox(self.bbox.text().strip())
+            if bbox is None:
+                bbox = parse_bbox(self.bbox.text().strip())
             config = self._terrain_estimate_config(bbox)
             width, height = measure.frame_sizes_km(bbox)
             cached = terrain_cache.dem_cached(config, bbox)
@@ -2790,6 +2957,40 @@ class XtopoDockWidget(QDockWidget):
             return i18n.trf("{} МБ", "0")
         return disk_space.human_size(size)
 
+    def _slice_estimate_line(self, estimate):
+        """Строка оценки выреза без предупреждения о пределе."""
+        if estimate.cached_bytes:
+            return i18n.trf(
+                "Вырез уже скачан: {} · подготовка ≈ {}.",
+                self._slice_size_text(estimate.cached_bytes),
+                _estimate_duration(estimate.prepare_seconds),
+            )
+        parts = [
+            i18n.trf(
+                "Объём ≈ {}", self._slice_size_text(estimate.size_bytes)
+            ),
+            i18n.trf("сборка ≈ {}", _duration(estimate.build_seconds)),
+            i18n.trf(
+                "скачивание ≈ {}", _duration(estimate.download_seconds)
+            ),
+            i18n.trf(
+                "подготовка ≈ {}",
+                _estimate_duration(estimate.prepare_seconds),
+            ),
+            i18n.trf(
+                "всего ≈ {}", _estimate_duration(estimate.total_seconds)
+            ),
+        ]
+        text = " · ".join(parts) + "."
+        if estimate.queue_size:
+            prefix = i18n.trf(
+                "В очереди {} заданий (ожидание до ≈ {}). ",
+                _spaced(estimate.queue_size),
+                _duration(estimate.queue_seconds),
+            )
+            text = prefix + text
+        return text
+
     def _render_slice_estimate(self):
         """Собирает подпись оценки выреза на текущем языке."""
         if self.source_mode.currentData() != "slice":
@@ -2816,38 +3017,9 @@ class XtopoDockWidget(QDockWidget):
             return
         estimate = state[1]
         if estimate.cached_bytes:
-            self.pbf_info.setText(
-                i18n.trf(
-                    "Вырез уже скачан: {} · подготовка ≈ {}.",
-                    self._slice_size_text(estimate.cached_bytes),
-                    _estimate_duration(estimate.prepare_seconds),
-                )
-            )
+            self.pbf_info.setText(self._slice_estimate_line(estimate))
         else:
-            parts = [
-                i18n.trf(
-                    "Объём ≈ {}", self._slice_size_text(estimate.size_bytes)
-                ),
-                i18n.trf("сборка ≈ {}", _duration(estimate.build_seconds)),
-                i18n.trf(
-                    "скачивание ≈ {}", _duration(estimate.download_seconds)
-                ),
-                i18n.trf(
-                    "подготовка ≈ {}",
-                    _estimate_duration(estimate.prepare_seconds),
-                ),
-                i18n.trf(
-                    "всего ≈ {}", _estimate_duration(estimate.total_seconds)
-                ),
-            ]
-            text = " · ".join(parts) + "."
-            if estimate.queue_size:
-                prefix = i18n.trf(
-                    "В очереди {} заданий (ожидание до ≈ {}). ",
-                    _spaced(estimate.queue_size),
-                    _duration(estimate.queue_seconds),
-                )
-                text = prefix + text
+            text = self._slice_estimate_line(estimate)
             if estimate.over_limit:
                 warning = html.escape(
                     i18n.trf(

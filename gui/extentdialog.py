@@ -22,7 +22,8 @@ from qgis.PyQt.QtGui import (
 )
 from qgis.PyQt.QtWidgets import (
     QApplication, QComboBox, QCompleter, QDialog, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QShortcut, QVBoxLayout,
+    QLineEdit, QMessageBox, QPushButton, QShortcut, QSizePolicy,
+    QVBoxLayout,
 )
 
 from ..core import i18n, nominatim
@@ -146,6 +147,62 @@ def _right_button():
 from ..core.measure import (  # noqa: E402,F401
     format_length, frame_sizes_km, scale_bar,
 )
+
+
+class OneLineLabel(QLabel):
+    """Однострочная подпись, которая не переносится и не расширяет окно.
+
+    Оценка подготовки бывает длинной; если дать QLabel её полную ширину,
+    кнопки уезжают или текст переносится на вторую строку.  Здесь
+    подпись занимает доступное место, а хвост сокращается многоточием;
+    полный текст остаётся в подсказке.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+        try:
+            self.setTextFormat(Qt.TextFormat.PlainText)
+        except AttributeError:
+            self.setTextFormat(Qt.PlainText)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = text or ""
+        super().setToolTip(self._full_text)
+        self.updateGeometry()
+        self._apply_elide()
+
+    def full_text(self):
+        return self._full_text
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        width = self.fontMetrics().horizontalAdvance(self._full_text) + 2
+        return QSize(width, hint.height())
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        width = max(0, self.width())
+        if width <= 0:
+            # Ширина ещё не выделена: показываем полный текст, чтобы
+            # sizeHint и компоновка дали подписи место.
+            super().setText(self._full_text)
+            return
+        text = self.fontMetrics().elidedText(
+            self._full_text, Qt.ElideRight, width
+        )
+        super().setText(text)
 
 
 class MeasuredCanvas(QgsMapCanvas):
@@ -512,6 +569,10 @@ class ExtentPanTool(QgsMapToolPan):
         self._corner = None
         self._start_extent = None
         self._extent = None
+        self._pan_point = None
+        self._pan_origin = None
+        self._pan_extent = None
+        self._pan_units = None
         self.handles = ExtentHandles(canvas, self)
         self.handles.hide()
 
@@ -575,6 +636,11 @@ class ExtentPanTool(QgsMapToolPan):
             self.handles.update()
 
     def canvasPressEvent(self, event):
+        if event.button() == _right_button():
+            # Правая кнопка панорамирует и в режиме без инструмента выбора:
+            # левая уже занята перетаскиванием рамки и её углов.
+            self._start_pan(event.pos())
+            return
         if event.button() == _left_button():
             corner = self._corner_at(event.pos())
             rectangle = self._normalized_extent()
@@ -613,6 +679,40 @@ class ExtentPanTool(QgsMapToolPan):
             return Qt.SizeAllCursor
         return Qt.OpenHandCursor
 
+    def _start_pan(self, position):
+        self._pan_point = position
+        self._pan_origin = position
+        self._pan_extent = QgsRectangle(self.canvas.extent())
+        self._pan_units = self.canvas.mapUnitsPerPixel()
+        self.canvas.setCursor(Qt.ClosedHandCursor)
+
+    def _pan(self, position):
+        delta = position - self._pan_origin
+        if delta.isNull():
+            return
+        # Карта следует за курсором: тянем вправо — область уходит влево.
+        dx = -delta.x() * self._pan_units
+        dy = delta.y() * self._pan_units
+        extent = self._pan_extent
+        self.canvas.setExtent(
+            QgsRectangle(
+                extent.xMinimum() + dx,
+                extent.yMinimum() + dy,
+                extent.xMaximum() + dx,
+                extent.yMaximum() + dy,
+            )
+        )
+        self.canvas.refresh()
+
+    def _stop_pan(self):
+        if self._pan_point is None:
+            return
+        self._pan_point = None
+        self._pan_origin = None
+        self._pan_extent = None
+        self._pan_units = None
+        self.canvas.setCursor(Qt.OpenHandCursor)
+
     def _resize(self, position):
         current = self.toMapCoordinates(position)
         corners = self._corners(self._start_extent)
@@ -636,6 +736,12 @@ class ExtentPanTool(QgsMapToolPan):
         )
 
     def canvasMoveEvent(self, event):
+        if self._pan_point is not None:
+            if event.buttons() & _right_button():
+                self._pan(event.pos())
+            else:
+                self._stop_pan()
+            return
         if self._operation is not None and self._start_extent is not None:
             if self._operation == "resize":
                 self._extent = self._resize(event.pos())
@@ -653,6 +759,9 @@ class ExtentPanTool(QgsMapToolPan):
         super().canvasMoveEvent(event)
 
     def canvasReleaseEvent(self, event):
+        if event.button() == _right_button() and self._pan_point is not None:
+            self._stop_pan()
+            return
         if self._operation is not None:
             rectangle = self._extent
             self._clear_operation()
@@ -675,12 +784,14 @@ class ExtentPanTool(QgsMapToolPan):
 
     def deactivate(self):
         self._clear_operation()
+        self._stop_pan()
         if self.handles is not None:
             self.handles.hide()
         super().deactivate()
 
     def dispose(self):
         self._clear_operation()
+        self._stop_pan()
         handles = self.handles
         self.handles = None
         if handles is None:
@@ -747,7 +858,7 @@ class NominatimWorker(QThread):
 
 
 class ExtentDialog(QDialog):
-    def __init__(self, bbox_text="", parent=None):
+    def __init__(self, bbox_text="", parent=None, estimate_provider=None):
         super().__init__(parent)
         install_quit_handler()
         self.setWindowTitle("Выбор охвата карты")
@@ -757,6 +868,9 @@ class ExtentDialog(QDialog):
         self._drawn_extent = None
         self._frame_labels = ("", "")
         self._search_worker = None
+        self._estimate_provider = estimate_provider
+        self._estimate_generation = 0
+        self._estimate_cancel = None
         self._wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         self._mercator = QgsCoordinateReferenceSystem("EPSG:3857")
 
@@ -770,6 +884,18 @@ class ExtentDialog(QDialog):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(SEARCH_DELAY_MS)
         self._search_timer.timeout.connect(self._start_search)
+
+        # Оценка объёма и времени пересчитывается после паузы: рамку
+        # двигают мышью, и запускать расчёт на каждое движение нельзя.
+        self._estimate_timer = QTimer(self)
+        self._estimate_timer.setSingleShot(True)
+        self._estimate_timer.setInterval(350)
+        self._estimate_timer.timeout.connect(self._request_estimate)
+
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.setInterval(5000)
+        self._notice_timer.timeout.connect(self._clear_notice)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Поиск места")
@@ -864,20 +990,34 @@ class ExtentDialog(QDialog):
         self.canvas.set_frame_provider(self._frame_provider)
         self.canvas.viewport().installEventFilter(self)
         layout.addWidget(self.canvas, 1)
+        # Подпись подложки — отдельной строкой: в нижней строке она
+        # отнимала место у оценки подготовки.
+        self.attribution.setWordWrap(False)
+        layout.addWidget(self.attribution)
 
         hint = QLabel(
-            "Перетаскивайте карту мышью, колесом меняйте масштаб. Готовую "
-            "рамку можно тянуть прямо за неё, а за угловые маркеры — менять "
-            "размер. Кнопка с иконкой прямоугольника рисует новую рамку; при "
-            "рисовании правая кнопка перемещает карту. Затем нажмите "
+            "Перетаскивайте карту мышью левой или правой кнопкой, колесом "
+            "меняйте масштаб. Готовую рамку можно тянуть прямо за неё, а за "
+            "угловые маркеры — менять размер. Кнопка с иконкой "
+            "прямоугольника рисует новую рамку. Затем нажмите "
             "«Использовать охват»."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         bottom = QHBoxLayout()
-        bottom.addWidget(self.attribution)
-        bottom.addStretch(1)
+        self.notice = OneLineLabel("")
+        self.notice.setStyleSheet("color:#b35c00; font-weight:bold;")
+        # Уведомление короткое: даём ему естественную ширину, но без
+        # роста окна на длинной строке.
+        self.notice.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Preferred
+        )
+        self.notice.setMaximumWidth(260)
+        bottom.addWidget(self.notice)
+        self.estimate = OneLineLabel("")
+        self.estimate.setMinimumWidth(0)
+        bottom.addWidget(self.estimate, 1)
         use_button = QPushButton("Использовать охват")
         use_button.setDefault(True)
         use_button.clicked.connect(self.accept)
@@ -903,6 +1043,7 @@ class ExtentDialog(QDialog):
 
         self._update_coords()
         self._update_measurement()
+        self._schedule_estimate()
 
     def keyPressEvent(self, event):
         # Enter в строке поиска запускает поиск, а не применяет охват:
@@ -1132,11 +1273,13 @@ class ExtentDialog(QDialog):
             return
         self._drawn_extent = QgsRectangle(rectangle)
         self._drawn_extent.normalize()
+        self._clear_notice()
         self.draw_button.setChecked(False)
         self.reset_button.setEnabled(True)
         self._pan_tool.refresh_handles()
         self._update_coords()
         self._update_measurement()
+        self._schedule_estimate()
 
     def _rectangle_changed(self, rectangle):
         """Рамка меняется прямо во время рисования — обновляем подписи."""
@@ -1144,9 +1287,11 @@ class ExtentDialog(QDialog):
             return
         self._drawn_extent = QgsRectangle(rectangle)
         self._drawn_extent.normalize()
+        self._clear_notice()
         self._pan_tool.refresh_handles()
         self._update_coords()
         self._update_measurement()
+        self._clear_estimate()
 
     def _reset_drawn(self):
         self._drawn_extent = None
@@ -1156,6 +1301,80 @@ class ExtentDialog(QDialog):
         self._pan_tool.refresh_handles()
         self._update_coords()
         self._update_measurement()
+        self._clear_estimate()
+
+    def _show_notice(self, text):
+        """Немодальное уведомление в нижней строке."""
+        self.notice.setText(text)
+        self._notice_timer.start()
+
+    def _clear_notice(self):
+        self._notice_timer.stop()
+        self.notice.setText("")
+
+    def _clear_estimate(self):
+        self._estimate_timer.stop()
+        self._stop_estimate()
+        self.estimate.setText("")
+        self.estimate.setStyleSheet("")
+
+    def _schedule_estimate(self):
+        if self._estimate_provider is None or self._drawn_extent is None:
+            self._clear_estimate()
+            return
+        self._clear_estimate()
+        self._estimate_timer.start()
+
+    def _request_estimate(self):
+        """Запросить оценку у панели для выбранной рамки."""
+        self._estimate_timer.stop()
+        self._stop_estimate()
+        if self._estimate_provider is None or self._drawn_extent is None:
+            self.estimate.setText("")
+            self.estimate.setStyleSheet("")
+            return
+        try:
+            bbox = self._extent_as_bbox()
+        except Exception:
+            self.estimate.setText("")
+            self.estimate.setStyleSheet("")
+            return
+        self._estimate_generation += 1
+        generation = self._estimate_generation
+        self.estimate.setStyleSheet("")
+        self.estimate.setText(i18n.tr("Оценка…"))
+
+        def ready(text, critical=False, tooltip=""):
+            self._estimate_done(generation, text, critical, tooltip)
+
+        try:
+            cancel = self._estimate_provider(bbox, ready)
+        except Exception:
+            self.estimate.setText("")
+            return
+        if callable(cancel):
+            self._estimate_cancel = cancel
+
+    def _estimate_done(self, generation, text, critical=False, tooltip=""):
+        if generation != self._estimate_generation:
+            return
+        self.estimate.setText(text or "")
+        if tooltip:
+            self.estimate.setToolTip(tooltip)
+        self.estimate.setStyleSheet(
+            "color:#e74c3c; font-weight:bold;" if critical else ""
+        )
+
+    def _stop_estimate(self):
+        self._estimate_generation += 1
+        cancel = self._estimate_cancel
+        self._estimate_cancel = None
+        if cancel is None:
+            return
+        try:
+            cancel()
+        except Exception:
+            pass
 
     @staticmethod
     def _padded_extent(extent):
@@ -1257,6 +1476,14 @@ class ExtentDialog(QDialog):
         return self._drawn_extent, labels[0], labels[1]
 
     def accept(self):
+        if self._drawn_extent is None:
+            # Без выбранной рамки текущий вид карты — ещё не охват.
+            self._show_notice(i18n.tr("Выберите охват на карте"))
+            if not self.draw_button.isChecked():
+                self.draw_button.setChecked(True)
+            self.canvas.setMapTool(self._draw_tool)
+            self.canvas.setFocus()
+            return
         try:
             self._bbox = self._extent_as_bbox()
         except Exception as exc:
@@ -1268,6 +1495,9 @@ class ExtentDialog(QDialog):
         super().accept()
 
     def done(self, result):
+        self._estimate_timer.stop()
+        self._stop_estimate()
+        self._notice_timer.stop()
         self._draw_tool.clear()
         self._pan_tool.dispose()
         self.canvas.stopRendering()
