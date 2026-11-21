@@ -95,10 +95,11 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `repair_project` починку готовых проектов и не чинить их иначе.
 - **Упакованные слои — `MultiLineString`/`MultiPolygon`.** Шаги
   `pack_roads` и `pack_all` меняют тип дорожных и простых линий на
-  `MultiLineString`, площадей и `building` — на `MultiPolygon`; слои
-  шаблона, читающие эти файлы, объявляют тот же тип. У безымянных групп
-  `building` сохраняются только ключевые поля и `area_m2`. Правку
-  вносит `tools/road_multiline.py`. Подробности — `docs/agents/drivers.md`.
+  `MultiLineString`, площадей и `building` — на `MultiPolygon`, `tree` —
+  на `MultiPoint`; слои шаблона, читающие эти файлы, объявляют тот же
+  тип. У безымянных групп `building` сохраняются только ключевые поля и
+  `area_m2`. Правку вносит `tools/road_multiline.py`. Подробности —
+  `docs/agents/drivers.md`.
 - **Подавление значков POI в шаблоне поддерживается скриптом**
   (`tools/suppression_to_data.py`): он подменяет фильтры правил с
   `overlay_nearest` на чтение поля `hide`. Правку вручную не делать — после

@@ -2941,6 +2941,10 @@ class PackedGeometryTest(unittest.TestCase):
         ("name", ogr.OFTString),
         ("waterway", ogr.OFTString),
     )
+    POINT_FIELDS = (
+        ("name", ogr.OFTString),
+        ("species", ogr.OFTString),
+    )
 
     @staticmethod
     def _square(x, y, size=0.002):
@@ -2989,6 +2993,26 @@ class PackedGeometryTest(unittest.TestCase):
             for x, y in row["coords"]:
                 line.AddPoint_2D(x, y)
             feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    def _point_source(self, directory, rows, name="tree"):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(name, srs, ogr.wkbPoint)
+        for field_name, field_type in self.POINT_FIELDS:
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for field_name, _field_type in self.POINT_FIELDS:
+                if field_name in row:
+                    feature.SetField(field_name, row[field_name])
+            point = ogr.Geometry(ogr.wkbPoint)
+            point.AddPoint_2D(row["x"], row["y"])
+            feature.SetGeometry(point)
             layer.CreateFeature(feature)
         dataset = None
         return path
@@ -3112,6 +3136,39 @@ class PackedGeometryTest(unittest.TestCase):
                 sorted(feature.GetField("waterway") for feature in features),
                 ["ditch", "stream"],
             )
+            dataset = None
+
+    def test_tree_packs_points_by_tile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._point_source(directory, [
+                {"name": "First", "species": "oak", "x": 0.001, "y": 0.001},
+                {"name": "Second", "species": "pine", "x": 0.005, "y": 0.005},
+                {"name": "Third", "species": "oak", "x": 0.03, "y": 0.03},
+            ])
+            self.assertEqual(
+                road_packing.pack(directory, "tree"), 2
+            )
+            dataset, layer, features = self._features(directory, "tree")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPoint)
+            counts = sorted(
+                feature.GetGeometryRef().GetGeometryCount()
+                for feature in features
+            )
+            self.assertEqual(counts, [1, 2])
+            self.assertIsNone(features[0].GetField("name"))
+            self.assertIsNone(features[0].GetField("species"))
+            dataset = None
+
+    def test_pack_all_runs_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._point_source(directory, [
+                {"name": "First", "x": 0.001, "y": 0.001},
+            ])
+            self.assertEqual(
+                road_packing.pack_all(directory), 1
+            )
+            dataset, layer, _features = self._features(directory, "tree")
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPoint)
             dataset = None
 
     def test_building_uses_lod_and_style_thresholds(self):

@@ -1306,6 +1306,7 @@ class PackedGeometryTest(unittest.TestCase):
         "landuse residential",
         "[blocking] landuse residential",
     )
+    PACKED_POINTS = ("tree",)
     PLAIN_LINES = (
         "highway main layer >=1",
         "highway main layer <=-1",
@@ -1346,6 +1347,16 @@ class PackedGeometryTest(unittest.TestCase):
             self.assertEqual(layer.get("wkbType"), "MultiPolygon", name)
             self.assertIn(
                 "geometrytype=MultiPolygon",
+                layer.findtext("datasource") or "", name,
+            )
+
+    def test_packed_points_are_multipoint(self):
+        for name in self.PACKED_POINTS:
+            layer = self.layers.get(name)
+            self.assertIsNotNone(layer, name)
+            self.assertEqual(layer.get("wkbType"), "MultiPoint", name)
+            self.assertIn(
+                "geometrytype=MultiPoint",
                 layer.findtext("datasource") or "", name,
             )
 

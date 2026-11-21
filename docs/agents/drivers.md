@@ -50,7 +50,8 @@
   (`highway_main`, `path`, `track`, `railway_all`, `stream`, `tree_row`,
   `power_minor_line`, `embankment`, `cutline`) объявляются в SQLite как
   `MultiLineString`, площади (`grass`, `farmland`, `landuse_residential`,
-  `wood`, `scrub`) и `building` — как `MultiPolygon`. Все слои шаблона,
+  `wood`, `scrub`) и `building` — как `MultiPolygon`, `tree` — как
+  `MultiPoint`. Все слои шаблона,
   читающие эти файлы, должны иметь соответствующий `wkbType` и
   `geometrytype` в datasource; иначе QGIS может не нарисовать слой.
   Правку вносит `tools/road_multiline.py`; `wood` уже был

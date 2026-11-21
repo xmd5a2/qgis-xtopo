@@ -1,4 +1,4 @@
-"""Упаковка линейных и площадных объектов для ускорения рендера.
+"""Упаковка линейных, площадных и точечных объектов для рендера.
 
 Именованные дороги сливаются в цепочки только по общим концам.  Для
 односторонних дорог слияние направленное: конец одного сегмента должен
@@ -23,7 +23,9 @@
 в ``MultiPolygon`` по тайлам, каждая часть сохраняется без слияния.
 Именованные объекты остаются отдельными, чтобы не потерять подписи.
 У слоёв с фильтрами по площади в ключ входит класс площади, поэтому
-правила рендерера продолжают выбирать тот же символ.
+правила рендерера продолжают выбирать тот же символ.  Точечный слой
+``tree`` без подписей и без зависимостей символа от полей пишется в
+``MultiPoint`` по тайлам: координаты точек не меняются.
 """
 
 import math
@@ -39,11 +41,17 @@ AREA_PACK_LAYERS = (
     "grass", "farmland", "landuse_residential", "wood", "scrub",
     "building",
 )
-# У building больше тысячи полей OSM.  Безымянные группы не нуждаются в
-# них: стиль читает только ключевые поля и area_m2, а подписей у группы
-# нет.  Полные атрибуты сохраняются только у именованных зданий.
-COMPACT_ATTRIBUTE_LAYERS = ("building",)
-POST_PASS_LAYERS = SIMPLE_LINE_LAYERS + AREA_PACK_LAYERS
+# Точечные слои без подписей: дерево рисуется одним маркером, а его
+# правило не зависит от полей.  Упаковка в MultiPoint сохраняет
+# положение каждой точки.
+POINT_PACK_LAYERS = ("tree",)
+# У building больше тысячи полей OSM.  Группы без подписей не нуждаются
+# в них: стиль читает только ключевые поля и area_m2.  Полные атрибуты
+# сохраняются только у именованных зданий.
+COMPACT_ATTRIBUTE_LAYERS = ("building", "tree")
+POST_PASS_LAYERS = (
+    SIMPLE_LINE_LAYERS + AREA_PACK_LAYERS + POINT_PACK_LAYERS
+)
 
 # Ключ упаковки.  У path/track нет стрелок oneway, а highway_integrity
 # намеренно не входит в ключ: иначе мелкие различия дробят группы.
@@ -95,6 +103,7 @@ AREA_KEY_FIELDS = {
     "building": ("abandoned", "disused", "building", "ruins", "historic"),
 }
 AREA_USE_NAMES = {name: True for name in AREA_PACK_LAYERS}
+POINT_KEY_FIELDS = {"tree": ()}
 # Пороги площадей: классы нужны и правилам символов, и фильтру
 # @level_of_detail.  Для building это 2000/1000 из стиля и 300/175/100/50
 # из LOD; внутри класса все фильтры дают одинаковый результат.
@@ -116,6 +125,8 @@ SIMPLE_LINE_TILE_SIZE = 0.02
 SIMPLE_LINE_PROJECTED_TILE_SIZE = 2000.0
 AREA_TILE_SIZE = 0.02
 AREA_PROJECTED_TILE_SIZE = 2000.0
+POINT_TILE_SIZE = 0.02
+POINT_PROJECTED_TILE_SIZE = 2000.0
 DEGREE_TO_METER = 111319.49079327357
 
 NAME_EXTRA_FIELDS = (
@@ -137,6 +148,13 @@ def pack(directory, name, cancel=None):
             compact=name in COMPACT_ATTRIBUTE_LAYERS,
             cancel=cancel,
         )
+    if name in POINT_PACK_LAYERS:
+        return _pack_point_file(
+            path,
+            POINT_KEY_FIELDS[name],
+            compact=name in COMPACT_ATTRIBUTE_LAYERS,
+            cancel=cancel,
+        )
     if name not in PACK_LAYERS:
         return 0
     tile_size = (
@@ -152,7 +170,7 @@ def pack(directory, name, cancel=None):
 
 
 def pack_all(directory, cancel=None, progress=None):
-    """Пакует площади, здания и простые линии после полей площади."""
+    """Пакует площади, здания, точки и простые линии после полей."""
     base = Path(directory)
     names = [
         name for name in POST_PASS_LAYERS
@@ -705,6 +723,170 @@ def _area_class(value, thresholds):
         if value < threshold:
             return index
     return len(thresholds)
+
+
+def _point_parts(geometry):
+    """Координаты точечной геометрии."""
+    if geometry is None or geometry.IsEmpty():
+        return []
+    kind = geometry.GetGeometryName()
+    if kind == "POINT":
+        return [(geometry.GetX(), geometry.GetY())]
+    if kind in ("MULTIPOINT", "GEOMETRYCOLLECTION"):
+        points = []
+        for index in range(geometry.GetGeometryCount()):
+            points.extend(_point_parts(geometry.GetGeometryRef(index)))
+        return points
+    return []
+
+
+def _pack_point_file(path, key_fields, compact=False, cancel=None):
+    """Пакует точечный слой в MultiPoint по тайлам.
+
+    Точки не сливаются и не смещаются: меняется только число объектов,
+    которое читает провайдер.  Слой должен рисоваться одним символом,
+    не зависящим от полей, и не иметь подписей; иначе группировка
+    потеряет различия между точками.
+    """
+    from osgeo import ogr
+
+    source = ogr.Open(str(path))
+    if source is None:
+        raise OSError(f"Cannot open {path}")
+    layer = source.GetLayer(0)
+    definition = layer.GetLayerDefn()
+    field_definitions = []
+    for index in range(definition.GetFieldCount()):
+        source_field = definition.GetFieldDefn(index)
+        field = ogr.FieldDefn(source_field.GetName(), source_field.GetType())
+        field.SetWidth(source_field.GetWidth())
+        field.SetPrecision(source_field.GetPrecision())
+        field_definitions.append(field)
+    spatial_ref = layer.GetSpatialRef()
+    if spatial_ref is not None:
+        spatial_ref = spatial_ref.Clone()
+    field_names = [field.GetName() for field in field_definitions]
+    index_of = {
+        name.lower(): index for index, name in enumerate(field_names)
+    }
+    field_types = [field.GetType() for field in field_definitions]
+    key_indexes = [index_of.get(name) for name in key_fields]
+    tile_size = POINT_TILE_SIZE
+    if spatial_ref is not None and not spatial_ref.IsGeographic():
+        tile_size = POINT_PROJECTED_TILE_SIZE
+
+    groups = {}
+    processed = 0
+    feature = None
+    geometry = None
+    try:
+        for feature in layer:
+            if cancel is not None and processed % 1000 == 0 and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            processed += 1
+            geometry = feature.GetGeometryRef()
+            points = _point_parts(geometry)
+            if not points:
+                continue
+            minx, maxx, miny, maxy = geometry.GetEnvelope()
+            tile = (
+                math.floor((minx + maxx) / 2 / tile_size),
+                math.floor((miny + maxy) / 2 / tile_size),
+            )
+            key_values = tuple(
+                feature.GetFieldAsString(index).strip()
+                if index is not None else ""
+                for index in key_indexes
+            )
+            key = ("point",) + key_values + (tile,)
+            group = groups.get(key)
+            if group is None:
+                if compact:
+                    attrs = {
+                        index: value
+                        for index, value in zip(key_indexes, key_values)
+                        if index is not None and value
+                    }
+                else:
+                    attrs = list(_attribute_values(feature, field_types))
+                group = {"attrs": attrs, "points": []}
+                groups[key] = group
+            group["points"].extend(points)
+    finally:
+        feature = None
+        geometry = None
+        layer = None
+        definition = None
+        source = None
+
+    return _write_points(
+        path, field_definitions, spatial_ref, groups, cancel=cancel
+    )
+
+
+def _write_points(path, field_definitions, spatial_ref, groups,
+                  cancel=None):
+    from osgeo import ogr
+
+    path = Path(path)
+    temporary = path.with_name(f"{path.stem}.packed{path.suffix}")
+    temporary.unlink(missing_ok=True)
+    driver = ogr.GetDriverByName("SQLite")
+    dataset = driver.CreateDataSource(
+        str(temporary), options=["SPATIALITE=YES"]
+    )
+    if dataset is None:
+        raise OSError(f"Cannot create {temporary}")
+    layer = dataset.CreateLayer(
+        path.stem, spatial_ref, ogr.wkbMultiPoint,
+        options=["SPATIAL_INDEX=YES"],
+    )
+    if layer is None:
+        dataset = None
+        temporary.unlink(missing_ok=True)
+        raise OSError(f"Cannot create layer in {temporary}")
+    for field in field_definitions:
+        layer.CreateField(field)
+
+    written = 0
+    try:
+        layer.StartTransaction()
+        out_definition = layer.GetLayerDefn()
+        for group in groups.values():
+            multi = ogr.Geometry(ogr.wkbMultiPoint)
+            for x, y in group["points"]:
+                point = ogr.Geometry(ogr.wkbPoint)
+                point.AddPoint_2D(x, y)
+                multi.AddGeometry(point)
+            if multi.GetGeometryCount() == 0:
+                continue
+            feature = ogr.Feature(out_definition)
+            attrs = group["attrs"]
+            if isinstance(attrs, dict):
+                for index, value in attrs.items():
+                    if value is not None:
+                        feature.SetField(index, value)
+            else:
+                for index, value in enumerate(attrs):
+                    if value is not None:
+                        feature.SetField(index, value)
+            feature.SetGeometry(multi)
+            layer.CreateFeature(feature)
+            written += 1
+            if (cancel is not None and written % 200 == 0
+                    and cancel.is_set()):
+                raise InterruptedError("Preparation cancelled")
+        layer.CommitTransaction()
+    except Exception:
+        layer.RollbackTransaction()
+        layer = None
+        dataset = None
+        temporary.unlink(missing_ok=True)
+        raise
+    layer = None
+    dataset = None
+    os.replace(temporary, path)
+    return written
 
 
 def _pack_polygon_file(path, key_fields, thresholds, use_names=True,

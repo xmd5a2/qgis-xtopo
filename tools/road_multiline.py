@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Переводит упакованные слои шаблона на MultiLineString/MultiPolygon.
+"""Переводит упакованные слои шаблона на составную геометрию.
 
 Дороги, железные дороги и простые линии после упаковки содержат
-MultiLineString, площадные слои — MultiPolygon.  Слои шаблона, которые
-читают эти файлы, должны объявлять тот же тип геометрии.
+MultiLineString, площадные слои — MultiPolygon, точки — MultiPoint.
+Слои шаблона, которые читают эти файлы, должны объявлять тот же тип.
 
 Скрипт правит `automap.qgz` и идемпотентен.
 
@@ -44,6 +44,8 @@ POLYGON_LAYERS = (
     "[blocking] landuse residential",
 )
 
+POINT_LAYERS = ("tree",)
+
 
 def layer_region(text, name):
     """Границы `<maplayer>` с указанным именем."""
@@ -80,6 +82,9 @@ def patch_project(text):
     targets.extend(
         (name, "Polygon", "MultiPolygon") for name in POLYGON_LAYERS
     )
+    targets.extend(
+        (name, "Point", "MultiPoint") for name in POINT_LAYERS
+    )
     for name, source, target in targets:
         region = layer_region(text, name)
         if region is None:
@@ -107,7 +112,7 @@ def main():
     text = contents[project].decode("utf-8")
     patched, changed = patch_project(text)
     if not changed:
-        print("Упакованные слои уже MultiLineString/MultiPolygon")
+        print("Упакованные слои уже MultiLineString/MultiPolygon/MultiPoint")
         return 0
     contents[project] = patched.encode("utf-8")
     temporary = TEMPLATE.with_suffix(".qgz.tmp")
@@ -115,7 +120,7 @@ def main():
         for name in names:
             archive.writestr(name, contents[name])
     temporary.replace(TEMPLATE)
-    print("MultiLineString/MultiPolygon: " + ", ".join(changed))
+    print("MultiLineString/MultiPolygon/MultiPoint: " + ", ".join(changed))
     return 0
 
 
