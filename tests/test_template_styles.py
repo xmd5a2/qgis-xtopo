@@ -1298,6 +1298,7 @@ class PackedGeometryTest(unittest.TestCase):
         "cutline",
     )
     PACKED_POLYGONS = (
+        "building",
         "wood",
         "grass",
         "farmland",

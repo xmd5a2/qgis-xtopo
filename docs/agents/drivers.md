@@ -50,10 +50,13 @@
   (`highway_main`, `path`, `track`, `railway_all`, `stream`, `tree_row`,
   `power_minor_line`, `embankment`, `cutline`) объявляются в SQLite как
   `MultiLineString`, площади (`grass`, `farmland`, `landuse_residential`,
-  `wood`, `scrub`) — как `MultiPolygon`. Все слои шаблона, читающие эти
-  файлы, должны иметь соответствующий `wkbType` и `geometrytype` в
-  datasource; иначе QGIS может не нарисовать слой. Правку вносит
-  `tools/road_multiline.py`; `wood` уже был `MultiPolygon`. Разбиения
+  `wood`, `scrub`) и `building` — как `MultiPolygon`. Все слои шаблона,
+  читающие эти файлы, должны иметь соответствующий `wkbType` и
+  `geometrytype` в datasource; иначе QGIS может не нарисовать слой.
+  Правку вносит `tools/road_multiline.py`; `wood` уже был
+  `MultiPolygon`. У безымянных упакованных групп `building` остаются
+  только ключевые поля стиля и `area_m2`: полные 1122 колонки на
+  группу не нужны и съедают память. Разбиения
   `highway_main_layer_1/_layer_-1`, `highway_main_tunnel`, `path bridge`,
   `track bridge`, `railway_all_exploded`, `rail tunnel`, `railway bridge`,
   `cemetery`, `quarry` и `power line` не пакуются и остаются с прежним

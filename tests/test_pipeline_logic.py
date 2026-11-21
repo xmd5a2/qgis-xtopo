@@ -2931,6 +2931,11 @@ class PackedGeometryTest(unittest.TestCase):
         ("wood:damage", ogr.OFTString),
         ("wood:age", ogr.OFTString),
         ("wood:density", ogr.OFTString),
+        ("abandoned", ogr.OFTString),
+        ("disused", ogr.OFTString),
+        ("building", ogr.OFTString),
+        ("ruins", ogr.OFTString),
+        ("historic", ogr.OFTString),
     )
     LINE_FIELDS = (
         ("name", ogr.OFTString),
@@ -3107,6 +3112,151 @@ class PackedGeometryTest(unittest.TestCase):
                 sorted(feature.GetField("waterway") for feature in features),
                 ["ditch", "stream"],
             )
+            dataset = None
+
+    def test_building_uses_lod_and_style_thresholds(self):
+        self.assertEqual(
+            road_packing.AREA_THRESHOLDS["building"],
+            (50, 100, 175, 300, 1000, 2000),
+        )
+        self.assertEqual(
+            road_packing.AREA_KEY_FIELDS["building"],
+            ("abandoned", "disused", "building", "ruins", "historic"),
+        )
+
+    def test_building_keeps_key_fields_and_drops_the_rest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "building": "yes", "area_m2": 150.0,
+                    "residential": "rural",
+                    "coords": self._square(0.001, 0.001),
+                },
+                {
+                    "building": "yes", "area_m2": 150.0,
+                    "coords": self._square(0.005, 0.005),
+                },
+            ], name="building")
+            self.assertEqual(
+                road_packing.pack(directory, "building"), 1
+            )
+            dataset, layer, features = self._features(
+                directory, "building"
+            )
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPolygon)
+            self.assertEqual(len(features), 1)
+            feature = features[0]
+            self.assertEqual(feature.GetField("building"), "yes")
+            self.assertEqual(feature.GetField("area_m2"), 150.0)
+            self.assertIsNone(feature.GetField("residential"))
+            self.assertEqual(
+                feature.GetGeometryRef().GetGeometryCount(), 2
+            )
+            dataset = None
+
+    def test_building_key_splits_abandoned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "building": "yes", "abandoned": "yes",
+                    "area_m2": 150.0,
+                    "coords": self._square(0.001, 0.001),
+                },
+                {
+                    "building": "yes", "area_m2": 150.0,
+                    "coords": self._square(0.005, 0.005),
+                },
+            ], name="building")
+            self.assertEqual(
+                road_packing.pack(directory, "building"), 2
+            )
+            dataset, _layer, features = self._features(
+                directory, "building"
+            )
+            self.assertEqual(
+                sorted(
+                    feature.GetFieldAsString("abandoned")
+                    for feature in features
+                ),
+                ["", "yes"],
+            )
+            dataset = None
+
+    def test_building_area_classes_follow_lod_thresholds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "building": "yes", "area_m2": 90.0,
+                    "coords": self._square(0.001, 0.001),
+                },
+                {
+                    "building": "yes", "area_m2": 110.0,
+                    "coords": self._square(0.005, 0.005),
+                },
+            ], name="building")
+            self.assertEqual(
+                road_packing.pack(directory, "building"), 2
+            )
+            dataset, _layer, features = self._features(
+                directory, "building"
+            )
+            self.assertEqual(
+                sorted(
+                    feature.GetField("area_m2") for feature in features
+                ),
+                [90.0, 110.0],
+            )
+            dataset = None
+
+    def test_named_building_keeps_all_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "name": "First", "name:de": "Erste",
+                    "residential": "rural", "area_m2": 90.0,
+                    "coords": self._square(0.001, 0.001),
+                },
+                {
+                    "name": "Second", "name:de": "Zweite",
+                    "residential": "urban", "area_m2": 110.0,
+                    "coords": self._square(0.005, 0.005),
+                },
+            ], name="building")
+            self.assertEqual(
+                road_packing.pack(directory, "building"), 2
+            )
+            dataset, _layer, features = self._features(
+                directory, "building"
+            )
+            self.assertEqual(
+                sorted(
+                    (feature.GetField("name"),
+                     feature.GetField("name:de"),
+                     feature.GetField("residential"))
+                    for feature in features
+                ),
+                [
+                    ("First", "Erste", "rural"),
+                    ("Second", "Zweite", "urban"),
+                ],
+            )
+            dataset = None
+
+    def test_pack_all_runs_building(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._polygon_source(directory, [
+                {
+                    "building": "yes", "area_m2": 150.0,
+                    "coords": self._square(0.001, 0.001),
+                },
+            ], name="building")
+            self.assertEqual(
+                road_packing.pack_all(directory), 1
+            )
+            dataset, layer, _features = self._features(
+                directory, "building"
+            )
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiPolygon)
             dataset = None
 
     def test_pack_all_runs_post_pass_layers(self):

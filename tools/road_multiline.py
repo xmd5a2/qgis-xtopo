@@ -35,6 +35,7 @@ LINE_LAYERS = (
 )
 
 POLYGON_LAYERS = (
+    "building",
     "wood",
     "grass",
     "farmland",

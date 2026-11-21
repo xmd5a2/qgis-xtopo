@@ -37,7 +37,12 @@ SIMPLE_LINE_LAYERS = (
 PACK_LAYERS = ROAD_LAYERS + SIMPLE_LINE_LAYERS
 AREA_PACK_LAYERS = (
     "grass", "farmland", "landuse_residential", "wood", "scrub",
+    "building",
 )
+# У building больше тысячи полей OSM.  Безымянные группы не нуждаются в
+# них: стиль читает только ключевые поля и area_m2, а подписей у группы
+# нет.  Полные атрибуты сохраняются только у именованных зданий.
+COMPACT_ATTRIBUTE_LAYERS = ("building",)
 POST_PASS_LAYERS = SIMPLE_LINE_LAYERS + AREA_PACK_LAYERS
 
 # Ключ упаковки.  У path/track нет стрелок oneway, а highway_integrity
@@ -87,14 +92,19 @@ AREA_KEY_FIELDS = {
     "landuse_residential": ("residential",),
     "wood": ("wood:damage", "wood:age", "wood:density"),
     "scrub": (),
+    "building": ("abandoned", "disused", "building", "ruins", "historic"),
 }
 AREA_USE_NAMES = {name: True for name in AREA_PACK_LAYERS}
+# Пороги площадей: классы нужны и правилам символов, и фильтру
+# @level_of_detail.  Для building это 2000/1000 из стиля и 300/175/100/50
+# из LOD; внутри класса все фильтры дают одинаковый результат.
 AREA_THRESHOLDS = {
     "grass": (),
     "farmland": (),
     "landuse_residential": (),
     "wood": (8000, 60000, 75000, 250000, 400000, 500000, 1000000),
     "scrub": (8000, 75000, 250000, 500000),
+    "building": (50, 100, 175, 300, 1000, 2000),
 }
 
 # Тайл 0.05° примерно 5.5 км на широте Гуаякиля.  Для проецированных
@@ -124,6 +134,7 @@ def pack(directory, name, cancel=None):
             AREA_KEY_FIELDS[name],
             AREA_THRESHOLDS[name],
             use_names=AREA_USE_NAMES[name],
+            compact=name in COMPACT_ATTRIBUTE_LAYERS,
             cancel=cancel,
         )
     if name not in PACK_LAYERS:
@@ -141,7 +152,7 @@ def pack(directory, name, cancel=None):
 
 
 def pack_all(directory, cancel=None, progress=None):
-    """Пакует площадные слои и простые линии после полей площади."""
+    """Пакует площади, здания и простые линии после полей площади."""
     base = Path(directory)
     names = [
         name for name in POST_PASS_LAYERS
@@ -697,7 +708,7 @@ def _area_class(value, thresholds):
 
 
 def _pack_polygon_file(path, key_fields, thresholds, use_names=True,
-                       cancel=None):
+                       compact=False, cancel=None):
     """Пакует площадной слой в MultiPolygon по тайлам.
 
     Именованные объекты остаются отдельными: подпись не должна
@@ -705,6 +716,10 @@ def _pack_polygon_file(path, key_fields, thresholds, use_names=True,
     полям стиля, классу площади и тайлу.  Класс площади нужен, чтобы
     фильтры ``area_m2 < порог`` давали тот же результат, что и до
     упаковки.
+
+    ``compact`` хранит у безымянной группы только ключевые поля и
+    площадь: остальные колонки у объединённого объекта всё равно
+    бессмысленны, а на слое с тысячей полей экономят гигабайты.
     """
     from osgeo import ogr
 
@@ -813,10 +828,19 @@ def _pack_polygon_file(path, key_fields, thresholds, use_names=True,
                 key = ("unnamed",) + key_values + (area_key, tile)
             group = groups.get(key)
             if group is None:
-                attrs = list(_attribute_values(feature, field_types))
-                if (thresholds and area_index is not None
-                        and attrs[area_index] is None):
-                    attrs[area_index] = area_value
+                if compact and not named:
+                    attrs = {
+                        index: value
+                        for index, value in zip(key_indexes, key_values)
+                        if index is not None and value
+                    }
+                    if area_index is not None and area_value is not None:
+                        attrs[area_index] = area_value
+                else:
+                    attrs = list(_attribute_values(feature, field_types))
+                    if (thresholds and area_index is not None
+                            and attrs[area_index] is None):
+                        attrs[area_index] = area_value
                 group = {"attrs": attrs, "parts": []}
                 groups[key] = group
             group["parts"].extend(parts)
@@ -865,9 +889,15 @@ def _write_polygons(path, field_definitions, spatial_ref, groups,
             if geometry is None:
                 continue
             feature = ogr.Feature(out_definition)
-            for index, value in enumerate(group["attrs"]):
-                if value is not None:
-                    feature.SetField(index, value)
+            attrs = group["attrs"]
+            if isinstance(attrs, dict):
+                for index, value in attrs.items():
+                    if value is not None:
+                        feature.SetField(index, value)
+            else:
+                for index, value in enumerate(attrs):
+                    if value is not None:
+                        feature.SetField(index, value)
             feature.SetGeometry(geometry)
             layer.CreateFeature(feature)
             written += 1
