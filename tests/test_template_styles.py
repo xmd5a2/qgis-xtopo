@@ -543,7 +543,7 @@ class IsolinesSchemeTest(unittest.TestCase):
 
         Движок подписей перебирает и размещает тысячи подписей; 500 на
         кадр заметно ускоряют обзорный рендер.  Крупные масштабы не
-        затрагиваются.  Правку вносит `tools/isolines_label_limit.py`.
+        затрагиваются.
         """
         for name in self.LAYERS:
             rules = self._rules(name, "labeling", "description")
@@ -608,8 +608,6 @@ class BlockingRoadLabelsTest(unittest.TestCase):
     виден на карте, а стиль у дорог отличается от настоящего (серый
     halo вместо цвета полосы).  Из-за этого одно и то же название
     дороги выглядело по-разному.
-
-    Правку вносит `tools/blocking_text.py`.
     """
 
     LAYERS = (
@@ -2907,8 +2905,7 @@ class CemeteryIconSuppressionTest(unittest.TestCase):
 class PoiSuppressionExpressionTest(unittest.TestCase):
     """Прежнее выражение подавления: вытесняет значки и внутри слоя.
 
-    Оно осталось в коде для правки шаблона (`tools/suppression_to_data.py`
-    ищет по нему старые фильтры) и для снятия условия, если попадётся
+    Оно осталось в коде для снятия условия, если попадётся
     непереведённый шаблон.  В правилах шаблона выражения больше нет:
     подавление считается при подготовке данных, см. `PoiSuppressionDataTest`.
 
