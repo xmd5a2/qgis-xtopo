@@ -13,7 +13,7 @@ from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
     Pipeline, PipelineError, _ProgressTracker, _promote_geometry,
-    _report_terrain_stage, progress_stages, save_vector,
+    _report_terrain_stage, clear_zero_elevation, progress_stages, save_vector,
 )
 from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
@@ -238,6 +238,88 @@ class SaveVectorTest(unittest.TestCase):
             self.assertEqual(_geometry_type(polygons), "MULTIPOLYGON")
             lines = self._collection(directory, "lines.geojson", [line])
             self.assertEqual(_geometry_type(lines), "LINESTRING")
+
+
+class ZeroElevationTest(unittest.TestCase):
+    """ele=0.0 в OSM — ошибка ввода, подпись должна взять рельеф."""
+
+    @staticmethod
+    def _write_layer(path, values):
+        from osgeo import ogr
+
+        ogr.UseExceptions()
+        driver = ogr.GetDriverByName("SQLite")
+        dataset = driver.CreateDataSource(str(path))
+        layer = dataset.CreateLayer("peak", geom_type=ogr.wkbPoint)
+        layer.CreateField(ogr.FieldDefn("@id", ogr.OFTString))
+        layer.CreateField(ogr.FieldDefn("ele", ogr.OFTString))
+        for identifier, value in values:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("@id", identifier)
+            if value is not None:
+                feature.SetField("ele", value)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    def test_zero_ele_is_stored_as_null(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "peak.sqlite"
+            self._write_layer(path, [
+                ("node/0", "0"),
+                ("node/1", "0.0"),
+                ("node/2", "4440"),
+                ("node/3", ""),
+                ("node/4", None),
+                ("node/5", "-430"),
+            ])
+            self.assertEqual(clear_zero_elevation(path), 2)
+
+            database = sqlite3.connect(path)
+            values = dict(database.execute('select "@id", ele from peak'))
+            database.close()
+            self.assertIsNone(values["node/0"])
+            self.assertIsNone(values["node/1"])
+            self.assertEqual(values["node/2"], "4440")
+            self.assertEqual(values["node/3"], "")
+            self.assertIsNone(values["node/4"])
+            self.assertEqual(values["node/5"], "-430")
+            self.assertEqual(clear_zero_elevation(path), 0)
+
+    def test_saving_peak_layer_clears_zero_ele(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "peak.geojson"
+            source.write_text(
+                json.dumps({
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Zero", "ele": "0.0"},
+                            "geometry": {"type": "Point",
+                                         "coordinates": [30.0, 36.0]},
+                        },
+                        {
+                            "type": "Feature",
+                            "properties": {"name": "Real", "ele": "4440"},
+                            "geometry": {"type": "Point",
+                                         "coordinates": [30.01, 36.01]},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            pipeline = Pipeline(
+                config, BBox(30.0, 35.99, 30.02, 36.02), _FakeRunner(None)
+            )
+            pipeline._save("peak", source)
+
+            database = sqlite3.connect(config.vector_dir / "peak.sqlite")
+            values = dict(database.execute("select name, ele from peak"))
+            database.close()
+            self.assertIsNone(values["Zero"])
+            self.assertEqual(values["Real"], "4440")
 
 
 class ProgressTrackerTest(unittest.TestCase):

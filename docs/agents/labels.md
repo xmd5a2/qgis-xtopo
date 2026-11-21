@@ -33,6 +33,13 @@
   статистика растра для размера не читается. Функция —
   `resources/expressions/get_peak_text_size_add.py`, проверка —
   `PeakLabelSizeTest` в `tests/test_template_styles.py`.
+- **`ele=0` считается отсутствующей высотой.** OSM иногда содержит
+  `ele=0.0` у вершины — это ошибка ввода, а не уровень моря. При
+  сохранении слоёв `peak`, `hill`, `volcano`, `volcano dirt` и
+  `mountain pass` функция `core/pipeline.py: clear_zero_elevation`
+  заменяет ноль на NULL; подпись, размер текста и порядок берут
+  `ele_calc` — высоту рельефа. Проверка — `ZeroElevationTest` в
+  `tests/test_pipeline_logic.py`.
 - Виртуальное поле `text_add` удалено из слоёв пиков, холмов и вулканов:
   подписи его не использовали, а `raster_statistic` в нём считалась на
   каждый объект при каждой отрисовке.

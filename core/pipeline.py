@@ -1308,6 +1308,12 @@ class Pipeline:
             target_crs=target_crs,
             fields=fields,
         )
+        if name in ELEVATION_LAYERS:
+            cleared = clear_zero_elevation(destination)
+            if cleared:
+                self.progress(
+                    f"{name}: высота 0 убрана у {cleared} объектов"
+                )
         self.progress(f"{name}: saved {destination.name}")
         return current
 
@@ -2212,6 +2218,57 @@ def _source_fields(source):
         ]
     except Exception:
         return []
+    finally:
+        dataset = None
+
+
+# Слои, где высота OSM участвует в подписи.  Нулевая высота там —
+# ошибка ввода, а не уровень моря: подпись должна взять высоту рельефа
+# (виртуальное поле ele_calc).
+ELEVATION_LAYERS = frozenset({
+    "peak", "hill", "volcano", "volcano_dirt", "mountain_pass",
+})
+
+
+def clear_zero_elevation(path):
+    """Заменяет ele=0 на NULL, возвращает число исправленных объектов.
+
+    OSM иногда содержит ``ele=0.0`` у вершины (ошибка ввода).  Подписи
+    берут ``ele``, только если оно не NULL, иначе — ``ele_calc``; NULL
+    заставляет их показать высоту рельефа вместо «0 м».
+    """
+    from osgeo import ogr
+
+    ogr.UseExceptions()
+    dataset = ogr.Open(str(path), 1)
+    if dataset is None:
+        return 0
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return 0
+        index = layer.GetLayerDefn().GetFieldIndex("ele")
+        if index < 0:
+            return 0
+        fids = []
+        for feature in layer:
+            value = feature.GetField(index)
+            if value in (None, ""):
+                continue
+            try:
+                number = float(str(value).replace(",", "."))
+            except (TypeError, ValueError):
+                continue
+            if number == 0:
+                fids.append(feature.GetFID())
+        for fid in fids:
+            feature = layer.GetFeature(fid)
+            if feature is None:
+                continue
+            feature.SetFieldNull(index)
+            layer.SetFeature(feature)
+        layer.SyncToDisk()
+        return len(fids)
     finally:
         dataset = None
 
