@@ -1385,6 +1385,21 @@ class PointClusterTest(unittest.TestCase):
             )
 
 
+class PlaceIconSwitchTest(unittest.TestCase):
+    """Мёртвый переключатель значков населённых пунктов убран."""
+
+    def test_switch_is_absent(self):
+        root = _template_root()
+        for option in root.iter("Option"):
+            if option.get("name") == "expression":
+                self.assertNotIn(
+                    "use_place_icon", option.get("value") or ""
+                )
+        for names in root.iter("variableNames"):
+            labels = [item.text for item in names.findall("value")]
+            self.assertNotIn("use_place_icon", labels)
+
+
 class OnewayArrowTest(unittest.TestCase):
     """Стрелки oneway только у крупных масштабов и по классу дороги."""
 
