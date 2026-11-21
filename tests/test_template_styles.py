@@ -1371,6 +1371,20 @@ class PackedGeometryTest(unittest.TestCase):
             )
 
 
+class PointClusterTest(unittest.TestCase):
+    """Кластеризация точек убрана: она дороже обычной отрисовки."""
+
+    def test_no_point_cluster_renderers(self):
+        for layer in _template_root().iter("maplayer"):
+            renderer = layer.find("renderer-v2")
+            if renderer is None:
+                continue
+            self.assertNotEqual(
+                renderer.get("type"), "pointCluster",
+                layer.findtext("layername"),
+            )
+
+
 class OnewayArrowTest(unittest.TestCase):
     """Стрелки oneway только у крупных масштабов и по классу дороги."""
 
