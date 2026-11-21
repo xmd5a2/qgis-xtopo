@@ -151,6 +151,24 @@ DIFFERENCE_SPLIT_MIN_FEATURES = 1000
 DIFFERENCE_SPLIT_MAX_OVERLAY = 20000
 
 
+def _prepared_geometry(geometry):
+    """Подготовленная GEOS-геометрия для повторных проверок пересечений.
+
+    ``QgsGeometry.intersects`` строит индекс рёбер сложного полигона
+    заново на каждый вызов: десяток тысяч проверок ручья у воды занимает
+    секунды.  OGR с ``CreatePreparedGeometry`` делает ту же работу за
+    доли секунды.  Если GDAL собран без GEOS, вернётся ``None``, и
+    вызывающий проверит пересечение обычным путём.
+    """
+    create = getattr(geometry, "CreatePreparedGeometry", None)
+    if create is None:
+        return None
+    try:
+        return create()
+    except Exception:  # noqa: BLE001 - проверка пойдёт обычным путём
+        return None
+
+
 def progress_stages(config):
     """Stage weights for the preparation progress bar."""
     stages = [("Проверка параметров", 1), ("Создание проекта QGIS", 4)]
@@ -1335,7 +1353,9 @@ class Pipeline:
         вода касается только 1,6 тыс.  Здесь объекты делятся по
         пространственному индексу, разность считается для пересекающихся,
         остальные переносятся как есть с тем же мульти-типом, что выдал
-        бы алгоритм.
+        бы алгоритм.  Сама разность кандидатов повторяет
+        ``native:difference`` напрямую в OGR (unary union и Difference),
+        а processing остаётся запасным путём на случай ошибки GEOS.
 
         Возвращает путь к готовому слою или ``None``, если деление
         невыгодно — тогда вызывающий считает разность целиком.
@@ -1378,6 +1398,8 @@ class Pipeline:
 
         index = QgsSpatialIndex()
         geometries = []
+        sources = []
+        prepared = []
         insert = getattr(index, "addFeature", None) or index.insertFeature
         for position, feature in enumerate(overlay_layer):
             if self.cancel is not None and position % 500 == 0 and self.cancel.is_set():
@@ -1393,6 +1415,11 @@ class Pipeline:
             item.setGeometry(qgis_geometry)
             insert(item)
             geometries.append(qgis_geometry)
+            # Подготовленная геометрия ссылается на исходную, поэтому
+            # нужна копия: объекты слоя живут только до следующего чтения.
+            clone = geometry.Clone()
+            sources.append(clone)
+            prepared.append(_prepared_geometry(clone))
         overlay_layer = None
         overlay_source = None
         if not geometries:
@@ -1407,6 +1434,8 @@ class Pipeline:
             cancel=self.cancel,
         )
         candidate_ids = set()
+        direct_geometries = {}
+        direct_ok = True
         seen_ids = set()
         total = 0
         abort = False
@@ -1435,15 +1464,32 @@ class Pipeline:
                     abort = True
                     break
                 found = False
-                for position in index.intersects(
+                matches = []
+                for position in sorted(index.intersects(
                     qgis_geometry.boundingBox()
-                ):
-                    if geometries[position].intersects(qgis_geometry):
+                )):
+                    check = prepared[position]
+                    if check is not None:
+                        hit = check.Intersects(geometry)
+                    else:
+                        hit = geometries[position].intersects(qgis_geometry)
+                    if hit:
                         found = True
-                        break
+                        matches.append(sources[position])
                 if found:
                     writer.add(feature)
                     candidate_ids.add(identifier)
+                    if direct_ok:
+                        try:
+                            cut = _difference_lines(geometry, matches)
+                        except Exception:  # noqa: BLE001 - ниже обычный путь
+                            # Неподходящая геометрия overlay или сбой GEOS:
+                            # слой считается алгоритмом целиком, как раньше.
+                            direct_ok = False
+                            direct_geometries.clear()
+                        else:
+                            if cut is not None:
+                                direct_geometries[identifier] = cut
             if abort:
                 writer.close(commit=False)
                 candidates_path.unlink(missing_ok=True)
@@ -1456,6 +1502,8 @@ class Pipeline:
         finally:
             layer = None
             source = None
+            prepared = None
+            sources = None
 
         if (
             total < DIFFERENCE_SPLIT_MIN_FEATURES
@@ -1469,39 +1517,46 @@ class Pipeline:
             f"из {total} объектов"
         )
 
-        difference_path = self._algorithm(
-            "native:difference",
-            {
-                "INPUT": str(candidates_path),
-                "OVERLAY": str(overlay),
-                "OUTPUT": str(self._temp_path(name, "difference_candidates")),
-            },
-            allow_empty=True,
-        )
         difference_geometries = {}
         target_type = None
-        if difference_path and Path(difference_path).exists():
-            difference_source = ogr.Open(str(difference_path))
-            if difference_source is not None:
-                difference_layer = difference_source.GetLayer(0)
-                if difference_layer is not None:
-                    target_type = difference_layer.GetGeomType()
-                    difference_index = (
-                        difference_layer.GetLayerDefn().GetFieldIndex("@id")
-                    )
-                    if difference_index < 0:
-                        difference_layer = None
-                        difference_source = None
-                        candidates_path.unlink(missing_ok=True)
-                        return None
-                    for feature in difference_layer:
-                        geometry = feature.GetGeometryRef()
-                        if geometry is not None and not geometry.IsEmpty():
-                            difference_geometries[
-                                feature.GetField(difference_index)
-                            ] = geometry.Clone()
-                difference_layer = None
-                difference_source = None
+        if direct_ok:
+            # Разность уже посчитана по ходу отбора кандидатов: промежуточный
+            # слой и вызов processing не нужны.
+            candidates_path.unlink(missing_ok=True)
+            difference_geometries = direct_geometries
+            target_type = ogr.wkbMultiLineString
+        else:
+            difference_path = self._algorithm(
+                "native:difference",
+                {
+                    "INPUT": str(candidates_path),
+                    "OVERLAY": str(overlay),
+                    "OUTPUT": str(self._temp_path(name, "difference_candidates")),
+                },
+                allow_empty=True,
+            )
+            if difference_path and Path(difference_path).exists():
+                difference_source = ogr.Open(str(difference_path))
+                if difference_source is not None:
+                    difference_layer = difference_source.GetLayer(0)
+                    if difference_layer is not None:
+                        target_type = difference_layer.GetGeomType()
+                        difference_index = (
+                            difference_layer.GetLayerDefn().GetFieldIndex("@id")
+                        )
+                        if difference_index < 0:
+                            difference_layer = None
+                            difference_source = None
+                            candidates_path.unlink(missing_ok=True)
+                            return None
+                        for feature in difference_layer:
+                            geometry = feature.GetGeometryRef()
+                            if geometry is not None and not geometry.IsEmpty():
+                                difference_geometries[
+                                    feature.GetField(difference_index)
+                                ] = geometry.Clone()
+                    difference_layer = None
+                    difference_source = None
         if target_type in (None, ogr.wkbUnknown):
             target_type = _multi_type_for_layer(current)
 
@@ -1802,6 +1857,62 @@ def _is_polygonal(geometry):
         and not geometry.IsEmpty()
         and geometry.GetGeometryName() in ("POLYGON", "MULTIPOLYGON")
     )
+
+
+def _difference_lines(geometry, overlay_geometries):
+    """Разность линии с объединением пересекающихся полигонов.
+
+    Повторяет шаги ``native:difference``: полигоны overlay объединяются
+    GEOS-функцией unary union, затем из линии вычитается результат.
+    Прямой вызов OGR дешевле алгоритма QGIS: overlay не перечитывается
+    на каждый объект и не создаётся промежуточный слой.
+    """
+    from osgeo import ogr
+
+    polygons = ogr.Geometry(ogr.wkbMultiPolygon)
+    for other in overlay_geometries:
+        name = other.GetGeometryName()
+        if name == "POLYGON":
+            polygons.AddGeometry(other)
+        elif name == "MULTIPOLYGON":
+            for index in range(other.GetGeometryCount()):
+                polygons.AddGeometry(other.GetGeometryRef(index))
+        else:
+            raise TypeError(f"unexpected overlay geometry: {name}")
+    merged = polygons.UnionCascaded()
+    return _difference_result(geometry.Difference(merged))
+
+
+def _difference_result(geometry):
+    """Линейный результат разности в MultiLineString, как у QGIS."""
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        result = ogr.Geometry(ogr.wkbMultiLineString)
+        result.AddGeometry(geometry.Clone())
+        return result
+    if name == "MULTILINESTRING":
+        return geometry.Clone()
+    if name != "GEOMETRYCOLLECTION":
+        # QGIS оставляет из коллекции только линейные части.
+        return None
+    result = ogr.Geometry(ogr.wkbMultiLineString)
+    _add_line_parts(geometry, result)
+    if result.GetGeometryCount() == 0:
+        return None
+    return result
+
+
+def _add_line_parts(geometry, result):
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        result.AddGeometry(geometry.Clone())
+    elif name in ("MULTILINESTRING", "GEOMETRYCOLLECTION"):
+        for index in range(geometry.GetGeometryCount()):
+            _add_line_parts(geometry.GetGeometryRef(index), result)
 
 
 def _promote_geometry(geometry, target_type):
