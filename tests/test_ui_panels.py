@@ -559,6 +559,41 @@ class SourceModeTest(unittest.TestCase):
         self.assertIn("Уменьшите охват", tooltip)
         self.assertIn("сборка", tooltip)
 
+    def test_slice_extent_over_one_hour_is_blocked(self):
+        """Оценка дольше часа блокирует выбор охвата и не содержит HTML."""
+        dock = self._dock()
+        estimate = self._slice_estimate(total_seconds=4000.0)
+        text, critical, tooltip = dock._slice_extent_text(estimate)
+        self.assertTrue(critical)
+        self.assertIn("1 часа", text)
+        self.assertNotIn("<span", text)
+        self.assertIn("1 часа", tooltip)
+        self.assertNotIn("<span", tooltip)
+
+    def test_extent_estimate_over_one_hour_is_blocked(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from qgis_xtopo.core import performance
+        from qgis_xtopo.core.bbox import parse_bbox
+
+        dock = self._dock()
+        dock.source_mode.setCurrentIndex(
+            dock.source_mode.findData("geofabrik")
+        )
+        dock._selected_map_statuses = lambda: [
+            SimpleNamespace(size=10 * 1048576)
+        ]
+        with mock.patch.object(
+            performance, "estimate_map_seconds", return_value=4000
+        ):
+            text, critical = dock._quick_extent_estimate(
+                parse_bbox("1,2,3,4"), "geofabrik"
+            )
+        self.assertTrue(critical)
+        self.assertIn("1 часа", text)
+        self.assertNotIn("<span", text)
+
     def test_slice_estimate_failure_does_not_hide_mode(self):
         dock = self._dock()
         dock.source_mode.setCurrentIndex(dock.source_mode.findData("slice"))

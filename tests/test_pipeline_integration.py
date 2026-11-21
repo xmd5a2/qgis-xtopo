@@ -3188,8 +3188,23 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(width_label, dialog._frame_labels[0])
         self.assertEqual(height_label, dialog._frame_labels[1])
         # Шкала масштаба: длина полоски и подпись вычисляются без ошибок.
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
         painter_check = dialog.canvas._draw_scale_bar
         self.assertTrue(callable(painter_check))
+        dialog.canvas._draw_scale_bar()
+        dialog.canvas._draw_attribution()
+        viewport = dialog.canvas.viewport()
+        scale_rect = dialog.canvas._scale_bar_rect
+        attribution_rect = dialog.canvas._attribution_rect
+        self.assertIsNotNone(scale_rect)
+        self.assertIsNotNone(attribution_rect)
+        # Шкала — слева внизу, атрибуция — справа внизу, обе поверх карты.
+        self.assertLess(scale_rect.center().x(), viewport.width() / 2)
+        self.assertGreater(attribution_rect.center().x(), viewport.width() / 2)
+        self.assertGreater(scale_rect.bottom(), viewport.height() * 0.9)
+        self.assertGreater(attribution_rect.bottom(), viewport.height() * 0.9)
         dialog.done(0)
 
     def test_extent_dialog_hides_frame_labels_without_frame(self):
@@ -3295,6 +3310,70 @@ class PipelineIntegrationTest(unittest.TestCase):
             )
             tool.canvasReleaseEvent(Event(_right_button(), move))
             self.assertIsNone(tool._pan_point)
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_blocks_oversized_extent(self):
+        """Охват с превышением предела или временем больше часа не выбрать."""
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        def provider(_bbox, callback):
+            callback("Оценка больше 1 часа!", True)
+
+        dialog = ExtentDialog(
+            "37.5,55.7,37.7,55.8", estimate_provider=provider
+        )
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
+        accepted = []
+        dialog.accepted.connect(lambda: accepted.append(True))
+        try:
+            dialog._rectangle_changed(dialog.canvas.extent())
+            dialog._request_estimate()
+            self.app.processEvents()
+            self.assertFalse(dialog.use_button.isEnabled())
+            dialog.accept()
+            self.app.processEvents()
+            self.assertEqual(accepted, [])
+            self.assertIn("велик", dialog.notice.full_text())
+        finally:
+            dialog.done(0)
+
+    def test_extent_dialog_waits_for_estimate_before_accepting(self):
+        """Пока оценка не готова, охват не применяется."""
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        ready = []
+
+        def provider(_bbox, callback):
+            ready.append(callback)
+
+        dialog = ExtentDialog(
+            "37.5,55.7,37.7,55.8", estimate_provider=provider
+        )
+        dialog.resize(900, 700)
+        dialog.show()
+        self.app.processEvents()
+        accepted = []
+        dialog.accepted.connect(lambda: accepted.append(True))
+        try:
+            dialog._rectangle_changed(dialog.canvas.extent())
+            dialog._request_estimate()
+            self.app.processEvents()
+            self.assertTrue(ready)
+            self.assertFalse(dialog.use_button.isEnabled())
+            dialog.accept()
+            self.app.processEvents()
+            self.assertEqual(accepted, [])
+            self.assertIn("оценки", dialog.notice.full_text())
+
+            ready[0]("Объём ≈ 10 МБ · всего ≈ 1 мин", False)
+            self.app.processEvents()
+            self.assertTrue(dialog.use_button.isEnabled())
+            dialog.accept()
+            self.app.processEvents()
+            self.assertEqual(accepted, [True])
         finally:
             dialog.done(0)
 
@@ -3464,10 +3543,13 @@ class PipelineIntegrationTest(unittest.TestCase):
             ):
                 self.assertIn(expected, names)
             self.assertTrue(dialog.layer.isValid())
-            self.assertIn("openstreetmap.org", dialog.attribution.text())
+            attribution = dialog.canvas.attribution_text()
+            self.assertIn("OpenStreetMap contributors", attribution)
+            self.assertNotIn("<a", attribution)
+            self.assertNotIn("href", attribution)
             index = dialog.basemap_combo.findData("opentopo")
             dialog.basemap_combo.setCurrentIndex(index)
-            self.assertIn("opentopomap.org", dialog.attribution.text())
+            self.assertIn("OpenTopoMap", dialog.canvas.attribution_text())
             self.assertIn("opentopomap.org", dialog.layer.source())
             self.assertTrue(dialog.layer.isValid())
             index = dialog.basemap_combo.findData("arcgis")

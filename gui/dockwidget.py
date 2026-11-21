@@ -224,6 +224,9 @@ ESTIMATE_CAUTION_SECONDS = 10 * 60
 ESTIMATE_CRITICAL_SECONDS = 20 * 60
 ESTIMATE_CAUTION_COLOR = "#e67e22"
 ESTIMATE_CRITICAL_COLOR = "#e74c3c"
+# Охват с расчётным временем больше часа не даём выбрать: подготовка
+# займёт слишком много времени.
+EXTENT_TOTAL_TIME_LIMIT_SECONDS = 60 * 60
 
 
 def _checked_state():
@@ -1679,12 +1682,16 @@ class XtopoDockWidget(QDockWidget):
                 workers=workers,
                 terrain_seconds=terrain_seconds,
             )
+            # Окно охвата показывает текст простой подписью: HTML-теги
+            # в нём остались бы видимыми.  Подсветку делает само окно.
             text = i18n.trf(
                 "Карты ≈ {} · подготовка ≈ {}",
                 self._slice_size_text(total),
-                _estimate_duration(seconds),
+                _duration(seconds),
             )
-            return text, seconds > ESTIMATE_CRITICAL_SECONDS
+            if seconds > EXTENT_TOTAL_TIME_LIMIT_SECONDS:
+                text = i18n.tr("Оценка больше 1 часа!") + " " + text
+            return text, seconds > EXTENT_TOTAL_TIME_LIMIT_SECONDS
         if mode == "pbf":
             value = self.source_value.text().strip()
             if not value:
@@ -1700,12 +1707,15 @@ class XtopoDockWidget(QDockWidget):
                 workers=workers,
                 terrain_seconds=terrain_seconds,
             )
+            # Текст идёт в простую подпись окна охвата, без rich text.
             text = i18n.trf(
                 "PBF {} · подготовка ≈ {}",
                 self._slice_size_text(size),
-                _estimate_duration(seconds),
+                _duration(seconds),
             )
-            return text, seconds > ESTIMATE_CRITICAL_SECONDS
+            if seconds > EXTENT_TOTAL_TIME_LIMIT_SECONDS:
+                text = i18n.tr("Оценка больше 1 часа!") + " " + text
+            return text, seconds > EXTENT_TOTAL_TIME_LIMIT_SECONDS
         return "", False
 
     def _start_extent_slice_estimate(self, bbox, callback):
@@ -1741,27 +1751,37 @@ class XtopoDockWidget(QDockWidget):
 
     def _slice_extent_text(self, estimate):
         """Компактная строка оценки и полная подсказка для окна охвата."""
-        full = self._slice_estimate_line(estimate)
+        # Подсказка тоже без разметки: окно охвата работает с plain text.
+        full = self._slice_estimate_line(estimate, rich=False)
+        # Окно охвата показывает текст простой подписью, поэтому здесь
+        # только обычные единицы времени, без span-разметки.
         if estimate.cached_bytes:
             text = i18n.trf(
                 "Вырез: {} · подготовка ≈ {}",
                 self._slice_size_text(estimate.cached_bytes),
-                _estimate_duration(estimate.prepare_seconds),
+                _duration(estimate.prepare_seconds),
             )
         else:
             text = i18n.trf(
                 "Объём ≈ {} · всего ≈ {}",
                 self._slice_size_text(estimate.size_bytes),
-                _estimate_duration(estimate.total_seconds),
+                _duration(estimate.total_seconds),
             )
-        critical = estimate.over_limit
-        if critical:
+        too_long = estimate.total_seconds > EXTENT_TOTAL_TIME_LIMIT_SECONDS
+        critical = estimate.over_limit or too_long
+        if estimate.over_limit:
             text = i18n.tr("Предел SliceOSM! ") + text
             full = i18n.trf(
                 "Предел SliceOSM превышен: ≈ {} узлов при пределе {}. "
                 "Уменьшите охват или выберите Geofabrik.",
                 _spaced(estimate.nodes),
                 _spaced(estimate.nodes_limit),
+            ) + " " + full
+        elif too_long:
+            text = i18n.tr("Оценка больше 1 часа!") + " " + text
+            full = i18n.tr(
+                "Расчётное время больше 1 часа: уменьшите охват или "
+                "выберите готовые карты."
             ) + " " + full
         return text, critical, full
 
@@ -2957,13 +2977,14 @@ class XtopoDockWidget(QDockWidget):
             return i18n.trf("{} МБ", "0")
         return disk_space.human_size(size)
 
-    def _slice_estimate_line(self, estimate):
+    def _slice_estimate_line(self, estimate, rich=True):
         """Строка оценки выреза без предупреждения о пределе."""
+        duration = _estimate_duration if rich else _duration
         if estimate.cached_bytes:
             return i18n.trf(
                 "Вырез уже скачан: {} · подготовка ≈ {}.",
                 self._slice_size_text(estimate.cached_bytes),
-                _estimate_duration(estimate.prepare_seconds),
+                duration(estimate.prepare_seconds),
             )
         parts = [
             i18n.trf(
@@ -2975,10 +2996,10 @@ class XtopoDockWidget(QDockWidget):
             ),
             i18n.trf(
                 "подготовка ≈ {}",
-                _estimate_duration(estimate.prepare_seconds),
+                duration(estimate.prepare_seconds),
             ),
             i18n.trf(
-                "всего ≈ {}", _estimate_duration(estimate.total_seconds)
+                "всего ≈ {}", duration(estimate.total_seconds)
             ),
         ]
         text = " · ".join(parts) + "."

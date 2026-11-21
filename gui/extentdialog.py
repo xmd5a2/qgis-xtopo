@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from qgis.core import (
@@ -39,6 +40,11 @@ class Basemap:
     template: str
     zmax: int
     attribution: str
+
+    @property
+    def attribution_text(self):
+        """Атрибуция без ссылок: рисуется поверх карты как обычный текст."""
+        return re.sub(r"<[^>]+>", "", self.attribution).strip()
 
     @property
     def uri(self):
@@ -210,8 +216,8 @@ class MeasuredCanvas(QgsMapCanvas):
 
     Рядом с каждой осью рамки показывается длина стороны: по горизонтали —
     ширина, по вертикали — высота. Подписи рисуются поверх карты, поэтому
-    отдельный слой или элемент управления не нужны. В правом нижнем углу
-    рисуется шкала масштаба.
+    отдельный слой или элемент управления не нужны. В левом нижнем углу
+    рисуется шкала масштаба, в правом — атрибуция подложки.
     """
 
     def __init__(self, parent=None):
@@ -220,6 +226,17 @@ class MeasuredCanvas(QgsMapCanvas):
         self._width_label = ""
         self._height_label = ""
         self._frame_provider = None
+        self._attribution = ""
+        self._scale_bar_rect = None
+        self._attribution_rect = None
+
+    def set_attribution(self, text):
+        """Текст атрибуции поверх карты (без ссылок и разметки)."""
+        self._attribution = " ".join(str(text or "").split())
+        self.update()
+
+    def attribution_text(self):
+        return self._attribution
 
     def set_frame(self, rectangle, width_label="", height_label=""):
         """Задаёт рамку (в координатах холста) и подписи её сторон."""
@@ -257,6 +274,7 @@ class MeasuredCanvas(QgsMapCanvas):
     def paintEvent(self, event):
         super().paintEvent(event)
         self._draw_scale_bar()
+        self._draw_attribution()
         frame, self._width_label, self._height_label = self._current_frame()
         if frame is None:
             return
@@ -315,11 +333,12 @@ class MeasuredCanvas(QgsMapCanvas):
             painter.end()
 
     def _draw_scale_bar(self):
-        """Шкала масштаба в правом нижнем углу карты.
+        """Шкала масштаба в левом нижнем углу карты.
 
         Длина полоски подбирается так, чтобы она соответствовала
         «круглому» расстоянию (1, 2 или 5 × 10ⁿ метров).
         """
+        self._scale_bar_rect = None
         painter = QPainter(self.viewport())
         try:
             view = self.viewport()
@@ -343,7 +362,7 @@ class MeasuredCanvas(QgsMapCanvas):
             if not length:
                 return
             margin = 10
-            right = view.width() - margin
+            left = margin
             bottom = view.height() - margin
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             # Классическая шкала: чередующиеся чёрные и белые четверти,
@@ -352,8 +371,9 @@ class MeasuredCanvas(QgsMapCanvas):
             bar_top = bottom - bar_height
             segment = length / 4.0
             for index in range(4):
-                left = right - length + index * segment
-                rect = QRectF(left, bar_top, segment, bar_height)
+                rect = QRectF(
+                    left + index * segment, bar_top, segment, bar_height
+                )
                 painter.setPen(QPen(QColor(25, 25, 25), 1))
                 painter.setBrush(
                     QColor(25, 25, 25) if index % 2 == 0
@@ -362,19 +382,53 @@ class MeasuredCanvas(QgsMapCanvas):
                 painter.drawRect(rect)
             painter.setPen(QPen(QColor(25, 25, 25), 1))
             painter.setBrush(Qt.NoBrush)
-            painter.drawText(
-                QRectF(
-                    right - length, bar_top - metrics.height() - 2,
-                    length, metrics.height(),
-                ),
-                Qt.AlignCenter,
-                text,
+            text_rect = QRectF(
+                left, bar_top - metrics.height() - 2,
+                length, metrics.height(),
+            )
+            painter.drawText(text_rect, Qt.AlignCenter, text)
+            self._scale_bar_rect = QRectF(
+                left, text_rect.top(), length, text_rect.height() + bar_height + 2
             )
         finally:
             painter.end()
 
+    def _draw_attribution(self):
+        """Атрибуция подложки поверх карты в правом нижнем углу."""
+        self._attribution_rect = None
+        if not self._attribution:
+            return
+        painter = QPainter(self.viewport())
+        try:
+            view = self.viewport()
+            if view.width() <= 0 or view.height() <= 0:
+                return
+            font = painter.font()
+            font.setPointSizeF(max(8.0, font.pointSizeF() - 1))
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            margin = 10
+            # Слева оставляем место шкале масштаба, чтобы подписи не
+            # наезжали друг на друга на узком окне.
+            available = max(0, view.width() - 180 - 2 * margin)
+            text = metrics.elidedText(self._attribution, Qt.ElideRight, available)
+            width = metrics.horizontalAdvance(text)
+            rect = QRectF(
+                view.width() - margin - width,
+                view.height() - margin - metrics.height(),
+                width,
+                metrics.height(),
+            )
+            self._draw_label(
+                painter, rect, text, font, metrics, color=QColor(25, 25, 25)
+            )
+            self._attribution_rect = QRectF(rect)
+        finally:
+            painter.end()
+
     @staticmethod
-    def _draw_label(painter, rect, text, font, metrics, rotate=False):
+    def _draw_label(painter, rect, text, font, metrics, rotate=False,
+                    color=FRAME_COLOR):
         """Подпись без подложки: тёмные буквы с белой обводкой.
 
         Обводка нужна, чтобы подпись читалась на любом фоне карты.
@@ -398,7 +452,7 @@ class MeasuredCanvas(QgsMapCanvas):
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(FRAME_COLOR))
+        painter.setBrush(QColor(color))
         painter.drawPath(path)
         painter.restore()
 
@@ -871,6 +925,8 @@ class ExtentDialog(QDialog):
         self._estimate_provider = estimate_provider
         self._estimate_generation = 0
         self._estimate_cancel = None
+        self._estimate_pending = False
+        self._estimate_blocked = False
         self._wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         self._mercator = QgsCoordinateReferenceSystem("EPSG:3857")
 
@@ -923,10 +979,6 @@ class ExtentDialog(QDialog):
             self.basemap_combo.addItem(basemap.name, basemap.key)
         self.basemap_combo.setToolTip("Подложка карты")
         self.basemap_combo.currentIndexChanged.connect(self._basemap_changed)
-
-        # Подпись под подложкой меняется вместе с ней.
-        self.attribution = QLabel("")
-        self.attribution.setOpenExternalLinks(True)
 
         tools = QHBoxLayout()
         self.draw_button = QPushButton()
@@ -990,10 +1042,6 @@ class ExtentDialog(QDialog):
         self.canvas.set_frame_provider(self._frame_provider)
         self.canvas.viewport().installEventFilter(self)
         layout.addWidget(self.canvas, 1)
-        # Подпись подложки — отдельной строкой: в нижней строке она
-        # отнимала место у оценки подготовки.
-        self.attribution.setWordWrap(False)
-        layout.addWidget(self.attribution)
 
         hint = QLabel(
             "Перетаскивайте карту мышью левой или правой кнопкой, колесом "
@@ -1018,12 +1066,12 @@ class ExtentDialog(QDialog):
         self.estimate = OneLineLabel("")
         self.estimate.setMinimumWidth(0)
         bottom.addWidget(self.estimate, 1)
-        use_button = QPushButton("Использовать охват")
-        use_button.setDefault(True)
-        use_button.clicked.connect(self.accept)
+        self.use_button = QPushButton("Использовать охват")
+        self.use_button.setDefault(True)
+        self.use_button.clicked.connect(self.accept)
         cancel_button = QPushButton("Отмена")
         cancel_button.clicked.connect(self.reject)
-        bottom.addWidget(use_button)
+        bottom.addWidget(self.use_button)
         bottom.addWidget(cancel_button)
         layout.addLayout(bottom)
 
@@ -1093,7 +1141,7 @@ class ExtentDialog(QDialog):
         layer = QgsRasterLayer(basemap.uri, basemap.name, "wms")
         self.layer = layer
         self.canvas.setLayers([layer] if layer.isValid() else [])
-        self.attribution.setText(basemap.attribution)
+        self.canvas.set_attribution(basemap.attribution_text)
 
     def _search_text_changed(self, text):
         """Поиск по мере ввода: пауза, затем запрос к Nominatim."""
@@ -1317,30 +1365,50 @@ class ExtentDialog(QDialog):
         self._stop_estimate()
         self.estimate.setText("")
         self.estimate.setStyleSheet("")
+        self._estimate_pending = False
+        self._estimate_blocked = False
+        self._update_use_button()
 
     def _schedule_estimate(self):
         if self._estimate_provider is None or self._drawn_extent is None:
             self._clear_estimate()
             return
         self._clear_estimate()
+        # Пока оценка не готова, охват не применяем: превышение предела
+        # SliceOSM или часовой расчёт могли бы остаться незамеченными.
+        self._estimate_pending = True
+        self._update_use_button()
         self._estimate_timer.start()
+
+    def _update_use_button(self):
+        blocked = self._estimate_pending or self._estimate_blocked
+        self.use_button.setEnabled(not blocked)
+        if self._estimate_blocked:
+            self.use_button.setToolTip(
+                i18n.tr(
+                    "Охват превышает предел SliceOSM или расчётное время "
+                    "больше 1 часа"
+                )
+            )
+        else:
+            self.use_button.setToolTip("")
 
     def _request_estimate(self):
         """Запросить оценку у панели для выбранной рамки."""
         self._estimate_timer.stop()
         self._stop_estimate()
         if self._estimate_provider is None or self._drawn_extent is None:
-            self.estimate.setText("")
-            self.estimate.setStyleSheet("")
+            self._clear_estimate()
             return
         try:
             bbox = self._extent_as_bbox()
         except Exception:
-            self.estimate.setText("")
-            self.estimate.setStyleSheet("")
+            self._clear_estimate()
             return
         self._estimate_generation += 1
         generation = self._estimate_generation
+        self._estimate_pending = True
+        self._update_use_button()
         self.estimate.setStyleSheet("")
         self.estimate.setText(i18n.tr("Оценка…"))
 
@@ -1350,7 +1418,7 @@ class ExtentDialog(QDialog):
         try:
             cancel = self._estimate_provider(bbox, ready)
         except Exception:
-            self.estimate.setText("")
+            self._clear_estimate()
             return
         if callable(cancel):
             self._estimate_cancel = cancel
@@ -1358,6 +1426,11 @@ class ExtentDialog(QDialog):
     def _estimate_done(self, generation, text, critical=False, tooltip=""):
         if generation != self._estimate_generation:
             return
+        self._estimate_pending = False
+        # critical означает, что охват выбирать нельзя: предел SliceOSM
+        # превышен или расчётное время больше часа.
+        self._estimate_blocked = bool(critical)
+        self._update_use_button()
         self.estimate.setText(text or "")
         if tooltip:
             self.estimate.setToolTip(tooltip)
@@ -1483,6 +1556,17 @@ class ExtentDialog(QDialog):
                 self.draw_button.setChecked(True)
             self.canvas.setMapTool(self._draw_tool)
             self.canvas.setFocus()
+            return
+        if self._estimate_pending:
+            self._show_notice(i18n.tr("Дождитесь оценки охвата"))
+            return
+        if self._estimate_blocked:
+            self._show_notice(
+                i18n.tr(
+                    "Охват слишком велик: уменьшите его или выберите "
+                    "готовые карты"
+                )
+            )
             return
         try:
             self._bbox = self._extent_as_bbox()
