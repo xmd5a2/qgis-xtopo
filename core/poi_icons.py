@@ -48,8 +48,8 @@ QGIS не разводит значки разных слоёв: кластер�
 не замедляются.
 """
 
-import heapq
 import io
+import heapq
 import math
 import re
 import zipfile
@@ -1739,6 +1739,36 @@ def _cell_distance(cx, cy, gx, gy, cell_lon, cell_lat, cos_lat):
     return math.sqrt(dlon * dlon + dlat * dlat)
 
 
+def _heap_cells(gx, gy, radius, cell_lon, cell_lat, cos_lat, best):
+    """Ячейки сетки по возрастанию расстояния до них.
+
+    Нужен, когда радиус больше ячейки: подавитель может лежать в
+    нескольких ячейках, и перебирать квадрат вокруг точки дорого.
+    Обход останавливается, когда до ячейки дальше найденного порога.
+    """
+    heap = [(0.0, gx, gy)]
+    seen = {(gx, gy)}
+    while heap:
+        distance, cx, cy = heapq.heappop(heap)
+        if distance > radius:
+            break
+        nearest = best[LOD_LEVELS[0]]
+        if nearest is not None and nearest <= distance:
+            break
+        yield cx, cy
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                nx = cx + dx
+                ny = cy + dy
+                if (nx, ny) in seen:
+                    continue
+                seen.add((nx, ny))
+                heapq.heappush(heap, (
+                    _cell_distance(nx, ny, gx, gy, cell_lon, cell_lat,
+                                   cos_lat), nx, ny,
+                ))
+
+
 def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
     """Пороги до ближайших подавителей по уровням детализации.
 
@@ -1746,10 +1776,13 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
     разница долгот на широте точки, умноженная на 111320 и на
     косинус широты, и разница широт на 111320.
 
-    Ячейки сетки обходятся по расстоянию, а не кольцами: сосед
-    может стоять в соседней ячейке и быть ближе, чем те, что в
-    своей.  Обход останавливается, когда расстояние до ячейки больше
-    найденного порога.
+    Размер ячейки сетки обычно не меньше радиуса поиска, поэтому
+    подавитель в радиусе лежит в соседних ячейках: тогда достаточно
+    блока 5×5.  По широте размер ячейки ограничен 1000 м, а радиус
+    последнего диапазона бывает больше — тогда ячейки обходятся по
+    расстоянию.  Оба способа просматривают надмножество ячеек,
+    которые может задеть радиус, а кандидаты за радиусом
+    отбрасываются, поэтому пороги не меняются.
 
     В кандидаты попадают только те, кто встаёт раньше: обход идёт по
     порядку (ранг, долгота, широта), поэтому в сетке лежат лишь
@@ -1765,18 +1798,21 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
     gx = int(lon // cell_lon)
     gy = int(lat // cell_lat)
     best = {level: None for level in LOD_LEVELS}
-    heap = [(0.0, gx, gy)]
-    seen = {(gx, gy)}
-    while heap:
-        distance, cx, cy = heapq.heappop(heap)
-        if distance > radius:
-            break
-        nearest = best[LOD_LEVELS[0]]
-        if nearest is not None and nearest <= distance:
-            # Уровни вложены: порог самого низкого уровня — наибольший
-            # из всех, и когда он не больше расстояния до ячейки,
-            # искать больше нечего.
-            break
+    # Ячейка по широте может быть меньше радиуса: размер сетки
+    # ограничен 1000 м, а радиус последнего диапазона больше.  Тогда
+    # подавитель в радиусе может лежать в нескольких ячейках от
+    # точки, и блок 5×5 его не покроет — идёт обход по расстоянию.
+    if radius <= cell_lat * 111320.0:
+        cells = (
+            (gx + dx, gy + dy)
+            for dx in (-2, -1, 0, 1, 2)
+            for dy in (-2, -1, 0, 1, 2)
+        )
+    else:
+        cells = _heap_cells(
+            gx, gy, radius, cell_lon, cell_lat, cos_lat, best,
+        )
+    for cx, cy in cells:
         for candidate, meridian, lod in grid.get((cx, cy), ()):
             dlon = candidate.lon - lon
             dlat = candidate.lat - lat
@@ -1809,17 +1845,6 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
                 previous = best[level]
                 if previous is None or value < previous:
                     best[level] = value
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                nx = cx + dx
-                ny = cy + dy
-                if (nx, ny) in seen:
-                    continue
-                seen.add((nx, ny))
-                heapq.heappush(heap, (
-                    _cell_distance(nx, ny, gx, gy, cell_lon, cell_lat,
-                                   cos_lat), nx, ny,
-                ))
     return best
 
 
