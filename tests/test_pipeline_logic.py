@@ -12,7 +12,7 @@ from osgeo import ogr, osr
 from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
-    Pipeline, PipelineError, _ProgressTracker,
+    Pipeline, PipelineError, _ProgressTracker, _promote_geometry,
     _report_terrain_stage, progress_stages, save_vector,
 )
 from qgis_xtopo.core.project import (
@@ -3331,6 +3331,38 @@ class AreaFieldTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(
                 ensure_area_fields(Path(directory) / "missing"), [])
+
+
+class PromoteGeometryTest(unittest.TestCase):
+    """Склейка разности с нетронутыми объектами сохраняет мульти-тип."""
+
+    def _line(self):
+        line = ogr.Geometry(ogr.wkbLineString)
+        line.AddPoint_2D(0, 0)
+        line.AddPoint_2D(1, 0)
+        return line
+
+    def test_line_becomes_multi(self):
+        result = _promote_geometry(self._line(), ogr.wkbMultiLineString)
+        self.assertEqual(result.GetGeometryName(), "MULTILINESTRING")
+        self.assertEqual(result.GetGeometryCount(), 1)
+
+    def test_polygon_becomes_multi(self):
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for x, y in ((0, 0), (0, 1), (1, 1), (1, 0), (0, 0)):
+            ring.AddPoint_2D(x, y)
+        polygon = ogr.Geometry(ogr.wkbPolygon)
+        polygon.AddGeometry(ring)
+        result = _promote_geometry(polygon, ogr.wkbMultiPolygon)
+        self.assertEqual(result.GetGeometryName(), "MULTIPOLYGON")
+
+    def test_unknown_type_is_kept(self):
+        result = _promote_geometry(self._line(), ogr.wkbUnknown)
+        self.assertEqual(result.GetGeometryName(), "LINESTRING")
+
+    def test_single_target_keeps_geometry(self):
+        result = _promote_geometry(self._line(), ogr.wkbLineString)
+        self.assertEqual(result.GetGeometryName(), "LINESTRING")
 
 
 if __name__ == "__main__":

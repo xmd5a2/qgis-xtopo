@@ -141,6 +141,15 @@ INTERMEDIATE_EXTENSION = os.environ.get(
     "QGIS_XTOPO_INTERMEDIATE", "gpkg"
 ).lower()
 
+# Разность со слоем-наложением считается только для пересекающихся
+# объектов: native:difference тратит время на каждый объект слоя, даже
+# если он далеко от overlay.  Деление окупается на больших слоях; для
+# мелких дешевле вызвать алгоритм целиком.
+DIFFERENCE_SPLIT_MIN_FEATURES = 1000
+# Overlay целиком держится в памяти для пространственного индекса.
+# Больше этого предела индексация дороже самой разности.
+DIFFERENCE_SPLIT_MAX_OVERLAY = 20000
+
 
 def progress_stages(config):
     """Stage weights for the preparation progress bar."""
@@ -1182,6 +1191,12 @@ class Pipeline:
                 self._missing_layer(name, parameters["overlay"])
                 return current
             algorithm = "native:difference" if operation == "difference" else "native:intersection"
+            if operation == "difference":
+                filtered = self._difference_filtered(
+                    name, current, overlay
+                )
+                if filtered is not None:
+                    return filtered
             return self._algorithm(algorithm, {
                 "INPUT": current,
                 "OVERLAY": overlay,
@@ -1234,7 +1249,7 @@ class Pipeline:
             return current
         raise PipelineError(f"Unknown pipeline operation: {operation}")
 
-    def _algorithm(self, algorithm, parameters):
+    def _algorithm(self, algorithm, parameters, allow_empty=False):
         if not self.runner.has_algorithm(algorithm):
             # Шаг без алгоритма пропускать нельзя: слой сохранился бы
             # необработанным под именем обработанного, и пользователь
@@ -1253,8 +1268,12 @@ class Pipeline:
                 or parameters.get("INPUT")
                 or parameters.get("input")
             )
-        if isinstance(output, str) and not output.startswith(
-            ("memory:", "ogr:", "postgres:", "pointcloud:", "mesh:")
+        if (
+            not allow_empty
+            and isinstance(output, str)
+            and not output.startswith(
+                ("memory:", "ogr:", "postgres:", "pointcloud:", "mesh:")
+            )
         ):
             path = Path(output)
             if not path.exists() or not _layer_has_features(path):
@@ -1307,6 +1326,236 @@ class Pipeline:
             if candidate.exists():
                 return candidate
         return None
+
+    def _difference_filtered(self, name, current, overlay):
+        """``native:difference`` только для объектов у overlay.
+
+        Алгоритм обрабатывает каждый объект входного слоя, даже если он
+        не пересекает overlay: на 15 тыс. ручьёв это около 70 с, хотя
+        вода касается только 1,6 тыс.  Здесь объекты делятся по
+        пространственному индексу, разность считается для пересекающихся,
+        остальные переносятся как есть с тем же мульти-типом, что выдал
+        бы алгоритм.
+
+        Возвращает путь к готовому слою или ``None``, если деление
+        невыгодно — тогда вызывающий считает разность целиком.
+        """
+        from osgeo import ogr
+        from qgis.core import QgsFeature, QgsGeometry, QgsSpatialIndex
+
+        source = ogr.Open(str(current))
+        if source is None:
+            return None
+        layer = source.GetLayer(0)
+        if layer is None:
+            return None
+        definition = layer.GetLayerDefn()
+        id_index = definition.GetFieldIndex("@id")
+        if id_index < 0:
+            return None
+        # Деление проверено на линейных слоях.  У точек native:difference
+        # ведёт себя иначе: полный слой оставляет точки внутри полигонов,
+        # а разность по подмножеству их убирает, поэтому для точечных
+        # слоёв считается как раньше.
+        polygons, lines = _layer_geometry_families(current)
+        if polygons or not lines:
+            return None
+        known_count = layer.GetFeatureCount()
+        if 0 <= known_count < DIFFERENCE_SPLIT_MIN_FEATURES:
+            return None
+        overlay_source = ogr.Open(str(overlay))
+        if overlay_source is None:
+            return None
+        overlay_layer = overlay_source.GetLayer(0)
+        if overlay_layer is None:
+            return None
+        overlay_count = overlay_layer.GetFeatureCount()
+        if (
+            overlay_count <= 0
+            or overlay_count > DIFFERENCE_SPLIT_MAX_OVERLAY
+        ):
+            return None
+
+        index = QgsSpatialIndex()
+        geometries = []
+        insert = getattr(index, "addFeature", None) or index.insertFeature
+        for position, feature in enumerate(overlay_layer):
+            if self.cancel is not None and position % 500 == 0 and self.cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty():
+                continue
+            qgis_geometry = QgsGeometry()
+            qgis_geometry.fromWkb(geometry.ExportToIsoWkb())
+            if qgis_geometry.isNull():
+                continue
+            item = QgsFeature(len(geometries))
+            item.setGeometry(qgis_geometry)
+            insert(item)
+            geometries.append(qgis_geometry)
+        overlay_layer = None
+        overlay_source = None
+        if not geometries:
+            return None
+
+        candidates_path = self._temp_path(
+            name, "difference_candidates", "gpkg"
+        )
+        candidates_path.unlink(missing_ok=True)
+        writer = _GpkgWriter(
+            candidates_path, name, definition, layer.GetSpatialRef(),
+            cancel=self.cancel,
+        )
+        candidate_ids = set()
+        seen_ids = set()
+        total = 0
+        abort = False
+        try:
+            for feature in layer:
+                if (
+                    self.cancel is not None
+                    and total % 500 == 0
+                    and self.cancel.is_set()
+                ):
+                    raise InterruptedError("Preparation cancelled")
+                total += 1
+                geometry = feature.GetGeometryRef()
+                if geometry is None or geometry.IsEmpty():
+                    abort = True
+                    break
+                identifier = feature.GetField(id_index)
+                if identifier in seen_ids:
+                    # Повторяющийся @id склеил бы два объекта в один.
+                    abort = True
+                    break
+                seen_ids.add(identifier)
+                qgis_geometry = QgsGeometry()
+                qgis_geometry.fromWkb(geometry.ExportToIsoWkb())
+                if qgis_geometry.isNull():
+                    abort = True
+                    break
+                found = False
+                for position in index.intersects(
+                    qgis_geometry.boundingBox()
+                ):
+                    if geometries[position].intersects(qgis_geometry):
+                        found = True
+                        break
+                if found:
+                    writer.add(feature)
+                    candidate_ids.add(identifier)
+            if abort:
+                writer.close(commit=False)
+                candidates_path.unlink(missing_ok=True)
+                return None
+            writer.close()
+        except Exception:
+            writer.close(commit=False)
+            candidates_path.unlink(missing_ok=True)
+            raise
+        finally:
+            layer = None
+            source = None
+
+        if (
+            total < DIFFERENCE_SPLIT_MIN_FEATURES
+            or not candidate_ids
+            or len(candidate_ids) == total
+        ):
+            candidates_path.unlink(missing_ok=True)
+            return None
+        self.progress(
+            f"{name}: разность только для {len(candidate_ids)} "
+            f"из {total} объектов"
+        )
+
+        difference_path = self._algorithm(
+            "native:difference",
+            {
+                "INPUT": str(candidates_path),
+                "OVERLAY": str(overlay),
+                "OUTPUT": str(self._temp_path(name, "difference_candidates")),
+            },
+            allow_empty=True,
+        )
+        difference_geometries = {}
+        target_type = None
+        if difference_path and Path(difference_path).exists():
+            difference_source = ogr.Open(str(difference_path))
+            if difference_source is not None:
+                difference_layer = difference_source.GetLayer(0)
+                if difference_layer is not None:
+                    target_type = difference_layer.GetGeomType()
+                    difference_index = (
+                        difference_layer.GetLayerDefn().GetFieldIndex("@id")
+                    )
+                    if difference_index < 0:
+                        difference_layer = None
+                        difference_source = None
+                        candidates_path.unlink(missing_ok=True)
+                        return None
+                    for feature in difference_layer:
+                        geometry = feature.GetGeometryRef()
+                        if geometry is not None and not geometry.IsEmpty():
+                            difference_geometries[
+                                feature.GetField(difference_index)
+                            ] = geometry.Clone()
+                difference_layer = None
+                difference_source = None
+        if target_type in (None, ogr.wkbUnknown):
+            target_type = _multi_type_for_layer(current)
+
+        source = ogr.Open(str(current))
+        if source is None:
+            return None
+        layer = source.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        merged_path = self._temp_path(name, "difference")
+        merged_path.unlink(missing_ok=True)
+        writer = _GpkgWriter(
+            merged_path, name, definition, layer.GetSpatialRef(),
+            geometry_type=target_type, cancel=self.cancel,
+        )
+        written = 0
+        processed = 0
+        try:
+            for feature in layer:
+                processed += 1
+                if (
+                    self.cancel is not None
+                    and processed % 500 == 0
+                    and self.cancel.is_set()
+                ):
+                    raise InterruptedError("Preparation cancelled")
+                identifier = feature.GetField(id_index)
+                if identifier in candidate_ids:
+                    geometry = difference_geometries.get(identifier)
+                    if geometry is None:
+                        # Объект полностью ушёл в воду.
+                        continue
+                    writer.add(feature, geometry)
+                else:
+                    writer.add(
+                        feature,
+                        _promote_geometry(
+                            feature.GetGeometryRef(), target_type
+                        ),
+                    )
+                written += 1
+            writer.close()
+        except Exception:
+            writer.close(commit=False)
+            merged_path.unlink(missing_ok=True)
+            raise
+        finally:
+            layer = None
+            source = None
+        if not written:
+            merged_path.unlink(missing_ok=True)
+            raise PipelineError(
+                f"{name}: difference removed every object"
+            )
+        return merged_path
 
     def _polygonstolines_mixed(self, name, current):
         """Контуры полигонов и уже существующие линии в одном слое.
@@ -1553,6 +1802,58 @@ def _is_polygonal(geometry):
         and not geometry.IsEmpty()
         and geometry.GetGeometryName() in ("POLYGON", "MULTIPOLYGON")
     )
+
+
+def _promote_geometry(geometry, target_type):
+    """Геометрия в мульти-тип, который выдаёт ``native:difference``.
+
+    QGIS возвращает результат разности линий как MultiLineString,
+    площадей — как MultiPolygon, даже если объект не пересекался с
+    overlay.  При склейке результата с нетронутыми объектами тип надо
+    привести к тому же виду, иначе итоговый слой станет смешанным.
+    """
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    if target_type in (ogr.wkbUnknown, ogr.wkbGeometryCollection):
+        return geometry.Clone()
+    name = geometry.GetGeometryName()
+    expected = {
+        ogr.wkbMultiLineString: "MULTILINESTRING",
+        ogr.wkbMultiPolygon: "MULTIPOLYGON",
+        ogr.wkbMultiPoint: "MULTIPOINT",
+        ogr.wkbLineString: "LINESTRING",
+        ogr.wkbPolygon: "POLYGON",
+        ogr.wkbPoint: "POINT",
+    }.get(target_type)
+    if expected is None or name == expected:
+        return geometry.Clone()
+    multi = {
+        "LINESTRING": (ogr.wkbMultiLineString, ogr.wkbLineString),
+        "POLYGON": (ogr.wkbMultiPolygon, ogr.wkbPolygon),
+        "POINT": (ogr.wkbMultiPoint, ogr.wkbPoint),
+    }.get(name)
+    if multi is None:
+        return geometry.Clone()
+    multi_type, single_type = multi
+    if geometry.GetGeometryType() != single_type:
+        return geometry.Clone()
+    result = ogr.Geometry(multi_type)
+    result.AddGeometry(geometry.Clone())
+    return result
+
+
+def _multi_type_for_layer(path):
+    """Мульти-тип, соответствующий семейству геометрий слоя."""
+    from osgeo import ogr
+
+    polygons, lines = _layer_geometry_families(path)
+    if polygons and not lines:
+        return ogr.wkbMultiPolygon
+    if lines and not polygons:
+        return ogr.wkbMultiLineString
+    return ogr.wkbUnknown
 
 
 def _line_parts(geometry):
