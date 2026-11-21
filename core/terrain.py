@@ -237,8 +237,11 @@ def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
                     handle.write(chunk)
                     if meter.add(len(chunk)) and status:
                         status(
-                            f"Загрузка рельефа: {meter.total / 1048576:.1f} МБ"
-                            f" · {meter.speed / 1048576:.1f} МБ/с"
+                            f"Загрузка рельефа: "
+                            f"{disk_space.format_decimal(meter.total / 1048576)}"
+                            f" МБ · "
+                            f"{disk_space.format_decimal(meter.speed / 1048576)}"
+                            f" МБ/с"
                         )
             with gzip.open(temporary, "rb") as source, target.open("wb") as output:
                 shutil.copyfileobj(source, output)

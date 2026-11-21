@@ -63,14 +63,25 @@ def free_bytes(path):
     return None
 
 
+def format_decimal(value, digits=1):
+    """Число с фиксированной точностью, но без хвостового нуля.
+
+    ``5.0`` превращается в ``5``, ``12.3`` остаётся ``12.3``.
+    """
+    text = f"{float(value):.{digits}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
 def human_size(size):
     """Размер словами: «12.3 ГБ»."""
     if size is None:
         return "?"
     if size >= GIB:
-        return f"{size / GIB:.1f} {i18n.tr('ГБ')}"
+        return f"{format_decimal(size / GIB)} {i18n.tr('ГБ')}"
     if size >= MIB:
-        return f"{size / MIB:.0f} {i18n.tr('МБ')}"
+        return f"{format_decimal(size / MIB, 0)} {i18n.tr('МБ')}"
     return f"{max(1, size // 1024)} {i18n.tr('КБ')}"
 
 

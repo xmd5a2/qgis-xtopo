@@ -2052,7 +2052,10 @@ class XtopoDockWidget(QDockWidget):
             total = 0
             for item, status in plan.items():
                 size = (
-                    i18n.trf("{} МБ", f"{status.size / 1048576:.1f}")
+                    i18n.trf(
+                        "{} МБ",
+                        disk_space.format_decimal(status.size / 1048576),
+                    )
                     if status.size
                     else i18n.tr("размер неизвестен")
                 )
@@ -2066,9 +2069,10 @@ class XtopoDockWidget(QDockWidget):
                 if status.size:
                     total += status.size
             if total:
-                total_line.append(
-                    i18n.trf("Всего: {} МБ", f"{total / 1048576:.1f}")
-                )
+                total_line.append(i18n.trf(
+                    "Всего: {} МБ",
+                    disk_space.format_decimal(total / 1048576),
+                ))
         self.map_index_status.setText("\n".join(base))
         self.map_index_status.setToolTip(
             "\n".join(base + details + total_line) if details else "\n".join(base)
@@ -2128,7 +2132,10 @@ class XtopoDockWidget(QDockWidget):
 
     def _map_list_item(self, item, status, checked):
         size = (
-            i18n.trf("{} МБ", f"{status.size / 1048576:.1f}")
+            i18n.trf(
+                "{} МБ",
+                disk_space.format_decimal(status.size / 1048576),
+            )
             if status.size
             else i18n.tr("размер неизвестен")
         )
@@ -2237,7 +2244,10 @@ class XtopoDockWidget(QDockWidget):
         total = sum(status.size or 0 for status in statuses)
         text = i18n.trf("Выбрано карт: {}", len(statuses))
         if total:
-            text += i18n.trf(", объём {} МБ", f"{total / 1048576:.1f}")
+            text += i18n.trf(
+                ", объём {} МБ",
+                disk_space.format_decimal(total / 1048576),
+            )
         self.map_index_summary.setText(text)
 
     def _map_selection_changed(self, _item):
@@ -2572,7 +2582,9 @@ class XtopoDockWidget(QDockWidget):
         title = (
             i18n.trf("PBF ({} файлов)", file_count)
             if file_count > 1
-            else i18n.trf("PBF {} МБ", f"{size:.1f}")
+            else i18n.trf(
+                "PBF {} МБ", disk_space.format_decimal(size)
+            )
         )
         self.pbf_info.setText(
             i18n.trf(

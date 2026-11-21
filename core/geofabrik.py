@@ -14,7 +14,7 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsRectangle
 
-from . import i18n
+from . import disk_space, i18n
 
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
@@ -326,7 +326,10 @@ def _fetch(url, headers=None, cancel=None, progress=None, label=""):
             received += len(chunk)
             if progress and total and received != total:
                 percent = received * 100 // total
-                progress(f"{label}: {percent}% ({received / 1048576:.1f} МБ)")
+                progress(
+                    f"{label}: {percent}% "
+                    f"({disk_space.format_decimal(received / 1048576)} МБ)"
+                )
         return status, b"".join(chunks), response.headers
 
 
@@ -571,7 +574,8 @@ def _looks_like_pbf(path):
 def _format_mb(value):
     """Мегабайты без лишней точности: крупные суммы — целыми."""
     megabytes = value / 1048576
-    return f"{megabytes:.0f}" if megabytes >= 100 else f"{megabytes:.1f}"
+    digits = 0 if megabytes >= 100 else 1
+    return disk_space.format_decimal(megabytes, digits)
 
 
 def _format_eta(seconds):
@@ -656,7 +660,9 @@ class _Transfer:
             text = f"Загрузка карт: {_format_mb(self.done)} МБ"
         parts = [text, f"{self.maps}/{self.total_maps}"]
         if self.speed > 0:
-            parts.append(f"{self.speed / 1048576:.1f} МБ/с")
+            parts.append(
+                f"{disk_space.format_decimal(self.speed / 1048576)} МБ/с"
+            )
             remaining = self.total - self.done
             if self.total and remaining > 0:
                 parts.append(_format_eta(remaining / self.speed))
@@ -732,7 +738,10 @@ def _download_one(config, item, status, transfer, progress, cancel):
     transfer.map_done()
     if progress:
         size = destination.stat().st_size / 1048576
-        progress(f"Скачана карта {item.name} ({size:.1f} МБ)")
+        progress(
+            f"Скачана карта {item.name} "
+            f"({disk_space.format_decimal(size)} МБ)"
+        )
     return destination
 
 
@@ -777,8 +786,9 @@ def ensure_maps(config, maps, statuses=None, progress=None, percent=None,
     free = shutil.disk_usage(config.geofabrik_dir).free
     if needed and free < needed + MIN_FREE_SPACE:
         raise GeofabrikError(
-            f"Недостаточно места: нужно {needed / 1073741824:.1f} ГБ, "
-            f"свободно {free / 1073741824:.1f} ГБ"
+            f"Недостаточно места: нужно "
+            f"{disk_space.format_decimal(needed / 1073741824)} ГБ, "
+            f"свободно {disk_space.format_decimal(free / 1073741824)} ГБ"
         )
 
     if pending:
@@ -788,7 +798,10 @@ def ensure_maps(config, maps, statuses=None, progress=None, percent=None,
         if progress:
             progress(
                 f"Скачивание карт: {total_maps} шт."
-                + (f", {total / 1048576:.1f} МБ" if total else "")
+                + (
+                    f", {disk_space.format_decimal(total / 1048576)} МБ"
+                    if total else ""
+                )
             )
         transfer = _Transfer(total, total_maps, percent)
         errors = []

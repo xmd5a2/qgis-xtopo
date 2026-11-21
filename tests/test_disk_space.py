@@ -22,7 +22,7 @@ class DiskSpaceTest(unittest.TestCase):
     def test_human_size(self):
         self.assertEqual(
             disk_space.human_size(2 * disk_space.GIB),
-            f"2.0 {i18n.tr('ГБ')}",
+            f"2 {i18n.tr('ГБ')}",
         )
         self.assertEqual(
             disk_space.human_size(5 * disk_space.MIB),
@@ -76,7 +76,7 @@ class DiskSpaceTest(unittest.TestCase):
             disk_space, "free_bytes", return_value=disk_space.MIB
         ):
             warning = disk_space.space_warning("/tmp", disk_space.GIB, template)
-        self.assertIn(f"1.0 {i18n.tr('ГБ')}", warning)
+        self.assertIn(f"1 {i18n.tr('ГБ')}", warning)
         self.assertIn(f"1 {i18n.tr('МБ')}", warning)
 
     def test_require_space_raises_when_not_enough(self):

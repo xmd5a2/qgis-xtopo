@@ -400,7 +400,7 @@ class GeofabrikDownloadTest(unittest.TestCase):
         transfer._speed_done = 0
         transfer.add(4 * 1048576)
         self.assertIn("МБ/с", values[-1][1])
-        self.assertIn("4.0 МБ/с", values[-1][1])
+        self.assertIn("4 МБ/с", values[-1][1])
 
     def test_transfer_reports_eta(self):
         values = []
@@ -426,7 +426,7 @@ class GeofabrikDownloadTest(unittest.TestCase):
         transfer._last = 0.0
         transfer.add(10 * 1048576)
         # Второй отчёт усредняет скорость: 10 и 20 МБ/с дают 15 МБ/с.
-        self.assertIn("15.0 МБ/с", values[-1][1])
+        self.assertIn("15 МБ/с", values[-1][1])
 
     def test_source_paths_requires_files(self):
         with self.assertRaises(geofabrik.GeofabrikError) as context:

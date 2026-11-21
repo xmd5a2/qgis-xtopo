@@ -264,7 +264,7 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                             reported = received
                             progress(
                                 f"{label or url}: скачано "
-                                f"{received / 1048576:.1f} МБ"
+                                f"{disk_space.format_decimal(received / 1048576)} МБ"
                             )
         except urllib.error.HTTPError as exc:
             if exc.code == 416 and received:

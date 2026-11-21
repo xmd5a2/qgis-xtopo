@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
-from . import i18n, net, relief
+from . import disk_space, i18n, net, relief
 from .bbox import BBox
 
 USER_AGENT = "qgis-xtopo/1.0"
@@ -1638,7 +1638,10 @@ def mixed_datum_warning(key, bbox, availability, sonny_tiles=()):
 def format_size(value):
     """Объём в удобных единицах: КБ, МБ или ГБ."""
     if value >= 1024 ** 3:
-        return f"{value / 1024 ** 3:.1f} {i18n.tr('ГБ')}"
+        return (
+            f"{disk_space.format_decimal(value / 1024 ** 3)} "
+            f"{i18n.tr('ГБ')}"
+        )
     if value >= 1024 ** 2:
         return f"{value / 1024 ** 2:.0f} {i18n.tr('МБ')}"
     return f"{max(1, round(value / 1024))} {i18n.tr('КБ')}"

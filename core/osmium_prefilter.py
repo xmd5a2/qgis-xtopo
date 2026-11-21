@@ -21,7 +21,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import osmium_tool
+from . import disk_space, osmium_tool
 from .cpu import cpu_workers
 from .memory import (
     GIB, RESERVE_BYTES, TERRAIN_RESERVE_BYTES, MemoryLimiter,
@@ -134,8 +134,9 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
             free = max(0, (available or 0) - reserve) / GIB
             progress(
                 f"osmium: вырезка {Path(source).name} не помещается "
-                f"в память (~{needed:.1f} ГБ, свободно под неё "
-                f"{free:.1f} ГБ) — читаю исходный PBF"
+                f"в память (~{disk_space.format_decimal(needed)} ГБ, "
+                f"свободно под неё {disk_space.format_decimal(free)} ГБ) "
+                f"— читаю исходный PBF"
             )
         return original, [], []
     directory = _temporary_dir(config)
@@ -170,7 +171,7 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
             if progress:
                 progress(
                     f"osmium: карт {len(tasks)}, память под вырезку "
-                    f"{budget / GIB:.1f} ГБ"
+                    f"{disk_space.format_decimal(budget / GIB)} ГБ"
                 )
             say_lock = threading.Lock()
 
