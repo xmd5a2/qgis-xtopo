@@ -7,11 +7,14 @@
 ``MultiLineString`` по тайлам без слияния геометрий: каждая исходная
 часть сохраняет своё направление.
 
-Обрабатываются ``highway_main.sqlite``, ``path.sqlite`` и ``track.sqlite``.
-Разбиения ``highway_main`` по ``layer``, мосты и туннели остаются
-отдельными слоями и не пакуются.  У ``path``/``track`` из ключа
-исключены ``highway_integrity`` и ``oneway``: стрелок там нет, а
-интегритет слишком дробит группы.
+Обрабатываются ``highway_main.sqlite``, ``path.sqlite``,
+``track.sqlite`` и ``railway_all.sqlite``.  Разбиения ``highway_main``
+по ``layer``, мосты, туннели, ``railway_disused`` и
+``railway_all_exploded`` остаются отдельными слоями и не пакуются.  У
+``path``/``track`` из ключа исключены ``highway_integrity`` и
+``oneway``: стрелок там нет, а интегритет слишком дробит группы.  У
+``railway_all`` в ключе только тип, ``service`` и ``usage``; имя и
+``ref`` не входят, поэтому все линии пакуются по тайлам.
 """
 
 import math

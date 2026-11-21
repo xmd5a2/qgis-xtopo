@@ -171,7 +171,7 @@ MultiLineString (безымянные группы). OGR SQLite хранит т�
 
 ## План внедрения
 
-1. Новый шаг пайплайна `pack_highway` после
+1. Новый шаг пайплайна `pack_roads` после
    `split_layer(fields="highway_main")` и `store_highway_integrity()`:
    `highway_integrity` нужен как часть ключа упаковки.
 2. Реализация без новых зависимостей: OGR/GEOS.
@@ -233,3 +233,28 @@ Warm — второй прогон в свежем процессе; вариа�
 
 Геометрия — `MultiLineString` из исходных частей без `line_merge`.
 Именованные — отдельные LineString (или слитые цепочки по ключу выше).
+
+## Итог внедрения (21.11.2026)
+
+Реализовано в `core/road_packing.py`, шаг `pack_roads`:
+
+- `highway_main`: ключ `highway`, `highway_integrity`, `service`,
+  `embankment`, `winter_road`, `ice_road`, `layer`, `oneway`, варианты
+  имени и `ref`; односторонние цепочки сливаются «конец → начало»;
+- `path`/`track`: те же ключи без `highway_integrity` и `oneway`;
+- `railway_all`: только `railway`, `service`, `usage`; имя и `ref` не
+  входят, поэтому все линии пакуются по тайлам;
+- безымянные части пакуются в `MultiLineString` по тайлам 0,05°,
+  именованные двухсторонние сливаются через узлы степени 2;
+- шаблон: девять слоёв объявляют `MultiLineString`
+  (`tools/road_multiline.py`);
+- мосты, туннели, разбиения по `layer`, `railway_disused` и
+  `railway_all_exploded` остаются `LineString` и не пакуются.
+
+Замеры на Люксембурге (203 слоя, 1:137 283, медиана 3 прогонов): кадр
+4,90 → 3,44 с; `highway main` 177 942 → 72 653 и 1,29 → 0,63 с; `path`
+84 512 → 3 738 и 0,31 → 0,08 с; `track` 116 215 → 2 615 и 0,29 → 0,07 с;
+`railway all` 6 515 → 753 и 0,036 → 0,018 с. Подготовка всех четырёх
+файлов — около 17 с. План и вопросы выше — история исследования;
+актуальное поведение описано в `docs/agents/styles.md` и
+`docs/agents/drivers.md`.
