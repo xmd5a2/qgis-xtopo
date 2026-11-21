@@ -3192,6 +3192,41 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertTrue(callable(painter_check))
         dialog.done(0)
 
+    def test_extent_dialog_hides_frame_labels_without_frame(self):
+        """Без нарисованной рамки размеры видимого охвата не подписываются."""
+        from qgis.core import QgsRectangle
+        from qgis_xtopo.gui.extentdialog import ExtentDialog
+
+        dialog = ExtentDialog("")
+        try:
+            self.assertIsNone(dialog._drawn_extent)
+            self.assertEqual(dialog._frame_labels, ("", ""))
+            self.assertEqual(dialog.canvas._current_frame(), (None, "", ""))
+
+            # Перетаскивание карты меняет видимый охват, но не рамку.
+            extent = QgsRectangle(dialog.canvas.extent())
+            extent.grow(extent.width() * 0.1)
+            dialog.canvas.setExtent(extent)
+            dialog._update_measurement()
+            self.assertEqual(dialog._frame_labels, ("", ""))
+            self.assertEqual(dialog.canvas._current_frame(), (None, "", ""))
+
+            # Нарисованная рамка снова получает подписи.
+            dialog._rectangle_changed(extent)
+            self.assertTrue(dialog._frame_labels[0])
+            self.assertTrue(dialog._frame_labels[1])
+            rectangle, width_label, height_label = dialog.canvas._current_frame()
+            self.assertEqual(rectangle, extent)
+            self.assertEqual(width_label, dialog._frame_labels[0])
+            self.assertEqual(height_label, dialog._frame_labels[1])
+
+            # После сброса подписи исчезают.
+            dialog._reset_drawn()
+            self.assertEqual(dialog._frame_labels, ("", ""))
+            self.assertEqual(dialog.canvas._current_frame(), (None, "", ""))
+        finally:
+            dialog.done(0)
+
     def test_extent_dialog_moves_drawn_frame(self):
         """Рамку можно тащить прямо за неё, подписи едут за сценой."""
         from qgis.core import QgsRectangle

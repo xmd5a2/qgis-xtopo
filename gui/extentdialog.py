@@ -1222,7 +1222,15 @@ class ExtentDialog(QDialog):
         return self.canvas.extent()
 
     def _update_measurement(self, *_args):
-        """Подписи размеров сторон рамки."""
+        """Подписи размеров сторон нарисованной рамки.
+
+        Без рамки подписей нет: видимый охват карты — это не выбранный
+        охват, и при перетаскивании его размеры не должны бегать по краям.
+        """
+        if self._drawn_extent is None:
+            self._frame_labels = ("", "")
+            self.canvas.update()
+            return
         try:
             bbox = self._extent_as_bbox()
         except Exception:
@@ -1240,11 +1248,13 @@ class ExtentDialog(QDialog):
         """Рамка и подписи для отрисовки.
 
         Вызывается при каждой отрисовке холста: подписи размеров сторон
-        идут за рамкой, даже когда карта перемещается, а сама рамка в
-        координатах не меняется.
+        идут за нарисованной рамкой, даже когда карта перемещается, а сама
+        рамка в координатах не меняется. Без рамки подписей нет.
         """
+        if self._drawn_extent is None:
+            return None, "", ""
         labels = getattr(self, "_frame_labels", ("", ""))
-        return self._frame_rectangle(), labels[0], labels[1]
+        return self._drawn_extent, labels[0], labels[1]
 
     def accept(self):
         try:
