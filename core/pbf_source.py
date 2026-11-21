@@ -444,15 +444,87 @@ def _source_properties(properties, allowed):
     }
 
 
-def _feature_properties(feature, definition, kind):
+def _write_matches(handles, feature_files, field_names, pbf_dir, matched,
+                   properties, geometry, field_sets):
+    """Записывает объект в NDJSON всех подходящих запросов."""
+    base_json = None
+    for name in matched:
+        handle = handles.get(name)
+        if handle is None:
+            path = pbf_dir / f"{name}.ndjson"
+            # Файл открыт в двоичном режиме: позиция записи нужна
+            # побайтовая, чтобы при откате обрезать файл до нужного
+            # места.
+            handle = path.open("wb")
+            handles[name] = handle
+            feature_files[name] = path
+        # В источник пишем только поля, которые нужны рецепту:
+        # GeoJSON-драйвер разбирает все свойства, и сотни лишних тегов
+        # стоили десятки секунд на каждом сохранении.
+        allowed = field_sets.get(name)
+        if allowed is None:
+            source_properties = properties
+            if base_json is None:
+                base_json = json.dumps(
+                    properties, ensure_ascii=False, separators=(",", ":"),
+                )
+            source_json = base_json
+        else:
+            source_properties = _source_properties(properties, allowed)
+            source_json = json.dumps(
+                source_properties, ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        # Имена полей приводятся к уникальным без учёта регистра: иначе
+        # SQLite не создаёт таблицу.
+        resolved = field_names[name].apply(source_properties)
+        properties_json = (
+            source_json
+            if resolved is source_properties
+            else json.dumps(
+                resolved, ensure_ascii=False, separators=(",", ":"),
+            )
+        )
+        handle.write(
+            (
+                '{"type":"Feature","properties":'
+                + properties_json
+                + ',"geometry":'
+                + geometry
+                + "}\n"
+            ).encode("utf-8")
+        )
+
+
+def _field_entries(definition, cache=None):
+    """Поля слоя без служебных, с кэшем на время чтения файла.
+
+    ``definition.GetFieldDefn(index).GetName()`` — вызов SWIG на каждое
+    поле каждого объекта.  На миллионе объектов это десятки секунд,
+    хотя набор полей у слоя не меняется.
+    """
+    key = getattr(definition, "GetName", lambda: id(definition))()
+    entries = cache.get(key) if cache is not None else None
+    if entries is None:
+        entries = []
+        for index in range(definition.GetFieldCount()):
+            name = definition.GetFieldDefn(index).GetName()
+            if name not in INTERNAL_FIELDS:
+                entries.append((index, name))
+        if cache is not None:
+            cache[key] = entries
+    return entries
+
+
+def _feature_properties(feature, definition, kind, fields=None):
+    if fields is None:
+        fields = _field_entries(definition)
     # Сначала известные поля драйвера OSM: они важнее одноимённых тегов из
     # other_tags, иначе тег в другом регистре переименовал бы «name».
     properties = {}
-    for index in range(definition.GetFieldCount()):
-        name = definition.GetFieldDefn(index).GetName()
-        if name in INTERNAL_FIELDS:
-            continue
-        value = feature.GetField(index)
+    getter = getattr(feature, "GetFieldAsString", feature.GetField)
+    for index, name in fields:
+        value = getter(index)
         if value is not None and str(value) != "":
             properties[name] = str(value)
 
@@ -803,6 +875,7 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                 paths, bbox, config, progress=progress, cancel=cancel
             )
             unfiltered = {str(Path(item).expanduser()) for item in covering}
+        field_sets = _default_field_sets(query_names, field_sets)
         try:
             dataset = _prepare_dataset(
                 config, bbox, query_names, query_texts=query_texts,
@@ -828,6 +901,17 @@ def prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
         _set_osm_config(previous)
 
 
+def _default_field_sets(query_names, field_sets=None):
+    """Поля источника для каждого запроса; None — не фильтровать."""
+    if field_sets is not None:
+        return field_sets
+    from . import query_recipes
+
+    return {
+        name: query_recipes.source_fields(name) for name in query_names
+    }
+
+
 def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                       progress=None, sources=None, _custom_indexing=True,
                       unfiltered=None, field_sets=None):
@@ -841,12 +925,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
 
     config.ensure_directories()
     query_texts = query_texts or {}
-    if field_sets is None:
-        from . import query_recipes
-
-        field_sets = {
-            name: query_recipes.source_fields(name) for name in query_names
-        }
+    field_sets = _default_field_sets(query_names, field_sets)
     index = QueryIndex({name: query_texts[name] for name in query_names if name in query_texts})
     bbox_geometry = _bbox_geometry(ogr, bbox)
     pbf_dir = config.temp_dir / "pbf"
@@ -912,6 +991,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         layer.GetName(): layer.GetLayerDefn()
                         for layer in layers
                     }
+                    field_cache = {}
                     # Два прохода.  Первый — грубый фильтр GDAL по области
                     # с запасом: драйвер не строит геометрию объектов,
                     # которые заведомо далеко от bbox, и до файла в 500 МБ
@@ -974,7 +1054,10 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         if definition is None:
                             continue
                         kind = _kind_for_layer(layer_name, feature)
-                        properties = _feature_properties(feature, definition, kind)
+                        properties = _feature_properties(
+                            feature, definition, kind,
+                            _field_entries(definition, field_cache),
+                        )
                         if not properties:
                             continue
 
@@ -992,60 +1075,10 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                                 continue
                             seen.add(identity)
                             file_ids.add(identity)
-                        base_json = None
-                        for name in matched:
-                            handle = handles.get(name)
-                            if handle is None:
-                                path = pbf_dir / f"{name}.ndjson"
-                                # Файл открыт в двоичном режиме: позиция
-                                # записи нужна побайтовая, чтобы при
-                                # откате обрезать файл до нужного места.
-                                handle = path.open("wb")
-                                handles[name] = handle
-                                feature_files[name] = path
-                            # В источник пишем только поля, которые нужны
-                            # рецепту: GeoJSON-драйвер разбирает все
-                            # свойства, и сотни лишних тегов стоили
-                            # десятки секунд на каждом сохранении.
-                            allowed = field_sets.get(name)
-                            if allowed is None:
-                                source_properties = properties
-                                if base_json is None:
-                                    base_json = json.dumps(
-                                        properties, ensure_ascii=False,
-                                        separators=(",", ":"),
-                                    )
-                                source_json = base_json
-                            else:
-                                source_properties = _source_properties(
-                                    properties, allowed,
-                                )
-                                source_json = json.dumps(
-                                    source_properties, ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                            # Имена полей приводятся к уникальным без учёта
-                            # регистра: иначе SQLite не создаёт таблицу.
-                            resolved = field_names[name].apply(
-                                source_properties
-                            )
-                            properties_json = (
-                                source_json
-                                if resolved is source_properties
-                                else json.dumps(
-                                    resolved, ensure_ascii=False,
-                                    separators=(",", ":"),
-                                )
-                            )
-                            handle.write(
-                                (
-                                    '{"type":"Feature","properties":'
-                                    + properties_json
-                                    + ',"geometry":'
-                                    + geometry
-                                    + "}\n"
-                                ).encode("utf-8")
-                            )
+                        _write_matches(
+                            handles, feature_files, field_names, pbf_dir,
+                            matched, properties, geometry, field_sets,
+                        )
                         features_written += 1
                     if use_filter and not _filter_delivered(read_box, area):
                         # Фильтр драйвера не доставил нужную область: файл
@@ -1143,6 +1176,7 @@ def _probe_source(gdal, source, temp_dir, index, bbox_geometry, bbox, cancel,
                 definitions = {
                     layer.GetName(): layer.GetLayerDefn() for layer in layers
                 }
+                field_cache = {}
                 filtered = use_filter and _apply_spatial_filter(
                     layers, source, bbox
                 )
@@ -1178,6 +1212,7 @@ def _count_features(dataset, definitions, index, bbox_geometry, bbox, cancel,
     in_bbox = 0
     matched = 0
     read_box = None
+    field_cache = {}
     for feature, layer_name in _iter_features(dataset, cancel):
         total += 1
         if total % 50000 == 0 and progress:
@@ -1200,7 +1235,10 @@ def _count_features(dataset, definitions, index, bbox_geometry, bbox, cancel,
         definition = definitions.get(layer_name)
         if definition is None:
             continue
-        properties = _feature_properties(feature, definition, kind)
+        properties = _feature_properties(
+            feature, definition, kind,
+            _field_entries(definition, field_cache),
+        )
         if properties and index.matching_names(kind, properties):
             identity = (layer_name, properties.get("@id"))
             if identity[1]:
