@@ -214,6 +214,12 @@
   `core/highway_integrity.py`, а `resources/expressions/
   calculate_highway_integrity.py` вызывает её же для старых проектов.
   Проверки — `HighwayIntegrityTest`, `HighwayIntegrityFieldTest`.
+- **`place=locality` скрывается на обзорных масштабах**: в слоях
+  `place locality point` (значки и подписи) и `place locality polygon`
+  (подписи) при `@level_of_detail <= 4` местность исчезает с 1:150000, при
+  `@level_of_detail = 5` — с 1:170000; на LOD 6 остаётся видимой. Условие
+  добавлено в фильтры правил рядом с подавлением значков, поэтому
+  скрываются и значки, и подписи. Проверка — `LocalityScaleTest`.
 - **Хутора и отдельные дворы: масштаб и уровень детализации**: в слое
   `places main` (правила значков и подписей) видимость задана диапазонами
   `0–100000`, `100000–200000` и `200000–500000`; дальше 1:500000 правил нет.

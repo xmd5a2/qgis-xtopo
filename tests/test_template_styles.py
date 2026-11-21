@@ -962,6 +962,93 @@ class SettlementScaleEngineTest(unittest.TestCase):
         self.assertEqual(self._visible(leaves, 500000), [])
 
 
+class LocalityScaleTest(unittest.TestCase):
+    """`place=locality` скрывается на обзорных масштабах по уровню детализации.
+
+    Значки точечного слоя и подписи обоих слоёв используют одно условие:
+    при LOD 4 и меньше — с 1:150000, при LOD 5 — с 1:170000.  На LOD 6
+    местность остаётся видимой.
+    """
+
+    CONTAINERS = (
+        ("place locality point", "renderer-v2"),
+        ("place locality point", "labeling"),
+        ("place locality polygon", "labeling"),
+    )
+    CHECKS = (
+        (100000, 4, True),
+        (149999, 4, True),
+        (150000, 4, False),
+        (169999, 5, True),
+        (170000, 5, False),
+        (170000, 6, True),
+        (300000, 4, False),
+        (300000, 6, True),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+        cls.root = _template_root()
+
+    @staticmethod
+    def _bounds(rule):
+        lower = float(rule.get("scalemindenom") or 0)
+        upper = float(rule.get("scalemaxdenom") or 0)
+        return (0.0 if lower <= 1.0 else lower), upper
+
+    def _rule_at(self, layer_name, tag, scale):
+        layer = next(
+            layer for layer in self.root.iter("maplayer")
+            if layer.findtext("layername") == layer_name
+        )
+        container = layer.find(tag)
+        self.assertIsNotNone(container)
+        for rule in container.iter("rule"):
+            lower, upper = self._bounds(rule)
+            if lower <= scale and (not upper or scale < upper):
+                return rule
+        return None
+
+    def _visible(self, rule, scale, lod):
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext, QgsExpressionContextScope,
+            QgsFeature, QgsField, QgsFields,
+        )
+        from qgis.PyQt.QtCore import QVariant
+
+        expression = QgsExpression(rule.get("filter") or "")
+        self.assertFalse(
+            expression.hasParserError(), expression.parserErrorString()
+        )
+        context = QgsExpressionContext()
+        scope = QgsExpressionContextScope("locality")
+        scope.setVariable("level_of_detail", lod)
+        scope.setVariable("map_scale", scale)
+        context.appendScope(scope)
+        fields = QgsFields()
+        fields.append(QgsField("hide", QVariant.String))
+        feature = QgsFeature(fields)
+        # Пустое подавление: проверяется только новое условие масштаба.
+        feature.setAttribute("hide", "1e30")
+        context.setFeature(feature)
+        return bool(expression.evaluate(context))
+
+    def test_visibility_matrix(self):
+        for layer_name, tag in self.CONTAINERS:
+            for scale, lod, expected in self.CHECKS:
+                with self.subTest(layer=layer_name, tag=tag,
+                                  scale=scale, lod=lod):
+                    rule = self._rule_at(layer_name, tag, scale)
+                    self.assertIsNotNone(rule, (scale, lod))
+                    self.assertEqual(
+                        self._visible(rule, scale, lod), expected,
+                        (scale, lod),
+                    )
+
+
 class RuleIntegrityTest(unittest.TestCase):
     """Правила, которые QGIS не сможет прочитать целиком."""
 
