@@ -69,7 +69,18 @@ class FieldNames:
         return target
 
     def apply(self, properties):
-        """Свойства с уникальными именами; исходный словарь, если всё ок."""
+        """Свойства с уникальными именами; исходный словарь, если всё ок.
+
+        У большинства объектов все имена уже известны и совпадают с
+        исходными: строить новый словарь и сравнивать его со старым
+        незачем.  Проверка по отображению дешевле полной сборки.
+        """
+        mapping = self._mapping
+        for key in properties:
+            if mapping.get(key) != key:
+                break
+        else:
+            return properties
         resolved = {}
         for key, value in properties.items():
             resolved[self.resolve(key)] = value

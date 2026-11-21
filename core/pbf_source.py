@@ -297,6 +297,7 @@ class QueryIndex:
     def __init__(self, query_texts):
         self.specs = []
         self.by_key = {}
+        self.keys_by_kind = {}
         self.other = []
         # Запросы, которым нужны члены отношений: драйвер PBF их не
         # отдаёт.  Это ограничение режима, а не ошибка данных, поэтому
@@ -323,16 +324,23 @@ class QueryIndex:
                     self.other.append((spec, query_filter))
                     continue
                 self.by_key.setdefault(index, []).append((spec, query_filter))
+                self.keys_by_kind.setdefault(query_filter.kind, set()).add(key)
 
     def matching_names(self, kind, properties):
         candidates = []
         seen = set()
-        for key, value in properties.items():
+        # Перебираются только ключи, которые вообще есть в запросах
+        # этого вида: у объекта бывает несколько сотен тегов, и
+        # проверять каждый из них незачем.
+        for key in self.keys_by_kind.get(kind, ()):
+            value = properties.get(key)
+            if value is None:
+                continue
             for index in (
                 (kind, key, "eq", value),
                 (kind, key, "exists", None),
             ):
-                for item in self.by_key.get(index, []):
+                for item in self.by_key.get(index, ()):
                     identity = id(item)
                     if identity not in seen:
                         seen.add(identity)
