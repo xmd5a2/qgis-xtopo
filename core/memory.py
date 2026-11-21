@@ -43,6 +43,14 @@ OSMIUM_EXTRACT_MAX = 6 * GIB
 OSMIUM_FILTER_MIN = 128 * MIB
 OSMIUM_FILTER_MAX = 512 * MIB
 
+# Фактический пик ``osmium extract`` со стратегией smart на 195-МБ PBF
+# Альп — около 4,1 ГБ, то есть ~21 байт на байт входа.  Оценка выше
+# нужна для планирования параллельных вырезок и намеренно завышена;
+# здесь — реальный пик с небольшим запасом, по нему решается, запускать
+# ли osmium вообще.
+OSMIUM_EXTRACT_PEAK_PER_BYTE = 24.0
+OSMIUM_EXTRACT_PEAK_BASE = 256 * MIB
+
 # Оценка памяти одного потока обработки слоёв и одного тайла изолиний.
 LAYER_WORKER_BYTES = int(1.5 * GIB)
 CONTOUR_WORKER_BYTES = 768 * MIB
@@ -239,6 +247,33 @@ def osmium_filter_bytes(path):
         size = 0
     estimate = max(OSMIUM_FILTER_MIN, int(size * 4))
     return min(OSMIUM_FILTER_MAX, estimate)
+
+
+def osmium_extract_peak_bytes(path):
+    """Ожидаемый пик памяти ``osmium extract`` (strategy=smart)."""
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        size = 0
+    return int(size * OSMIUM_EXTRACT_PEAK_PER_BYTE + OSMIUM_EXTRACT_PEAK_BASE)
+
+
+def osmium_extract_fits(path, reserve=RESERVE_BYTES):
+    """Помещается ли вырезка osmium в доступную память.
+
+    На машине с 4 ГБ умная стратегия занимает больше всей памяти: попытка
+    заканчивается OOM, после чего всё равно включается чтение исходного
+    PBF драйвером GDAL.  Лучше сразу пойти запасным путём и не тратить
+    время на обречённый запуск.  Если память определить не удалось,
+    возвращается ``True``: поведение остаётся прежним.
+    """
+    _total, available = memory_state()
+    if available is None:
+        return True
+    return (
+        osmium_extract_peak_bytes(path)
+        <= max(0, available - max(0, int(reserve)))
+    )
 
 
 def gdal_cache_bytes():

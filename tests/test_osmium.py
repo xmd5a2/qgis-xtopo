@@ -253,6 +253,26 @@ class OsmiumPrefilterTest(unittest.TestCase):
             self.assertEqual(covering, [])
 
     @unittest.skipUnless(OSMIUM, "osmium недоступен")
+    def test_prefilter_skips_extract_that_does_not_fit_memory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._make_pbf(directory)
+            bbox = BBox(42.9, 41.9, 43.1, 42.1)
+            with mock.patch.object(
+                osmium_prefilter, "osmium_extract_fits", return_value=False,
+            ), mock.patch.object(
+                osmium_prefilter.osmium_tool, "run",
+            ) as run:
+                paths, temporary, covering = (
+                    osmium_prefilter.prefilter_sources(
+                        [str(source)], bbox, _config(directory)
+                    )
+                )
+            self.assertEqual(paths, [str(source)])
+            self.assertEqual(temporary, [])
+            self.assertEqual(covering, [])
+            run.assert_not_called()
+
+    @unittest.skipUnless(OSMIUM, "osmium недоступен")
     def test_prefilter_falls_back_on_error(self):
         with tempfile.TemporaryDirectory() as directory:
             source = self._make_pbf(directory)

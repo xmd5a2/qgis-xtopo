@@ -117,6 +117,28 @@ class MemoryBudgetTest(unittest.TestCase):
         self.assertGreater(large_estimate, small_estimate)
         self.assertLess(filter_estimate, large_estimate)
 
+    def test_osmium_peak_reflects_measured_memory(self):
+        """Пик с запасом: 100 МБ дают ~2.6 ГБ и не влезают в 4 ГБ."""
+        from qgis_xtopo.core import memory
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "map.osm.pbf"
+            with source.open("wb") as handle:
+                handle.truncate(100 * memory.MIB)
+            peak = memory.osmium_extract_peak_bytes(source)
+            self.assertGreater(peak, int(100 * memory.MIB * 20))
+            self.assertLess(peak, int(100 * memory.MIB * 30))
+            with mock.patch.object(
+                memory, "memory_state",
+                return_value=(4 * memory.GIB, 3 * memory.GIB),
+            ):
+                self.assertFalse(memory.osmium_extract_fits(source))
+            with mock.patch.object(
+                memory, "memory_state",
+                return_value=(16 * memory.GIB, 12 * memory.GIB),
+            ):
+                self.assertTrue(memory.osmium_extract_fits(source))
+
     def test_windows_memory_source_is_used(self):
         from qgis_xtopo.core import memory
 

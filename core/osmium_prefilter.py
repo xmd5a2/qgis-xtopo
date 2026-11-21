@@ -24,8 +24,9 @@ from pathlib import Path
 from . import osmium_tool
 from .cpu import cpu_workers
 from .memory import (
-    GIB, MemoryLimiter, memory_budget, osmium_extract_bytes,
-    osmium_filter_bytes,
+    GIB, RESERVE_BYTES, TERRAIN_RESERVE_BYTES, MemoryLimiter,
+    memory_budget, memory_state, osmium_extract_bytes,
+    osmium_extract_fits, osmium_extract_peak_bytes, osmium_filter_bytes,
 )
 
 # Запас вокруг области вырезки (в градусах и доля от размера области).
@@ -116,6 +117,26 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
         return original, [], []
     executable = osmium_tool.find_osmium(config.temp_dir)
     if not executable:
+        return original, [], []
+    # На машине с 4 ГБ умная стратегия не помещается и её убивает OOM.
+    # Запасной путь (GDAL читает исходный PBF с грубым фильтром) всё
+    # равно включился бы, поэтому не тратим время на обречённый запуск.
+    # Рельеф строится одновременно с источником, его память тоже резервируем.
+    reserve = RESERVE_BYTES
+    if getattr(config, "generate_terrain", False):
+        reserve += TERRAIN_RESERVE_BYTES
+    _total, available = memory_state()
+    for source in original:
+        if osmium_extract_fits(source, reserve=reserve):
+            continue
+        if progress:
+            needed = osmium_extract_peak_bytes(source) / GIB
+            free = max(0, (available or 0) - reserve) / GIB
+            progress(
+                f"osmium: вырезка {Path(source).name} не помещается "
+                f"в память (~{needed:.1f} ГБ, свободно под неё "
+                f"{free:.1f} ГБ) — читаю исходный PBF"
+            )
         return original, [], []
     directory = _temporary_dir(config)
     temporary = []
