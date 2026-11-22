@@ -21,6 +21,10 @@ class CoastlineError(RuntimeError):
 SIDE_BUFFER_WIDTH = 0.0002
 SIDE_BUFFER_INSET = 0.3 * SIDE_BUFFER_WIDTH
 
+# Площадь в квадратных градусах: всё, что меньше, — щель на стыке
+# геометрий, а не водоём.  1e-8°² — это порядка десятых долей м².
+MIN_POLYGON_AREA = 1e-8
+
 
 def _line_geometries(geometry):
     if geometry is None or geometry.IsEmpty():
@@ -109,11 +113,207 @@ def _has_features(path):
         dataset = None
 
 
-def _output(result, parameters):
-    for key, value in result.items():
-        if str(key).lower() == "output":
+def _polygon_area(path):
+    """Суммарная площадь полигональных объектов слоя."""
+    from osgeo import ogr
+
+    try:
+        dataset = ogr.Open(str(path))
+    except Exception:
+        dataset = None
+    if dataset is None:
+        return 0.0
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return 0.0
+        area = 0.0
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is not None and not geometry.IsEmpty() and geometry.GetDimension() == 2:
+                area += geometry.GetArea()
+        return area
+    finally:
+        dataset = None
+
+
+def _intersection_area(first_path, second_path):
+    """Площадь пересечения полигонов двух слоёв."""
+    from osgeo import ogr
+
+    first = ogr.Open(str(first_path))
+    second = ogr.Open(str(second_path))
+    if first is None or second is None:
+        if first is not None:
+            first = None
+        if second is not None:
+            second = None
+        return 0.0
+    try:
+        first_layer = first.GetLayer(0)
+        second_layer = second.GetLayer(0)
+        if first_layer is None or second_layer is None:
+            return 0.0
+        area = 0.0
+        for feature in first_layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
+                continue
+            second_layer.SetSpatialFilter(geometry)
+            for other in second_layer:
+                other_geometry = other.GetGeometryRef()
+                if (other_geometry is None or other_geometry.IsEmpty()
+                        or other_geometry.GetDimension() != 2):
+                    continue
+                if not geometry.Intersects(other_geometry):
+                    continue
+                try:
+                    common = geometry.Intersection(other_geometry)
+                except Exception:
+                    continue
+                if common is not None and not common.IsEmpty():
+                    area += common.GetArea()
+            second_layer.SetSpatialFilter(None)
+        return area
+    finally:
+        second = None
+        first = None
+
+
+def _looks_like_land(ocean_path, island_path):
+    """Похоже ли выбранное «море» на острова, а не на океан.
+
+    Направление береговых линий после dissolve теряется, и полоса по
+    водной стороне может оказаться на суше.  Тогда выбранные части
+    охвата почти целиком совпадают с полигонами островов.  Настоящий
+    океан пересекается с ними только на кромке берега.
+    """
+    if not island_path.exists():
+        return False
+    total = _polygon_area(ocean_path)
+    if total <= 0:
+        return True
+    overlap = _intersection_area(ocean_path, island_path)
+    return overlap >= total * 0.5
+
+
+def _largest_polygon(source, destination):
+    """Самый крупный полигон слоя — запасной вариант океана.
+
+    Если в охвате нет открытых участков берега (все острова обведены
+    замкнутыми кольцами), сторону воды по линиям не определить.  Для
+    такого охвата океан — самая большая часть, на которые берег разбил
+    прямоугольник охвата.
+    """
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(source))
+    if dataset is None:
+        raise CoastlineError(f"Cannot open {source}")
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return None
+        spatial_ref = layer.GetSpatialRef()
+        best = None
+        best_area = -1.0
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
+                continue
+            area = geometry.GetArea()
+            if area > best_area:
+                best_area = area
+                best = geometry.Clone()
+    finally:
+        dataset = None
+    if best is None:
+        return None
+    if best.GetGeometryName() == "POLYGON":
+        best = ogr.ForceToMultiPolygon(best)
+    driver = ogr.GetDriverByName("GeoJSON")
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(str(destination))
+    if output is None:
+        raise CoastlineError(f"Cannot create {destination}")
+    try:
+        layer = output.CreateLayer(
+            "ocean", spatial_ref, geom_type=ogr.wkbMultiPolygon
+        )
+        item = ogr.Feature(layer.GetLayerDefn())
+        item.SetGeometry(best)
+        layer.CreateFeature(item)
+    finally:
+        output = None
+    return destination
+
+
+def _write_polygons(source, destination):
+    """Записать только полигональные объекты, сохранив поля.
+
+    ``water_dissolved`` в прежних сборках мог содержать линии и точки:
+    они попадали туда после ошибочного определения океана.  Растворение
+    и вычитание с таким слоем работают непредсказуемо, поэтому перед
+    объединением и сохранением оставляем только площадные объекты.
+    """
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(source))
+    if dataset is None:
+        raise CoastlineError(f"Cannot open {source}")
+    driver = ogr.GetDriverByName("GeoJSON")
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(str(destination))
+    if output is None:
+        dataset = None
+        raise CoastlineError(f"Cannot create {destination}")
+    try:
+        source_layer = dataset.GetLayer(0)
+        if source_layer is None:
+            return None
+        source_definition = source_layer.GetLayerDefn()
+        layer = output.CreateLayer(
+            "water", source_layer.GetSpatialRef(), geom_type=ogr.wkbMultiPolygon
+        )
+        definition = layer.GetLayerDefn()
+        fields = [
+            (index, source_definition.GetFieldDefn(index).GetName())
+            for index in range(source_definition.GetFieldCount())
+        ]
+        written = 0
+        for feature in source_layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
+                continue
+            if geometry.GetArea() <= MIN_POLYGON_AREA:
+                continue
+            if geometry.GetGeometryName() == "POLYGON":
+                geometry = ogr.ForceToMultiPolygon(geometry)
+            item = ogr.Feature(definition)
+            item.SetGeometry(geometry)
+            for source_index, name in fields:
+                target_index = definition.GetFieldIndex(name)
+                if target_index >= 0:
+                    item.SetField(target_index, feature.GetField(source_index))
+            layer.CreateFeature(item)
+            written += 1
+        if not written:
+            output = None
+            destination.unlink(missing_ok=True)
+            return None
+    finally:
+        output = None
+        dataset = None
+    return destination
+
+
+def _output(result, parameters, key="OUTPUT"):
+    for name, value in result.items():
+        if str(name).lower() == key.lower():
             return value
-    return parameters.get("OUTPUT") or parameters.get("output")
+    return parameters.get(key) or parameters.get(key.lower())
 
 
 def _run(runner, algorithm, parameters):
@@ -133,6 +333,58 @@ def _temp(config, name):
     path = config.temp_dir / name
     path.parent.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def _side_ocean(runner, config, split, open_source, side):
+    """Части охвата, лежащие по указанную сторону берега.
+
+    Входные линии не растворяются: ``native:dissolve`` меняет
+    направление части линий, и сторона воды перестаёт быть той, которую
+    задаёт OSM (вода справа по ходу линии).  Направление исходных
+    незамкнутых ways сохраняется, поэтому буфер строится на воде.
+    """
+    tag = "right" if side else "left"
+    one_side = _run(runner, "native:singlesidedbuffer", {
+        "INPUT": str(open_source),
+        "DISTANCE": SIDE_BUFFER_WIDTH,
+        "SIDE": side,
+        "SEGMENTS": 5,
+        "JOIN_STYLE": 0,
+        "MITER_LIMIT": 2,
+        "OUTPUT": _temp(config, f"coastline_side_{tag}.geojson"),
+    })
+    thin = _run(runner, "native:buffer", {
+        "INPUT": one_side,
+        "DISTANCE": -SIDE_BUFFER_INSET,
+        "SEGMENTS": 5,
+        "END_CAP_STYLE": 0,
+        "JOIN_STYLE": 0,
+        "MITER_LIMIT": 2,
+        "DISSOLVE": False,
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_thin.geojson"),
+    })
+    parts = _run(runner, "native:multiparttosingleparts", {
+        "INPUT": thin,
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_parts.geojson"),
+    })
+    clipped = _run(runner, "native:intersection", {
+        "INPUT": parts,
+        "OVERLAY": str(config.crop_path),
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_clipped.geojson"),
+    })
+    # Точка берётся строго внутри отступа по водной стороне, а часть
+    # области выбирается по «содержит»: вершина на самой линии берега
+    # принадлежит сразу двум частям, и океаном выбирался обломок.
+    vertices = _run(runner, "native:pointonsurface", {
+        "INPUT": clipped,
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_vertices.gpkg"),
+    })
+    return _run(runner, "native:extractbylocation", {
+        "INPUT": split,
+        "INTERSECT": vertices,
+        "PREDICATE": [1],
+        "OUTPUT": _temp(config, f"coastline_ocean_{tag}.geojson"),
+    })
 
 
 def prepare_coastline(config, bbox, progress=None, cancel=None):
@@ -184,61 +436,38 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         # замкнутые кольца — это острова, и по ним сторона выходит неверной
         # (в дельте Дуная океаном оказывался крошечный обломок у края
         # области, а море не заливалось вовсе).
-        open_dissolved = _run(runner, "native:dissolve", {
-            "INPUT": str(open_source),
-            "FIELD": [],
-            "SEPARATE_DISJOINT": False,
-            "OUTPUT": _temp(config, "coastline_open_dissolved.geojson"),
-        })
-        open_simplified = _run(runner, "native:simplifygeometries", {
-            "INPUT": open_dissolved,
-            "METHOD": 0,
-            "TOLERANCE": 0.00005,
-            "OUTPUT": _temp(config, "coastline_open_simplified.geojson"),
-        })
-        one_side = _run(runner, "native:singlesidedbuffer", {
-            "INPUT": open_simplified,
-            "DISTANCE": SIDE_BUFFER_WIDTH,
-            "SIDE": 1,
-            "SEGMENTS": 5,
-            "JOIN_STYLE": 0,
-            "MITER_LIMIT": 2,
-            "OUTPUT": _temp(config, "coastline_side.geojson"),
-        })
-        thin = _run(runner, "native:buffer", {
-            "INPUT": one_side,
-            "DISTANCE": -SIDE_BUFFER_INSET,
-            "SEGMENTS": 5,
-            "END_CAP_STYLE": 0,
-            "JOIN_STYLE": 0,
-            "MITER_LIMIT": 2,
-            "DISSOLVE": False,
-            "OUTPUT": _temp(config, "coastline_side_thin.geojson"),
-        })
-        parts = _run(runner, "native:multiparttosingleparts", {
-            "INPUT": thin,
-            "OUTPUT": _temp(config, "coastline_side_parts.geojson"),
-        })
-        clipped = _run(runner, "native:intersection", {
-            "INPUT": parts,
-            "OVERLAY": str(crop),
-            "OUTPUT": _temp(config, "coastline_side_clipped.geojson"),
-        })
-        # Точка берётся строго внутри отступа по водной стороне, а часть
-        # области выбирается по «содержит»: вершина на самой линии берега
-        # принадлежит сразу двум частям, и океаном выбирался обломок.
-        vertices = _run(runner, "native:pointonsurface", {
-            "INPUT": clipped,
-            "OUTPUT": _temp(config, "coastline_side_vertices.gpkg"),
-        })
-
-        ocean = _run(runner, "native:extractbylocation", {
-            "INPUT": split,
-            "INTERSECT": vertices,
-            "PREDICATE": [1],
-            "OUTPUT": _temp(config, "coastline_ocean.geojson"),
-        })
-        if not _has_features(ocean):
+        island = config.vector_dir / "island.sqlite"
+        ocean = None
+        if _has_features(open_source):
+            ocean = _side_ocean(runner, config, split, open_source, 1)
+        if (ocean is not None and _has_features(ocean)
+                and not _looks_like_land(ocean, island)):
+            pass
+        else:
+            if ocean is not None and _has_features(ocean):
+                notify(
+                    "WARNING: Береговая линия: сторона океана определена "
+                    "неверно, повтор с другой стороны"
+                )
+            retried = None
+            if _has_features(open_source):
+                retried = _side_ocean(runner, config, split, open_source, 0)
+            if (retried is not None and _has_features(retried)
+                    and not _looks_like_land(retried, island)):
+                ocean = retried
+            else:
+                # Все берега замкнуты в кольца: сторону воды по
+                # направлению линий не определить.  Океан — крупнейшая
+                # часть, на которые берег разбил охват.
+                ocean = _largest_polygon(
+                    split, _temp(config, "coastline_ocean_largest.geojson")
+                )
+                if ocean is not None:
+                    notify(
+                        "WARNING: Береговая линия: океан взят как "
+                        "крупнейшая часть охвата"
+                    )
+        if ocean is None or not _has_features(ocean):
             notify("WARNING: Береговая линия: океан не построен")
             return False
         ocean = _run(runner, "native:fixgeometries", {
@@ -255,7 +484,6 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             "OUTPUT": _temp(config, "coastline_ocean_water.geojson"),
         })
 
-        island = config.vector_dir / "island.sqlite"
         if island.exists() and _has_features(island):
             notify("Береговая линия: вычитание островов")
             island_fixed = _run(runner, "native:fixgeometries", {
@@ -269,10 +497,15 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             })
 
         water = config.vector_dir / "water_dissolved.sqlite"
+        existing = None
         if water.exists() and _has_features(water):
+            existing = _write_polygons(
+                water, config.temp_dir / "coastline_existing_water.geojson"
+            )
+        if existing is not None:
             notify("Береговая линия: объединение с внутренними водами")
             merged = _run(runner, "native:mergevectorlayers", {
-                "LAYERS": [str(water), ocean],
+                "LAYERS": [str(existing), ocean],
                 "OUTPUT": _temp(config, "coastline_merged.geojson"),
             })
             # Растворение останавливается на первом невалидном объекте, а
@@ -294,6 +527,12 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             "INPUT": ocean,
             "OUTPUT": _temp(config, "coastline_water_parts.geojson"),
         })
+        final = _write_polygons(
+            final, config.temp_dir / "coastline_water_polygons.geojson"
+        )
+        if final is None:
+            notify("WARNING: Береговая линия: в воде нет полигонов")
+            return False
         save_vector(final, water, "water_dissolved")
         notify("Береговая линия: water_dissolved обновлён")
         return True

@@ -3072,6 +3072,66 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertIn(geometry.GetGeometryName(), ("LINESTRING", "LINEARRING"))
         self.assertEqual(_line_geometries(None), [])
 
+    def test_coastline_largest_polygon_fallback(self):
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _largest_polygon
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "split.geojson"
+            dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                str(source)
+            )
+            layer = dataset.CreateLayer("split", None, ogr.wkbPolygon)
+            for wkt in (
+                "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
+                "POLYGON ((0 0, 0 2, 2 2, 2 0, 0 0))",
+            ):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+                layer.CreateFeature(feature)
+            dataset = None
+
+            result = _largest_polygon(source, root / "ocean.geojson")
+            dataset = ogr.Open(str(result))
+            layer = dataset.GetLayer(0)
+            feature = layer.GetNextFeature()
+            self.assertEqual(feature.GetGeometryRef().GetArea(), 4.0)
+            self.assertIsNone(layer.GetNextFeature())
+            dataset = None
+
+    def test_coastline_write_polygons_drops_lines_and_points(self):
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _write_polygons
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "mixed.geojson"
+            dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                str(source)
+            )
+            layer = dataset.CreateLayer("mixed", None, ogr.wkbUnknown)
+            for wkt in (
+                "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
+                "LINESTRING (2 2, 3 3)",
+                "POINT (4 4)",
+            ):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+                layer.CreateFeature(feature)
+            dataset = None
+
+            result = _write_polygons(source, root / "water.geojson")
+            dataset = ogr.Open(str(result))
+            layer = dataset.GetLayer(0)
+            features = list(layer)
+            self.assertEqual(len(features), 1)
+            self.assertEqual(
+                features[0].GetGeometryRef().GetGeometryName(),
+                "MULTIPOLYGON",
+            )
+            dataset = None
+
     def test_extent_dialog(self):
         from qgis_xtopo.gui.extentdialog import ExtentDialog
 

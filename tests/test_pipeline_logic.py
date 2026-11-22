@@ -1115,6 +1115,7 @@ class CoastlineIntermediateTest(unittest.TestCase):
         from qgis_xtopo.core import coastline, pipeline
 
         recorded = {}
+        calls = []
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             vector_dir = base / "vector"
@@ -1136,20 +1137,28 @@ class CoastlineIntermediateTest(unittest.TestCase):
 
                 def run(self, algorithm, parameters):
                     recorded[algorithm] = parameters
+                    calls.append((algorithm, parameters))
                     return {"OUTPUT": f"memory:{algorithm}"}
+
+            def write_lines(source, destination, open_only=False):
+                name = "open_lines.geojson" if open_only else "lines.geojson"
+                return base / name
 
             with mock.patch.object(pipeline, "ProcessingRunner", FakeRunner), \
                     mock.patch.object(pipeline, "save_vector"), \
                     mock.patch.object(
-                        coastline, "_write_lines",
-                        side_effect=lambda *args, **kwargs: base / "lines.geojson",
+                        coastline, "_write_lines", side_effect=write_lines,
+                    ), \
+                    mock.patch.object(
+                        coastline, "_write_polygons",
+                        side_effect=lambda source, destination: destination,
                     ), \
                     mock.patch.object(coastline, "_has_features", return_value=True):
                 self.assertTrue(coastline.prepare_coastline(config, None))
-        return recorded
+        return recorded, calls
 
     def test_split_and_vertices_are_geopackages(self):
-        recorded = self._recorded()
+        recorded, _calls = self._recorded()
         for algorithm in ("native:splitwithlines", "native:pointonsurface"):
             self.assertEqual(
                 Path(recorded[algorithm]["OUTPUT"]).suffix, ".gpkg", algorithm
@@ -1157,12 +1166,26 @@ class CoastlineIntermediateTest(unittest.TestCase):
 
     def test_side_buffer_keeps_a_strip_along_the_coast(self):
         """Сужение меньше половины ширины, иначе полоса вырождается."""
-        recorded = self._recorded()
+        recorded, _calls = self._recorded()
         width = recorded["native:singlesidedbuffer"]["DISTANCE"]
         inset = recorded["native:buffer"]["DISTANCE"]
         self.assertGreater(width, 0)
         self.assertGreater(inset + width / 2, 0)
         self.assertGreater(width + 2 * inset, width * 0.1)
+
+    def test_side_buffer_uses_undissolved_open_lines(self):
+        """Dissolve теряет направление линий и сторону воды."""
+        recorded, calls = self._recorded()
+        self.assertEqual(
+            Path(recorded["native:singlesidedbuffer"]["INPUT"]).name,
+            "open_lines.geojson",
+        )
+        dissolves = [
+            parameters for algorithm, parameters in calls
+            if algorithm == "native:dissolve"
+        ]
+        self.assertEqual(len(dissolves), 1)
+        self.assertEqual(Path(dissolves[0]["INPUT"]).name, "lines.geojson")
 
 
 class EmptySourceOutputsTest(unittest.TestCase):
