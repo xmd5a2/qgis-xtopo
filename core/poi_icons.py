@@ -1069,6 +1069,36 @@ def layer_suppression_expression(layer, bands, minimum=None, maximum=None):
     return "(" + " OR ".join(expressions) + ")"
 
 
+def _strip_outer_parentheses(text):
+    """Снять внешние скобки, если они охватывают всё выражение."""
+    if not (text.startswith("(") and text.endswith(")")):
+        return text
+    depth = 0
+    for position, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0 and position != len(text) - 1:
+                return text
+    return text[1:-1]
+
+
+BAND_TERM = (
+    r"\(@map_scale (?:>=|<) [0-9.]+"
+    r"(?: AND @map_scale (?:>=|<) [0-9.]+)?\)"
+)
+
+
+def _strip_band_guard(text):
+    """Снять хвостовую проверку полос масштаба, если она есть."""
+    pattern = rf"(?:^| AND )(?:\({BAND_TERM}(?: OR {BAND_TERM})+\)|{BAND_TERM})$"
+    match = re.search(pattern, text)
+    if match:
+        return text[:match.start()].rstrip()
+    return text
+
+
 def restore_base_filters(layers, bands):
     """Убирает автоматическое подавление из прочитанных правил шаблона.
 
@@ -1083,20 +1113,20 @@ def restore_base_filters(layers, bands):
     """
     for layer in layers:
         for leaf in leaves(layer.root):
-            for suppression in (
-                suppression_expression(layer, leaf, bands),
-                suppression_data_expression(layer, leaf, bands),
-            ):
-                if suppression == "false":
-                    continue
-                condition = f"NOT ({suppression})"
-                if leaf.filter == condition:
-                    leaf.filter = ""
-                    break
-                suffix = f") AND {condition}"
-                if leaf.filter.startswith("(") and leaf.filter.endswith(suffix):
-                    leaf.filter = leaf.filter[1:-len(suffix)]
-                    break
+            position = leaf.filter.rfind("NOT (")
+            if position < 0:
+                continue
+            prefix = leaf.filter[:position].rstrip()
+            wrapper = leaf.filter[position:]
+            if not wrapper.endswith(")"):
+                continue
+            # Снимаем только подавление, а не NOT из базового фильтра.
+            if '"hide"' not in wrapper and "overlay_nearest(" not in wrapper:
+                continue
+            if prefix.endswith("AND"):
+                prefix = prefix[:-3].rstrip()
+            prefix = _strip_band_guard(prefix)
+            leaf.filter = _strip_outer_parentheses(prefix)
 
 
 def template_variables(path=None):

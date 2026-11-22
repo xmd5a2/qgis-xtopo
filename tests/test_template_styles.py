@@ -49,15 +49,27 @@ def _base_filter(filter_text):
     """Фильтр правила без условия подавления значка.
 
     Подавление добавлено в конец фильтра: либо `NOT (...)`, либо
-    `(основа) AND NOT (...)`.
+    `(основа) AND NOT (...)`.  Перед ним может стоять проверка полос
+    масштаба, добавленная для границ диапазонов.
     """
     text = filter_text or ""
-    match = re.match(r"^\((?P<base>.*)\) AND NOT \(.*\)$", text, re.S)
+    position = text.rfind("NOT (")
+    if position < 0:
+        return text
+    prefix = text[:position].rstrip()
+    if prefix.endswith("AND"):
+        prefix = prefix[:-3].rstrip()
+    term = (
+        r"\(@map_scale (?:>=|<) [0-9.]+"
+        r"(?: AND @map_scale (?:>=|<) [0-9.]+)?\)"
+    )
+    guard = rf"(?:\({term}(?: OR {term})+\)|{term})"
+    match = re.search(rf"(?:^| AND ){guard}$", prefix)
     if match:
-        return match.group("base")
-    if text.startswith("NOT ("):
-        return ""
-    return text
+        prefix = prefix[:match.start()].rstrip()
+    if prefix.startswith("(") and prefix.endswith(")"):
+        return prefix[1:-1]
+    return prefix
 
 
 def _find_option(element, name):
@@ -2659,6 +2671,70 @@ class PoiSuppressionTest(unittest.TestCase):
                 self.assertNotIn("overlay_nearest(", rule.filter)
                 checked += 1
         self.assertTrue(checked, "в шаблоне нет подписей POI")
+
+
+class PoiScaleBoundaryTest(unittest.TestCase):
+    """На границе полосы правило не показывает все значки подряд."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+        layers = poi_icons.read_template_poi()
+        cls.layer = next(
+            layer for layer in layers
+            if layer.name == "tower communication"
+        )
+        cls.leaves = poi_icons.leaves(cls.layer.root)
+
+    @staticmethod
+    def _visible(leaf, scale, hide=""):
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext, QgsExpressionContextScope,
+            QgsFeature, QgsField, QgsFields,
+        )
+        from qgis.PyQt.QtCore import QVariant
+
+        fields = QgsFields()
+        fields.append(QgsField("hide", QVariant.String))
+        feature = QgsFeature(fields)
+        feature.setAttribute(
+            "hide", ";".join([hide] * 90) if hide else "",
+        )
+        context = QgsExpressionContext()
+        scope = QgsExpressionContextScope("test")
+        scope.setVariable("map_scale", scale)
+        scope.setVariable("level_of_detail", 4)
+        context.appendScope(scope)
+        context.setFeature(feature)
+        return bool(QgsExpression(leaf.filter).evaluate(context))
+
+    def _leaf(self, minimum, maximum):
+        return next(
+            leaf for leaf in self.leaves
+            if leaf.minimum == minimum and leaf.maximum == maximum
+        )
+
+    def test_boundary_keeps_band_suppression(self):
+        """На 1:100000 активное правило находит свою полосу."""
+        previous = self._leaf(50000.0, 100000.0)
+        current = self._leaf(100000.0, 300000.0)
+        # Значок не пропадает: допуск принимает границу.
+        self.assertTrue(self._visible(previous, 100000))
+        # Но и не рисуется без вытеснения: полоса читает свой слот.
+        self.assertFalse(self._visible(previous, 100000, hide="0"))
+        self.assertTrue(self._visible(previous, 99999))
+        self.assertFalse(self._visible(current, 99999))
+        self.assertTrue(self._visible(current, 100000))
+
+    def test_boundary_keeps_finest_suppression(self):
+        """Ровно 1:50000 — допуск у верхней границы полосы."""
+        finest = self._leaf(0.0, 50000.0)
+        next_band = self._leaf(50000.0, 100000.0)
+        self.assertTrue(self._visible(finest, 50000))
+        self.assertFalse(self._visible(finest, 50000, hide="0"))
+        self.assertTrue(self._visible(next_band, 50000))
 
 
 class PoiPruneTest(unittest.TestCase):
