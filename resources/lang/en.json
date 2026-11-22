@@ -711,6 +711,7 @@
   "{}: пропущено ({})": "{}: skipped ({})",
   "{}: пропущено, исходный слой не удался": "{}: skipped, source layer failed",
   "{}: пропущено, зависимость не разрешена": "{}: skipped, unresolved dependency",
+  "{}: исправление геометрии перед повтором «{}»": "{}: repairing geometry before retrying \"{}\"",
   "{}: {}; слой пропущен": "{}: {}; layer skipped",
   "Расчёт уклона": "Generating slope",
   "Запись уклона": "Writing slope",

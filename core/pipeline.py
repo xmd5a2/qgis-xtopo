@@ -29,6 +29,26 @@ _LAYER_STAGE = "обработка слоёв"
 # складываются в общее время подготовки.
 _PARALLEL_STAGES = ("источник OSM", "рельеф")
 
+# QGIS сообщает о невалидной геометрии по-разному: собственные строки
+# локализованы, а GEOS добавляет английские TopologyException и
+# Self-intersection.  По этим признакам шаг повторяется после fix().
+_INVALID_GEOMETRY_MARKERS = (
+    "invalid geometr",
+    "self-intersection",
+    "topologyexception",
+    "invalid coordinate",
+    "too few points",
+)
+
+
+def _is_invalid_geometry_error(error):
+    text = str(error).lower()
+    if "invalid geometr" in text:
+        return True
+    if "некорректн" in text and "геометри" in text:
+        return True
+    return any(marker in text for marker in _INVALID_GEOMETRY_MARKERS)
+
 
 class Timings:
     """Хронометраж подготовки: время этапов и самых долгих шагов.
@@ -887,7 +907,9 @@ class Pipeline:
             try:
                 for operation, parameters in recipe_for(name).steps:
                     started = time.monotonic()
-                    current = self._step(name, current, operation, parameters)
+                    current = self._step_with_repair(
+                        name, current, operation, parameters
+                    )
                     self.timings.add_step(
                         name, operation, time.monotonic() - started
                     )
@@ -1075,6 +1097,24 @@ class Pipeline:
                 return ["@id"]
             return []
         return [name for name in fields if name.lower() in usable]
+
+    def _step_with_repair(self, name, current, operation, parameters):
+        """Шаг с однократным повтором после исправления геометрии.
+
+        QGIS может прервать алгоритм на первом же невалидном объекте
+        (настройка «Фильтрация ошибочных объектов»).  Вместо того чтобы
+        терять весь слой, чиним вход и повторяем шаг.
+        """
+        try:
+            return self._step(name, current, operation, parameters)
+        except PipelineError as exc:
+            if operation == "fix" or not _is_invalid_geometry_error(exc):
+                raise
+            self.progress(
+                f"{name}: исправление геометрии перед повтором «{operation}»"
+            )
+            fixed = self._step(name, current, "fix", {})
+            return self._step(name, fixed, operation, parameters)
 
     def _step(self, name, current, operation, parameters):
         if operation == "save":

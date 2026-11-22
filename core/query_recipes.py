@@ -174,7 +174,7 @@ RECIPES = {
         dissolve(), singleparts(), save("_dissolved"),
     ]),
     "highway_main_bridge": Recipe([
-        save(), centroid(), save("_centroids"),
+        save(), fix(), centroid(), save("_centroids"),
         load("highway_main_bridge"), fix(), dissolve("highway"), singleparts(),
         fix(), save("_dissolved"),
     ]),
@@ -207,12 +207,12 @@ RECIPES = {
         save(fields="peak"),
     ]),
     "waterfall": Recipe([
-        save(), polygonstolines(), save("_lines"),
-        load("waterfall"), centroid(), save("_centroids"),
+        save(), fix(), polygonstolines(), save("_lines"),
+        load("waterfall"), fix(), centroid(), save("_centroids"),
     ]),
     "weir": Recipe([
-        save(), polygonstolines(), save("_lines"),
-        load("weir"), centroid(), save("_centroids"),
+        save(), fix(), polygonstolines(), save("_lines"),
+        load("weir"), fix(), centroid(), save("_centroids"),
     ]),
     "mountain_pass": Recipe([
         # Слой остаётся в EPSG:4326: значки всех POI считаются в одной
@@ -277,26 +277,32 @@ RECIPES = {
         save(),
     ]),
     "monastery_christian": Recipe([
-        centroid(), save("_centroids"), buffer(0.0025), save("_centroids_buffered"),
+        fix(), centroid(), save("_centroids"), buffer(0.0025),
+        save("_centroids_buffered"),
     ]),
     "place_of_worship_christian": Recipe([
-        centroid(), save("_centroids"), difference("monastery_christian_centroids_buffered"),
+        fix(), centroid(), save("_centroids"),
+        difference("monastery_christian_centroids_buffered"),
         singleparts(), save("_centroids_diff_parts"),
     ]),
     "place_of_worship_christian_ruins": Recipe([
-        centroid(), save("_centroids"), difference("monastery_christian_centroids_buffered"),
+        fix(), centroid(), save("_centroids"),
+        difference("monastery_christian_centroids_buffered"),
         singleparts(), save("_centroids_diff_parts"),
     ]),
     "ford": Recipe([
-        save(), centroid(), save("_centroids"), load("ford"), buffer(0.006), dissolve("name"),
+        save(), fix(), centroid(), save("_centroids"),
+        load("ford"), fix(), buffer(0.006), dissolve("name"),
         centroid(), save("_buffered_dissolved_centroids"),
     ]),
     "railway_stop_names": Recipe([
-        centroid(), save("_centroids"), load("railway_stop_names"), buffer(0.006),
-        dissolve("name"), centroid(), reproject(), save("_buffered_dissolved_centroids"),
+        fix(), centroid(), save("_centroids"),
+        load("railway_stop_names"), fix(), buffer(0.006),
+        dissolve("name"), centroid(), reproject(),
+        save("_buffered_dissolved_centroids"),
     ]),
     "railway_station_icons": Recipe([
-        buffer(0.004), dissolve("name"), centroid(),
+        fix(), buffer(0.004), dissolve("name"), centroid(),
         save("_buffered_dissolved_centroids"),
     ]),
     "barrier": Recipe([
@@ -310,7 +316,7 @@ RECIPES = {
         fix(extension="geojson"), save(), polygonstolines(), save("_lines"),
     ]),
     "railway_halt_icons": Recipe([
-        buffer(0.004), dissolve("name"), centroid(),
+        fix(), buffer(0.004), dissolve("name"), centroid(),
         save("_buffered_dissolved_centroids"),
     ]),
     # Площадные дороги (highway=* с area=yes или area:highway=*) OSM рисует
@@ -333,7 +339,7 @@ RECIPES = {
         linestopolygons(), fix(), save(), store_highway_integrity(),
     ]),
     "aerialway_station": Recipe([
-        buffer(0.004), dissolve("name"), centroid(),
+        fix(), buffer(0.004), dissolve("name"), centroid(),
         save("_buffered_dissolved_centroids"),
     ]),
 }
@@ -363,7 +369,10 @@ def recipe_for(name):
     if name in RECIPES:
         return RECIPES[name]
     if name in POINT_CENTROID:
-        return Recipe([save(), centroid(), save("_centroids")])
+        # Базовый слой сохраняем до fix(): он должен остаться площадным,
+        # а fixgeometries повышает тип до Multi*. Центроид считается уже
+        # по исправленной геометрии — самопересечения роняли слой.
+        return Recipe([save(), fix(), centroid(), save("_centroids")])
     if name in POINT_ONLY:
         return Recipe([save()])
     return Recipe([save()])

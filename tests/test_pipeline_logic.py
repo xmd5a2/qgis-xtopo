@@ -966,6 +966,79 @@ class GeometryRepairRecipeTest(unittest.TestCase):
         self.assertEqual(steps[0][1].get("extension"), "geojson")
         self.assertEqual(steps[1][0], "save")
 
+    def test_centroid_inputs_are_repaired(self):
+        """Самопересечение в полигоне роняло native:centroids."""
+        from qgis_xtopo.core.query_recipes import POINT_CENTROID, recipe_for
+
+        names = set(POINT_CENTROID) | {
+            "highway_main_bridge", "waterfall", "weir",
+            "monastery_christian", "place_of_worship_christian",
+            "place_of_worship_christian_ruins", "ford",
+            "railway_stop_names", "railway_station_icons",
+            "railway_halt_icons", "aerialway_station",
+            "building_train_station",
+        }
+        for name in sorted(names):
+            steps = [operation for operation, _ in recipe_for(name).steps]
+            centroid = steps.index("centroid")
+            self.assertIn("fix", steps[:centroid], name)
+
+    def test_centroid_base_is_saved_before_fix(self):
+        """Базовый площадной слой не должен стать MultiPolygon."""
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        steps = [operation for operation, _ in recipe_for("power_plant").steps]
+        self.assertEqual(steps[:4], ["save", "fix", "centroid", "save"])
+
+
+class InvalidGeometryRetryTest(unittest.TestCase):
+    def test_error_messages_are_recognized(self):
+        from qgis_xtopo.core.pipeline import (
+            PipelineError, _is_invalid_geometry_error,
+        )
+
+        messages = (
+            "native:centroids failed: Объект (1) из \"power_plant_source\" "
+            "содержит некорректную геометрию.",
+            "Feature (1) has invalid geometry.",
+            "Self-intersection at or near point 1 2",
+            "TopologyException: side location conflict",
+            "Too few points in geometry component",
+        )
+        for message in messages:
+            self.assertTrue(
+                _is_invalid_geometry_error(PipelineError(message)), message
+            )
+        self.assertFalse(_is_invalid_geometry_error(
+            PipelineError("native:centroids produced an empty layer")
+        ))
+
+    def test_step_is_retried_after_repair(self):
+        from unittest import mock
+
+        from qgis_xtopo.core.pipeline import Pipeline, PipelineError
+
+        pipeline = Pipeline(mock.Mock(), None, mock.Mock())
+        calls = []
+
+        def step(name, current, operation, parameters):
+            calls.append(operation)
+            if operation == "centroid" and current == "source":
+                raise PipelineError(
+                    "native:centroids failed: объект содержит "
+                    "некорректную геометрию"
+                )
+            if operation == "fix":
+                return "fixed"
+            return current
+
+        with mock.patch.object(pipeline, "_step", side_effect=step):
+            result = pipeline._step_with_repair(
+                "power_plant", "source", "centroid", {}
+            )
+        self.assertEqual(result, "fixed")
+        self.assertEqual(calls, ["centroid", "fix", "centroid"])
+
 
 class PolygonToLinesFallbackTest(unittest.TestCase):
     """Слой из одних линий не должен теряться на polygonstolines."""

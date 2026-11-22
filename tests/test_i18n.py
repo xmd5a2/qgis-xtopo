@@ -1837,6 +1837,7 @@ class CoreMessagesTest(unittest.TestCase):
         "cliff: skipped (boom)",
         "cliff: skipped, source layer failed",
         "cliff: skipped, unresolved dependency",
+        "cliff: repairing geometry before retrying \"centroid\"",
         "cliff: boom; layer skipped",
         "Generating slope",
         "Writing slope",
