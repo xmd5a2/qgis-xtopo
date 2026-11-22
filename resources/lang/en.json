@@ -730,5 +730,10 @@
   "Использован кэш тайла DEM {}": "Using cached DEM tile {}",
   "не удалось скачать {}: {}": "cannot download {}: {}",
   "Использован {}": "Using {}",
-  "Изолинии: тайл {} из {}": "Contour lines: tile {} of {}"
+  "Изолинии: тайл {} из {}": "Contour lines: tile {} of {}",
+  "Рельеф: в охвате нет суши, тайлы DEM не нужны": "Terrain: no land in the extent, DEM tiles are not needed",
+  "Маска воды: слои воды не найдены, отрицательные глубины остаются": "Water mask: water layers not found, negative depths remain",
+  "Маска воды: {} — {} пикселей": "Water mask: {} — {} pixels",
+  "Маска воды: заменено пикселей — {}": "Water mask: pixels replaced — {}",
+  "Использован кэш маскированного рельефа: повторная обработка не требуется": "Using cached masked terrain: no reprocessing required"
 }

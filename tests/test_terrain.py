@@ -9,6 +9,65 @@ from qgis_xtopo.core.terrain import srtm_tile_names
 
 
 class TerrainTest(unittest.TestCase):
+    def test_water_mask_keeps_land_depressions(self):
+        """Маска воды не трогает отрицательные высоты на суше."""
+        from osgeo import gdal, ogr, osr
+
+        from qgis_xtopo.core import terrain
+        from qgis_xtopo.core.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="mask")
+            config.ensure_directories()
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            path = config.raster_dir / "merged_dem.tif"
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(path), 10, 10, 1, gdal.GDT_Float32
+            )
+            dataset.SetGeoTransform((0, 1, 0, 10, 0, -1))
+            dataset.SetProjection(srs.ExportToWkt())
+            values = [[100.0] * 10 for _ in range(10)]
+            for row in range(3):
+                values[row] = [-5000.0] * 10
+            values[5][0] = -50.0
+            import array
+
+            band = dataset.GetRasterBand(1)
+            for row, line in enumerate(values):
+                band.WriteRaster(
+                    0, row, 10, 1,
+                    array.array("f", [float(v) for v in line]).tobytes(),
+                )
+            band.SetNoDataValue(-32768)
+            dataset = None
+
+            water_path = config.vector_dir / "water_dissolved.sqlite"
+            water = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(water_path)
+            )
+            layer = water.CreateLayer(
+                "water_dissolved", srs, geom_type=ogr.wkbPolygon
+            )
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(ogr.CreateGeometryFromWkt(
+                "POLYGON((0 7,0 10,10 10,10 7,0 7))"
+            ))
+            layer.CreateFeature(feature)
+            water = None
+
+            messages = []
+            changed = terrain.mask_dem_by_water(
+                config, progress=messages.append
+            )
+            self.assertGreater(changed, 0)
+            dataset = gdal.Open(str(path))
+            array = dataset.GetRasterBand(1).ReadAsArray()
+            dataset = None
+            self.assertTrue((array[:3] == -32768).all())
+            self.assertEqual(array[5][0], -50.0)
+            self.assertEqual(array[9][9], 100.0)
+
     def test_tiles(self):
         names = srtm_tile_names(BBox(44.7, 42.7, 45.1, 42.9))
         self.assertEqual(names, ["N42E044", "N42E045"])
@@ -130,6 +189,30 @@ class TerrainTest(unittest.TestCase):
             self.assertEqual(target.stat().st_size, len(payload))
             self.assertEqual(target.read_bytes()[:11], b"cached tile")
             self.assertTrue(any("cached" in item for item in messages))
+
+    def test_download_srtm_skips_ocean_tiles(self):
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            destination = root / "input_terrain"
+            land = terrain.dem_sources.tile_name(0, 0)
+            cached = terrain._cached_tile(cache, land)
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            payload = b"cached tile" + b"\0" * (1201 * 1201 * 2 - 11)
+            cached.write_bytes(payload)
+
+            terrain.download_srtm(
+                BBox(0.0, 0.0, 2.0, 1.0),
+                destination,
+                cache_dir=cache,
+                required_tiles={(0, 0)},
+            )
+            self.assertEqual(
+                sorted(path.name for path in destination.iterdir()),
+                [f"{land}.hgt"],
+            )
 
     def test_cache_dir_is_shared_between_projects(self):
         from qgis_xtopo.core.config import Config
@@ -1106,6 +1189,56 @@ class DemSourceTest(unittest.TestCase):
         )
         self.assertEqual(dem_sources.source_warning("srtm", bbox, {}), "")
 
+    def test_auto_plan_land_only_skips_ocean_tiles(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources
+
+        bbox = BBox(0.0, 0.0, 2.0, 1.0)
+        availability = {
+            "cop30": dem_sources.Availability(
+                available=True, checked=True,
+                covered_tiles=frozenset({(0, 0), (0, 1)}),
+            ),
+        }
+        with mock.patch.object(
+            dem_sources, "_world_map_land_tiles",
+            return_value=frozenset({(0, 1)}),
+        ):
+            plan = dem_sources.auto_plan(
+                bbox, availability, priority=("cop30",), land_only=True,
+            )
+        self.assertEqual(plan, {(0, 1): "cop30"})
+
+    def test_osm_land_tiles_keeps_atolls_missing_from_natural_earth(self):
+        import json
+        from types import SimpleNamespace
+
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "coastline.ndjson"
+            path.write_text(
+                json.dumps({
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0.5, 0.5], [1.5, 0.5]],
+                    },
+                }) + "\n",
+                encoding="utf-8",
+            )
+            source = SimpleNamespace(
+                dataset=SimpleNamespace(
+                    feature_files={"coastline": str(path)}
+                )
+            )
+            self.assertEqual(
+                terrain.osm_land_tiles(source, BBox(0.0, 0.0, 2.0, 1.0)),
+                {(0, 0), (0, 1)},
+            )
+
     def test_auto_plan_prefers_better_datasets(self):
         from qgis_xtopo.core import dem_sources
 
@@ -1790,6 +1923,67 @@ class PrepareTerrainSplitTest(unittest.TestCase):
             self.assertTrue(
                 (config.vector_dir / "isolines_regular.sqlite").exists()
             )
+
+    def test_water_mask_keeps_land_depression(self):
+        """Затопленные тайлы не качаются, впадина на суше остаётся."""
+        import array
+
+        from osgeo import gdal, ogr, osr
+
+        from qgis_xtopo.core import terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(44.7, 42.78, 44.72, 42.8)
+            tile = config.terrain_src_dir / "N42E044.tif"
+            dataset = gdal.Open(str(tile), gdal.GA_Update)
+            band = dataset.GetRasterBand(1)
+            values = band.ReadAsArray().astype("float32")
+            values[:10, :] = -100.0
+            values[15, 5] = -50.0
+            band.WriteRaster(
+                0, 0, values.shape[1], values.shape[0],
+                array.array("f", values.ravel()).tobytes(),
+            )
+            dataset = None
+
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            water = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(config.vector_dir / "water_dissolved.sqlite")
+            )
+            layer = water.CreateLayer(
+                "water_dissolved", srs, geom_type=ogr.wkbPolygon
+            )
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(ogr.CreateGeometryFromWkt(
+                "POLYGON((44.7 42.79,44.7 42.8,44.72 42.8,"
+                "44.72 42.79,44.7 42.79))"
+            ))
+            layer.CreateFeature(feature)
+            water = None
+
+            terrain.prepare_terrain(
+                config, bbox, lambda message: None,
+                status=lambda message: None,
+            )
+            dataset = gdal.Open(str(config.raster_dir / "merged_dem.tif"))
+            values = dataset.GetRasterBand(1).ReadAsArray()
+            dataset = None
+            valid = values[values != -32768]
+            self.assertTrue((values[:8] == -32768).all())
+            self.assertEqual(valid.min(), -50.0)
+            self.assertGreater(valid.max(), 100.0)
+
+            isolines = ogr.Open(
+                str(config.vector_dir / "isolines_regular.sqlite")
+            )
+            layer = isolines.GetLayer(0)
+            elevations = {
+                feature.GetField("ELEV") for feature in layer
+            }
+            isolines = None
+            self.assertNotIn(-100.0, elevations)
 
 
 class Cop30FallbackTest(unittest.TestCase):

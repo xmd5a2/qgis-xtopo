@@ -19,8 +19,16 @@ import os
 import shutil
 from pathlib import Path
 
-# Файлы рельефа, которые переиспользуются между запусками.
+# Сырой DEM переиспользуется между запусками и не зависит от воды.
 DEM_FILES = (
+    "merged_dem.tif",
+    "merged_dem_3857.tif",
+)
+
+# Маскированный по воде DEM и производные от него растры.  Ключ этой
+# группы включает отпечатки слоёв воды: изменился берег или озеро —
+# маска и отмывка пересчитываются.
+RELIEF_FILES = (
     "merged_dem.tif",
     "merged_dem_3857.tif",
     "slope.tif",
@@ -52,7 +60,17 @@ HILLSHADE_STYLE_VERSION = 6
 # 7 — вода вычитается из готовых линий векторно, без растра-маски.
 # 8 — подробные изолинии без упрощения, обзорные — отдельной копией.
 # 9 — обзорная копия упрощается на 10 м и считается за один проход.
-ISOLINES_VERSION = 9
+# 10 — DEM маскируется по воде, морское дно в контуры не попадает.
+ISOLINES_VERSION = 10
+
+# Версия маскирования DEM по полигонам воды.  Меняется правило маски —
+# поднимаем число, иначе кэш вернёт отмывку, посчитанную по морскому дну.
+WATER_MASK_VERSION = 1
+
+# Версия фильтра океанских тайлов DEM.  Меняется правило пропуска
+# тайлов — старые подсказки кэша больше не должны находить рельеф,
+# собранный по другому набору тайлов.
+TILE_FILTER_VERSION = 1
 # Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
 DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
@@ -173,18 +191,56 @@ def dem_source_digest(config):
     return _digest(parts)
 
 
-def dem_signature(config, bbox, source_digest=None):
+def _tile_digest(required_tiles):
+    if required_tiles is None:
+        return "all"
+    return _digest(sorted(required_tiles))
+
+
+def dem_signature(config, bbox, source_digest=None, required_tiles=None):
     """Ключ кэша рельефа: версия формата, область, параметры и тайлы DEM."""
     if source_digest is None:
         source_digest = dem_source_digest(config)
     parts = [
         DEM_VERSION,
+        TILE_FILTER_VERSION,
         bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         config.resolved_terrain_source(),
         config.terrain_resample_method,
-        config.generate_terrain_hillshade_slope,
-        HILLSHADE_STYLE_VERSION,
         source_digest,
+        _tile_digest(required_tiles),
+    ]
+    return _digest(parts)
+
+
+WATER_LAYER_NAMES = (
+    "water_dissolved.sqlite",
+    "water.sqlite",
+    "water_intermittent_dissolved.sqlite",
+    "water_intermittent.sqlite",
+)
+
+
+def _water_digest(config):
+    """Отпечаток слоёв, по которым DEM маскируется."""
+    return _digest([
+        _file_stat(config.vector_dir / name) for name in WATER_LAYER_NAMES
+    ])
+
+
+def relief_signature(config, bbox, dem_key):
+    """Ключ маскированного DEM, уклона и отмывки.
+
+    Сырой DEM от воды не зависит, а эти растры зависят: изменился берег
+    или озеро — маску и отмывку надо пересчитать.
+    """
+    parts = [
+        WATER_MASK_VERSION,
+        HILLSHADE_STYLE_VERSION,
+        dem_key,
+        bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
+        config.generate_terrain_hillshade_slope,
+        _water_digest(config),
     ]
     return _digest(parts)
 
@@ -207,7 +263,7 @@ def _stat_digest(directory):
     return _digest(parts)
 
 
-def dem_hint(config, bbox):
+def dem_hint(config, bbox, required_tiles=None):
     """Ключ «эта область уже посчитана» без скачивания тайлов.
 
     Полный ключ :func:`dem_signature` включает хеш содержимого тайлов DEM,
@@ -219,13 +275,13 @@ def dem_hint(config, bbox):
     source = config.resolved_terrain_source()
     parts = [
         DEM_VERSION,
+        TILE_FILTER_VERSION,
         bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         source,
         config.terrain_resample_method,
-        config.generate_terrain_hillshade_slope,
-        HILLSHADE_STYLE_VERSION,
         config.download_terrain_tiles,
         config.get_terrain_tiles,
+        _tile_digest(required_tiles),
     ]
     if source == "manual":
         parts.append(_stat_digest(config.terrain_src_dir))
@@ -370,6 +426,10 @@ def _restore_item(item, target):
                 return
         except OSError:
             pass
+        # Прежний файл мог быть жёсткой ссылкой на другую запись кэша
+        # (например, сырой DEM под маскированным).  Копирование поверх
+        # изменило бы и её, поэтому ссылку сначала убираем.
+        target.unlink(missing_ok=True)
     try:
         os.link(item, target)
         return
@@ -430,7 +490,12 @@ def _store(config, group, signature, names, source_dir):
 
 
 def dem_required(config):
-    """Растры, которые должны быть в кэше при текущих настройках."""
+    """Сырые растры, которые должны быть в кэше при текущих настройках."""
+    return ("merged_dem.tif", "merged_dem_3857.tif")
+
+
+def relief_required(config):
+    """Растры маскированного рельефа, нужные для текущих настроек."""
     names = ["merged_dem.tif", "merged_dem_3857.tif"]
     if config.generate_terrain_hillshade_slope:
         names.extend(["slope.tif", "hillshade_composite.tif"])
@@ -467,8 +532,23 @@ def restore_dem(config, signature):
 
 
 def store_dem(config, signature):
-    """Сохраняет растры рельефа в кэш."""
+    """Сохраняет сырые растры рельефа в кэш."""
     return _store(config, "dem", signature, DEM_FILES + DEM_EXTRA_FILES, config.raster_dir)
+
+
+def restore_relief(config, signature):
+    """Возвращает маскированный DEM, уклон и отмывку из кэша."""
+    return _restore(
+        config, "relief", signature,
+        RELIEF_FILES, config.raster_dir, relief_required(config),
+    )
+
+
+def store_relief(config, signature):
+    """Сохраняет маскированный DEM, уклон и отмывку в кэш."""
+    return _store(
+        config, "relief", signature, RELIEF_FILES, config.raster_dir,
+    )
 
 
 def restore_isolines(config, signature):

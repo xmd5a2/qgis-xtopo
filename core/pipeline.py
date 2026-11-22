@@ -2446,36 +2446,6 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         started = time.monotonic()
         project_path = project.prepare_project(config)
         timings.add_stage("создание проекта", time.monotonic() - started)
-        # Скачивание тайлов и сборка растра рельефа не зависят ни от
-        # данных OSM, ни от слоёв проекта.  Поток рельефа запускается
-        # сразу после создания проекта: сеть за тайлами DEM работает,
-        # пока готовится источник OSM.  Изолинии зависят от слоёв
-        # (режутся по воде и ледникам) — их pipeline догоняет после
-        # pipeline.run.
-        if config.generate_terrain:
-            def _terrain_worker():
-                started_terrain = time.monotonic()
-                try:
-                    gdal_log.LOG.install()
-                    try:
-                        terrain_keys["dem"] = terrain.prepare_terrain_raster(
-                            config, bbox, progress=report, cancel=cancel,
-                            status=tracker.status, used_out=terrain_used,
-                        )
-                    finally:
-                        gdal_log.LOG.restore()
-                except InterruptedError:
-                    pass  # отмену проверяет основной поток после join
-                except Exception as exc:  # noqa: BLE001 - всплывёт после join
-                    terrain_error.append(exc)
-                finally:
-                    # Время самого рельефа: ожидание слоёв в счёт не
-                    # идёт, рельеф считается параллельно им.
-                    terrain_seconds[0] = time.monotonic() - started_terrain
-            terrain_thread = threading.Thread(
-                target=_terrain_worker, name="xtopo-terrain", daemon=True,
-            )
-            terrain_thread.start()
         if source_thread is not None:
             source_thread.join()
             if cancel is not None and cancel.is_set():
@@ -2497,6 +2467,41 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             report(note)
         for warning in prepared.warnings:
             report(f"WARNING: {warning}")
+        # Рельеф качается параллельно слоям, но набор тайлов уже можно
+        # сузить по суше: Natural Earth и берег/острова из OSM.  Воду
+        # для маски DEM эта стадия не ждёт — её строит pipeline.run.
+        if config.generate_terrain:
+            required_tiles = None
+            land = dem_sources.land_tiles(bbox)
+            if land is not None:
+                required_tiles = set(land) | terrain.osm_land_tiles(
+                    prepared, bbox
+                )
+
+            def _terrain_worker():
+                started_terrain = time.monotonic()
+                try:
+                    gdal_log.LOG.install()
+                    try:
+                        terrain_keys["dem"] = terrain.prepare_terrain_raster(
+                            config, bbox, progress=report, cancel=cancel,
+                            status=tracker.status, used_out=terrain_used,
+                            required_tiles=required_tiles,
+                        )
+                    finally:
+                        gdal_log.LOG.restore()
+                except InterruptedError:
+                    pass  # отмену проверяет основной поток после join
+                except Exception as exc:  # noqa: BLE001 - всплывёт после join
+                    terrain_error.append(exc)
+                finally:
+                    # Время самого рельефа: ожидание слоёв в счёт не
+                    # идёт, рельеф считается параллельно им.
+                    terrain_seconds[0] = time.monotonic() - started_terrain
+            terrain_thread = threading.Thread(
+                target=_terrain_worker, name="xtopo-terrain", daemon=True,
+            )
+            terrain_thread.start()
         report("Обработка слоёв")
         runner = ProcessingRunner(
             progress=report, cancel=cancel, fraction=tracker.fraction
@@ -2512,22 +2517,6 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         # какие слои собраны не полностью.
         for warning in warnings or ():
             report(f"WARNING: {warning}")
-        if terrain_thread is not None:
-            _report_terrain_stage(terrain_thread, report)
-            terrain_thread.join()
-            if cancel is not None and cancel.is_set():
-                raise InterruptedError("Preparation cancelled")
-            if terrain_error:
-                raise terrain_error[0]
-            timings.add_stage("рельеф", terrain_seconds[0])
-            gdal_log.LOG.install()
-            try:
-                terrain.prepare_terrain_isolines(
-                    config, bbox, terrain_keys.get("dem"),
-                    progress=report, cancel=cancel,
-                )
-            finally:
-                gdal_log.LOG.restore()
         if "coastline" in config.array_queries:
             report("Обработка береговой линии")
             started = time.monotonic()
@@ -2539,6 +2528,37 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("береговая линия", time.monotonic() - started)
+        if terrain_thread is not None:
+            _report_terrain_stage(terrain_thread, report)
+            terrain_thread.join()
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            if terrain_error:
+                raise terrain_error[0]
+            timings.add_stage("рельеф", terrain_seconds[0])
+            # Вода уже построена, поэтому отсюда можно маскировать
+            # морское дно и считать уклон с отмывкой.
+            report("Маска воды и отмывка рельефа")
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                terrain.prepare_terrain_relief(
+                    config, bbox, terrain_keys.get("dem"),
+                    progress=report, cancel=cancel,
+                )
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage(
+                "маска воды и отмывка", time.monotonic() - started,
+            )
+            gdal_log.LOG.install()
+            try:
+                terrain.prepare_terrain_isolines(
+                    config, bbox, terrain_keys.get("dem"),
+                    progress=report, cancel=cancel,
+                )
+            finally:
+                gdal_log.LOG.restore()
         if "peak" in config.array_queries:
             report("Проверка пиков")
             started = time.monotonic()

@@ -1368,6 +1368,18 @@ def _land_tiles(bbox, availability):
     return fallback
 
 
+def land_tiles(bbox):
+    """Тайлы 1°×1° с сушей по Natural Earth.
+
+    ``None`` — маску построить не удалось; тогда пропускать океанские
+    тайлы нельзя, потому что неизвестно, какие из них действительно
+    океанские.
+    """
+    if bbox is None:
+        return None
+    return _world_map_land_tiles(bbox)
+
+
 def preferred_source(bbox, availability):
     """Ключ лучшего источника для охвата (пока только 3DEP).
 
@@ -1417,15 +1429,21 @@ def _coverage(availability, key, sonny_tiles):
     return set(state.covered_tiles)
 
 
-def auto_plan(bbox, availability, sonny_tiles=(), priority=None):
+def auto_plan(bbox, availability, sonny_tiles=(), priority=None,
+              land_only=False):
     """Раскладка тайлов охвата по наборам для режима «Автоматически».
 
     Для каждого тайла 1°×1° выбирается первый набор из ``priority``
     (по умолчанию :func:`auto_priority` — в горах с ALOS), который этот
     тайл покрывает. Тайлы, которых не покрывает ни один набор, остаются
-    без данных.
+    без данных.  ``land_only`` оставляет только тайлы с сушей по Natural
+    Earth: рельеф океанского дна всё равно маскируется по воде.
     """
     tiles = set(tiles_for_bbox(bbox))
+    if land_only:
+        land = land_tiles(bbox)
+        if land is not None:
+            tiles &= set(land)
     order = tuple(priority) if priority else auto_priority(bbox)
     coverage = {
         key: _coverage(availability, key, sonny_tiles)
@@ -1448,7 +1466,7 @@ def auto_availability(bbox, availability, sonny_tiles=()):
     """
     tiles = set(tiles_for_bbox(bbox))
     order = auto_priority(bbox)
-    plan = auto_plan(bbox, availability, sonny_tiles)
+    plan = auto_plan(bbox, availability, sonny_tiles, land_only=True)
     counts = {}
     for key in plan.values():
         counts[key] = counts.get(key, 0) + 1

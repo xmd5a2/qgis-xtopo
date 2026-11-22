@@ -44,12 +44,7 @@ class TerrainCacheTest(unittest.TestCase):
     def test_dem_is_restored_from_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(directory)
-            names = [
-                "merged_dem.tif",
-                "merged_dem_3857.tif",
-                "slope.tif",
-                "hillshade_composite.tif",
-            ]
+            names = list(terrain_cache.DEM_FILES)
             for name in names:
                 (config.raster_dir / name).write_bytes(b"raster")
             key = terrain_cache.dem_signature(config, BBox(43.0, 42.0, 43.1, 42.1))
@@ -59,6 +54,54 @@ class TerrainCacheTest(unittest.TestCase):
             self.assertTrue(terrain_cache.restore_dem(config, key))
             for name in names:
                 self.assertTrue((config.raster_dir / name).exists(), name)
+
+    def test_relief_is_restored_without_touching_raw_dem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(43.0, 42.0, 43.1, 42.1)
+            for name in terrain_cache.DEM_FILES:
+                (config.raster_dir / name).write_bytes(b"raw")
+            dem_key = terrain_cache.dem_signature(config, bbox)
+            self.assertTrue(terrain_cache.store_dem(config, dem_key))
+
+            _write_layer(
+                config.vector_dir / "water_dissolved.sqlite",
+                "water_dissolved", [(43.05, 42.05)],
+            )
+            relief_key = terrain_cache.relief_signature(config, bbox, dem_key)
+            for name in terrain_cache.RELIEF_FILES:
+                # В terrain.py маска пишет новый файл и подменяет им
+                # старый; прямая запись изменила бы кэш сырого DEM.
+                (config.raster_dir / name).unlink(missing_ok=True)
+                (config.raster_dir / name).write_bytes(b"masked")
+            self.assertTrue(terrain_cache.store_relief(config, relief_key))
+            for name in terrain_cache.RELIEF_FILES:
+                (config.raster_dir / name).unlink()
+
+            self.assertTrue(terrain_cache.restore_dem(config, dem_key))
+            self.assertTrue(
+                terrain_cache.restore_relief(config, relief_key)
+            )
+            for name in terrain_cache.RELIEF_FILES:
+                self.assertEqual(
+                    (config.raster_dir / name).read_bytes(), b"masked", name,
+                )
+            # Маскированный DEM заменил файл в проекте, но не в кэше
+            # сырого рельефа: иначе следующий прогон начал бы с маски.
+            raw_cache = terrain_cache._group_dir(config, "dem", dem_key)
+            self.assertEqual(
+                (raw_cache / "merged_dem.tif").read_bytes(), b"raw",
+            )
+
+            (config.vector_dir / "water_dissolved.sqlite").unlink()
+            _write_layer(
+                config.vector_dir / "water_dissolved.sqlite",
+                "water_dissolved", [(43.06, 42.06)],
+            )
+            self.assertNotEqual(
+                relief_key,
+                terrain_cache.relief_signature(config, bbox, dem_key),
+            )
 
     def test_dem_cached_checks_files_without_restoring(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -127,6 +170,18 @@ class TerrainCacheTest(unittest.TestCase):
             first = terrain_cache.dem_signature(config, BBox(43.0, 42.0, 43.1, 42.1))
             (config.terrain_input_dir / "N42E043.tif").write_bytes(b"other dem")
             second = terrain_cache.dem_signature(config, BBox(43.0, 42.0, 43.1, 42.1))
+            self.assertNotEqual(first, second)
+
+    def test_dem_signature_depends_on_land_tiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(43.0, 42.0, 43.1, 42.1)
+            first = terrain_cache.dem_signature(
+                config, bbox, required_tiles={(42, 43)},
+            )
+            second = terrain_cache.dem_signature(
+                config, bbox, required_tiles={(42, 44)},
+            )
             self.assertNotEqual(first, second)
 
     def test_isolines_signature_depends_on_water_layer(self):

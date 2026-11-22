@@ -178,10 +178,16 @@ class _Speed:
 
 
 def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
-                  status=None, tiles=None):
+                  status=None, tiles=None, required_tiles=None):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     tiles = list(tiles) if tiles else srtm_tile_names(bbox)
+    if tiles and required_tiles is not None:
+        wanted = {
+            dem_sources.tile_name(lat, lon)
+            for lat, lon in required_tiles
+        }
+        tiles = [tile for tile in tiles if tile in wanted]
     meter = _Speed()
     pending = []
     for tile in tiles:
@@ -613,14 +619,14 @@ def download_cog_dem(source_key, bbox, destination, progress=None, cancel=None,
 
 
 def download_dem(source_key, bbox, destination, progress=None, cancel=None,
-                 cache_dir=None, status=None):
+                 cache_dir=None, status=None, required_tiles=None):
     """Скачивает рельеф выбранного источника для области."""
     if source_key == dem_sources.MANUAL_SOURCE:
         raise ValueError("Manual DEM source does not download tiles")
     if source_key == "srtm":
         return download_srtm(
             bbox, destination, progress=progress, cancel=cancel,
-            cache_dir=cache_dir, status=status,
+            cache_dir=cache_dir, status=status, required_tiles=required_tiles,
         )
     return download_cog_dem(
         source_key, bbox, destination, progress=progress, cancel=cancel,
@@ -931,7 +937,8 @@ def _mosaic_resolution(groups):
 def download_auto_dem(bbox, destination, progress=None, cancel=None,
                       cache_dir=None, status=None, availability=None,
                       sonny_catalogue=None, sonny_tiles_dir=None,
-                      priority=None, used=None, counts=None):
+                      priority=None, used=None, counts=None,
+                      required_tiles=None):
     """Собирает мозаику рельефа в режиме «Автоматически».
 
     Для каждого тайла 1°×1° выбирается лучший доступный набор: USGS
@@ -944,6 +951,10 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     DTM это ``(Sonny, Copernicus, SRTM)``.  В ``used`` дописываются
     ключи наборов, вошедших в мозаику, — для строки атрибуции; в
     ``counts`` — число тайлов, доставшихся каждому набору.
+
+    ``required_tiles`` — тайлы, где есть суша (Natural Earth и берег из
+    OSM).  Остальные не скачиваются: их высоты всё равно станут nodata
+    после маски воды.
     """
     gdal, _, _ = _gdal()
     destination = Path(destination)
@@ -963,8 +974,15 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     plan = dem_sources.auto_plan(
         bbox, availability, sonny_cells, priority=order
     )
+    if required_tiles is not None:
+        plan = {
+            cell: key for cell, key in plan.items()
+            if cell in required_tiles
+        }
     if not plan:
-        raise RuntimeError("Нет данных рельефа для выбранного охвата")
+        if progress:
+            progress("Рельеф: в охвате нет суши, тайлы DEM не нужны")
+        return
 
     groups = {}
     for cell, key in plan.items():
@@ -1095,7 +1113,7 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
 def download_sonny_dem(bbox, destination, progress=None, cancel=None,
                        cache_dir=None, status=None, availability=None,
                        sonny_catalogue=None, sonny_tiles_dir=None,
-                       used=None):
+                       used=None, required_tiles=None):
     """Скачивает рельеф Sonny DTM, а недостающие тайлы — фоном FABDEM.
 
     Набор выбран один, но тайлы в нём могут быть разной подробности:
@@ -1108,11 +1126,12 @@ def download_sonny_dem(bbox, destination, progress=None, cancel=None,
         sonny_catalogue=sonny_catalogue, sonny_tiles_dir=sonny_tiles_dir,
         priority=(dem_sources.SONNY_SOURCE, "fabdem",
                   dem_sources.AUTO_BACKGROUND, "srtm"),
-        used=used,
+        used=used, required_tiles=required_tiles,
     )
 
 
-def _download_cop30(config, bbox, progress=None, cancel=None, status=None):
+def _download_cop30(config, bbox, progress=None, cancel=None, status=None,
+                    required_tiles=None):
     """GLO-30 с добором недостающих тайлов SRTM v3.
 
     Если GLO-30 покрывает весь охват, работает обычный путь с кэшем
@@ -1124,10 +1143,15 @@ def _download_cop30(config, bbox, progress=None, cancel=None, status=None):
         bbox, keys=("cop30", "srtm")
     )
     state = availability.get("cop30")
-    required = set(dem_sources.tiles_for_bbox(bbox))
+    required = (
+        set(required_tiles) if required_tiles is not None
+        else set(dem_sources.tiles_for_bbox(bbox))
+    )
     covered = (set(state.covered_tiles)
                if state is not None and state.checked else set())
-    if required and required <= covered:
+    if not required:
+        return []
+    if required <= covered:
         download_cog_dem(
             "cop30", bbox, config.terrain_input_dir,
             progress=progress, cancel=cancel,
@@ -1141,7 +1165,7 @@ def _download_cop30(config, bbox, progress=None, cancel=None, status=None):
         progress=progress, cancel=cancel,
         cache_dir=config.terrain_cache_dir, status=status,
         availability=availability, used=used, counts=counts,
-        priority=("cop30", "srtm"),
+        priority=("cop30", "srtm"), required_tiles=required_tiles,
     )
     if "srtm" in used:
         if "cop30" in used:
@@ -1799,6 +1823,198 @@ def _water_mask_paths(config):
                 paths.append(path)
                 break
     return paths
+
+
+def osm_land_tiles(source, bbox):
+    """Тайлы 1°×1°, где OSM отмечает берег или остров.
+
+    Natural Earth 1:10m не содержит часть мелких атоллов.  Такой тайл
+    нельзя пропускать только по ней: берег из OSM показывает, что суша
+    там есть.
+    """
+    from osgeo import ogr
+
+    dataset = getattr(source, "dataset", None)
+    files = getattr(dataset, "feature_files", None) or {}
+    tiles = set()
+    for name in ("coastline", "island"):
+        path = files.get(name)
+        if not path:
+            continue
+        data = ogr.Open(str(path))
+        if data is None:
+            continue
+        try:
+            layer = data.GetLayer(0)
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                if geometry is None or geometry.IsEmpty():
+                    continue
+                envelope = geometry.GetEnvelope()
+                # Горизонтальный или вертикальный участок берега имеет
+                # нулевой размер по одной оси.  Небольшой запас не даёт
+                # потерять тайл и безвредно захватывает соседний на
+                # стыке градусов.
+                pad = 1e-9
+                min_x = max(envelope[0] - pad, bbox.lon_min)
+                min_y = max(envelope[2] - pad, bbox.lat_min)
+                max_x = min(envelope[1] + pad, bbox.lon_max)
+                max_y = min(envelope[3] + pad, bbox.lat_max)
+                if min_x >= max_x or min_y >= max_y:
+                    continue
+                tiles.update(
+                    dem_sources.tiles_for_bbox(
+                        BBox(min_x, min_y, max_x, max_y)
+                    )
+                )
+        finally:
+            data = None
+    return tiles
+
+
+def _rasterize_water_mask(config, raster, water_paths, cancel=None):
+    """Растровая маска воды на сетке растра."""
+    gdal, _, _ = _gdal()
+    transform = raster.GetGeoTransform()
+    width = raster.RasterXSize
+    height = raster.RasterYSize
+    path = config.temp_dir / f"{Path(raster.GetDescription()).stem}_water_mask.tif"
+    path.unlink(missing_ok=True)
+    driver = gdal.GetDriverByName("GTiff")
+    mask = driver.Create(
+        str(path), width, height, 1, gdal.GDT_Byte,
+        options=["COMPRESS=LZW", "TILED=YES", "SPARSE_OK=TRUE"],
+    )
+    if mask is None:
+        raise RuntimeError(f"Cannot create water mask: {path}")
+    try:
+        mask.SetGeoTransform(transform)
+        mask.SetProjection(raster.GetProjection())
+        band = mask.GetRasterBand(1)
+        band.Fill(0)
+        band.SetNoDataValue(0)
+        for water in water_paths:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Relief preparation cancelled")
+            gdal.Rasterize(
+                mask, str(water),
+                options=gdal.RasterizeOptions(
+                    burnValues=[1],
+                    allTouched=False,
+                ),
+            )
+    finally:
+        mask = None
+    return path
+
+
+def _mask_raster_water(config, name, water_paths, cancel=None):
+    """Заменить пиксели воды в растре на nodata.
+
+    Отрицательные высоты на суше (впадины, Мёртвое море в окружении)
+    остаются: маска строится по полигонам воды, а не по знаку высоты.
+    """
+    gdal, _, _ = _gdal()
+    path = config.raster_dir / name
+    if not path.exists():
+        return 0
+    source = gdal.Open(str(path))
+    if source is None:
+        return 0
+    mask_path = None
+    temporary = path.with_name(f"{path.stem}_masked{path.suffix}")
+    temporary.unlink(missing_ok=True)
+    try:
+        width = source.RasterXSize
+        height = source.RasterYSize
+        source_band = source.GetRasterBand(1)
+        nodata = source_band.GetNoDataValue()
+        if nodata is None:
+            nodata = -32768.0
+        mask_path = _rasterize_water_mask(config, source, water_paths, cancel)
+        mask = gdal.Open(str(mask_path))
+        if mask is None:
+            raise RuntimeError(f"Cannot open water mask: {mask_path}")
+        mask_band = mask.GetRasterBand(1)
+        disk_space.require_space(
+            temporary,
+            width * height * disk_space.FILE_FLOAT_PIXEL,
+            "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
+            name,
+        )
+        driver = gdal.GetDriverByName("GTiff")
+        output = driver.Create(
+            str(temporary), width, height, 1, gdal.GDT_Float32,
+            options=_relief_creation_options(),
+        )
+        if output is None:
+            raise RuntimeError(f"Cannot create masked raster: {temporary}")
+        output.SetGeoTransform(source.GetGeoTransform())
+        output.SetProjection(source.GetProjection())
+        target_band = output.GetRasterBand(1)
+        target_band.SetNoDataValue(nodata)
+        masked = 0
+        try:
+            for y in range(0, height, RASTER_BLOCK_SIDE):
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("Relief preparation cancelled")
+                rows = min(RASTER_BLOCK_SIDE, height - y)
+                for x in range(0, width, RASTER_BLOCK_SIDE):
+                    columns = min(RASTER_BLOCK_SIDE, width - x)
+                    block = source_band.ReadAsArray(x, y, columns, rows)
+                    water = mask_band.ReadAsArray(x, y, columns, rows)
+                    if block is None or water is None:
+                        continue
+                    hit = water > 0
+                    if hit.any():
+                        block = block.astype("float32")
+                        # Уже пустые пиксели не считаем: это не глубина.
+                        hit &= block != nodata
+                        if hit.any():
+                            block[hit] = nodata
+                            masked += int(hit.sum())
+                    target_band.WriteArray(block, x, y)
+            target_band.FlushCache()
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        finally:
+            output = None
+            mask = None
+        # Windows не даёт заменить файл, пока он открыт GDAL.
+        source = None
+        os.replace(temporary, path)
+        return masked
+    finally:
+        source = None
+        if mask_path is not None:
+            Path(mask_path).unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+
+
+def mask_dem_by_water(config, progress=None, cancel=None):
+    """Маскировать морское дно и озёра во всех растрах DEM.
+
+    Возвращает число заменённых пикселей.  Без слоёв воды маска не
+    строится: лучше оставить глубины, чем залить водой всю сушу.
+    """
+    water_paths = _water_mask_paths(config)
+    if not water_paths:
+        if progress:
+            progress(
+                "WARNING: Маска воды: слои воды не найдены, "
+                "отрицательные глубины остаются"
+            )
+        return 0
+    total = 0
+    for name in ("merged_dem.tif", "merged_dem_3857.tif"):
+        changed = _mask_raster_water(config, name, water_paths, cancel)
+        if changed and progress:
+            progress(f"Маска воды: {name} — {changed} пикселей")
+        total += changed
+    if progress:
+        progress(f"Маска воды: заменено пикселей — {total}")
+    return total
 
 
 def _contour_workers(tiles):
@@ -2634,12 +2850,15 @@ def _extend_used(used_out, used):
 
 
 def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
-                           status=None, used_out=None):
-    """Скачивание тайлов, сборка DEM и затенение (без изолиний).
+                           status=None, used_out=None, required_tiles=None):
+    """Скачивание тайлов и сборка сырого DEM (без воды и изолиний).
 
     Не зависит от слоёв проекта, поэтому в pipeline эта стадия работает
-    параллельно обработке слоёв.  Возвращает ключ кэша DEM — его ждёт
-    :func:`prepare_terrain_isolines`.
+    параллельно обработке слоёв.  Возвращает ключ кэша DEM — его ждут
+    :func:`prepare_terrain_relief` и :func:`prepare_terrain_isolines`.
+
+    ``required_tiles`` — тайлы с сушей: океанские не скачиваются, их
+    высоты всё равно станут nodata после маски воды.
 
     В ``used_out`` дописываются ключи наборов DEM, вошедших в мозаику:
     по ним пишется атрибуция.  Сама атрибуция пишется в конце сборки
@@ -2652,7 +2871,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     # Проверяем кэш до скачивания тайлов: ключ подсказки не требует
     # содержимого тайлов, поэтому повторная подготовка не ходит в сеть
     # и не собирает мозаику заново.
-    hint = terrain_cache.dem_hint(config, bbox)
+    hint = terrain_cache.dem_hint(config, bbox, required_tiles)
     cached = terrain_cache.restore_dem_by_hint(config, hint)
     if cached is not None:
         used = cached.get("used") or ()
@@ -2683,6 +2902,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
                 sonny_catalogue=sonny.catalogue_dir(),
                 sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
                 used=used,
+                required_tiles=required_tiles,
             )
         elif source_key == dem_sources.SONNY_SOURCE:
             download_sonny_dem(
@@ -2703,6 +2923,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
                 progress=progress,
                 cancel=cancel,
                 status=status,
+                required_tiles=required_tiles,
             )
         else:
             download_dem(
@@ -2713,6 +2934,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
                 cancel=cancel,
                 cache_dir=config.terrain_cache_dir,
                 status=status,
+                required_tiles=required_tiles,
             )
         if used:
             _extend_used(used_out, used)
@@ -2720,6 +2942,13 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     for archive in list(config.terrain_input_dir.glob("*.zip")):
         shutil.unpack_archive(str(archive), str(config.terrain_input_dir))
         archive.unlink(missing_ok=True)
+
+    if not any(path.is_file() for path in config.terrain_input_dir.iterdir()):
+        if progress:
+            progress(
+                "WARNING: Рельеф: в охвате нет суши, тайлы DEM не нужны"
+            )
+        return None
 
     # Хест исходных тайлов считаем до конвертации: содержимое .hgt
     # стабильно, а результат конвертации может отличаться от запуска
@@ -2737,14 +2966,14 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     # Рельеф и изолинии считаются долго, поэтому готовый результат
     # переиспользуется, если не изменились версия плагина, параметры
     # и исходные данные (см. core/terrain_cache.py).
-    dem_key = terrain_cache.dem_signature(config, bbox, source_digest)
+    dem_key = terrain_cache.dem_signature(
+        config, bbox, source_digest, required_tiles=required_tiles,
+    )
     if terrain_cache.restore_dem(config, dem_key):
         if progress:
             progress("Использован кэш рельефа: повторная обработка не требуется")
     else:
         build_dem(config, bbox, progress=progress, cancel=cancel)
-        if config.generate_terrain_hillshade_slope:
-            generate_hillshade_slope(config, bbox, progress=progress, cancel=cancel)
         if terrain_cache.store_dem(config, dem_key):
             terrain_cache.store_dem_hint(
                 config, hint, dem_key, used=used,
@@ -2755,6 +2984,36 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
             if path.is_file():
                 path.unlink(missing_ok=True)
     return dem_key
+
+
+def prepare_terrain_relief(config, bbox, dem_key, progress=None,
+                           cancel=None):
+    """Маска воды, уклон и отмывка по готовому сырому DEM.
+
+    Сырой DEM можно готовить параллельно со слоями, но маска воды
+    зависит от ``water_dissolved`` и строится только после береговой
+    линии.  Поэтому уклон, отмывка и изолинии считаются здесь, а не в
+    :func:`prepare_terrain_raster`.
+    """
+    if not config.generate_terrain or dem_key is None:
+        return
+    signature = terrain_cache.relief_signature(config, bbox, dem_key)
+    if terrain_cache.restore_relief(config, signature):
+        if progress:
+            progress(
+                "Использован кэш маскированного рельефа: "
+                "повторная обработка не требуется"
+            )
+        return
+    mask_dem_by_water(config, progress=progress, cancel=cancel)
+    if config.generate_terrain_hillshade_slope:
+        generate_hillshade_slope(
+            config, bbox, progress=progress, cancel=cancel,
+        )
+    else:
+        for name in ("slope.tif", "hillshade_composite.tif"):
+            (config.raster_dir / name).unlink(missing_ok=True)
+    terrain_cache.store_relief(config, signature)
 
 
 def prepare_terrain_isolines(config, bbox, dem_key, progress=None,
@@ -2778,9 +3037,12 @@ def prepare_terrain_isolines(config, bbox, dem_key, progress=None,
 
 
 def prepare_terrain(config, bbox, progress=None, cancel=None, status=None):
-    """Последовательный вариант: растр, затем изолинии."""
+    """Последовательный вариант: растр, маска воды, уклон, изолинии."""
     dem_key = prepare_terrain_raster(
         config, bbox, progress=progress, cancel=cancel, status=status,
+    )
+    prepare_terrain_relief(
+        config, bbox, dem_key, progress=progress, cancel=cancel,
     )
     prepare_terrain_isolines(
         config, bbox, dem_key, progress=progress, cancel=cancel,
