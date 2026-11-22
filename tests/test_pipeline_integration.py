@@ -457,6 +457,8 @@ class PipelineIntegrationTest(unittest.TestCase):
                 for name in (
                     "[TERRAIN] isolines regular",
                     "[TERRAIN] isolines glacier",
+                    "[TERRAIN] isolines regular overview",
+                    "[TERRAIN] isolines glacier overview",
                 ):
                     layer = QgsVectorLayer(
                         "LineString?crs=EPSG:4326&field=ELEV:integer",
@@ -497,7 +499,8 @@ class PipelineIntegrationTest(unittest.TestCase):
                 )
                 box5.setChecked(True)
                 self.assertTrue(active(glacier)["5"])
-                self.assertEqual(active(glacier), active(regular))
+                for name in layers:
+                    self.assertEqual(active(layers[name]), active(regular), name)
 
                 box5.setChecked(False)
                 self.assertFalse(active(glacier)["5"])
@@ -2233,22 +2236,24 @@ class PipelineIntegrationTest(unittest.TestCase):
 
         project = QgsProject.instance()
         project.clear()
-        regular = QgsVectorLayer(
-            "LineString?crs=EPSG:4326", "[TERRAIN] isolines regular", "memory"
+        names = (
+            "[TERRAIN] isolines regular",
+            "[TERRAIN] isolines glacier",
+            "[TERRAIN] isolines regular overview",
+            "[TERRAIN] isolines glacier overview",
         )
-        glacier = QgsVectorLayer(
-            "LineString?crs=EPSG:4326", "[TERRAIN] isolines glacier", "memory"
-        )
-        project.addMapLayer(regular)
-        project.addMapLayer(glacier)
+        for name in names:
+            project.addMapLayer(QgsVectorLayer(
+                "LineString?crs=EPSG:4326", name, "memory"
+            ))
         panel = ProjectPanel(None)
         try:
             panel.isolines_check.setChecked(True)
-            self.assertTrue(panel._layer_visible("[TERRAIN] isolines regular"))
-            self.assertTrue(panel._layer_visible("[TERRAIN] isolines glacier"))
+            for name in names:
+                self.assertTrue(panel._layer_visible(name), name)
             panel.isolines_check.setChecked(False)
-            self.assertFalse(panel._layer_visible("[TERRAIN] isolines regular"))
-            self.assertFalse(panel._layer_visible("[TERRAIN] isolines glacier"))
+            for name in names:
+                self.assertFalse(panel._layer_visible(name), name)
         finally:
             panel.deleteLater()
             project.clear()

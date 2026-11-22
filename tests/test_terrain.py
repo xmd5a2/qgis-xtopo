@@ -196,6 +196,77 @@ class TerrainTest(unittest.TestCase):
             self.assertAlmostEqual(geometries[300][0].Length(), 2 ** 0.5)
 
 
+    def test_water_subtraction_can_limit_to_touched_sources(self):
+        """Обзорный слой проверяет воду только по обрезанным линиям."""
+        from osgeo import ogr, osr
+
+        ogr.RegisterAll()
+        from qgis_xtopo.core.terrain import _subtract_water_from_layer
+
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        with tempfile.TemporaryDirectory() as directory:
+            water_path = Path(directory) / "water.geojson"
+            water_dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                str(water_path)
+            )
+            water_layer = water_dataset.CreateLayer(
+                "water", srs, ogr.wkbPolygon
+            )
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
+                ring.AddPoint(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(water_layer.GetLayerDefn())
+            feature.SetGeometry(polygon)
+            water_layer.CreateFeature(feature)
+            water_dataset = None
+
+            def make_layer():
+                dataset = ogr.GetDriverByName("Memory").CreateDataSource(
+                    "contours"
+                )
+                layer = dataset.CreateLayer(
+                    "isolines", srs, ogr.wkbLineString
+                )
+                layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+                layer.CreateField(ogr.FieldDefn("SRC", ogr.OFTInteger))
+                for index, points in enumerate((
+                    ((-1, 0.5), (2, 0.5)),
+                    ((0.2, 0.2), (0.8, 0.8)),
+                    ((2, 2), (3, 3)),
+                )):
+                    line = ogr.Geometry(ogr.wkbLineString)
+                    for x, y in points:
+                        line.AddPoint(x, y)
+                    item = ogr.Feature(layer.GetLayerDefn())
+                    item.SetField("ID", index)
+                    item.SetField("SRC", index)
+                    item.SetGeometry(line)
+                    layer.CreateFeature(item)
+                return dataset, layer
+
+            detail_dataset, detail = make_layer()
+            touched = set()
+            changed = _subtract_water_from_layer(
+                detail, [water_path], srs, touched_out=touched
+            )
+            self.assertEqual(changed, 2)
+            self.assertEqual(touched, {0, 1})
+
+            overview_dataset, overview = make_layer()
+            changed = _subtract_water_from_layer(
+                overview, [water_path], srs, only_keys={0}
+            )
+            self.assertEqual(changed, 1)
+            geometries = {
+                feature.GetField("SRC"): feature.GetGeometryRef().Clone()
+                for feature in overview
+            }
+            self.assertAlmostEqual(geometries[1].Length(), 2 ** 0.5 * 0.6)
+
     def test_contours_are_cut_by_intermittent_water(self):
         """По пересыхающей воде (intermittent=yes) изолинии тоже режутся.
 
@@ -2211,21 +2282,139 @@ class ContourTilingTest(unittest.TestCase):
                 self.source, config.raster_dir / "merged_dem.tif"
             )
             # Малый DEM принудительно режется на 4 тайла: проверяется
-            # именно ветка склейки результатов.
+            # именно ветка склейки результатов.  Контуры считаются один
+            # раз на оба слоя, поэтому вызовов ровно по числу тайлов.
             with mock.patch.object(
-                terrain, "_contour_tile_side", return_value=2
+                terrain, "_contour_tile", wraps=terrain._contour_tile
+            ) as contour_tile:
+                with mock.patch.object(
+                    terrain, "_contour_tile_side", return_value=2
+                ):
+                    terrain.generate_isolines(
+                        config, BBox(0.0, 0.0, 0.6, 0.6)
+                    )
+            self.assertEqual(contour_tile.call_count, 4)
+            vertices = {}
+            for name in (
+                "isolines_regular.sqlite",
+                "isolines_regular_overview.sqlite",
             ):
-                terrain.generate_isolines(
-                    config, BBox(0.0, 0.0, 0.6, 0.6)
-                )
-            dataset = ogr.Open(
-                str(config.vector_dir / "isolines_regular.sqlite")
+                dataset = ogr.Open(str(config.vector_dir / name))
+                self.assertIsNotNone(dataset, name)
+                try:
+                    layer = dataset.GetLayer(0)
+                    self.assertGreater(layer.GetFeatureCount(), 0, name)
+                    vertices[name] = sum(
+                        feature.GetGeometryRef().GetPointCount()
+                        for feature in layer
+                    )
+                finally:
+                    dataset = None
+            self.assertGreaterEqual(
+                vertices["isolines_regular.sqlite"],
+                vertices["isolines_regular_overview.sqlite"],
             )
-            self.assertIsNotNone(dataset)
-            try:
-                self.assertGreater(dataset.GetLayer(0).GetFeatureCount(), 0)
-            finally:
+
+            def read_levels(name, field):
+                path = config.vector_dir / name
+                if not path.exists():
+                    return {}
+                dataset = ogr.Open(str(path))
+                layer = dataset.GetLayer(0)
+                levels = {}
+                for feature in layer:
+                    key = feature.GetField(field)
+                    levels.setdefault(key, set()).add(
+                        round(feature.GetField("ELEV"), 6)
+                    )
                 dataset = None
+                return levels
+
+            detail = {}
+            for name in (
+                "isolines_regular.sqlite",
+                "isolines_glacier.sqlite",
+            ):
+                for key, values in read_levels(name, "ID").items():
+                    detail.setdefault(key, set()).update(values)
+            for name in (
+                "isolines_regular_overview.sqlite",
+                "isolines_glacier_overview.sqlite",
+            ):
+                for key, values in read_levels(name, "SRC").items():
+                    self.assertIn(key, detail)
+                    self.assertEqual(values, detail[key])
+
+    def test_tile_simplification_reduces_vertices(self):
+        """В тайле два слоя: подробный и упрощённый, уровни общие."""
+        from osgeo import gdal
+
+        from qgis_xtopo.core import terrain
+
+        raster = gdal.Open(str(self.source))
+        tiles = terrain._contour_tiles(raster, 2, terrain.CONTOUR_HALO)
+        raster = None
+
+        def collect(index):
+            vertices = 0
+            levels = set()
+            for tile in tiles:
+                dataset, _count = terrain._contour_tile(
+                    (str(self.source), tile, 50), simplify=0.001
+                )
+                layer = dataset.GetLayer(index)
+                for feature in layer:
+                    geometry = feature.GetGeometryRef()
+                    if geometry is None:
+                        continue
+                    vertices += geometry.GetPointCount()
+                    levels.add(round(feature.GetField("ELEV"), 6))
+            return vertices, levels
+
+        plain, plain_levels = collect(0)
+        simplified, simplified_levels = collect(1)
+        self.assertEqual(simplified_levels, plain_levels)
+        self.assertLess(simplified, plain)
+
+    def test_simplify_tolerance_is_capped_by_step_and_crs(self):
+        """Допуск обзорных контуров: min(10 м, шаг) в единицах СК."""
+        from osgeo import osr
+
+        from qgis_xtopo.core import terrain
+
+        geographic = osr.SpatialReference()
+        geographic.ImportFromEPSG(4326)
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(geographic, 10),
+            10.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(geographic, 5),
+            5.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(geographic, 12),
+            10.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        projected = osr.SpatialReference()
+        projected.ImportFromEPSG(3857)
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(projected, 10), 10.0
+        )
+        feet = osr.SpatialReference()
+        feet.ImportFromEPSG(2225)
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(feet, 10),
+            10.0 / feet.GetLinearUnits(),
+        )
+        empty = osr.SpatialReference()
+        self.assertAlmostEqual(
+            terrain._contour_simplify_tolerance(empty, 10),
+            10.0 / terrain.GEOGRAPHIC_SCALE,
+        )
+        self.assertEqual(
+            terrain._contour_simplify_tolerance(geographic, 0), 0.0
+        )
 
     def test_tile_side_grows_with_raster(self):
         """Тайлов тем больше, чем больше растр."""

@@ -1686,18 +1686,31 @@ def _collect_water_polygons(water_paths, target_srs):
     return polygons, envelope
 
 
-def _subtract_water_from_layer(layer, water_paths, target_srs):
+def _subtract_water_from_layer(layer, water_paths, target_srs,
+                               touched_out=None, only_keys=None,
+                               key_field="SRC"):
     """Режет контуры, заходящие на воду, по полигонам воды.
 
     Обход перевернут: контуры попадают в сетку по охватам, а для каждого
     полигона воды геометрические проверки выполняются только с кандидатами
     из соседних ячеек.  Прямой обход (каждая линия против каждого озера)
     стоил десятки секунд на регионе вроде Женевского озера.
+
+    ``touched_out`` собирает ID обрезанных линий, а ``only_keys``
+    ограничивает проверку линиями с этими ключами: обзорная копия
+    упрощена максимум на 10 м, поэтому воду достаточно проверять там,
+    где её уже коснулась подробная линия.  На остальных линиях
+    отклонение упрощения меньше пикселя обзорного масштаба.
     """
+    if only_keys is not None and not only_keys:
+        return 0
     _, ogr, _ = _gdal()
     polygons, envelope = _collect_water_polygons(water_paths, target_srs)
     if not polygons:
         return 0
+    definition = layer.GetLayerDefn()
+    id_index = definition.GetFieldIndex("ID") if touched_out is not None else -1
+    key_index = definition.GetFieldIndex(key_field) if only_keys is not None else -1
 
     def line_parts(geometry):
         if ogr.GT_Flatten(geometry.GetGeometryType()) == ogr.wkbLineString:
@@ -1712,6 +1725,11 @@ def _subtract_water_from_layer(layer, water_paths, target_srs):
     layer.ResetReading()
     feature = layer.GetNextFeature()
     while feature is not None:
+        if only_keys is not None and (
+                key_index < 0
+                or feature.GetField(key_index) not in only_keys):
+            feature = layer.GetNextFeature()
+            continue
         geometry = feature.GetGeometryRef()
         if geometry is not None and not geometry.IsEmpty():
             feature_envelopes[feature.GetFID()] = geometry.GetEnvelope()
@@ -1726,10 +1744,15 @@ def _subtract_water_from_layer(layer, water_paths, target_srs):
             feature = layer.GetFeature(fid)
             if feature is None:
                 continue
+            if only_keys is not None:
+                if key_index < 0 or feature.GetField(key_index) not in only_keys:
+                    continue
             geometry = feature.GetGeometryRef()
             if (geometry is None or geometry.IsEmpty()
                     or not polygon.Intersects(geometry)):
                 continue
+            if touched_out is not None and id_index >= 0:
+                touched_out.add(feature.GetField(id_index))
             clipped = geometry.Difference(polygon)
             parts = ([] if clipped is None or clipped.IsEmpty()
                      else line_parts(clipped))
@@ -1884,19 +1907,25 @@ def _clip_to_core(geometry, box):
     return _geometry_lines(clipped) if clipped is not None else []
 
 
-def _contour_tile(task):
+def _contour_tile(task, simplify=0.0):
     """Контуры одного тайла: только то, что попадает в его ядро.
 
     Тайл считается по окну с запасом, а в результат попадает только
     ядро: так линия у края получается такой же, как при расчёте по
     всему DEM, и тайлы не дублируют друг друга.
 
+    ``simplify`` — допуск упрощения в единицах СК.  Контуры считаются
+    один раз; рядом с подробным слоем сразу пишется упрощённая копия
+    для обзорных масштабов.  Второй проход по DEM стоил бы столько же,
+    сколько первый, а упрощение в потоке тайла почти ничего не добавляет.
+
     Вода в растре не вырезается: контуры считаются по всему DEM, а
     полигоны воды вычитаются из готовых линий.  Так концы изолиний
     лежат точно на берегу, а не обрываются за пиксель до него.
 
     Возвращает слой с отрезками: файл на тайл не пишется — создание
-    GeoPackage обходится дороже самой генерации.
+    GeoPackage обходится дороже самой генерации.  При ``simplify > 0``
+    в наборе два слоя: подробный и обзорный.
     """
     source_path, tile, step = task
     gdal, ogr, osr = _gdal()
@@ -1944,13 +1973,24 @@ def _contour_tile(task):
     layer = result.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
     layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
     layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+    overview = None
+    if simplify > 0:
+        overview = result.CreateLayer(
+            "isolines_overview", spatial_ref, ogr.wkbLineString
+        )
+        overview.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+        overview.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+        overview.CreateField(ogr.FieldDefn("SRC", ogr.OFTInteger))
     written = 0
+    overview_written = 0
     for feature in contour_layer:
         geometry = feature.GetGeometryRef()
+        elevation = feature.GetField("ELEV")
         for piece in _clip_to_core(geometry, box):
+            source_id = written
             item = ogr.Feature(layer.GetLayerDefn())
-            item.SetField("ID", written)
-            item.SetField("ELEV", feature.GetField("ELEV"))
+            item.SetField("ID", source_id)
+            item.SetField("ELEV", elevation)
             # Копировать геометрию поточечно нельзя: контуров миллионы
             # точек, и обход через Python занимает больше, чем весь
             # расчёт.  Лишнее измерение убирает сам writer.
@@ -1958,32 +1998,83 @@ def _contour_tile(task):
             layer.CreateFeature(item)
             item = None
             written += 1
+            if overview is None:
+                continue
+            simplified = piece.Simplify(simplify)
+            for part in _geometry_lines(simplified):
+                item = ogr.Feature(overview.GetLayerDefn())
+                item.SetField("ID", overview_written)
+                item.SetField("ELEV", elevation)
+                item.SetField("SRC", source_id)
+                item.SetGeometry(part)
+                overview.CreateFeature(item)
+                item = None
+                overview_written += 1
     memory = None
     raster = None
     return result, written
 
 
-def _merge_contour_tile(target, dataset, written=0):
+def _merge_contour_tile(target, dataset, written=0, layer_index=0,
+                        source_offset=0):
     """Склеивает контуры одного тайла в слой, перенумеровывая ID.
 
     Тайл склеивается сразу, как только посчитан: держать результаты
     всех тайлов в памяти до конца нельзя, на больших охватах это
-    гигабайты.  Возвращает число записанных линий.
+    гигабайты.  ``layer_index`` выбирает подробный или обзорный слой
+    тайла.  ``source_offset`` переводит локальные ID подробных линий
+    тайла в глобальные ID обзорного слоя (поле ``SRC``).  Возвращает
+    число записанных линий.
     """
     from osgeo import ogr
 
-    source_layer = dataset.GetLayer(0)
+    source_layer = dataset.GetLayer(layer_index)
     definition = target.GetLayerDefn()
+    source_index = definition.GetFieldIndex("SRC") if source_offset else -1
     for feature in source_layer:
         item = ogr.Feature(definition)
         for index in range(definition.GetFieldCount()):
             item.SetField(index, feature.GetField(index))
         item.SetField("ID", written)
+        if source_index >= 0:
+            item.SetField(
+                source_index,
+                feature.GetField(source_index) + source_offset,
+            )
         item.SetGeometry(feature.GetGeometryRef().Clone())
         target.CreateFeature(item)
         item = None
         written += 1
     return written
+
+
+OVERVIEW_SIMPLIFY_METERS = 10.0
+
+
+def _contour_simplify_tolerance(spatial_ref, step):
+    """Допуск упрощения обзорных контуров в единицах их СК.
+
+    Не больше 10 м и не больше шага изолиний: при шаге 10 м допуск
+    10 м, при более мелком шаге он ужимается до шага.  В
+    географической СК допуск переводится в градусы через
+    ``GEOGRAPHIC_SCALE``.
+    """
+    meters = min(OVERVIEW_SIMPLIFY_METERS, float(step))
+    if meters <= 0:
+        return 0.0
+    try:
+        # Пустая СК ведёт себя как географическая — так же, как в
+        # _dem_vertical_scale.
+        if spatial_ref is None or not spatial_ref.ExportToWkt():
+            return meters / GEOGRAPHIC_SCALE
+        if spatial_ref.IsGeographic():
+            return meters / GEOGRAPHIC_SCALE
+        units = spatial_ref.GetLinearUnits()
+    except Exception:  # noqa: BLE001 - неизвестная или пустая СК
+        return meters / GEOGRAPHIC_SCALE
+    if units and units > 0:
+        return meters / units
+    return meters
 
 
 def _smoothed_isolines_dem(config, progress=None):
@@ -2024,105 +2115,219 @@ def _smoothed_isolines_dem(config, progress=None):
     return destination
 
 
+ISOLINES_OVERVIEW_SUFFIX = "_overview"
+
+
 def generate_isolines(config, bbox, progress=None, cancel=None):
-    gdal, ogr, osr = _gdal()
+    """Контуры высот: подробные и упрощённые для обзорных масштабов.
+
+    Контуры считаются один раз.  Подробный слой получает все вершины,
+    обзорный — упрощённую копию с допуском ``OVERVIEW_SIMPLIFY_METERS``;
+    обе пишутся из одного прохода по DEM.
+    """
     smooth_source = _smoothed_isolines_dem(config, progress)
     source = smooth_source or (config.raster_dir / "merged_dem.tif")
     if not source.exists():
         raise RuntimeError("DEM raster is missing")
+    try:
+        shapes = _contour_shapefiles(config, source, progress, cancel)
+    finally:
+        if smooth_source is not None:
+            smooth_source.unlink(missing_ok=True)
+    destination = None
+    touched = set()
+    for shape_path, suffix in shapes:
+        result = _finish_isoline_set(
+            config, shape_path, suffix, progress,
+            touched_out=touched if not suffix else None,
+            only_keys=touched if suffix else None,
+        )
+        if destination is None:
+            destination = result
+    return destination
 
-    if progress:
-        progress("Generating contour lines")
-    shape_path = config.temp_dir / "isolines_full.shp"
-    driver = ogr.GetDriverByName("ESRI Shapefile")
-    dataset = driver.CreateDataSource(str(shape_path))
-    spatial_ref = osr.SpatialReference()
-    spatial_ref.ImportFromWkt(gdal.Open(str(source)).GetProjection())
-    layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
+
+def _new_contour_layer(dataset, spatial_ref, name="isolines",
+                       with_source=False):
+    """Слой контуров с полями, которые ждёт GDAL ContourGenerate."""
+    ogr = _gdal()[1]
+    layer = dataset.CreateLayer(name, spatial_ref, ogr.wkbLineString)
     layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
     layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
+    if with_source:
+        layer.CreateField(ogr.FieldDefn("SRC", ogr.OFTInteger))
+    return layer
 
+
+def _write_contour_feature(layer, geometry, elevation, identifier,
+                           source=None):
+    """Пишет один отрезок и возвращает следующий номер."""
+    ogr = _gdal()[1]
+    item = ogr.Feature(layer.GetLayerDefn())
+    item.SetField("ID", identifier)
+    item.SetField("ELEV", elevation)
+    if source is not None:
+        item.SetField("SRC", source)
+    item.SetGeometry(geometry.Clone())
+    layer.CreateFeature(item)
+    item = None
+    return identifier + 1
+
+
+def _contour_untiled(config, source, spatial_ref, simplify, outputs):
+    """Контуры мелкого DEM: один расчёт, две записи."""
+    gdal, ogr, _ = _gdal()
+    memory = gdal.Translate("", str(source), format="MEM")
+    contours = ogr.GetDriverByName("Memory").CreateDataSource("contours")
+    contour_layer = _new_contour_layer(contours, spatial_ref)
+    memory_band = memory.GetRasterBand(1)
+    nodata = memory_band.GetNoDataValue()
+    if nodata is not None:
+        gdal.ContourGenerate(
+            memory_band,
+            float(config.isolines_step),
+            0.0,
+            [],
+            1,
+            nodata,
+            contour_layer,
+            0,
+            1,
+        )
+    else:
+        gdal.ContourGenerate(
+            memory_band,
+            float(config.isolines_step),
+            0.0,
+            [],
+            0,
+            0.0,
+            contour_layer,
+            0,
+            1,
+        )
+    targets = [dataset.GetLayer(0) for _path, dataset in outputs]
+    counters = [0] * len(targets)
+    for feature in contour_layer:
+        geometry = feature.GetGeometryRef()
+        elevation = feature.GetField("ELEV")
+        source_id = counters[0]
+        counters[0] = _write_contour_feature(
+            targets[0], geometry, elevation, counters[0]
+        )
+        if len(targets) > 1:
+            simplified = geometry.Simplify(simplify)
+            for part in _geometry_lines(simplified):
+                counters[1] = _write_contour_feature(
+                    targets[1], part, elevation, counters[1],
+                    source=source_id,
+                )
+    memory = None
+
+
+def _contour_tiled(config, source, raster, side, simplify, outputs,
+                   progress, cancel):
+    """Контуры крупного DEM: тайлы считаются один раз на оба слоя."""
+    tiles = _contour_tiles(raster, side, CONTOUR_HALO)
+    tasks = [
+        (str(source), tile, config.isolines_step)
+        for tile in tiles
+    ]
+    workers = _contour_workers(len(tasks))
+    targets = [dataset.GetLayer(0) for _path, dataset in outputs]
+    counters = [0] * len(targets)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_contour_tile, task, simplify): index
+            for index, task in enumerate(tasks)
+        }
+        done = 0
+        for future in as_completed(futures):
+            result, _count = future.result()
+            # Тайл склеивается сразу: держать все результаты в
+            # памяти до конца расчёта нельзя.
+            detail_offset = counters[0]
+            for index, target in enumerate(targets):
+                counters[index] = _merge_contour_tile(
+                    target, result, counters[index], layer_index=index,
+                    source_offset=detail_offset if index else 0,
+                )
+            result = None
+            done += 1
+            if progress:
+                progress(f"Contour lines: tile {done} of {len(tasks)}")
+            if cancel is not None and cancel.is_set():
+                for pending in futures:
+                    pending.cancel()
+                raise InterruptedError("Preparation cancelled")
+    if progress:
+        progress(f"Contour lines: {counters[0]} segments")
+
+
+def _contour_shapefiles(config, source, progress, cancel):
+    """Пишет подробный и обзорный shapefile за один расчёт контуров."""
+    gdal, ogr, osr = _gdal()
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError("Preparation cancelled")
+    if progress:
+        progress("Generating contour lines")
     raster = gdal.Open(str(source))
-    pixels = raster.RasterXSize * raster.RasterYSize
-    side = _contour_tile_side(pixels)
-    if side <= 1:
-        # Ледники в растр не вырезаются: готовые контуры делятся по
-        # полигонам ледников векторно, иначе на границе ледника
-        # ледниковая и обычная линии обрывались в разных точках.
-        memory = gdal.Translate("", str(source), format="MEM")
-        memory_band = memory.GetRasterBand(1)
-        nodata = memory_band.GetNoDataValue()
-        if nodata is not None:
-            gdal.ContourGenerate(
-                memory_band,
-                float(config.isolines_step),
-                0.0,
-                [],
-                1,
-                nodata,
-                layer,
-                0,
-                1,
+    if raster is None:
+        raise RuntimeError(f"Cannot open DEM: {source}")
+    spatial_ref = osr.SpatialReference()
+    spatial_ref.ImportFromWkt(raster.GetProjection())
+    simplify = _contour_simplify_tolerance(
+        spatial_ref, config.isolines_step
+    )
+    driver = ogr.GetDriverByName("ESRI Shapefile")
+    outputs = []
+    try:
+        detailed_path = config.temp_dir / "isolines_full.shp"
+        dataset = driver.CreateDataSource(str(detailed_path))
+        _new_contour_layer(dataset, spatial_ref)
+        outputs.append((detailed_path, dataset))
+        if simplify > 0:
+            overview_path = (
+                config.temp_dir
+                / f"isolines_full{ISOLINES_OVERVIEW_SUFFIX}.shp"
+            )
+            dataset = driver.CreateDataSource(str(overview_path))
+            _new_contour_layer(dataset, spatial_ref, with_source=True)
+            outputs.append((overview_path, dataset))
+        pixels = raster.RasterXSize * raster.RasterYSize
+        side = _contour_tile_side(pixels)
+        if side <= 1:
+            _contour_untiled(
+                config, source, spatial_ref, simplify, outputs
             )
         else:
-            gdal.ContourGenerate(
-                memory_band,
-                float(config.isolines_step),
-                0.0,
-                [],
-                0,
-                0.0,
-                layer,
-                0,
-                1,
+            _contour_tiled(
+                config, source, raster, side, simplify, outputs,
+                progress, cancel,
             )
-        memory = None
+    finally:
         raster = None
-    else:
-        # DEM режется на тайлы с запасом, контуры считаются параллельно,
-        # в результат попадает только середина тайла.
-        tiles = _contour_tiles(raster, side, CONTOUR_HALO)
-        raster = None
-        tasks = [
-            (str(source), tile, config.isolines_step)
-            for tile in tiles
-        ]
-        workers = _contour_workers(len(tasks))
-        written = 0
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_contour_tile, task): index
-                for index, task in enumerate(tasks)
-            }
-            done = 0
-            for future in as_completed(futures):
-                result, _count = future.result()
-                # Тайл склеивается сразу: держать все результаты в
-                # памяти до конца расчёта нельзя.
-                written = _merge_contour_tile(layer, result, written)
-                result = None
-                done += 1
-                if progress:
-                    progress(f"Contour lines: tile {done} of {len(tasks)}")
-                if cancel is not None and cancel.is_set():
-                    for pending in futures:
-                        pending.cancel()
-                    raise InterruptedError("Preparation cancelled")
-        if progress:
-            progress(f"Contour lines: {written} segments")
-    dataset = None
-    if smooth_source is not None:
-        smooth_source.unlink(missing_ok=True)
-        smooth_source = None
-    dataset = None
+        for _path, dataset in outputs:
+            dataset = None
+    return [
+        (path, "" if index == 0 else ISOLINES_OVERVIEW_SUFFIX)
+        for index, (path, _dataset) in enumerate(outputs)
+    ]
 
+
+def _finish_isoline_set(config, shape_path, suffix, progress,
+                        touched_out=None, only_keys=None):
+    """Вода, SQLite и ледники для одного набора контуров."""
+    gdal, ogr, osr = _gdal()
     dataset = ogr.Open(str(shape_path), 1)
     layer = dataset.GetLayer(0)
+    spatial_ref = layer.GetSpatialRef()
     # Вода вычитается из готовых контуров: конец линии ложится точно на
     # берег.  Растеризация воды в nodata расширяла её на пиксель, и
     # изолинии обрывались, не доходя до воды.
     changed = _subtract_water_from_layer(
-        layer, _water_mask_paths(config), spatial_ref
+        layer, _water_mask_paths(config), spatial_ref,
+        touched_out=touched_out, only_keys=only_keys,
     )
     if progress and changed:
         progress(f"Contour lines cut by water: {changed}")
@@ -2134,9 +2339,11 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         "-dsco", "SPATIALITE=YES",
         "-lco", "COMPRESS_GEOM=YES",
     ]
-    destination = config.vector_dir / "isolines_full.sqlite"
+    destination = config.vector_dir / f"isolines_full{suffix}.sqlite"
     try:
-        result = gdal.VectorTranslate(str(destination), str(shape_path), options=options)
+        result = gdal.VectorTranslate(
+            str(destination), str(shape_path), options=options
+        )
     except Exception:
         result = None
     if result is None:
@@ -2145,7 +2352,8 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         destination.unlink(missing_ok=True)
         try:
             result = gdal.VectorTranslate(
-                str(destination), str(shape_path), options=options + ["-skipfailures"]
+                str(destination), str(shape_path),
+                options=options + ["-skipfailures"],
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to write contour lines: {exc}") from exc
@@ -2153,13 +2361,21 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         raise RuntimeError("Failed to write contour lines")
     result = None
     glacier_destination = _generate_glacier_isolines(
-        config, shape_path, progress
+        config, shape_path, progress, suffix=suffix
     )
-    for suffix in (".shp", ".shx", ".dbf", ".prj"):
-        (config.temp_dir / f"isolines_full{suffix}").unlink(missing_ok=True)
+    for extension in (".shp", ".shx", ".dbf", ".prj"):
+        (config.temp_dir / f"isolines_full{suffix}{extension}").unlink(
+            missing_ok=True
+        )
+    regular_destination = (
+        config.vector_dir / f"isolines_regular{suffix}.sqlite"
+    )
     if glacier_destination is None:
         # Ледников нет: все изолинии остаются обычными.
-        shutil.copy2(destination, config.vector_dir / "isolines_regular.sqlite")
+        (config.vector_dir / f"isolines_glacier{suffix}.sqlite").unlink(
+            missing_ok=True
+        )
+        shutil.copy2(destination, regular_destination)
     return destination
 
 
@@ -2287,7 +2503,8 @@ def _glacier_polygons(config):
     return polygons
 
 
-def _split_isolines_by_glaciers(config, shape_path, progress=None):
+def _split_isolines_by_glaciers(config, shape_path, progress=None,
+                                suffix=""):
     """Делит изолинии на части внутри ледников и вне их.
 
     Внутри ледника изолинии относятся к леднику (в исходном проекте они
@@ -2304,8 +2521,12 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
     if source is None:
         return None
     polygon_index = _PolygonIndex(polygons)
-    glacier_destination = config.vector_dir / "isolines_glacier.sqlite"
-    regular_destination = config.vector_dir / "isolines_regular.sqlite"
+    glacier_destination = (
+        config.vector_dir / f"isolines_glacier{suffix}.sqlite"
+    )
+    regular_destination = (
+        config.vector_dir / f"isolines_regular{suffix}.sqlite"
+    )
     glacier_destination.unlink(missing_ok=True)
     regular_destination.unlink(missing_ok=True)
     driver = ogr.GetDriverByName("SQLite")
@@ -2392,14 +2613,14 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None):
     return glacier_destination
 
 
-def _generate_glacier_isolines(config, shape_path, progress=None):
+def _generate_glacier_isolines(config, shape_path, progress=None, suffix=""):
     """Контурные линии, обрезанные по полигонам ледников.
 
     Обычные изолинии при этом тоже пересобираются: на площади ледников
     их нет, там рисуются ледниковые (синие).
     """
     return _split_isolines_by_glaciers(
-        config, shape_path, progress
+        config, shape_path, progress, suffix=suffix
     )
 
 
