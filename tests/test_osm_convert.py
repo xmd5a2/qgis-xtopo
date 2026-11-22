@@ -183,6 +183,31 @@ class OsmConvertTest(unittest.TestCase):
             ["archipelago", "islet"],
         )
 
+    def test_island_query_includes_land_area(self):
+        """Суша острова может быть только в relation boundary=land_area.
+
+        У Тикехау и Матаивы островки входят в отношения boundary=land_area:
+        GDAL не отдаёт их way отдельно, а без них суша не попадает в
+        island.sqlite, не вычитается из океана и остаётся под водой.
+        """
+        query = (
+            Path(__file__).resolve().parents[1]
+            / "resources/queries/island.txt"
+        ).read_text(encoding="utf-8")
+        features = [
+            {"properties": {"@type": "relation", "boundary": "land_area"},
+             "geometry": {"type": "MultiPolygon"}},
+            {"properties": {"@type": "way", "boundary": "land_area"},
+             "geometry": {"type": "Polygon"}},
+            {"properties": {"@type": "relation", "boundary": "administrative"},
+             "geometry": {"type": "MultiPolygon"}},
+        ]
+        selected = filter_features(features, query)
+        self.assertEqual(
+            [feature["properties"]["@type"] for feature in selected],
+            ["relation", "way"],
+        )
+
     def test_negation_matches_missing_tag(self):
         query = 'way["natural"="water"]["intermittent"!="yes"];'
         features = [
