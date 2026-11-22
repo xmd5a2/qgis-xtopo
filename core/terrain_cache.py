@@ -50,12 +50,15 @@ HILLSHADE_STYLE_VERSION = 6
 # 5 — геометрия упрощается на min(5 м, шаг/2).
 # 6 — упрощение выполняется в потоках тайлов.
 # 7 — вода вычитается из готовых линий векторно, без растра-маски.
-ISOLINES_VERSION = 7
+# 8 — подробные изолинии без упрощения, обзорные — отдельной копией.
+ISOLINES_VERSION = 8
 # Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
 DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
     "isolines_regular.sqlite",
     "isolines_glacier.sqlite",
+    "isolines_regular_overview.sqlite",
+    "isolines_glacier_overview.sqlite",
 )
 
 # Сколько последних записей кэша оставляем в каждой группе.  Рельеф
@@ -471,7 +474,8 @@ def restore_isolines(config, signature):
     """Возвращает готовые изолинии из кэша (True — удалось)."""
     return _restore(
         config, "isolines", signature,
-        ISOLINES_FILES, config.vector_dir, ("isolines_regular.sqlite",),
+        ISOLINES_FILES, config.vector_dir,
+        ("isolines_regular.sqlite", "isolines_regular_overview.sqlite"),
     )
 
 

@@ -2218,14 +2218,26 @@ class ContourTilingTest(unittest.TestCase):
                 terrain.generate_isolines(
                     config, BBox(0.0, 0.0, 0.6, 0.6)
                 )
-            dataset = ogr.Open(
-                str(config.vector_dir / "isolines_regular.sqlite")
+            vertices = {}
+            for name in (
+                "isolines_regular.sqlite",
+                "isolines_regular_overview.sqlite",
+            ):
+                dataset = ogr.Open(str(config.vector_dir / name))
+                self.assertIsNotNone(dataset, name)
+                try:
+                    layer = dataset.GetLayer(0)
+                    self.assertGreater(layer.GetFeatureCount(), 0, name)
+                    vertices[name] = sum(
+                        feature.GetGeometryRef().GetPointCount()
+                        for feature in layer
+                    )
+                finally:
+                    dataset = None
+            self.assertGreaterEqual(
+                vertices["isolines_regular.sqlite"],
+                vertices["isolines_regular_overview.sqlite"],
             )
-            self.assertIsNotNone(dataset)
-            try:
-                self.assertGreater(dataset.GetLayer(0).GetFeatureCount(), 0)
-            finally:
-                dataset = None
 
     def test_tile_simplification_reduces_vertices(self):
         """Упрощение в тайле уменьшает вершины, не теряя уровни."""

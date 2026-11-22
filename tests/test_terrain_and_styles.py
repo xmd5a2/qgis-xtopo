@@ -727,7 +727,12 @@ class IsolineWidthTest(unittest.TestCase):
         }
         self.assertEqual(
             sorted(layers),
-            ["[TERRAIN] isolines glacier", "[TERRAIN] isolines regular"],
+            [
+                "[TERRAIN] isolines glacier",
+                "[TERRAIN] isolines glacier overview",
+                "[TERRAIN] isolines regular",
+                "[TERRAIN] isolines regular overview",
+            ],
         )
         for layer in layers.values():
             expressions = [

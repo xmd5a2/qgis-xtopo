@@ -2058,16 +2058,46 @@ def _smoothed_isolines_dem(config, progress=None):
     return destination
 
 
+ISOLINES_OVERVIEW_SUFFIX = "_overview"
+
+
 def generate_isolines(config, bbox, progress=None, cancel=None):
-    gdal, ogr, osr = _gdal()
+    """Контуры высот: подробные и упрощённые для обзорных масштабов.
+
+    Подробный слой не упрощается: до 1:50000 нужны все вершины.
+    Для мелких масштабов готовится отдельная копия с допуском
+    ``_contour_simplify_tolerance`` — она рисуется только с 1:50001
+    и не утяжеляет обзорный кадр.
+    """
     smooth_source = _smoothed_isolines_dem(config, progress)
     source = smooth_source or (config.raster_dir / "merged_dem.tif")
     if not source.exists():
         raise RuntimeError("DEM raster is missing")
+    try:
+        destination = _generate_isolines_pass(
+            config, progress, cancel, source=source, overview=False,
+        )
+        _generate_isolines_pass(
+            config, progress, cancel, source=source, overview=True,
+        )
+    finally:
+        if smooth_source is not None:
+            smooth_source.unlink(missing_ok=True)
+    return destination
 
+
+def _generate_isolines_pass(config, progress, cancel, source, overview):
+    """Один набор контуров: подробный или упрощённый обзорный."""
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError("Preparation cancelled")
+    gdal, ogr, osr = _gdal()
+    suffix = ISOLINES_OVERVIEW_SUFFIX if overview else ""
     if progress:
-        progress("Generating contour lines")
-    shape_path = config.temp_dir / "isolines_full.shp"
+        progress(
+            "Generating overview contour lines" if overview
+            else "Generating contour lines"
+        )
+    shape_path = config.temp_dir / f"isolines_full{suffix}.shp"
     driver = ogr.GetDriverByName("ESRI Shapefile")
     dataset = driver.CreateDataSource(str(shape_path))
     spatial_ref = osr.SpatialReference()
@@ -2075,7 +2105,10 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     layer = dataset.CreateLayer("isolines", spatial_ref, ogr.wkbLineString)
     layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
     layer.CreateField(ogr.FieldDefn("ELEV", ogr.OFTReal))
-    simplify = _contour_simplify_tolerance(spatial_ref, config.isolines_step)
+    simplify = (
+        _contour_simplify_tolerance(spatial_ref, config.isolines_step)
+        if overview else 0.0
+    )
 
     raster = gdal.Open(str(source))
     pixels = raster.RasterXSize * raster.RasterYSize
@@ -2147,10 +2180,6 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         if progress:
             progress(f"Contour lines: {written} segments")
     dataset = None
-    if smooth_source is not None:
-        smooth_source.unlink(missing_ok=True)
-        smooth_source = None
-    dataset = None
 
     dataset = ogr.Open(str(shape_path), 1)
     layer = dataset.GetLayer(0)
@@ -2174,7 +2203,7 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         # Один проход для мелкого DEM: в тайловом режиме контуры уже
         # упрощены в потоках _contour_tile.
         options += ["-simplify", format(simplify, ".12g")]
-    destination = config.vector_dir / "isolines_full.sqlite"
+    destination = config.vector_dir / f"isolines_full{suffix}.sqlite"
     try:
         result = gdal.VectorTranslate(str(destination), str(shape_path), options=options)
     except Exception:
@@ -2193,13 +2222,22 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
         raise RuntimeError("Failed to write contour lines")
     result = None
     glacier_destination = _generate_glacier_isolines(
-        config, shape_path, progress, simplify=0.0 if tiled else simplify
+        config, shape_path, progress, simplify=0.0 if tiled else simplify,
+        suffix=suffix,
     )
-    for suffix in (".shp", ".shx", ".dbf", ".prj"):
-        (config.temp_dir / f"isolines_full{suffix}").unlink(missing_ok=True)
+    for extension in (".shp", ".shx", ".dbf", ".prj"):
+        (config.temp_dir / f"isolines_full{suffix}{extension}").unlink(
+            missing_ok=True
+        )
+    regular_destination = (
+        config.vector_dir / f"isolines_regular{suffix}.sqlite"
+    )
     if glacier_destination is None:
         # Ледников нет: все изолинии остаются обычными.
-        shutil.copy2(destination, config.vector_dir / "isolines_regular.sqlite")
+        (config.vector_dir / f"isolines_glacier{suffix}.sqlite").unlink(
+            missing_ok=True
+        )
+        shutil.copy2(destination, regular_destination)
     return destination
 
 
@@ -2327,7 +2365,8 @@ def _glacier_polygons(config):
     return polygons
 
 
-def _split_isolines_by_glaciers(config, shape_path, progress=None, simplify=None):
+def _split_isolines_by_glaciers(config, shape_path, progress=None,
+                                simplify=None, suffix=""):
     """Делит изолинии на части внутри ледников и вне их.
 
     Внутри ледника изолинии относятся к леднику (в исходном проекте они
@@ -2344,8 +2383,12 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None, simplify=None
     if source is None:
         return None
     polygon_index = _PolygonIndex(polygons)
-    glacier_destination = config.vector_dir / "isolines_glacier.sqlite"
-    regular_destination = config.vector_dir / "isolines_regular.sqlite"
+    glacier_destination = (
+        config.vector_dir / f"isolines_glacier{suffix}.sqlite"
+    )
+    regular_destination = (
+        config.vector_dir / f"isolines_regular{suffix}.sqlite"
+    )
     glacier_destination.unlink(missing_ok=True)
     regular_destination.unlink(missing_ok=True)
     driver = ogr.GetDriverByName("SQLite")
@@ -2440,14 +2483,15 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None, simplify=None
     return glacier_destination
 
 
-def _generate_glacier_isolines(config, shape_path, progress=None, simplify=None):
+def _generate_glacier_isolines(config, shape_path, progress=None,
+                               simplify=None, suffix=""):
     """Контурные линии, обрезанные по полигонам ледников.
 
     Обычные изолинии при этом тоже пересобираются: на площади ледников
     их нет, там рисуются ледниковые (синие).
     """
     return _split_isolines_by_glaciers(
-        config, shape_path, progress, simplify=simplify
+        config, shape_path, progress, simplify=simplify, suffix=suffix
     )
 
 
