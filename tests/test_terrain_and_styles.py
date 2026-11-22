@@ -877,6 +877,17 @@ class BasemapLabelInversionTest(unittest.TestCase):
 
     def test_inversion_removes_outer_buffer_glow(self):
         """Внешнее свечение буфера на подложке выключается."""
+        from qgis_xtopo.core import label_style
+
+        # В шаблоне свечение выключено по умолчанию ради скорости рендера;
+        # включаем его, чтобы проверить саму инверсию.
+        for key, settings in label_style.label_settings(
+            self.layer.labeling()
+        ):
+            label_style.set_label_buffer_effect(settings, True)
+            label_style.set_label_settings(
+                self.layer.labeling(), key, settings
+            )
         before = self._buffer_effects()
         self.assertTrue(any(before), before)
         self.assertTrue(self.basemap.invert_labels(self.project))
