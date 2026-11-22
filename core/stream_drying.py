@@ -1,9 +1,10 @@
 """Подсыхание ручьёв: статический ранг видимости по сети.
 
 Слой ручьёв разбивается на ветви в притоках и растворяется по значимым
-для отрисовки тегам.  Для каждой ветви считается максимальная длина
-ветви на пути вверх по течению; это статический эквивалент
-итеративного подсчёта суммарной длины видимой сети.  Результат
+для отрисовки тегам.  Верхняя часть потоков скрывается от истока:
+250 м на 1:150000 и 700 м на 1:200000.  Обрезка останавливается на
+T-развилке, но продолжается ниже, если все её боковые ветви уже
+удалены.  Результат
 записывается в поле ``dry_rank``, по которому фильтры шаблона скрывают
 мелкие водотоки на обзорных масштабах.
 
@@ -23,14 +24,19 @@ from pathlib import Path
 FIELD = "dry_rank"
 LAYERS = ("stream", "stream_intermittent")
 ARROW_LAYER = "stream_smoothed"
-# Порог в метрах для масштабов 1:150000 и 1:200000.  Это половина
-# прежних 550/800 м: подсыхание начинается позже и идёт мягче.
-THRESHOLDS = (275.0, 400.0)
+# Порог в метрах для масштабов 1:150000 и 1:200000.
+THRESHOLDS = (250.0, 700.0)
 MAX_RANK = len(THRESHOLDS)
 SNAP = 10.0
 TJOIN = 5.0
 SPRING_RADIUS = 100.0
 OUTLET_TOLERANCE = 30.0
+# Разрыв у устья: полигон воды иногда срезает последние метры ручья.
+MOUTH_SNAP = 40.0
+MOUTH_MAX_LENGTH = 300.0
+# Допускаем плавный или шумный поворот, но не разворот линии.
+MOUTH_MIN_DOT = -0.5
+COASTLINE_LAYER = "coastline"
 WATER_LAYERS = ("water_without_riverbanks", "water_dissolved")
 
 
@@ -489,24 +495,216 @@ def _components(branches):
     groups = defaultdict(list)
     for position in range(len(branches)):
         groups[union.find(position)].append(position)
-    has_junction = {}
     totals = {}
     for root, positions in groups.items():
         totals[root] = sum(branches[position].length for position in positions)
-        has_junction[root] = any(
-            len(node_branches[branches[position].up]) >= 3
-            or len(node_branches[branches[position].down]) >= 3
-            for position in positions
+    return groups, totals
+
+
+def _attach_mouth_fragments(branches, followers, cancel=None):
+    """Присоединяет оторванные устья к продолжению линии.
+
+    Полигон воды иногда срезает последние метры ручья, и устье остаётся
+    отдельной тупиковой ветвью.  Если его начало продолжает направление
+    соседней ветви, устье получает её нижний узел и наследует ранг,
+    вместо того чтобы считаться самостоятельным коротким ручьём.
+    """
+    from qgis.core import QgsRectangle
+
+    if not branches:
+        return 0
+    boxes = []
+    for branch in branches:
+        if not branch.points:
+            boxes.append((0.0, 0.0, 0.0, 0.0))
+            continue
+        x, y = branch.points[-1]
+        boxes.append((
+            x - MOUTH_SNAP, y - MOUTH_SNAP,
+            x + MOUTH_SNAP, y + MOUTH_SNAP,
+        ))
+    index = _build_bbox_index(boxes)
+    attached = 0
+    for position, branch in enumerate(branches):
+        if len(branch.points) < 2:
+            continue
+        if branch.length > MOUTH_MAX_LENGTH:
+            continue
+        if [
+            item for item in followers.get(branch.down, ())
+            if item != position
+        ]:
+            continue
+        start = branch.points[0]
+        rectangle = QgsRectangle(
+            start[0] - MOUTH_SNAP, start[1] - MOUTH_SNAP,
+            start[0] + MOUTH_SNAP, start[1] + MOUTH_SNAP,
         )
-    return groups, totals, has_junction
+        best = None
+        best_score = None
+        for candidate_position in index.intersects(rectangle):
+            if candidate_position == position:
+                continue
+            other = branches[candidate_position]
+            if len(other.points) < 2:
+                continue
+            end = other.points[-1]
+            distance = _distance(start, end)
+            if distance > MOUTH_SNAP:
+                continue
+            if distance <= 1e-9 and branch.length <= 1e-9:
+                dot = 1.0
+            else:
+                first_x = branch.points[1][0] - start[0]
+                first_y = branch.points[1][1] - start[1]
+                last_x = end[0] - other.points[-2][0]
+                last_y = end[1] - other.points[-2][1]
+                first_length = math.hypot(first_x, first_y)
+                last_length = math.hypot(last_x, last_y)
+                if first_length <= 1e-9 or last_length <= 1e-9:
+                    continue
+                dot = (
+                    first_x * last_x + first_y * last_y
+                ) / (first_length * last_length)
+                if dot < MOUTH_MIN_DOT:
+                    continue
+            score = (dot, -distance, other.length)
+            if best_score is None or score > best_score:
+                best_score = score
+                best = candidate_position
+        if best is None:
+            continue
+        other = branches[best]
+        old_up = branch.up
+        if old_up in followers and position in followers[old_up]:
+            followers[old_up].remove(position)
+        branch.up = other.down
+        branch.points[0] = other.points[-1]
+        branch.length = _length(branch.points)
+        followers[other.down].append(position)
+        attached += 1
+    return attached
 
 
-def _upstream_values(branches, followers, groups, totals, has_junction):
-    values = [0.0] * len(branches)
+def _removal_prefixes(branches, feeders, followers, threshold,
+                      protected=(), cancel=None):
+    """Сколько метров удалить сверху каждой ветви.
+
+    Идём от истоков вниз.  Если ветвь удалена целиком и у развилки не
+    осталось других активных ветвей, развилка исчезает и обрезка
+    продолжается по примыкающей ветви.
+    """
+    count = len(branches)
+    prefix = [0.0] * count
+    active = [True] * count
     heap = []
     for position, branch in enumerate(branches):
-        values[position] = branch.length
-        heapq.heappush(heap, (-values[position], position))
+        incoming = [
+            item for item in feeders.get(branch.up, ())
+            if item != position and active[item]
+        ]
+        if not incoming and position not in protected:
+            heapq.heappush(heap, (-threshold, position))
+    while heap:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Preparation cancelled")
+        negative, position = heapq.heappop(heap)
+        remaining = -negative
+        branch = branches[position]
+        if position in protected:
+            continue
+        if not active[position] or remaining <= prefix[position] + 1e-9:
+            continue
+        if remaining + 1e-9 >= branch.length:
+            prefix[position] = branch.length
+            active[position] = False
+            leftover = remaining - branch.length
+            if leftover <= 1e-9:
+                continue
+            for follower in followers.get(branch.down, ()):
+                if follower == position or not active[follower]:
+                    continue
+                incoming = [
+                    item for item in feeders.get(branches[follower].up, ())
+                    if item != follower and active[item]
+                ]
+                if incoming:
+                    continue
+                if leftover > prefix[follower] + 1e-9:
+                    heapq.heappush(heap, (-leftover, follower))
+        else:
+            prefix[position] = remaining
+    return prefix
+
+
+def _clone_branch(branch, points, length):
+    clone = _Branch()
+    clone.group = branch.group
+    clone.waterway = branch.waterway
+    clone.intermittent = branch.intermittent
+    clone.tunnel = branch.tunnel
+    clone.layer = branch.layer
+    clone.sig = branch.sig
+    clone.attrs = branch.attrs
+    clone.points = points
+    clone.length = length
+    clone.up = branch.up
+    clone.down = branch.down
+    return clone
+
+
+def _split_prefixes(branches, removed_short, removed_long, protected,
+                    mouths):
+    """Режет ветви по удалённым сверху участкам."""
+    result = []
+    ranks = []
+    for position, branch in enumerate(branches):
+        total = branch.length
+        if total <= 1e-9:
+            result.append(branch)
+            ranks.append(MAX_RANK)
+            continue
+        first = removed_short[position]
+        second = max(first, removed_long[position])
+        if position in protected:
+            first = second = 0.0
+        if position in mouths:
+            keep = min(50.0, total)
+            first = min(first, total - keep)
+            second = min(second, total - keep)
+        boundaries = sorted({
+            0.0, total, min(first, total), min(second, total),
+        })
+        cumulative = _cumulative(branch.points)
+        for start, end in zip(boundaries, boundaries[1:]):
+            if end - start <= 1e-9:
+                continue
+            points = _slice(branch.points, cumulative, start, end)
+            if start < first - 1e-9:
+                rank = 0
+            elif start < second - 1e-9:
+                rank = 1
+            else:
+                rank = MAX_RANK
+            result.append(_clone_branch(branch, points, end - start))
+            ranks.append(rank)
+    return result, ranks
+
+
+def _upstream_values(branches, followers, groups, totals):
+    """Длина самого длинного пути от истока до низа ветви.
+
+    Длины ветвей вдоль пути суммируются, поэтому разбиение OSM на
+    короткие сегменты не меняет результат.  На циклах значение
+    ограничено общей длиной компоненты.
+    """
+    values = [branch.length for branch in branches]
+    group_of = {}
+    for root, positions in groups.items():
+        for position in positions:
+            group_of[position] = root
+    heap = [(-value, position) for position, value in enumerate(values)]
+    heapq.heapify(heap)
     while heap:
         negative, position = heapq.heappop(heap)
         value = -negative
@@ -516,15 +714,11 @@ def _upstream_values(branches, followers, groups, totals, has_junction):
         for follower in followers.get(node, ()):
             if follower == position:
                 continue
-            if values[follower] + 1e-9 < value:
-                values[follower] = value
-                heapq.heappush(heap, (-value, follower))
-    for root, positions in groups.items():
-        if has_junction[root]:
-            continue
-        total = totals[root]
-        for position in positions:
-            values[position] = total
+            limit = totals[group_of[follower]]
+            candidate = min(value + branches[follower].length, limit)
+            if candidate > values[follower] + 1e-9:
+                values[follower] = candidate
+                heapq.heappush(heap, (-candidate, follower))
     return values
 
 
@@ -652,6 +846,38 @@ def _read_polygons(path, skip_sub_sea=False, transform=None):
     return polygons
 
 
+def _read_coastline(directory, transform=None):
+    """Читает береговую линию в метрической СК."""
+    from osgeo import ogr
+
+    path = directory / f"{COASTLINE_LAYER}.sqlite"
+    if not path.exists():
+        return []
+    source = ogr.Open(str(path))
+    if source is None:
+        return []
+    layer = source.GetLayer(0)
+    lines = []
+    for feature in layer:
+        geometry = feature.GetGeometryRef()
+        if geometry is None or geometry.IsEmpty():
+            continue
+        clone = geometry.Clone()
+        if clone.GetGeometryName() not in (
+            "LINESTRING", "MULTILINESTRING", "GEOMETRYCOLLECTION",
+        ):
+            continue
+        if transform is not None:
+            try:
+                clone.Transform(transform)
+            except Exception:
+                continue
+        lines.append(clone)
+    layer = None
+    source = None
+    return lines
+
+
 def _water_path(directory):
     from osgeo import ogr
 
@@ -757,8 +983,59 @@ def _protect_polygons(polygons, branches, down_values, cancel=None):
     return set(best.values())
 
 
+def _coastline_outlets(lines, branches, cancel=None):
+    """Находит ветви, нижний конец которых выходит на берег."""
+    if not lines:
+        return set()
+    boxes = [line.GetEnvelope() for line in lines]
+    outlets = set()
+    for position, branch in enumerate(branches):
+        if cancel is not None and position % 500 == 0 and cancel.is_set():
+            raise InterruptedError("Preparation cancelled")
+        point = _point_geometry(branch.points[-1])
+        for line, box in zip(lines, boxes):
+            if (
+                point.GetX() < box[0] - OUTLET_TOLERANCE
+                or point.GetX() > box[1] + OUTLET_TOLERANCE
+                or point.GetY() < box[2] - OUTLET_TOLERANCE
+                or point.GetY() > box[3] + OUTLET_TOLERANCE
+            ):
+                continue
+            try:
+                if line.Distance(point) <= OUTLET_TOLERANCE:
+                    outlets.add(position)
+                    break
+            except Exception:
+                continue
+    return outlets
+
+
+def _apply_outlet_protection(outlets, branches, feeders, values, ranks):
+    """Оставляет видимым путь от устья вверх до крупной ветви."""
+    result = list(ranks)
+    for start in outlets:
+        position = start
+        seen = set()
+        while position is not None and position not in seen:
+            seen.add(position)
+            if result[position] >= MAX_RANK:
+                break
+            result[position] = MAX_RANK
+            candidates = [
+                item for item in feeders.get(branches[position].up, ())
+                if item != position
+            ]
+            if not candidates:
+                break
+            position = max(
+                candidates, key=lambda item: (values[item], -item),
+            )
+    return result
+
+
 def _apply_protection(starts, branches, followers, down_values, ranks):
     result = list(ranks)
+    protected = set()
     for start in starts:
         position = start
         seen = set()
@@ -767,6 +1044,7 @@ def _apply_protection(starts, branches, followers, down_values, ranks):
             if ranks[position] >= MAX_RANK:
                 break
             result[position] = MAX_RANK
+            protected.add(position)
             candidates = [
                 follower for follower in followers.get(
                     branches[position].down, ()
@@ -779,7 +1057,7 @@ def _apply_protection(starts, branches, followers, down_values, ranks):
                 candidates,
                 key=lambda item: (down_values[item], -item),
             )
-    return result
+    return result, protected
 
 
 def _default_rank(value):
@@ -990,13 +1268,18 @@ def apply(directory, cancel=None, progress=None):
     followers = defaultdict(list)
     for position, branch in enumerate(branches):
         followers[branch.up].append(position)
-    groups, totals, has_junction = _components(branches)
-    values = _upstream_values(
-        branches, followers, groups, totals, has_junction
+    mouths = _attach_mouth_fragments(
+        branches, followers, cancel=cancel,
     )
+    feeders = defaultdict(list)
+    for position, branch in enumerate(branches):
+        feeders[branch.down].append(position)
+    groups, totals = _components(branches)
+    values = _upstream_values(branches, followers, groups, totals)
     ranks = [_default_rank(value) for value in values]
 
     protected = 0
+    protected_positions = set()
     warning = None
     try:
         starts, down_values = _source_starts(
@@ -1004,7 +1287,7 @@ def apply(directory, cancel=None, progress=None):
             transform=forward, cancel=cancel,
         )
         if starts and down_values is not None:
-            ranks = _apply_protection(
+            ranks, protected_positions = _apply_protection(
                 starts, branches, followers, down_values, ranks
             )
             protected = len(starts)
@@ -1012,6 +1295,34 @@ def apply(directory, cancel=None, progress=None):
         raise
     except Exception as exc:  # noqa: BLE001 - карта не должна страдать
         warning = str(exc)
+
+    outlets = 0
+    mouth_branches = set()
+    try:
+        coastline = _read_coastline(directory, transform=forward)
+        mouth_branches = _coastline_outlets(
+            coastline, branches, cancel=cancel,
+        )
+        outlets = len(mouth_branches)
+    except InterruptedError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - карта не должна страдать
+        warning = (
+            f"{warning}; берег: {exc}" if warning else f"берег: {exc}"
+        )
+
+    removed_short = _removal_prefixes(
+        branches, feeders, followers, THRESHOLDS[0],
+        protected_positions, cancel=cancel,
+    )
+    removed_long = _removal_prefixes(
+        branches, feeders, followers, THRESHOLDS[1],
+        protected_positions, cancel=cancel,
+    )
+    branches, ranks = _split_prefixes(
+        branches, removed_short, removed_long,
+        protected_positions, mouth_branches,
+    )
 
     rank_by_branch = {
         id(branch): ranks[position]
@@ -1073,6 +1384,8 @@ def apply(directory, cancel=None, progress=None):
     stats = {
         "branches": len(branches),
         "protected": protected,
+        "mouths": mouths,
+        "outlets": outlets,
         "arrows": arrows,
         "layers": counts,
     }
