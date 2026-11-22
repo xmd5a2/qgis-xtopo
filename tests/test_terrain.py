@@ -1111,6 +1111,22 @@ class DemSourceTest(unittest.TestCase):
             frozenset({(26, -81)}),
         )
 
+    def test_world_map_land_area_skips_ocean(self):
+        """Оценка рельефа должна видеть острова, а не целые тайлы."""
+        from qgis_xtopo.core import dem_sources
+
+        if dem_sources._world_map_path() is None:
+            self.skipTest("QGIS world map is not available")
+        bbox = BBox(-152.6578, -18.2298, -147.8138, -13.8628)
+        area = dem_sources.land_area_km2(bbox)
+        self.assertIsNotNone(area)
+        # Таити и Муреа вместе — около 1,5 тыс. км², а не 90 тыс. км²
+        # площади затронутых тайлов 1°×1°.
+        self.assertTrue(1000 < area < 2000, area)
+        self.assertEqual(
+            dem_sources.land_area_km2(BBox(0.0, 0.0, 3.0, 2.0)), 0.0
+        )
+
     def test_preferred_source_requires_land_coverage(self):
         from qgis_xtopo.core import dem_sources
 

@@ -68,6 +68,29 @@ def frame_sizes_km(bbox):
     return width / 1000.0, height / 1000.0
 
 
+# Средний радиус Земли, км: для площади рамки достаточно сферической
+# формулы, расхождение с эллипсоидом — доли процента.
+EARTH_RADIUS_KM = 6371.0088
+
+
+def _rect_area_km2(min_lon, min_lat, max_lon, max_lat):
+    return (
+        EARTH_RADIUS_KM ** 2
+        * math.radians(max_lon - min_lon)
+        * (
+            math.sin(math.radians(max_lat))
+            - math.sin(math.radians(min_lat))
+        )
+    )
+
+
+def frame_area_km2(bbox):
+    """Площадь рамки на сфере в квадратных километрах."""
+    return _rect_area_km2(
+        bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max
+    )
+
+
 def format_length(km):
     """Подпись длины в километрах."""
     from . import i18n

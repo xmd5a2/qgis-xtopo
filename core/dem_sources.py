@@ -1307,6 +1307,63 @@ def _tile_geometry(rect):
 
 
 @lru_cache(maxsize=32)
+def _world_map_land_area(bbox):
+    """Площадь суши охвата по Natural Earth, км².
+
+    Тайлы 1°×1° слишком грубы для архипелагов: целый квадрат океана
+    вокруг маленького острова считался бы сушей.  Здесь полигоны
+    обрезаются рамкой и измеряются по эллипсоиду.  ``None`` — маску
+    построить не удалось.
+    """
+    path = _world_map_path()
+    if path is None:
+        return None
+    try:
+        from osgeo import ogr
+        from qgis.core import QgsGeometry
+
+        from . import measure
+
+        dataset = ogr.Open(str(path))
+        if dataset is None:
+            return None
+        layer = dataset.GetLayerByName(WORLD_MAP_LAYER)
+        if layer is None:
+            dataset = None
+            return None
+        layer.SetSpatialFilterRect(
+            bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max
+        )
+        frame = _tile_geometry((
+            bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max,
+        ))
+        distance = measure.distance_area()
+        total = 0.0
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None:
+                continue
+            clipped = geometry.Intersection(frame)
+            if clipped is None or clipped.IsEmpty():
+                continue
+            shape = QgsGeometry.fromWkt(clipped.ExportToWkt())
+            if not shape.isEmpty():
+                total += distance.measureArea(shape) / 1_000_000.0
+        layer.SetSpatialFilter(None)
+        dataset = None
+        return total
+    except Exception:
+        return None
+
+
+def land_area_km2(bbox):
+    """Площадь суши охвата, км² (``None`` — маску построить не удалось)."""
+    if bbox is None:
+        return None
+    return _world_map_land_area(bbox)
+
+
+@lru_cache(maxsize=32)
 def _world_map_land_tiles(bbox):
     """Тайлы охвата с сушей по Natural Earth из ресурсов QGIS.
 

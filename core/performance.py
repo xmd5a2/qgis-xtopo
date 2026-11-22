@@ -42,6 +42,12 @@ TERRAIN_SECONDS_PER_KM2 = 0.012
 TERRAIN_3DEP_SECONDS_PER_KM2 = 0.040
 TERRAIN_CACHED_SECONDS = 1.5
 
+# Изолинии считаются по всему растру DEM, включая морскую часть: вода
+# вычитается из готовых линий позже.  Поэтому их время зависит от
+# площади рамки, а не от площади суши.  Замер на Таити (рамка
+# 250 тыс. км², DEM 11 526×10 391): около 330 с.
+TERRAIN_ISOLINES_SECONDS_PER_KM2 = 0.0013
+
 # Общий хвост после слоёв: создание проекта, значки POI, пересечения
 # полигонов, очистка.  Он не зависит от размера выгрузки, но заметен
 # на маленьких охватах.
@@ -158,14 +164,18 @@ def read_score(bytes_per_second):
 
 
 def estimate_terrain_seconds(area_km2, source="auto", cpu=None,
-                             workers=None, cached=False, hillshade=True):
+                             workers=None, cached=False, hillshade=True,
+                             isolines=False, frame_area_km2=None):
     """Оценка подготовки растрового рельефа в секундах.
 
-    ``area_km2`` — площадь охвата, ``source`` — ключ выбранного набора
-    DEM.  Для 3DEP (1/3″) работы примерно втрое больше на ту же площадь.
-    Если готовый рельеф уже лежит в кэше, остаётся только восстановить
-    файлы.  ``workers`` — фактическое число параллельных задач; на
-    машинах с малым объёмом памяти их меньше, и рельеф идёт медленнее.
+    ``area_km2`` — площадь суши: океанские тайлы DEM не скачиваются.
+    ``source`` — ключ выбранного набора DEM; для 3DEP (1/3″) работы
+    примерно втрое больше на ту же площадь.  Если готовый рельеф уже
+    лежит в кэше, остаётся только восстановить файлы.  ``isolines`` —
+    строятся ли изолинии, ``frame_area_km2`` — площадь всей рамки: они
+    считаются по всему растру, включая морскую часть.  ``workers`` —
+    фактическое число параллельных задач; на машинах с малым объёмом
+    памяти их меньше, и рельеф идёт медленнее.
     """
     speed = cpu_score() if cpu is None else _clamp(float(cpu), CPU_MIN, CPU_MAX)
     if cached:
@@ -180,6 +190,12 @@ def estimate_terrain_seconds(area_km2, source="auto", cpu=None,
     seconds = TERRAIN_FIXED_SECONDS + max(0.0, float(area_km2 or 0.0)) * rate
     if not hillshade:
         seconds *= 0.8
+    if isolines:
+        frame = max(
+            0.0,
+            float(frame_area_km2 if frame_area_km2 is not None else area_km2)
+        )
+        seconds += frame * TERRAIN_ISOLINES_SECONDS_PER_KM2
     # При нехватке памяти воркеров меньше восьми; зависимость слабее
     # линейной, потому что часть работы последовательная.
     memory_factor = (REFERENCE_WORKERS / max(1, workers)) ** 0.35

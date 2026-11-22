@@ -1997,6 +1997,47 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             dock.deleteLater()
 
+    def test_dock_terrain_estimate_uses_land_area(self):
+        """Океан в рамке не должен раздувать оценку рельефа."""
+        from unittest import mock
+
+        from qgis_xtopo.core import measure
+        from qgis_xtopo.core.bbox import parse_bbox
+        from qgis_xtopo.gui import dockwidget
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        dock = XtopoDockWidget(None)
+        try:
+            text = "-152.6578,-18.2298,-147.8138,-13.8628"
+            dock.bbox.setText(text)
+            dock.generate_terrain.setChecked(True)
+            dock.isolines.setChecked(True)
+            land_area = 17_000.0
+            with mock.patch.object(
+                dockwidget.dem_sources,
+                "land_area_km2",
+                return_value=land_area,
+            ), mock.patch.object(
+                dockwidget.terrain_cache, "dem_cached", return_value=False,
+            ), mock.patch.object(
+                dockwidget.performance,
+                "estimate_terrain_seconds",
+                return_value=1.0,
+            ) as estimate:
+                dock._terrain_estimate_seconds(cpu=1.0)
+            bbox = parse_bbox(text)
+            args, kwargs = estimate.call_args
+            self.assertAlmostEqual(args[0], land_area, places=3)
+            self.assertLess(args[0], measure.frame_area_km2(bbox) / 10)
+            self.assertTrue(kwargs["isolines"])
+            self.assertAlmostEqual(
+                kwargs["frame_area_km2"],
+                measure.frame_area_km2(bbox),
+                places=3,
+            )
+        finally:
+            dock.deleteLater()
+
     def test_pbf_probe_reports_read_throughput(self):
         from types import SimpleNamespace
         from unittest import mock

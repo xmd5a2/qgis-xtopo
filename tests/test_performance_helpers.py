@@ -284,6 +284,19 @@ class PerformanceEstimateTest(unittest.TestCase):
         self.assertLess(cached, cold)
         self.assertGreater(highres, cold)
 
+    def test_terrain_isolines_depend_on_frame_area(self):
+        from qgis_xtopo.core import performance
+
+        without = performance.estimate_terrain_seconds(
+            10_000, source="cop30", cpu=1.0, workers=8,
+        )
+        with_isolines = performance.estimate_terrain_seconds(
+            10_000, source="cop30", cpu=1.0, workers=8,
+            isolines=True, frame_area_km2=250_000,
+        )
+        # Изолинии считаются по всей рамке, а не только по суше.
+        self.assertGreater(with_isolines, without + 300)
+
     def test_preparation_estimate_includes_terrain(self):
         from qgis_xtopo.core import performance
 

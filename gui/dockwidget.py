@@ -2695,15 +2695,26 @@ class XtopoDockWidget(QDockWidget):
             if bbox is None:
                 bbox = parse_bbox(self.bbox.text().strip())
             config = self._terrain_estimate_config(bbox)
-            width, height = measure.frame_sizes_km(bbox)
+            frame_area = measure.frame_area_km2(bbox)
+            source = self._terrain_estimate_source(config)
+            area = frame_area
+            if source != dem_sources.MANUAL_SOURCE:
+                # DEM качается только для суши, поэтому оценка по всей
+                # рамке завышала время в разы.  Ручной набор берётся
+                # целиком, без фильтра по суше.
+                land_area = dem_sources.land_area_km2(bbox)
+                if land_area is not None:
+                    area = land_area
             cached = terrain_cache.dem_cached(config, bbox)
         except Exception:
             return 0.0
         return performance.estimate_terrain_seconds(
-            width * height,
-            source=self._terrain_estimate_source(config),
+            area,
+            source=source,
             cached=cached,
             hillshade=config.generate_terrain_hillshade_slope,
+            isolines=config.generate_terrain_isolines,
+            frame_area_km2=frame_area,
             cpu=cpu,
         )
 
