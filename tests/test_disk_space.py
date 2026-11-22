@@ -43,8 +43,7 @@ class DiskSpaceTest(unittest.TestCase):
         """
         pixels = 1000 * 1000
         estimate = disk_space.relief_estimate(1000, 1000)
-        # DEM, его копия в 3857 и ссылка на него же, уклон и его
-        # итоговый растр, оттенок и его итоговая копия.
+        # DEM с запасом на копию, уклон, оттенок и промежуточные растры.
         self.assertEqual(
             estimate,
             pixels * (5 * disk_space.FLOAT_PIXEL + 2 * disk_space.BYTE_PIXEL),

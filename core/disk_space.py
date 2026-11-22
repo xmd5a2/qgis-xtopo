@@ -98,8 +98,7 @@ def relief_estimate(width, height):
     записывалась как float32 — оценка была вчетверо ниже реальности.
     """
     pixels = max(0, int(width)) * max(0, int(height))
-    # DEM, его копия в 3857, ссылка на него же (на случай копии),
-    # уклон и его итоговый растр, оттенок и его итоговая копия.
+    # DEM с запасом на копию, уклон, оттенок и промежуточные растры.
     return pixels * (
         3 * FLOAT_PIXEL + 2 * FLOAT_PIXEL + 2 * BYTE_PIXEL
     )

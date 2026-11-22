@@ -119,7 +119,8 @@ class TerrainTest(unittest.TestCase):
             self.assertEqual(gdal.Warp.call_args_list[0].args[1], str(tile))
             self.assertFalse(any("Merging" in message for message in messages))
 
-    def test_reprojected_dem_uses_content_cache(self):
+    def test_dem_is_built_without_projected_copy(self):
+        """Копия DEM в EPSG:3857 не нужна и убирается из старых проектов."""
         from unittest import mock
 
         from osgeo import gdal, osr
@@ -148,21 +149,22 @@ class TerrainTest(unittest.TestCase):
                 encoding="utf-8",
             )
             bbox = BBox(44.7, 42.78, 44.72, 42.8)
-            messages = []
             with mock.patch.object(gdal, "Warp", wraps=gdal.Warp) as warp:
-                terrain.build_dem(config, bbox, messages.append)
-                self.assertEqual(warp.call_count, 2)
-                terrain.build_dem(config, bbox, messages.append)
-                self.assertEqual(warp.call_count, 3)
-                self.assertIn(
-                    "Using cached reprojected DEM (EPSG:3857)", messages
+                terrain.build_dem(config, bbox)
+                self.assertEqual(warp.call_count, 1)
+                self.assertTrue((config.raster_dir / "merged_dem.tif").exists())
+                self.assertFalse(
+                    (config.raster_dir / "merged_dem_3857.tif").exists()
                 )
 
-                dataset = gdal.Open(str(tile), gdal.GA_Update)
-                dataset.GetRasterBand(1).Fill(2000)
-                dataset = None
-                terrain.build_dem(config, bbox, messages.append)
-                self.assertEqual(warp.call_count, 5)
+                stale = config.raster_dir / "merged_dem_3857.tif"
+                marker = config.raster_dir / "merged_dem_3857.tif.sha256"
+                stale.write_bytes(b"old")
+                marker.write_text("old", encoding="ascii")
+                terrain.build_dem(config, bbox)
+                self.assertEqual(warp.call_count, 2)
+                self.assertFalse(stale.exists())
+                self.assertFalse(marker.exists())
 
     def test_download_srtm_uses_cache(self):
         from qgis_xtopo.core import terrain

@@ -125,7 +125,6 @@ _TERRAIN_STEPS = (
     ("Preparing terrain", 0.05),
     ("Загрузка рельефа", 0.15),
     ("Merging ", 0.35),
-    ("Reprojecting DEM", 0.5),
     ("Generating slope", 0.65),
     ("Writing slope", 0.72),
     ("Generating hillshade", 0.85),

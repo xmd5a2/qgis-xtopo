@@ -22,7 +22,6 @@ from pathlib import Path
 # Сырой DEM переиспользуется между запусками и не зависит от воды.
 DEM_FILES = (
     "merged_dem.tif",
-    "merged_dem_3857.tif",
 )
 
 # Маскированный по воде DEM и производные от него растры.  Ключ этой
@@ -30,7 +29,6 @@ DEM_FILES = (
 # маска и отмывка пересчитываются.
 RELIEF_FILES = (
     "merged_dem.tif",
-    "merged_dem_3857.tif",
     "slope.tif",
     "hillshade_composite.tif",
 )
@@ -40,7 +38,7 @@ RELIEF_FILES = (
 # кэш на месте.  Копирование гигабайтов при каждой подготовке больше
 # не нужно.
 
-# Версия расчёта рельефа (формат растров, сборка мозаики, репроекция).
+# Версия расчёта рельефа (формат растров, сборка мозаики).
 # Меняя результат, поднимайте число: иначе старый кэш отдаст устаревший
 # рельеф даже после обновления плагина.  Версия плагина сюда намеренно не
 # входит — обновление интерфейса или стиля не должно пересчитывать DEM.
@@ -71,8 +69,6 @@ WATER_MASK_VERSION = 1
 # тайлов — старые подсказки кэша больше не должны находить рельеф,
 # собранный по другому набору тайлов.
 TILE_FILTER_VERSION = 1
-# Маркер репроекции: без него повторная сборка DEM не найдёт свой кэш.
-DEM_EXTRA_FILES = ("merged_dem_3857.tif.sha256",)
 ISOLINES_FILES = (
     "isolines_regular.sqlite",
     "isolines_glacier.sqlite",
@@ -491,12 +487,12 @@ def _store(config, group, signature, names, source_dir):
 
 def dem_required(config):
     """Сырые растры, которые должны быть в кэше при текущих настройках."""
-    return ("merged_dem.tif", "merged_dem_3857.tif")
+    return ("merged_dem.tif",)
 
 
 def relief_required(config):
     """Растры маскированного рельефа, нужные для текущих настроек."""
-    names = ["merged_dem.tif", "merged_dem_3857.tif"]
+    names = ["merged_dem.tif"]
     if config.generate_terrain_hillshade_slope:
         names.extend(["slope.tif", "hillshade_composite.tif"])
     return tuple(names)
@@ -527,13 +523,13 @@ def restore_dem(config, signature):
     """Возвращает готовые растры рельефа из кэша (True — удалось)."""
     return _restore(
         config, "dem", signature,
-        DEM_FILES + DEM_EXTRA_FILES, config.raster_dir, dem_required(config),
+        DEM_FILES, config.raster_dir, dem_required(config),
     )
 
 
 def store_dem(config, signature):
     """Сохраняет сырые растры рельефа в кэш."""
-    return _store(config, "dem", signature, DEM_FILES + DEM_EXTRA_FILES, config.raster_dir)
+    return _store(config, "dem", signature, DEM_FILES, config.raster_dir)
 
 
 def restore_relief(config, signature):

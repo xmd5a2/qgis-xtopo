@@ -184,6 +184,42 @@ class TemplateFilterExpressionTest(unittest.TestCase):
         self.assertEqual(broken, [])
 
 
+class DemLayerTest(unittest.TestCase):
+    """Высота перевала считается по DEM в градусах, как и координаты слоя."""
+
+    def test_no_projected_dem_layer(self):
+        names = [
+            layer.findtext("layername")
+            for layer in _template_root().iter("maplayer")
+        ]
+        self.assertIn("merged_dem", names)
+        self.assertNotIn("merged_dem_3857", names)
+
+    def test_mountain_pass_has_single_elevation_expression(self):
+        fields = [
+            field.get("expression") or ""
+            for field in _template_root().iter("field")
+        ]
+        self.assertFalse(
+            any("merged_dem_3857" in expression for expression in fields)
+        )
+        for layer in _template_root().iter("maplayer"):
+            if layer.findtext("layername") != "mountain pass":
+                continue
+            blocks = layer.findall("expressionfields")
+            self.assertEqual(len(blocks), 1)
+            elevation = [
+                field.get("expression") or ""
+                for field in blocks[0].findall("field")
+                if field.get("name") == "ele_calc"
+            ]
+            self.assertEqual(len(elevation), 1)
+            self.assertIn("raster_value('merged_dem'", elevation[0])
+            break
+        else:
+            self.fail("mountain pass layer not found")
+
+
 class TunnelLayerOrderTest(unittest.TestCase):
     """Туннели — под линейными слоями, над площадными.
 

@@ -1,5 +1,4 @@
 import gzip
-import hashlib
 import math
 import os
 import shutil
@@ -1304,43 +1303,11 @@ def _transform_raster(source_path, destination_path, operation, dtype=None,
         source = None
 
 
-def _file_sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as source:
-        for chunk in iter(lambda: source.read(CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _stat_digest(path):
-    """Быстрый отпечаток файла или каталога: размер и время изменения.
-
-    Полный хеш содержимого читает весь файл: на крупном охвате это
-    сотни мегабайт только ради ключа кэша.  Для каталога учитываются
-    имена, размеры и время изменения всех файлов (как в
-    ``core/terrain_cache.py``).
-    """
-    target = Path(path)
-    if target.is_dir():
-        parts = []
-        try:
-            entries = sorted(target.iterdir())
-        except OSError:
-            return "missing"
-        for entry in entries:
-            if not entry.is_file():
-                continue
-            try:
-                stat = entry.stat()
-            except OSError:
-                continue
-            parts.append(f"{entry.name}:{stat.st_size}:{stat.st_mtime_ns}")
-        return hashlib.sha1(":".join(parts).encode("utf-8")).hexdigest()
-    try:
-        stat = target.stat()
-    except OSError:
-        return "missing"
-    return f"{stat.st_size}:{stat.st_mtime_ns}"
+def _remove_stale_projected_dem(config):
+    """Убрать копию DEM в EPSG:3857 из проектов прежних версий."""
+    stale = config.raster_dir / "merged_dem_3857.tif"
+    stale.unlink(missing_ok=True)
+    stale.with_suffix(stale.suffix + ".sha256").unlink(missing_ok=True)
 
 
 def build_dem(config, bbox, progress=None, cancel=None):
@@ -1384,46 +1351,7 @@ def build_dem(config, bbox, progress=None, cancel=None):
         raise RuntimeError("Failed to crop and merge DEM tiles")
     result = None
 
-    merged_3857 = config.raster_dir / "merged_dem_3857.tif"
-    cache_marker = merged_3857.with_suffix(merged_3857.suffix + ".sha256")
-    # Ключ кэша репроекции — отпечаток входов слияния, а не хеш
-    # содержимого merged_dem.tif: тот читает весь растр (гигабайты)
-    # только ради ключа.  Слияние детерминировано тайлами и маской
-    # охвата, поэтому отпечатка достаточно.
-    source_hash = (
-        _stat_digest(config.terrain_input_dir) + "/" + _stat_digest(crop)
-    )
-    cache_key = f"EPSG:3857:{source_hash}"
-    cached_key = None
-    if merged_3857.exists() and cache_marker.exists():
-        try:
-            cached_key = cache_marker.read_text(encoding="ascii").strip()
-        except (OSError, UnicodeError):
-            pass
-    if cached_key == cache_key:
-        if progress:
-            progress("Using cached reprojected DEM (EPSG:3857)")
-        return merged
-
-    if progress:
-        progress("Reprojecting DEM to EPSG:3857")
-    # Маркер и прежний растр удаляем до записи: прерванный Warp не должен
-    # оставить действительный кэш для частично записанного растра.
-    cache_marker.unlink(missing_ok=True)
-    merged_3857.unlink(missing_ok=True)
-    options = gdal.WarpOptions(
-        dstSRS="EPSG:3857",
-        outputType=gdal.GDT_Float32,
-        creationOptions=["COMPRESS=LZW", "BIGTIFF=YES"],
-        callback=_warp_callback(cancel, None, "DEM"),
-    )
-    result = gdal.Warp(str(merged_3857), str(merged), options=options)
-    if result is None:
-        if cancel is not None and cancel.is_set():
-            raise InterruptedError("DEM preparation cancelled")
-        raise RuntimeError("Failed to reproject DEM")
-    result = None
-    cache_marker.write_text(cache_key + "\n", encoding="ascii")
+    _remove_stale_projected_dem(config)
     return merged
 
 
@@ -2006,12 +1934,10 @@ def mask_dem_by_water(config, progress=None, cancel=None):
                 "отрицательные глубины остаются"
             )
         return 0
-    total = 0
-    for name in ("merged_dem.tif", "merged_dem_3857.tif"):
-        changed = _mask_raster_water(config, name, water_paths, cancel)
-        if changed and progress:
-            progress(f"Маска воды: {name} — {changed} пикселей")
-        total += changed
+    name = "merged_dem.tif"
+    total = _mask_raster_water(config, name, water_paths, cancel)
+    if total and progress:
+        progress(f"Маска воды: {name} — {total} пикселей")
     if progress:
         progress(f"Маска воды: заменено пикселей — {total}")
     return total
@@ -2983,6 +2909,7 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
         for path in config.terrain_input_dir.iterdir():
             if path.is_file():
                 path.unlink(missing_ok=True)
+    _remove_stale_projected_dem(config)
     return dem_key
 
 
