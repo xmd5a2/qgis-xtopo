@@ -1198,6 +1198,81 @@ class RuleIntegrityTest(unittest.TestCase):
             )
 
 
+class RuleScaleRangeTest(unittest.TestCase):
+    """Диапазоны соседних правил не должны пересекаться.
+
+    Верхняя граница диапазона в QGIS исключающая, поэтому стык
+    `100000`/`100000` пересечением не считается.
+    """
+
+    @staticmethod
+    def _interval(rule, parent):
+        lower = float(rule.get("scalemindenom") or 0)
+        upper = float(rule.get("scalemaxdenom") or 0) or float("inf")
+        return max(parent[0], lower), min(parent[1], upper)
+
+    def _check(self, container, parent, layer_name):
+        children = container.findall("rule")
+        drawing = [
+            (rule, self._interval(rule, parent))
+            for rule in children
+            if rule.find("settings") is not None
+            or rule.find("symbol") is not None
+        ]
+        for index, (first, first_range) in enumerate(drawing):
+            for second, second_range in drawing[index + 1:]:
+                if (first.get("filter") or "") != (second.get("filter") or ""):
+                    continue
+                lower = max(first_range[0], second_range[0])
+                upper = min(first_range[1], second_range[1])
+                self.assertGreaterEqual(
+                    lower, upper,
+                    f"{layer_name}: {first.get('description')} "
+                    f"{first_range} и {second.get('description')} "
+                    f"{second_range}",
+                )
+        for rule in children:
+            self._check(
+                rule, self._interval(rule, parent), layer_name
+            )
+
+    def test_sibling_scale_ranges_do_not_overlap(self):
+        for layer in _template_root().iter("maplayer"):
+            name = layer.findtext("layername")
+            labeling = layer.find("labeling")
+            if labeling is not None and labeling.get("type") == "rule-based":
+                rules = labeling.find("rules")
+                if rules is not None:
+                    self._check(rules, (0.0, float("inf")), name)
+            renderer = layer.find("renderer-v2")
+            if renderer is not None and renderer.get("type") == "RuleRenderer":
+                rules = renderer.find("rules")
+                if rules is not None:
+                    self._check(rules, (0.0, float("inf")), name)
+
+    def test_plateau_labels_stop_at_400k(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        expected = [
+            ("30000", "100000"),
+            ("100000", "200000"),
+            ("200000", "300000"),
+            ("300000", "400000"),
+        ]
+        for name in ("plateau", "plateau node"):
+            rules = layers[name].findall("./labeling/rules/rule")
+            self.assertEqual(
+                [
+                    (rule.get("scalemindenom"), rule.get("scalemaxdenom"))
+                    for rule in rules
+                ],
+                expected,
+                name,
+            )
+
+
 class BridgeIconScaleTest(unittest.TestCase):
     """Значки мостов не должны попадать на обзорные масштабы."""
 
