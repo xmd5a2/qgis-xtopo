@@ -47,8 +47,9 @@
   чинятся в начале рецепта.
 - **Упакованные слои — MultiLineString/MultiPolygon.** После шагов
   `pack_roads` и `pack_all` дорожные и простые линии
-  (`highway_main`, `path`, `track`, `railway_all`, `stream`, `tree_row`,
-  `power_minor_line`, `embankment`, `cutline`) объявляются в SQLite как
+  (`highway_main`, `path`, `track`, `railway_all`, `stream`,
+  `stream_intermittent`, `tree_row`, `power_minor_line`, `embankment`,
+  `cutline`) объявляются в SQLite как
   `MultiLineString`, площади (`grass`, `farmland`, `landuse_residential`,
   `wood`, `scrub`) и `building` — как `MultiPolygon`, `tree` — как
   `MultiPoint`. Все слои шаблона,

@@ -1983,8 +1983,8 @@ class IntermittentWaterwayWidthTest(unittest.TestCase):
         return float(_option_value(line, "line_width"))
 
     def test_streams_are_thinner_at_100k(self):
-        for label in ("100000 - 200000", "200000 - 300000",
-                      "300000 - 500000"):
+        for label in ("100000 - 150000", "150000 - 200000",
+                      "200000 - 300000", "300000 - 500000"):
             regular = self._width("stream", ["default", label])
             intermittent = self._width(
                 "stream intermittent", ["default", label])
@@ -2003,6 +2003,86 @@ class IntermittentWaterwayWidthTest(unittest.TestCase):
             self._width("river intermittent", ["100000 - 300000"]), 0.22)
         self.assertAlmostEqual(
             self._width("river intermittent", ["300000 - 0"]), 0.17)
+
+
+class StreamDryingStyleTest(unittest.TestCase):
+    """Подсыхание ручьёв задано целочисленными фильтрами по dry_rank."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    @staticmethod
+    def _find(node, path):
+        for rule in node.findall("rule"):
+            title = rule.get("label") or rule.get("description")
+            if title == path[0]:
+                if len(path) == 1:
+                    return rule
+                return StreamDryingStyleTest._find(rule, path[1:])
+        return None
+
+    def _filter(self, layer_name, path):
+        layer = self.layers[layer_name]
+        rule = self._find(
+            layer.find("renderer-v2").find("rules"), path
+        )
+        self.assertIsNotNone(rule, f"{layer_name}/{'/'.join(path)}")
+        return rule.get("filter") or ""
+
+    def test_stream_bands_have_expected_ranks(self):
+        cases = (
+            ("stream", "default", (
+                ("100000 - 150000", 1, 3),
+                ("150000 - 200000", 2, 3),
+                ("200000 - 300000", 3, 4),
+            )),
+            ("stream", "drain or ditch", (
+                ("100000 - 150000", 1, 4),
+                ("150000 - 200000", 2, 4),
+                ("200000 - 300000", 3, 5),
+            )),
+            ("stream intermittent", "default", (
+                ("100000 - 150000", 1, 4),
+                ("150000 - 200000", 2, 4),
+                ("200000 - 300000", 3, 5),
+            )),
+        )
+        for layer_name, branch, bands in cases:
+            for label, rank, lod in bands:
+                text = self._filter(layer_name, [branch, label])
+                self.assertIn(f'"dry_rank" >= {rank}', text)
+                self.assertIn(f"@level_of_detail >= {lod}", text)
+
+    def test_overview_bands_keep_rank_three(self):
+        text = self._filter(
+            "stream", ["default", "300000 - 500000"])
+        self.assertIn('"dry_rank" >= 3', text)
+        text = self._filter(
+            "stream intermittent", ["default", "300000 - 500000"])
+        self.assertIn('"dry_rank" >= 3', text)
+        text = self._filter(
+            "stream", ["drain or ditch", "200000 - 300000"])
+        self.assertIn('"dry_rank" >= 3', text)
+
+    def test_below_100k_has_no_drying(self):
+        for layer_name, branch, label in (
+            ("stream", "default", "50000 - 100000"),
+            ("stream", "drain or ditch", "50000 - 100000"),
+            ("stream intermittent", "default", "50000 - 100000"),
+        ):
+            self.assertNotIn(
+                "dry_rank",
+                self._filter(layer_name, [branch, label]),
+            )
+
+    def test_drystream_is_not_changed(self):
+        layer = self.layers["drystream"]
+        for rule in layer.find("renderer-v2").iter("rule"):
+            self.assertNotIn("dry_rank", rule.get("filter") or "")
 
 
 class HillshadeVariantsTest(unittest.TestCase):

@@ -18,14 +18,15 @@
 
 После заполнения ``area_m2`` отдельным проходом пакуются площадные слои
 (``grass``, ``farmland``, ``landuse_residential``, ``wood``, ``scrub``)
-и простые линии без подписей (``stream``, ``tree_row``,
-``power_minor_line``, ``embankment``, ``cutline``).  Полигоны пишутся
-в ``MultiPolygon`` по тайлам, каждая часть сохраняется без слияния.
-Именованные объекты остаются отдельными, чтобы не потерять подписи.
-У слоёв с фильтрами по площади в ключ входит класс площади, поэтому
-правила рендерера продолжают выбирать тот же символ.  Точечный слой
-``tree`` без подписей и без зависимостей символа от полей пишется в
-``MultiPoint`` по тайлам: координаты точек не меняются.
+и простые линии без подписей (``stream``, ``stream_intermittent``,
+``tree_row``, ``power_minor_line``, ``embankment``, ``cutline``).
+Полигоны пишутся в ``MultiPolygon`` по тайлам, каждая часть сохраняется
+без слияния.  Именованные объекты остаются отдельными, чтобы не потерять
+подписи.  У слоёв с фильтрами по площади в ключ входит класс площади,
+поэтому правила рендерера продолжают выбирать тот же символ.  У ручьёв
+в ключ входит ``dry_rank``: объекты с разной видимостью нельзя сливать в
+один.  Точечный слой ``tree`` без подписей и без зависимостей символа от
+полей пишется в ``MultiPoint`` по тайлам: координаты точек не меняются.
 """
 
 import math
@@ -34,7 +35,8 @@ from pathlib import Path
 
 ROAD_LAYERS = ("highway_main", "path", "track", "railway_all")
 SIMPLE_LINE_LAYERS = (
-    "stream", "tree_row", "power_minor_line", "embankment", "cutline",
+    "stream", "stream_intermittent", "tree_row", "power_minor_line",
+    "embankment", "cutline",
 )
 PACK_LAYERS = ROAD_LAYERS + SIMPLE_LINE_LAYERS
 AREA_PACK_LAYERS = (
@@ -69,7 +71,8 @@ KEY_FIELDS = {
         "layer",
     ),
     "railway_all": ("railway", "service", "usage"),
-    "stream": ("waterway",),
+    "stream": ("waterway", "dry_rank"),
+    "stream_intermittent": ("waterway", "dry_rank"),
     "tree_row": (),
     "power_minor_line": (),
     "embankment": (),
@@ -85,6 +88,7 @@ USE_NAMES = {
     "track": True,
     "railway_all": False,
     "stream": False,
+    "stream_intermittent": False,
     "tree_row": False,
     "power_minor_line": False,
     "embankment": False,
@@ -160,11 +164,16 @@ def pack(directory, name, cancel=None):
     tile_size = (
         SIMPLE_LINE_TILE_SIZE if name in SIMPLE_LINE_LAYERS else None
     )
+    projected_tile_size = (
+        SIMPLE_LINE_PROJECTED_TILE_SIZE
+        if name in SIMPLE_LINE_LAYERS else None
+    )
     return _pack_file(
         path,
         KEY_FIELDS[name],
         use_names=USE_NAMES[name],
         tile_size=tile_size,
+        projected_tile_size=projected_tile_size,
         cancel=cancel,
     )
 
@@ -478,7 +487,7 @@ def _multi_from_geometries(parts):
 
 
 def _pack_file(path, key_fields, use_names=True, tile_size=None,
-               cancel=None):
+               projected_tile_size=None, cancel=None):
     from osgeo import ogr
 
     source = ogr.Open(str(path))
@@ -526,6 +535,10 @@ def _pack_file(path, key_fields, use_names=True, tile_size=None,
         tile_size = TILE_SIZE
         if spatial_ref is not None and not spatial_ref.IsGeographic():
             tile_size = PROJECTED_TILE_SIZE
+    elif projected_tile_size is not None and spatial_ref is not None \
+            and not spatial_ref.IsGeographic():
+        # 0.02° для градусов, 2 км для проецированных единиц.
+        tile_size = projected_tile_size
     field_types = [field.GetType() for field in field_definitions]
     key_indexes = [index_of.get(name) for name in key_fields]
     oneway_position = (

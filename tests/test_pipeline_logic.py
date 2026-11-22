@@ -19,7 +19,7 @@ from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
 )
 from qgis_xtopo.core import (
-    field_subset, highway_integrity, oneway, road_packing,
+    field_subset, highway_integrity, oneway, road_packing, stream_drying,
 )
 from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
 from qgis_xtopo.core.resources import query_names
@@ -3220,6 +3220,81 @@ class PackedGeometryTest(unittest.TestCase):
             )
             dataset = None
 
+    def _stream_source(self, directory, rows, name="stream"):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(3857)
+        layer = dataset.CreateLayer(name, srs, ogr.wkbLineString)
+        for field_name, field_type in (
+            ("name", ogr.OFTString),
+            ("waterway", ogr.OFTString),
+            ("dry_rank", ogr.OFTInteger),
+        ):
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for field_name in ("name", "waterway", "dry_rank"):
+                if field_name in row:
+                    feature.SetField(field_name, row[field_name])
+            line = ogr.Geometry(ogr.wkbLineString)
+            for x, y in row["coords"]:
+                line.AddPoint_2D(x, y)
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    def test_stream_packs_by_dry_rank_and_projected_tile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._stream_source(directory, [
+                {
+                    "waterway": "stream", "dry_rank": 0,
+                    "coords": [(0, 0), (100, 0)],
+                },
+                {
+                    "waterway": "stream", "dry_rank": 0,
+                    "coords": [(100, 0), (200, 0)],
+                },
+                {
+                    "waterway": "stream", "dry_rank": 3,
+                    "coords": [(300, 0), (400, 0)],
+                },
+            ])
+            self.assertEqual(road_packing.pack(directory, "stream"), 2)
+            dataset, _layer, features = self._features(directory, "stream")
+            ranks = sorted(feature.GetField("dry_rank") for feature in features)
+            self.assertEqual(ranks, [0, 3])
+            zero = next(
+                feature for feature in features
+                if feature.GetField("dry_rank") == 0
+            )
+            self.assertEqual(zero.GetGeometryRef().GetGeometryCount(), 2)
+            dataset = None
+
+    def test_intermittent_stream_is_packed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._stream_source(directory, [
+                {
+                    "waterway": "stream", "dry_rank": 0,
+                    "coords": [(0, 0), (100, 0)],
+                },
+                {
+                    "waterway": "stream", "dry_rank": 0,
+                    "coords": [(100, 0), (200, 0)],
+                },
+            ], name="stream_intermittent")
+            self.assertEqual(
+                road_packing.pack(directory, "stream_intermittent"), 1
+            )
+            dataset, layer, features = self._features(
+                directory, "stream_intermittent"
+            )
+            self.assertEqual(layer.GetGeomType(), ogr.wkbMultiLineString)
+            self.assertEqual(len(features), 1)
+            self.assertEqual(features[0].GetField("dry_rank"), 0)
+            dataset = None
+
     def test_tree_packs_points_by_tile(self):
         with tempfile.TemporaryDirectory() as directory:
             self._point_source(directory, [
@@ -3418,6 +3493,271 @@ class PackedGeometryTest(unittest.TestCase):
             dataset, layer, _features = self._features(directory, "stream")
             self.assertEqual(layer.GetGeomType(), ogr.wkbMultiLineString)
             dataset = None
+
+
+class StreamDryingTest(unittest.TestCase):
+    """Подсыхание ручьёв и защита у источников."""
+
+    FIELDS = (
+        ("waterway", ogr.OFTString),
+        ("name", ogr.OFTString),
+        ("intermittent", ogr.OFTString),
+        ("tunnel", ogr.OFTString),
+        ("layer", ogr.OFTString),
+    )
+
+    @staticmethod
+    def _line_layer(directory, name, rows, epsg=3857):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(epsg)
+        layer = dataset.CreateLayer(name, srs, ogr.wkbLineString)
+        for field_name, field_type in StreamDryingTest.FIELDS:
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for field_name, _field_type in StreamDryingTest.FIELDS:
+                value = row.get(field_name, "")
+                if value is not None:
+                    feature.SetField(field_name, value)
+            line = ogr.Geometry(ogr.wkbLineString)
+            for x, y in row["coords"]:
+                line.AddPoint_2D(x, y)
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _point_layer(directory, points):
+        path = Path(directory) / "spring.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(3857)
+        layer = dataset.CreateLayer("spring", srs, ogr.wkbPoint)
+        layer.CreateField(ogr.FieldDefn("natural", ogr.OFTString))
+        for x, y in points:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("natural", "spring")
+            geometry = ogr.Geometry(ogr.wkbPoint)
+            geometry.AddPoint_2D(x, y)
+            feature.SetGeometry(geometry)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _polygon_layer(directory, name, boxes):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(3857)
+        layer = dataset.CreateLayer(name, srs, ogr.wkbPolygon)
+        layer.CreateField(ogr.FieldDefn("natural", ogr.OFTString))
+        for min_x, min_y, max_x, max_y in boxes:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("natural", "water")
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in (
+                (min_x, min_y), (max_x, min_y), (max_x, max_y),
+                (min_x, max_y), (min_x, min_y),
+            ):
+                ring.AddPoint_2D(x, y)
+            polygon.AddGeometry(ring)
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _ranks(directory, name="stream"):
+        dataset = ogr.Open(str(Path(directory) / f"{name}.sqlite"))
+        layer = dataset.GetLayer(0)
+        result = [
+            (feature.GetField("name"), feature.GetField("dry_rank"))
+            for feature in layer
+        ]
+        dataset = None
+        return result
+
+    def test_main_stays_through_confluence_and_short_tributary_dries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (2000, 0)], "name": "main"},
+                {"coords": [(1000, 400), (1000, 0)], "name": "trib"},
+                {"coords": [(3000, 0), (3000, 100)], "name": "short"},
+            ])
+            self._line_layer(directory, "stream_intermittent", [])
+            stats = stream_drying.apply(directory)
+            self.assertEqual(stats["branches"], 4)
+            ranks = dict(self._ranks(directory))
+            self.assertEqual(ranks["trib"], 1)
+            self.assertEqual(ranks["short"], 0)
+            self.assertEqual(
+                sorted(rank for _name, rank in self._ranks(directory)),
+                [0, 1, 3, 3],
+            )
+
+    def test_standalone_chain_uses_total_length(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {
+                    "coords": [(0, 0), (350, 0)], "name": "first",
+                    "waterway": "stream",
+                },
+                {
+                    "coords": [(350, 0), (700, 0)], "name": "second",
+                    "waterway": "ditch",
+                },
+            ])
+            stream_drying.apply(directory)
+            self.assertEqual(
+                [rank for _name, rank in self._ranks(directory)],
+                [2, 2],
+            )
+
+    def test_t_junction_is_split_into_branches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (2000, 0)], "name": "main"},
+                {"coords": [(1000, 400), (1000, 0)], "name": "trib"},
+            ])
+            stream_drying.apply(directory)
+            self.assertEqual(len(self._ranks(directory)), 3)
+            self.assertEqual(
+                sorted(rank for _name, rank in self._ranks(directory)),
+                [1, 3, 3],
+            )
+
+    def test_spring_protects_only_one_main_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (100, 0)], "name": "small"},
+                {"coords": [(0, 80), (200, 80)], "name": "main"},
+            ])
+            self._point_layer(directory, [(50, 40)])
+            stream_drying.apply(directory)
+            ranks = dict(self._ranks(directory))
+            self.assertEqual(ranks["main"], 3)
+            self.assertEqual(ranks["small"], 0)
+
+    def test_spring_protection_continues_downstream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (300, 0)], "name": "upstream"},
+                {"coords": [(300, 0), (500, 0)], "name": "downstream"},
+                {"coords": [(300, 200), (300, 0)], "name": "trib"},
+            ])
+            self._point_layer(directory, [(300, 190)])
+            stream_drying.apply(directory)
+            ranks = dict(self._ranks(directory))
+            self.assertEqual(ranks["trib"], 3)
+            self.assertEqual(ranks["downstream"], 3)
+            self.assertEqual(ranks["upstream"], 1)
+
+    def test_water_outlet_protects_one_main_stream_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(50, 100), (50, 300)], "name": "short"},
+                {"coords": [(20, 100), (20, 500)], "name": "main"},
+                {"coords": [(50, -100), (50, 0)], "name": "inlet"},
+            ])
+            self._polygon_layer(
+                directory, "water_without_riverbanks",
+                [(0, 0, 100, 100)],
+            )
+            stream_drying.apply(directory)
+            ranks = dict(self._ranks(directory))
+            self.assertEqual(ranks["main"], 3)
+            self.assertEqual(ranks["short"], 0)
+            self.assertEqual(ranks["inlet"], 0)
+
+    def test_wetland_outlet_is_protected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(50, 50), (50, 200)], "name": "outlet"},
+                {"coords": [(50, -200), (50, 0)], "name": "inlet"},
+            ])
+            self._polygon_layer(directory, "wetland", [(0, 0, 100, 100)])
+            stream_drying.apply(directory)
+            ranks = dict(self._ranks(directory))
+            self.assertEqual(ranks["outlet"], 3)
+            self.assertEqual(ranks["inlet"], 0)
+
+    def test_geographic_layer_uses_metres(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(10.0, 50.0), (10.02, 50.0)],
+                 "name": "main"},
+                {"coords": [(10.01, 50.006), (10.01, 50.0)],
+                 "name": "trib"},
+                {"coords": [(10.03, 50.0), (10.03, 50.002)],
+                 "name": "short"},
+            ], epsg=4326)
+            stream_drying.apply(directory)
+            ranks = dict(self._ranks(directory))
+            self.assertEqual(ranks["trib"], 2)
+            self.assertEqual(ranks["short"], 0)
+            dataset = ogr.Open(str(Path(directory) / "stream.sqlite"))
+            layer = dataset.GetLayer(0)
+            srs = layer.GetSpatialRef()
+            self.assertEqual(srs.GetAuthorityCode(None), "4326")
+            dataset = None
+
+    def test_missing_source_layers_do_not_block_drying(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (1000, 0)], "name": "main"},
+                {"coords": [(500, 400), (500, 0)], "name": "trib"},
+            ])
+            stats = stream_drying.apply(directory)
+            self.assertNotIn("warning", stats)
+            self.assertEqual(dict(self._ranks(directory))["trib"], 1)
+
+    def test_second_run_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (1000, 0)], "name": "main"},
+                {"coords": [(500, 200), (500, 0)], "name": "trib"},
+            ])
+            stream_drying.apply(directory)
+            first = sorted(self._ranks(directory))
+            stream_drying.apply(directory)
+            second = sorted(self._ranks(directory))
+            self.assertEqual(first, second)
+
+    def test_drystream_is_not_processed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (1000, 0)], "name": "main"},
+            ])
+            self._line_layer(directory, "drystream", [
+                {"coords": [(0, 100), (100, 100)], "name": "dry"},
+            ])
+            stream_drying.apply(directory)
+            dataset = ogr.Open(str(Path(directory) / "drystream.sqlite"))
+            definition = dataset.GetLayer(0).GetLayerDefn()
+            self.assertEqual(definition.GetFieldIndex("dry_rank"), -1)
+            dataset = None
+
+    def test_cycle_terminates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {
+                    "coords": [(0, 0), (100, 0), (100, 100),
+                               (0, 100), (0, 0)],
+                    "name": "loop",
+                },
+            ])
+            stream_drying.apply(directory)
+            self.assertEqual(dict(self._ranks(directory))["loop"], 1)
+
+    def test_ensure_visible_sets_all_ranks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {"coords": [(0, 0), (100, 0)], "name": "short"},
+            ])
+            stream_drying.ensure_visible(directory)
+            self.assertEqual(dict(self._ranks(directory))["short"], 3)
 
 
 class AreaFieldTest(unittest.TestCase):

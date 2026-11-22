@@ -10,7 +10,7 @@ from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
     peak_filter, poi_icons, polygon_overlaps, project, road_packing, sources,
-    terrain,
+    stream_drying, terrain,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -2609,6 +2609,31 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         started = time.monotonic()
         area_field.ensure_area_fields(config.vector_dir)
         timings.add_stage("поле площади", time.monotonic() - started)
+        report("Подсыхание ручьёв")
+        started = time.monotonic()
+        try:
+            stats = stream_drying.apply(
+                config.vector_dir, cancel=cancel, progress=report,
+            )
+            if stats.get("warning"):
+                report(i18n.trf(
+                    "WARNING: источник ручья: {}; защита пропущена",
+                    stats["warning"],
+                ))
+        except InterruptedError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - карта не должна страдать
+            report(i18n.trf(
+                "WARNING: подсыхание ручьёв: {}; шаг пропущен", exc,
+            ))
+            try:
+                stream_drying.ensure_visible(config.vector_dir)
+            except Exception as fallback_exc:  # noqa: BLE001
+                report(i18n.trf(
+                    "WARNING: ручьи не удалось оставить видимыми: {}",
+                    fallback_exc,
+                ))
+        timings.add_stage("подсыхание ручьёв", time.monotonic() - started)
         report("Упаковка площадей, зданий и линий")
         started = time.monotonic()
         road_packing.pack_all(
