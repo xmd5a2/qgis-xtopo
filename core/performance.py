@@ -22,9 +22,7 @@ import time
 
 from .cpu import cpu_workers
 from .i18n import SETTINGS_GROUP
-from .memory import (
-    LAYER_WORKER_BYTES, TERRAIN_RESERVE_BYTES, memory_budget, worker_cap,
-)
+from .memory import layer_worker_limit
 from .pbf_source import parse_tags
 
 # Эталонные значения прежней формулы (калибровка по реальным выгрузкам).
@@ -139,17 +137,9 @@ def layer_worker_count(layers, terrain=False):
     """
     total = max(1, int(layers or 1))
     requested = max(1, min(cpu_workers(limit=8), total))
-    budget = memory_budget(
-        extra_reserve=TERRAIN_RESERVE_BYTES if terrain else 0
-    )
     return max(
         1,
-        min(
-            requested,
-            worker_cap(
-                LAYER_WORKER_BYTES, cpu_limit=requested, budget=budget
-            ),
-        ),
+        min(requested, layer_worker_limit(requested, terrain=terrain)),
     )
 
 

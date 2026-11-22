@@ -52,9 +52,8 @@ class ParallelWorkersTest(unittest.TestCase):
         # Здесь проверяется только потолок по ядрам; ограничение памяти
         # проверяется отдельно в MemoryBudgetTest.
         with mock.patch(
-            "qgis_xtopo.core.pipeline.worker_cap",
-            side_effect=lambda per_worker, cpu_limit=None, budget=None:
-                cpu_limit,
+            "qgis_xtopo.core.pipeline.layer_worker_limit",
+            side_effect=lambda cpu_limit, terrain=False: cpu_limit,
         ):
             self.assertGreaterEqual(pipeline._worker_count(100), 1)
             self.assertEqual(
@@ -100,6 +99,29 @@ class MemoryBudgetTest(unittest.TestCase):
         )
         self.assertLess(small_workers, large_workers)
         self.assertGreaterEqual(large_workers, 8)
+
+    def test_small_machine_runs_more_layers(self):
+        """До 6 ГБ запас на слой ниже, но не больше трёх воркеров."""
+        from qgis_xtopo.core import memory
+
+        with mock.patch.object(
+            memory, "memory_state",
+            return_value=(4 * memory.GIB, int(3.7 * memory.GIB)),
+        ):
+            self.assertEqual(memory.layer_worker_limit(4), 2)
+            # рельеф забирает свой резерв, второй слой уже не помещается
+            self.assertEqual(memory.layer_worker_limit(4, terrain=True), 1)
+        with mock.patch.object(
+            memory, "memory_state",
+            return_value=(6 * memory.GIB, int(5.7 * memory.GIB)),
+        ):
+            self.assertEqual(memory.layer_worker_limit(4), 3)
+        with mock.patch.object(
+            memory, "memory_state",
+            return_value=(32 * memory.GIB, 28 * memory.GIB),
+        ):
+            # на мощной машине прежняя оценка и потолок по ядрам
+            self.assertGreaterEqual(memory.layer_worker_limit(8), 8)
 
     def test_osmium_estimate_scales_with_map_size(self):
         from qgis_xtopo.core import memory

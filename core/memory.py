@@ -55,6 +55,14 @@ OSMIUM_EXTRACT_PEAK_BASE = 256 * MIB
 LAYER_WORKER_BYTES = int(1.5 * GIB)
 CONTOUR_WORKER_BYTES = 768 * MIB
 
+# На машинах до 6 ГБ запас 1,5 ГБ на слой не оставляет места второму
+# воркеру.  Замеры на 4 и 6 ГБ дали пик процесса меньше 0,83 ГБ при трёх
+# воркерах, поэтому там оценка понижена до 900 МБ, а число слоёв ограничено
+# тремя — наибольшей проверенной конфигурацией.
+SMALL_MEMORY_TOTAL = 6 * GIB
+SMALL_LAYER_WORKER_BYTES = 900 * MIB
+SMALL_LAYER_WORKERS = 3
+
 # Поток рельефа работает одновременно со слоями: варпы, MEM-растры и
 # предзагрузка COG занимают память, которую нельзя отдавать слоям.
 TERRAIN_RESERVE_BYTES = int(1.5 * GIB)
@@ -227,6 +235,28 @@ def worker_cap(per_worker, cpu_limit=None, budget=None):
     if cpu_limit is not None:
         workers = min(workers, max(1, int(cpu_limit)))
     return max(1, workers)
+
+
+def layer_worker_limit(cpu_limit, terrain=False):
+    """Сколько слоёв обрабатывать одновременно с учётом памяти машины.
+
+    На машинах до 6 ГБ запас на слой понижен: иначе второй воркер не
+    помещается в бюджет, хотя замеры показали пик меньше гигабайта.
+    Больше трёх слоёв там не запускаем — это наибольшая проверенная
+    конфигурация.  На остальных машинах действует прежняя оценка.
+    """
+    total, available = memory_state()
+    small = total is not None and total <= SMALL_MEMORY_TOTAL
+    budget = memory_budget(
+        total=total,
+        available=available,
+        extra_reserve=TERRAIN_RESERVE_BYTES if terrain else 0,
+    )
+    per_worker = SMALL_LAYER_WORKER_BYTES if small else LAYER_WORKER_BYTES
+    workers = worker_cap(per_worker, cpu_limit=cpu_limit, budget=budget)
+    if small:
+        workers = min(workers, SMALL_LAYER_WORKERS)
+    return workers
 
 
 def osmium_extract_bytes(path):

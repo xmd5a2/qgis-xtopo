@@ -14,9 +14,7 @@ from . import (
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
-from .memory import (
-    LAYER_WORKER_BYTES, TERRAIN_RESERVE_BYTES, memory_budget, worker_cap,
-)
+from .memory import layer_worker_limit
 from .query_recipes import recipe_for
 
 
@@ -861,17 +859,9 @@ class Pipeline:
         requested = configured if configured > 0 else cpu_workers(limit=8)
         requested = max(1, min(requested, total))
         terrain = bool(getattr(self.config, "generate_terrain", False))
-        budget = memory_budget(
-            extra_reserve=TERRAIN_RESERVE_BYTES if terrain else 0
-        )
         return max(
             1,
-            min(
-                requested,
-                worker_cap(
-                    LAYER_WORKER_BYTES, cpu_limit=requested, budget=budget
-                ),
-            ),
+            min(requested, layer_worker_limit(requested, terrain=terrain)),
         )
 
     def _run_layer(self, name, source, index, total):
