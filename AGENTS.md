@@ -67,6 +67,7 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   язык интерфейса; `core/expressions.py` — регистрация выражений QGIS;
   `core/measure.py` — размеры рамки; `core/peak_placement.py` — правило
   проверки пиков; `core/peak_filter.py` — его применение к слою `peak`;
+  `core/underwater.py` — удаление подводных вершин и вулканов;
   `core/poi_icons.py` — вытеснение значков; `core/label_cache.py` — кэш
   линий подписи; `core/road_packing.py` — слияние и упаковка линий и
   площадей;

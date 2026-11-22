@@ -322,6 +322,121 @@ class ZeroElevationTest(unittest.TestCase):
             self.assertEqual(values["Real"], "4440")
 
 
+class UnderwaterTest(unittest.TestCase):
+    """Подводные объекты определяются по воде, а не по знаку высоты."""
+
+    @staticmethod
+    def _write_points(path, layer_name, rows):
+        from osgeo import ogr, osr
+
+        ogr.UseExceptions()
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(layer_name, srs, ogr.wkbPoint)
+        names = ["@id", "name", "ele"]
+        if any(row.get("volcano:type") for row in rows):
+            names.append("volcano:type")
+        for name in names:
+            layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for name in names:
+                if row.get(name) is not None:
+                    feature.SetField(name, str(row[name]))
+            point = ogr.Geometry(ogr.wkbPoint)
+            point.AddPoint_2D(row["x"], row["y"])
+            feature.SetGeometry(point)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _write_water(path):
+        from osgeo import ogr, osr
+
+        ogr.UseExceptions()
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer("water_dissolved", srs, ogr.wkbPolygon)
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for x, y in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
+            ring.AddPoint_2D(x, y)
+        polygon = ogr.Geometry(ogr.wkbPolygon)
+        polygon.AddGeometry(ring)
+        feature = ogr.Feature(layer.GetLayerDefn())
+        feature.SetGeometry(polygon)
+        layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _identifiers(path):
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(path))
+        try:
+            layer = dataset.GetLayer(0)
+            ids = set()
+            for feature in layer:
+                index = layer.GetLayerDefn().GetFieldIndex("@id")
+                ids.add(feature.GetField(index))
+            return ids
+        finally:
+            dataset = None
+
+    def test_underwater_is_removed_and_negative_land_peak_is_kept(self):
+        from qgis_xtopo.core.underwater import remove_underwater
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="underwater"
+            )
+            config.ensure_directories()
+            self._write_water(config.vector_dir / "water_dissolved.sqlite")
+            self._write_points(config.vector_dir / "peak.sqlite", "peak", [
+                {"@id": "node/1", "name": "Seamount",
+                 "ele": "-1600", "x": 0.5, "y": 0.5},
+                # Наземные вершины ниже уровня моря: Долина Смерти.
+                {"@id": "node/2", "name": "Cinder Hill",
+                 "ele": "-29", "x": 2.0, "y": 2.0},
+                {"@id": "node/3", "name": "Mars Hill",
+                 "ele": "-69", "x": 2.5, "y": 2.5},
+            ])
+            self._write_points(config.vector_dir / "volcano.sqlite", "volcano", [
+                {"@id": "node/4", "name": "Teahitia",
+                 "ele": "-1600", "x": 0.6, "y": 0.6},
+                {"@id": "node/5", "name": "Land volcano",
+                 "ele": "1000", "x": 2.6, "y": 2.6},
+                {"@id": "node/6", "name": "Tagged submarine",
+                 "ele": "1000", "volcano:type": "submarine",
+                 "x": 3.0, "y": 3.0},
+            ])
+            self._write_points(
+                config.vector_dir / "volcano_centroids.sqlite",
+                "volcano_centroids",
+                [{"@id": "node/4", "name": "Teahitia",
+                  "ele": "-1600", "x": 0.6, "y": 0.6}],
+            )
+
+            self.assertEqual(remove_underwater(config), 4)
+            self.assertEqual(
+                self._identifiers(config.vector_dir / "peak.sqlite"),
+                {"node/2", "node/3"},
+            )
+            self.assertEqual(
+                self._identifiers(config.vector_dir / "volcano.sqlite"),
+                {"node/5"},
+            )
+            self.assertEqual(
+                self._identifiers(
+                    config.vector_dir / "volcano_centroids.sqlite"
+                ),
+                set(),
+            )
+
+
 class ProgressTrackerTest(unittest.TestCase):
     def test_progress_moves_through_stages(self):
         config = Config(

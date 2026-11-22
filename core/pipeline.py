@@ -10,7 +10,7 @@ from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
     peak_filter, poi_icons, polygon_overlaps, project, road_packing, sources,
-    stream_drying, terrain,
+    stream_drying, terrain, underwater,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -198,6 +198,8 @@ def progress_stages(config):
         stages.append(("Обработка рельефа", 14))
     if "coastline" in config.array_queries:
         stages.append(("Обработка береговой линии", 4))
+    if underwater.enabled(config):
+        stages.append(("Удаление подводных объектов", 1))
     if "peak" in config.array_queries:
         stages.append(("Проверка пиков", 3))
     if config.resolve_polygon_overlaps:
@@ -2700,6 +2702,28 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("береговая линия", time.monotonic() - started)
+        if underwater.enabled(config):
+            report("Удаление подводных объектов")
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                underwater.remove_underwater(
+                    config, progress=report, cancel=cancel
+                )
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - карта не должна страдать
+                report(
+                    i18n.trf(
+                        "WARNING: подводные объекты: {}; шаг пропущен",
+                        exc,
+                    )
+                )
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage(
+                "подводные объекты", time.monotonic() - started
+            )
         if terrain_thread is not None:
             _report_terrain_stage(terrain_thread, report)
             terrain_thread.join()
