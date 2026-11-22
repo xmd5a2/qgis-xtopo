@@ -1934,6 +1934,7 @@ class PrepareTerrainSplitTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(directory)
+            config.generate_terrain_hillshade_slope = True
             bbox = BBox(44.7, 42.78, 44.72, 42.8)
             tile = config.terrain_src_dir / "N42E044.tif"
             dataset = gdal.Open(str(tile), gdal.GA_Update)
@@ -1974,6 +1975,13 @@ class PrepareTerrainSplitTest(unittest.TestCase):
             self.assertTrue((values[:8] == -32768).all())
             self.assertEqual(valid.min(), -50.0)
             self.assertGreater(valid.max(), 100.0)
+
+            dataset = gdal.Open(str(config.raster_dir / "slope.tif"))
+            band = dataset.GetRasterBand(1)
+            self.assertEqual(band.GetNoDataValue(), 255.0)
+            slope = band.ReadAsArray()
+            dataset = None
+            self.assertTrue((slope[:8] == 255).all())
 
             isolines = ogr.Open(
                 str(config.vector_dir / "isolines_regular.sqlite")

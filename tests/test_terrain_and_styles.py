@@ -1830,6 +1830,17 @@ class SlopeVariantChoiceTest(unittest.TestCase):
         self.assertEqual(slope_style.choose_variant(path),
                          slope_style.MOUNTAINS)
 
+    def test_water_nodata_is_ignored(self):
+        """Океан лежит в slope.tif как nodata и не тянет выбор к равнинам."""
+        import numpy as np
+        from qgis_xtopo.core import slope_style
+
+        values = np.full((50, 50), 255.0)
+        values[40:, :] = 45.0
+        path = self._raster(values, nodata=255.0)
+        self.assertEqual(slope_style.choose_variant(path),
+                         slope_style.MOUNTAINS)
+
     def test_missing_raster_keeps_manual_choice(self):
         from qgis_xtopo.core import slope_style
 
