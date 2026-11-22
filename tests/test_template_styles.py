@@ -1162,6 +1162,47 @@ class RuleIntegrityTest(unittest.TestCase):
             )
 
 
+class BridgeIconScaleTest(unittest.TestCase):
+    """Значки мостов не должны попадать на обзорные масштабы."""
+
+    def test_icons_stop_at_800000(self):
+        for layer in _template_root().iter("maplayer"):
+            name = layer.findtext("layername")
+            if name not in (
+                "highway main bridge", "path bridge",
+                "railway bridge", "track bridge",
+            ):
+                continue
+            renderer = layer.find("renderer-v2")
+            if renderer is None or renderer.get("type") != "RuleRenderer":
+                continue
+            classes = {
+                symbol.get("name"): {
+                    item.get("class") for item in symbol.iter("layer")
+                }
+                for symbol in renderer.findall("symbols/symbol")
+            }
+            rules = renderer.find("rules")
+            if rules is None:
+                continue
+
+            def check(node, inherited=None):
+                for rule in node.findall("rule"):
+                    scale_max = rule.get("scalemaxdenom")
+                    effective = (
+                        int(scale_max) if scale_max else inherited
+                    )
+                    symbol_classes = classes.get(rule.get("symbol"), set())
+                    if symbol_classes & {"MarkerLine", "SvgMarker"}:
+                        self.assertIsNotNone(effective, (name, rule.get("label")))
+                        self.assertLessEqual(
+                            effective, 800000, (name, rule.get("label")),
+                        )
+                    check(rule, effective)
+
+            check(rules)
+
+
 class TrackScaleTest(unittest.TestCase):
     """Треки рисуются на 1:50 000+ и зависят от уровня детализации."""
 
