@@ -8,9 +8,9 @@
 мелкие водотоки на обзорных масштабах.
 
 Отдельно защищаются ручьи у источников: рядом с родником, у выхода из
-водоёма или болота.  Защищённой главной линии ставится ранг 3, и он
-распространяется вниз по главному продолжению, чтобы не появилось
-разрывов.
+водоёма или болота.  Защищённой главной линии ставится максимальный
+ранг, и он распространяется вниз по главному продолжению, чтобы не
+появилось разрывов.
 """
 
 import bisect
@@ -22,8 +22,11 @@ from pathlib import Path
 
 FIELD = "dry_rank"
 LAYERS = ("stream", "stream_intermittent")
-# Порог в метрах для масштабов 1:100000, 1:150000 и 1:200000.
-THRESHOLDS = (300.0, 550.0, 800.0)
+ARROW_LAYER = "stream_smoothed"
+# Порог в метрах для масштабов 1:150000 и 1:200000.  Это половина
+# прежних 550/800 м: подсыхание начинается позже и идёт мягче.
+THRESHOLDS = (275.0, 400.0)
+MAX_RANK = len(THRESHOLDS)
 SNAP = 10.0
 TJOIN = 5.0
 SPRING_RADIUS = 100.0
@@ -761,9 +764,9 @@ def _apply_protection(starts, branches, followers, down_values, ranks):
         seen = set()
         while position is not None and position not in seen:
             seen.add(position)
-            if ranks[position] >= 3:
+            if ranks[position] >= MAX_RANK:
                 break
-            result[position] = 3
+            result[position] = MAX_RANK
             candidates = [
                 follower for follower in followers.get(
                     branches[position].down, ()
@@ -860,6 +863,54 @@ def _write_layer(path, fields, srs, branches, ranks, output_transform=None,
     layer = None
     dataset = None
     os.replace(temporary, path)
+    return written
+
+
+def _set_arrow_ranks(path, ranks_by_id, default=0, cancel=None):
+    """Пишет ``dry_rank`` в слой стрелок по OSM ``@id``.
+
+    Стрелки строятся из отдельного сглаженного слоя.  Если ОСМ-путь
+    разрезан на ветви с разными рангами, берётся худший ранг: стрелка
+    не должна висеть над участком, который уже скрыт.
+    """
+    from osgeo import ogr
+
+    if not path.exists():
+        return 0
+    source = ogr.Open(str(path), 1)
+    if source is None:
+        return 0
+    layer = source.GetLayer(0)
+    definition = layer.GetLayerDefn()
+    id_index = definition.GetFieldIndex("@id")
+    if id_index < 0:
+        layer = None
+        source = None
+        return 0
+    rank_index = definition.GetFieldIndex(FIELD)
+    if rank_index < 0:
+        layer.CreateField(ogr.FieldDefn(FIELD, ogr.OFTInteger))
+        rank_index = layer.GetLayerDefn().GetFieldIndex(FIELD)
+    written = 0
+    try:
+        layer.StartTransaction()
+        for feature in layer:
+            if cancel is not None and written % 500 == 0 and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            key = _text(feature.GetField(id_index))
+            rank = ranks_by_id.get(key, default)
+            feature.SetField(rank_index, int(rank))
+            if layer.SetFeature(feature) != 0:
+                raise OSError(f"Cannot update {path}")
+            written += 1
+        layer.CommitTransaction()
+    except Exception:
+        layer.RollbackTransaction()
+        layer = None
+        source = None
+        raise
+    layer = None
+    source = None
     return written
 
 
@@ -966,6 +1017,26 @@ def apply(directory, cancel=None, progress=None):
         id(branch): ranks[position]
         for position, branch in enumerate(branches)
     }
+    arrow_ranks = {}
+    if "stream" in fields:
+        id_index = next(
+            (
+                index for index, definition in enumerate(fields["stream"])
+                if definition.GetName().lower() == "@id"
+            ),
+            None,
+        )
+        if id_index is not None:
+            for branch, rank in zip(branches, ranks):
+                if branch.group != "stream":
+                    continue
+                key = _text(branch.attrs[id_index])
+                if not key:
+                    continue
+                current = arrow_ranks.get(key)
+                arrow_ranks[key] = (
+                    rank if current is None else min(current, rank)
+                )
     counts = {}
     for name in LAYERS:
         input_pieces = layer_pieces.get(name)
@@ -987,9 +1058,22 @@ def apply(directory, cancel=None, progress=None):
             output_transform=inverse, cancel=cancel,
         )
         counts[name] = len(layer_branches)
+    arrows = 0
+    try:
+        arrows = _set_arrow_ranks(
+            directory / f"{ARROW_LAYER}.sqlite", arrow_ranks,
+            default=0, cancel=cancel,
+        )
+    except InterruptedError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - стрелки не должны ронять карту
+        warning = (
+            f"{warning}; стрелки: {exc}" if warning else f"стрелки: {exc}"
+        )
     stats = {
         "branches": len(branches),
         "protected": protected,
+        "arrows": arrows,
         "layers": counts,
     }
     if warning:
@@ -998,7 +1082,7 @@ def apply(directory, cancel=None, progress=None):
 
 
 def ensure_visible(directory, names=None):
-    """Аварийный режим: ставит всем объектам ``dry_rank = 3``.
+    """Аварийный режим: ставит всем объектам максимальный ``dry_rank``.
 
     Нужен, если основной расчёт упал: фильтры шаблона не должны скрыть
     все ручьи.
@@ -1026,5 +1110,8 @@ def ensure_visible(directory, names=None):
             branch.down = piece.down
             branches.append(branch)
         _write_layer(
-            path, fields, srs, branches, [3] * len(branches)
+            path, fields, srs, branches, [MAX_RANK] * len(branches)
         )
+    _set_arrow_ranks(
+        directory / f"{ARROW_LAYER}.sqlite", {}, default=MAX_RANK
+    )

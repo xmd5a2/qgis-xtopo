@@ -2102,48 +2102,79 @@ class StreamDryingStyleTest(unittest.TestCase):
                 return StreamDryingStyleTest._find(rule, path[1:])
         return None
 
-    def _filter(self, layer_name, path):
+    def _rule(self, layer_name, path):
         layer = self.layers[layer_name]
         rule = self._find(
             layer.find("renderer-v2").find("rules"), path
         )
         self.assertIsNotNone(rule, f"{layer_name}/{'/'.join(path)}")
-        return rule.get("filter") or ""
+        return rule
+
+    def _filter(self, layer_name, path):
+        return self._rule(layer_name, path).get("filter") or ""
 
     def test_stream_bands_have_expected_ranks(self):
         cases = (
             ("stream", "default", (
-                ("100000 - 150000", 1, 3),
-                ("150000 - 200000", 2, 3),
-                ("200000 - 300000", 3, 4),
+                ("100000 - 150000", None, 3),
+                ("150000 - 200000", 1, 3),
+                ("200000 - 300000", 2, 4),
             )),
             ("stream", "drain or ditch", (
-                ("100000 - 150000", 1, 4),
-                ("150000 - 200000", 2, 4),
-                ("200000 - 300000", 3, 5),
+                ("100000 - 150000", None, 4),
+                ("150000 - 200000", 1, 4),
+                ("200000 - 300000", 2, 5),
             )),
             ("stream intermittent", "default", (
-                ("100000 - 150000", 1, 4),
-                ("150000 - 200000", 2, 4),
-                ("200000 - 300000", 3, 5),
+                ("100000 - 150000", None, 4),
+                ("150000 - 200000", 1, 4),
+                ("200000 - 300000", 2, 5),
             )),
         )
         for layer_name, branch, bands in cases:
             for label, rank, lod in bands:
                 text = self._filter(layer_name, [branch, label])
-                self.assertIn(f'"dry_rank" >= {rank}', text)
+                if rank is None:
+                    self.assertNotIn("dry_rank", text)
+                else:
+                    self.assertIn(f'"dry_rank" >= {rank}', text)
                 self.assertIn(f"@level_of_detail >= {lod}", text)
 
-    def test_overview_bands_keep_rank_three(self):
-        text = self._filter(
-            "stream", ["default", "300000 - 500000"])
-        self.assertIn('"dry_rank" >= 3', text)
-        text = self._filter(
-            "stream intermittent", ["default", "300000 - 500000"])
-        self.assertIn('"dry_rank" >= 3', text)
-        text = self._filter(
-            "stream", ["drain or ditch", "200000 - 300000"])
-        self.assertIn('"dry_rank" >= 3', text)
+    def test_overview_bands_keep_rank_two(self):
+        for layer_name, branch, label in (
+            ("stream", "default", "300000 - 500000"),
+            ("stream intermittent", "default", "300000 - 500000"),
+            ("stream", "drain or ditch", "200000 - 300000"),
+        ):
+            self.assertIn(
+                '"dry_rank" >= 2',
+                self._filter(layer_name, [branch, label]),
+            )
+
+    def test_scale_ranges_cover_100k_to_500k_without_gaps(self):
+        expected = {
+            "100000 - 150000": ("100000", "150000"),
+            "150000 - 200000": ("150000", "200000"),
+            "200000 - 300000": ("200000", "300000"),
+            "300000 - 500000": ("300000", "500000"),
+        }
+        for layer_name, branch in (
+            ("stream", "default"),
+            ("stream", "drain or ditch"),
+            ("stream intermittent", "default"),
+        ):
+            for label, (minimum, maximum) in expected.items():
+                if label == "300000 - 500000" and branch == "drain or ditch":
+                    self.assertIsNone(self._find(
+                        self.layers[layer_name].find("renderer-v2").find(
+                            "rules"
+                        ),
+                        [branch, label],
+                    ))
+                    continue
+                rule = self._rule(layer_name, [branch, label])
+                self.assertEqual(rule.get("scalemindenom"), minimum)
+                self.assertEqual(rule.get("scalemaxdenom"), maximum)
 
     def test_below_100k_has_no_drying(self):
         for layer_name, branch, label in (
@@ -2155,6 +2186,30 @@ class StreamDryingStyleTest(unittest.TestCase):
                 "dry_rank",
                 self._filter(layer_name, [branch, label]),
             )
+
+    def test_arrows_dry_with_the_stream(self):
+        layer = self.layers["stream arrows"]
+        rules = layer.find("renderer-v2").find("rules").findall("rule")
+        by_scale = {
+            (rule.get("scalemindenom"), rule.get("scalemaxdenom")): rule
+            for rule in rules
+        }
+        self.assertNotIn(
+            "dry_rank",
+            by_scale[("100000", "150000")].get("filter") or "",
+        )
+        self.assertIn(
+            '"dry_rank" >= 1',
+            by_scale[("150000", "200000")].get("filter") or "",
+        )
+        self.assertIn(
+            '"dry_rank" >= 2',
+            by_scale[("200000", "300000")].get("filter") or "",
+        )
+        self.assertIn(
+            '"dry_rank" >= 2',
+            by_scale[("300000", None)].get("filter") or "",
+        )
 
     def test_drystream_is_not_changed(self):
         layer = self.layers["drystream"]

@@ -3600,6 +3600,7 @@ class StreamDryingTest(unittest.TestCase):
         ("intermittent", ogr.OFTString),
         ("tunnel", ogr.OFTString),
         ("layer", ogr.OFTString),
+        ("@id", ogr.OFTString),
     )
 
     @staticmethod
@@ -3679,7 +3680,7 @@ class StreamDryingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self._line_layer(directory, "stream", [
                 {"coords": [(0, 0), (2000, 0)], "name": "main"},
-                {"coords": [(1000, 400), (1000, 0)], "name": "trib"},
+                {"coords": [(1000, 300), (1000, 0)], "name": "trib"},
                 {"coords": [(3000, 0), (3000, 100)], "name": "short"},
             ])
             self._line_layer(directory, "stream_intermittent", [])
@@ -3690,7 +3691,7 @@ class StreamDryingTest(unittest.TestCase):
             self.assertEqual(ranks["short"], 0)
             self.assertEqual(
                 sorted(rank for _name, rank in self._ranks(directory)),
-                [0, 1, 3, 3],
+                [0, 1, 2, 2],
             )
 
     def test_standalone_chain_uses_total_length(self):
@@ -3715,13 +3716,13 @@ class StreamDryingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self._line_layer(directory, "stream", [
                 {"coords": [(0, 0), (2000, 0)], "name": "main"},
-                {"coords": [(1000, 400), (1000, 0)], "name": "trib"},
+                {"coords": [(1000, 300), (1000, 0)], "name": "trib"},
             ])
             stream_drying.apply(directory)
             self.assertEqual(len(self._ranks(directory)), 3)
             self.assertEqual(
                 sorted(rank for _name, rank in self._ranks(directory)),
-                [1, 3, 3],
+                [1, 2, 2],
             )
 
     def test_spring_protects_only_one_main_stream(self):
@@ -3733,7 +3734,7 @@ class StreamDryingTest(unittest.TestCase):
             self._point_layer(directory, [(50, 40)])
             stream_drying.apply(directory)
             ranks = dict(self._ranks(directory))
-            self.assertEqual(ranks["main"], 3)
+            self.assertEqual(ranks["main"], 2)
             self.assertEqual(ranks["small"], 0)
 
     def test_spring_protection_continues_downstream(self):
@@ -3746,8 +3747,8 @@ class StreamDryingTest(unittest.TestCase):
             self._point_layer(directory, [(300, 190)])
             stream_drying.apply(directory)
             ranks = dict(self._ranks(directory))
-            self.assertEqual(ranks["trib"], 3)
-            self.assertEqual(ranks["downstream"], 3)
+            self.assertEqual(ranks["trib"], 2)
+            self.assertEqual(ranks["downstream"], 2)
             self.assertEqual(ranks["upstream"], 1)
 
     def test_water_outlet_protects_one_main_stream_only(self):
@@ -3763,7 +3764,7 @@ class StreamDryingTest(unittest.TestCase):
             )
             stream_drying.apply(directory)
             ranks = dict(self._ranks(directory))
-            self.assertEqual(ranks["main"], 3)
+            self.assertEqual(ranks["main"], 2)
             self.assertEqual(ranks["short"], 0)
             self.assertEqual(ranks["inlet"], 0)
 
@@ -3776,7 +3777,7 @@ class StreamDryingTest(unittest.TestCase):
             self._polygon_layer(directory, "wetland", [(0, 0, 100, 100)])
             stream_drying.apply(directory)
             ranks = dict(self._ranks(directory))
-            self.assertEqual(ranks["outlet"], 3)
+            self.assertEqual(ranks["outlet"], 2)
             self.assertEqual(ranks["inlet"], 0)
 
     def test_geographic_layer_uses_metres(self):
@@ -3799,6 +3800,39 @@ class StreamDryingTest(unittest.TestCase):
             self.assertEqual(srs.GetAuthorityCode(None), "4326")
             dataset = None
 
+    def test_arrow_layer_gets_worst_rank_by_osm_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._line_layer(directory, "stream", [
+                {
+                    "coords": [(0, 0), (2000, 0)], "name": "main",
+                    "@id": "way/main",
+                },
+                {
+                    "coords": [(300, 300), (300, 0)], "name": "trib",
+                    "@id": "way/trib",
+                },
+            ])
+            self._line_layer(directory, "stream_smoothed", [
+                {
+                    "coords": [(0, 0), (2000, 0)], "name": "arrow-main",
+                    "@id": "way/main",
+                },
+                {
+                    "coords": [(300, 300), (300, 0)], "name": "arrow-trib",
+                    "@id": "way/trib",
+                },
+                {
+                    "coords": [(5000, 0), (5100, 0)], "name": "unknown",
+                    "@id": "way/unknown",
+                },
+            ])
+            stats = stream_drying.apply(directory)
+            self.assertEqual(stats["arrows"], 3)
+            ranks = dict(self._ranks(directory, "stream_smoothed"))
+            self.assertEqual(ranks["arrow-main"], 1)
+            self.assertEqual(ranks["arrow-trib"], 1)
+            self.assertEqual(ranks["unknown"], 0)
+
     def test_missing_source_layers_do_not_block_drying(self):
         with tempfile.TemporaryDirectory() as directory:
             self._line_layer(directory, "stream", [
@@ -3807,7 +3841,7 @@ class StreamDryingTest(unittest.TestCase):
             ])
             stats = stream_drying.apply(directory)
             self.assertNotIn("warning", stats)
-            self.assertEqual(dict(self._ranks(directory))["trib"], 1)
+            self.assertEqual(dict(self._ranks(directory))["trib"], 2)
 
     def test_second_run_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3845,7 +3879,7 @@ class StreamDryingTest(unittest.TestCase):
                 },
             ])
             stream_drying.apply(directory)
-            self.assertEqual(dict(self._ranks(directory))["loop"], 1)
+            self.assertEqual(dict(self._ranks(directory))["loop"], 2)
 
     def test_ensure_visible_sets_all_ranks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3853,7 +3887,7 @@ class StreamDryingTest(unittest.TestCase):
                 {"coords": [(0, 0), (100, 0)], "name": "short"},
             ])
             stream_drying.ensure_visible(directory)
-            self.assertEqual(dict(self._ranks(directory))["short"], 3)
+            self.assertEqual(dict(self._ranks(directory))["short"], 2)
 
 
 class AreaFieldTest(unittest.TestCase):
