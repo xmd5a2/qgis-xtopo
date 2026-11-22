@@ -596,6 +596,22 @@ class ProjectBasemapTest(unittest.TestCase):
         ))
         self.project.addMapLayer(self.tree)
 
+        self.runway = QgsVectorLayer(
+            "LineString?crs=EPSG:3857", "aeroway runway way", "memory"
+        )
+        self.runway.setRenderer(QgsSingleSymbolRenderer(
+            QgsLineSymbol.createSimple({"color": "220,220,220"})
+        ))
+        self.project.addMapLayer(self.runway)
+
+        self.aerodrome = QgsVectorLayer(
+            "Point?crs=EPSG:3857", "aerodrome", "memory"
+        )
+        self.aerodrome.setRenderer(QgsSingleSymbolRenderer(
+            QgsMarkerSymbol.createSimple({"color": "0,90,160"})
+        ))
+        self.project.addMapLayer(self.aerodrome)
+
         self.osm = QgsVectorLayer(
             "Polygon?crs=EPSG:3857", "OpenStreetMap", "memory"
         )
@@ -656,6 +672,14 @@ class ProjectBasemapTest(unittest.TestCase):
             self.basemap.LABELS_STYLE,
         )
         self.assertEqual(self.tree.renderer().type(), "nullSymbol")
+        # Взлётные полосы и рулёжные дорожки — линейный слой без подписей.
+        self.assertEqual(
+            self.runway.styleManager().currentStyle(),
+            self.basemap.LABELS_STYLE,
+        )
+        self.assertEqual(self.runway.renderer().type(), "nullSymbol")
+        # Значок аэродрома остаётся: это отдельный точечный слой.
+        self.assertEqual(self.aerodrome.renderer().type(), "singleSymbol")
         self.assertEqual(self.bbox.renderer().type(), before_bbox)
         self.assertFalse(self._visible(self.osm))
         self.assertEqual(
@@ -686,6 +710,8 @@ class ProjectBasemapTest(unittest.TestCase):
         self.assertTrue(self.polygon.labelsEnabled())
         self.assertEqual(self.tree_row.renderer().type(), "singleSymbol")
         self.assertEqual(self.tree.renderer().type(), "singleSymbol")
+        self.assertEqual(self.runway.renderer().type(), "singleSymbol")
+        self.assertEqual(self.aerodrome.renderer().type(), "singleSymbol")
         self.assertTrue(self._visible(self.osm))
         self.assertEqual(self.bbox.renderer().type(), "singleSymbol")
 
@@ -721,6 +747,10 @@ class ProjectBasemapTest(unittest.TestCase):
                 self.assertEqual(tree_row.renderer().type(), "nullSymbol")
                 tree = saved.mapLayersByName("tree")[0]
                 self.assertEqual(tree.renderer().type(), "nullSymbol")
+                runway = saved.mapLayersByName("aeroway runway way")[0]
+                self.assertEqual(runway.renderer().type(), "nullSymbol")
+                aerodrome = saved.mapLayersByName("aerodrome")[0]
+                self.assertEqual(aerodrome.renderer().type(), "singleSymbol")
                 self.assertEqual(
                     self.basemap.active_source(saved).key, "google"
                 )
@@ -730,6 +760,7 @@ class ProjectBasemapTest(unittest.TestCase):
                     tree_row.renderer().type(), "singleSymbol"
                 )
                 self.assertEqual(tree.renderer().type(), "singleSymbol")
+                self.assertEqual(runway.renderer().type(), "singleSymbol")
             finally:
                 saved.clear()
 
