@@ -159,14 +159,18 @@ class TerrainCacheTest(unittest.TestCase):
             bbox = BBox(43.0, 42.0, 43.1, 42.1)
             key = terrain_cache.dem_signature(config, bbox)
             isolines_key = terrain_cache.isolines_signature(config, bbox, key)
-            for name in terrain_cache.ISOLINES_FILES:
-                (config.vector_dir / name).write_bytes(name.encode())
+            (config.vector_dir / "isolines_regular.sqlite").write_bytes(b"lines")
+            (config.vector_dir / "isolines_glacier.sqlite").write_bytes(b"glacier")
             self.assertTrue(terrain_cache.store_isolines(config, isolines_key))
-            for name in terrain_cache.ISOLINES_FILES:
-                (config.vector_dir / name).unlink()
+            (config.vector_dir / "isolines_regular.sqlite").unlink()
+            (config.vector_dir / "isolines_glacier.sqlite").unlink()
             self.assertTrue(terrain_cache.restore_isolines(config, isolines_key))
-            for name in terrain_cache.ISOLINES_FILES:
-                self.assertTrue((config.vector_dir / name).exists(), name)
+            self.assertTrue(
+                (config.vector_dir / "isolines_regular.sqlite").exists()
+            )
+            self.assertTrue(
+                (config.vector_dir / "isolines_glacier.sqlite").exists()
+            )
 
     def test_cache_grows_only_by_a_few_entries(self):
         with tempfile.TemporaryDirectory() as directory:

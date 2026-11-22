@@ -713,7 +713,6 @@
   "Запись уклона": "Writing slope",
   "Расчёт отмывки": "Generating hillshade",
   "Расчёт изолиний": "Generating contour lines",
-  "Расчёт обзорных изолиний": "Generating overview contour lines",
   "Изолинии обрезаны по воде: {}": "Contour lines cut by water: {}",
   "Изолинии ледников готовы: {}": "Glacier contour lines ready: {}",
   "Изолинии вне ледников: {}": "Contour lines outside glaciers: {}",

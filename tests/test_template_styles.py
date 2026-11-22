@@ -26,8 +26,6 @@ WATER_LINE_WIDTH_MM = "0.25"
 HASH_CLASS = "HashLine"
 ISOLINES_REGULAR = "[TERRAIN] isolines regular"
 ISOLINES_GLACIER = "[TERRAIN] isolines glacier"
-ISOLINES_REGULAR_OVERVIEW = "[TERRAIN] isolines regular overview"
-ISOLINES_GLACIER_OVERVIEW = "[TERRAIN] isolines glacier overview"
 DD_PROPERTY = "offsetAlongLine"
 
 
@@ -384,10 +382,7 @@ class IsolinesSchemeTest(unittest.TestCase):
     }
     HASH_BUCKETS = {5: (), 10: (0,), 25: (0,), 50: (0,),
                     100: (0, 1, 2), 200: (0, 1, 2), 1000: (0, 1, 2)}
-    LAYERS = (
-        ISOLINES_REGULAR, ISOLINES_GLACIER,
-        ISOLINES_REGULAR_OVERVIEW, ISOLINES_GLACIER_OVERVIEW,
-    )
+    LAYERS = (ISOLINES_REGULAR, ISOLINES_GLACIER)
 
     @classmethod
     def setUpClass(cls):
@@ -573,78 +568,6 @@ class IsolinesSchemeTest(unittest.TestCase):
                             rendering.get("limitNumLabels"), "0",
                             f"{name}: крупный масштаб {value} "
                             "не должен ограничиваться")
-
-
-class IsolinesScaleSplitTest(unittest.TestCase):
-    """Подробные изолинии — до 1:50000, обзорные — с 1:50001.
-
-    Геометрия подробного слоя не упрощается.  Обзорная копия рисуется
-    только на мелких масштабах и сохраняет прежнюю скорость кадра.
-    Граница 50001, а не 50000: QGIS считает minScale исключающим, и
-    ровно 1:50000 должно оставаться за подробным слоем.
-    """
-
-    PAIRS = (
-        (ISOLINES_REGULAR, ISOLINES_REGULAR_OVERVIEW),
-        (ISOLINES_GLACIER, ISOLINES_GLACIER_OVERVIEW),
-    )
-    DETAIL_LIMIT = 50001
-
-    @classmethod
-    def setUpClass(cls):
-        cls.layers = {
-            layer.findtext("layername"): layer
-            for layer in _template_root().iter("maplayer")
-        }
-
-    def _bounds(self, name):
-        layer = self.layers.get(name)
-        self.assertIsNotNone(layer, name)
-        return (
-            float(layer.get("minScale") or 0),
-            float(layer.get("maxScale") or 0),
-        )
-
-    def test_scale_ranges(self):
-        for fine, overview in self.PAIRS:
-            self.assertEqual(
-                self._bounds(fine), (self.DETAIL_LIMIT, 0.0), fine
-            )
-            self.assertEqual(
-                self._bounds(overview), (0.0, self.DETAIL_LIMIT), overview
-            )
-            for name in (fine, overview):
-                self.assertEqual(
-                    self.layers[name].get("hasScaleBasedVisibilityFlag"),
-                    "1", name,
-                )
-
-    def test_overview_uses_same_style(self):
-        for fine, overview in self.PAIRS:
-            for tag in ("renderer-v2", "labeling"):
-                first = self.layers[fine].find(tag)
-                second = self.layers[overview].find(tag)
-                self.assertIsNotNone(first, (fine, tag))
-                self.assertIsNotNone(second, (overview, tag))
-                def rules(node):
-                    return [
-                        (
-                            rule.get("label"), rule.get("filter"),
-                            rule.get("scalemindenom"),
-                            rule.get("scalemaxdenom"),
-                            rule.get("symbol"),
-                        )
-                        for rule in node.iter("rule")
-                    ]
-                self.assertEqual(rules(first), rules(second), (fine, tag))
-
-    def test_overview_reads_separate_files(self):
-        for fine, overview in self.PAIRS:
-            source = self.layers[overview].findtext("datasource") or ""
-            self.assertIn("_overview.sqlite", source, overview)
-            self.assertNotIn(
-                "isolines_regular.sqlite", source, overview
-            )
 
 
 class LabelPriorityTest(unittest.TestCase):

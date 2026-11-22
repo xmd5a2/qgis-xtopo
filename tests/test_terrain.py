@@ -2218,97 +2218,14 @@ class ContourTilingTest(unittest.TestCase):
                 terrain.generate_isolines(
                     config, BBox(0.0, 0.0, 0.6, 0.6)
                 )
-            vertices = {}
-            for name in (
-                "isolines_regular.sqlite",
-                "isolines_regular_overview.sqlite",
-            ):
-                dataset = ogr.Open(str(config.vector_dir / name))
-                self.assertIsNotNone(dataset, name)
-                try:
-                    layer = dataset.GetLayer(0)
-                    self.assertGreater(layer.GetFeatureCount(), 0, name)
-                    vertices[name] = sum(
-                        feature.GetGeometryRef().GetPointCount()
-                        for feature in layer
-                    )
-                finally:
-                    dataset = None
-            self.assertGreaterEqual(
-                vertices["isolines_regular.sqlite"],
-                vertices["isolines_regular_overview.sqlite"],
+            dataset = ogr.Open(
+                str(config.vector_dir / "isolines_regular.sqlite")
             )
-
-    def test_tile_simplification_reduces_vertices(self):
-        """Упрощение в тайле уменьшает вершины, не теряя уровни."""
-        from osgeo import gdal
-
-        from qgis_xtopo.core import terrain
-
-        raster = gdal.Open(str(self.source))
-        tiles = terrain._contour_tiles(raster, 2, terrain.CONTOUR_HALO)
-        raster = None
-
-        def collect(simplify):
-            vertices = 0
-            levels = set()
-            for tile in tiles:
-                dataset, _count = terrain._contour_tile(
-                    (str(self.source), tile, 50), simplify=simplify
-                )
-                layer = dataset.GetLayer(0)
-                for feature in layer:
-                    geometry = feature.GetGeometryRef()
-                    if geometry is None:
-                        continue
-                    vertices += geometry.GetPointCount()
-                    levels.add(round(feature.GetField("ELEV"), 6))
-            return vertices, levels
-
-        plain, plain_levels = collect(0.0)
-        simplified, simplified_levels = collect(0.001)
-        self.assertEqual(simplified_levels, plain_levels)
-        self.assertLess(simplified, plain)
-
-    def test_simplify_tolerance_is_capped_by_step_and_crs(self):
-        """Допуск упрощения: min(5 м, шаг/2) в единицах СК."""
-        from osgeo import osr
-
-        from qgis_xtopo.core import terrain
-
-        geographic = osr.SpatialReference()
-        geographic.ImportFromEPSG(4326)
-        self.assertAlmostEqual(
-            terrain._contour_simplify_tolerance(geographic, 10),
-            5.0 / terrain.GEOGRAPHIC_SCALE,
-        )
-        self.assertAlmostEqual(
-            terrain._contour_simplify_tolerance(geographic, 5),
-            2.5 / terrain.GEOGRAPHIC_SCALE,
-        )
-        self.assertAlmostEqual(
-            terrain._contour_simplify_tolerance(geographic, 12),
-            5.0 / terrain.GEOGRAPHIC_SCALE,
-        )
-        projected = osr.SpatialReference()
-        projected.ImportFromEPSG(3857)
-        self.assertAlmostEqual(
-            terrain._contour_simplify_tolerance(projected, 10), 5.0
-        )
-        feet = osr.SpatialReference()
-        feet.ImportFromEPSG(2225)
-        self.assertAlmostEqual(
-            terrain._contour_simplify_tolerance(feet, 10),
-            5.0 / feet.GetLinearUnits(),
-        )
-        empty = osr.SpatialReference()
-        self.assertAlmostEqual(
-            terrain._contour_simplify_tolerance(empty, 10),
-            5.0 / terrain.GEOGRAPHIC_SCALE,
-        )
-        self.assertEqual(
-            terrain._contour_simplify_tolerance(geographic, 0), 0.0
-        )
+            self.assertIsNotNone(dataset)
+            try:
+                self.assertGreater(dataset.GetLayer(0).GetFeatureCount(), 0)
+            finally:
+                dataset = None
 
     def test_tile_side_grows_with_raster(self):
         """Тайлов тем больше, чем больше растр."""

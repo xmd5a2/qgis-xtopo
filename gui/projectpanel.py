@@ -135,15 +135,6 @@ def _enum(owner, group, name):
 
 ISOLINES_LAYER = "[TERRAIN] isolines regular"
 GLACIER_ISOLINES_LAYER = "[TERRAIN] isolines glacier"
-ISOLINES_OVERVIEW_LAYER = "[TERRAIN] isolines regular overview"
-GLACIER_ISOLINES_OVERVIEW_LAYER = "[TERRAIN] isolines glacier overview"
-# Подробные и обзорные изолинии — одна сущность для панели: цвет,
-# ширина, видимость и кратности применяются ко всем четырём слоям.
-ISOLINE_LAYERS = (ISOLINES_LAYER, ISOLINES_OVERVIEW_LAYER)
-GLACIER_ISOLINE_LAYERS = (
-    GLACIER_ISOLINES_LAYER, GLACIER_ISOLINES_OVERVIEW_LAYER,
-)
-ALL_ISOLINE_LAYERS = ISOLINE_LAYERS + GLACIER_ISOLINE_LAYERS
 STEEP_LAYER = "[TERRAIN] slope (steep)"
 SLIGHT_LAYER = "[TERRAIN] slope (slight)"
 HILLSHADE_LAYER = "[TERRAIN] hillshade"
@@ -3309,18 +3300,6 @@ class ProjectPanel(QWidget):
                 return layer
         return None
 
-    def _isoline_source_layer(self):
-        """Слой, с которого читаются правила кратностей.
-
-        Подробный слой — основной; если в старом проекте его нет,
-        берётся обзорный или ледниковый.
-        """
-        for name in ALL_ISOLINE_LAYERS:
-            layer = self._layer(name)
-            if layer is not None:
-                return layer
-        return None
-
     def _layer_node(self, layer):
         root = QgsProject.instance().layerTreeRoot()
         return root.findLayer(layer.id()) if root is not None else None
@@ -3372,13 +3351,11 @@ class ProjectPanel(QWidget):
             for box, name in self._layer_boxes:
                 box.setEnabled(available[name])
                 box.setChecked(visible[name])
-            isolines_available = any(
-                self._layer(name) is not None
-                for name in ALL_ISOLINE_LAYERS
+            isolines_available = (
+                available[ISOLINES_LAYER] or available[GLACIER_ISOLINES_LAYER]
             )
-            isolines_visible = any(
-                self._layer_visible(name)
-                for name in ALL_ISOLINE_LAYERS
+            isolines_visible = (
+                visible[ISOLINES_LAYER] or visible[GLACIER_ISOLINES_LAYER]
             )
             self.isolines_check.setEnabled(isolines_available)
             self.isolines_check.setChecked(isolines_visible)
@@ -3394,10 +3371,8 @@ class ProjectPanel(QWidget):
             self._sync_opacity_sliders()
             self._update_steep_variant_state()
             self._update_hillshade_variant_state()
-            self._update_rule_checks(any(
-                self._layer(name) is not None for name in ISOLINE_LAYERS
-            ))
-            self._sync_isoline_rules()
+            self._update_rule_checks(available[ISOLINES_LAYER])
+            self._sync_glacier_rules()
             self._update_isoline_controls()
             # Подложка запрещает отмывку и раскраску уклонов: галки нельзя
             # включить, пока подложка стоит.
@@ -3417,7 +3392,7 @@ class ProjectPanel(QWidget):
                 box.setChecked(active[label])
 
     def _rule_states(self):
-        layer = self._isoline_source_layer()
+        layer = self._layer(ISOLINES_LAYER)
         if layer is None:
             return {}
         renderer = layer.renderer()
@@ -3453,7 +3428,7 @@ class ProjectPanel(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._rule_checks = []
-        layer = self._isoline_source_layer()
+        layer = self._layer(ISOLINES_LAYER)
         renderer = layer.renderer() if layer is not None else None
         if not isinstance(renderer, QgsRuleBasedRenderer):
             self.rules_container.setVisible(False)
@@ -3555,7 +3530,7 @@ class ProjectPanel(QWidget):
     def _rule_toggled(self, label, checked):
         if self._syncing:
             return
-        layer = self._isoline_source_layer()
+        layer = self._layer(ISOLINES_LAYER)
         if layer is None:
             return
         renderer = layer.renderer()
@@ -3576,47 +3551,44 @@ class ProjectPanel(QWidget):
         self._syncing = True
         try:
             self._set_rule_states(renderer, values, target)
-            self._sync_isoline_rules()
+            self._sync_glacier_rules()
             self._update_rule_checks(True)
         finally:
             self._syncing = False
 
-    def _sync_isoline_rules(self):
-        """Приводит правила всех слоёв изолиний к одному состоянию.
+    def _sync_glacier_rules(self):
+        """Приводит правила изолиний ледников к состоянию обычных изолиний.
 
-        Галочки «Кратность» относятся к подробным, обзорным и ледниковым
-        слоям: они рисуются одинаковыми интервалами.
+        Галочки «Кратность» относятся к обоим слоям: изолинии ледников
+        рисуются теми же интервалами, что и остальные изолинии.
         """
         states = self._rule_states()
         if not states:
             return False
-        changed_layers = []
-        for name in ALL_ISOLINE_LAYERS:
-            layer = self._layer(name)
-            renderer = layer.renderer() if layer is not None else None
-            if not isinstance(renderer, QgsRuleBasedRenderer):
+        layer = self._layer(GLACIER_ISOLINES_LAYER)
+        renderer = layer.renderer() if layer is not None else None
+        if not isinstance(renderer, QgsRuleBasedRenderer):
+            return False
+        changed = False
+        for rule in renderer.rootRule().children():
+            label = rule.label().strip()
+            if label not in states:
                 continue
-            changed = False
-            for rule in renderer.rootRule().children():
-                label = rule.label().strip()
-                if label not in states:
-                    continue
-                if self._rule_state(rule) != states[label]:
-                    self._apply_rule_state(rule, states[label])
-                    changed = True
-            if changed:
-                changed_layers.append(layer)
-        for layer in changed_layers:
-            layer.triggerRepaint()
-            try:
-                layer.emitStyleChanged()
-            except Exception:
-                pass
-        return bool(changed_layers)
+            if self._rule_state(rule) != states[label]:
+                self._apply_rule_state(rule, states[label])
+                changed = True
+        if not changed:
+            return False
+        layer.triggerRepaint()
+        try:
+            layer.emitStyleChanged()
+        except Exception:
+            pass
+        return True
 
     def _rule_values(self):
         """Кратности, доступные в слое изолиний: {значение: подпись правила}."""
-        layer = self._isoline_source_layer()
+        layer = self._layer(ISOLINES_LAYER)
         renderer = layer.renderer() if layer is not None else None
         if not isinstance(renderer, QgsRuleBasedRenderer):
             return {}
@@ -4075,10 +4047,8 @@ class ProjectPanel(QWidget):
         try:
             self._set_layer_visible(name, checked)
             if name == ISOLINES_LAYER:
-                # Контуры высот управляют подробными, обзорными
-                # и ледниковыми изолиниями.
-                for isolines_name in ALL_ISOLINE_LAYERS:
-                    self._set_layer_visible(isolines_name, checked)
+                # Контуры высот управляют и изолиниями ледников.
+                self._set_layer_visible(GLACIER_ISOLINES_LAYER, checked)
         finally:
             self._syncing = False
         self._sync_from_project()
@@ -4149,7 +4119,7 @@ class ProjectPanel(QWidget):
 
     def _capture_isoline_baseline(self):
         """Запоминает цвета линий и подписей изогипс из шаблона."""
-        for name in ALL_ISOLINE_LAYERS:
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             if name in self._isoline_baseline:
                 continue
             layer = self._layer(name)
@@ -4194,7 +4164,7 @@ class ProjectPanel(QWidget):
 
     def _basemap_isoline_layers(self):
         layers = []
-        for name in ALL_ISOLINE_LAYERS:
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             layer = self._layer(name)
             if layer is not None:
                 layers.append(layer)
@@ -4353,7 +4323,9 @@ class ProjectPanel(QWidget):
         """Образец цвета, кнопки сброса и двойной ширины."""
         if not self._isoline_baseline and self._isoline_color is None:
             self._capture_isoline_baseline()
-        layer = self._isoline_source_layer()
+        layer = self._layer(ISOLINES_LAYER) or self._layer(
+            GLACIER_ISOLINES_LAYER
+        )
         enabled = layer is not None and self.isolines_check.isChecked()
         doubled = isolines_width_doubled()
         self.isolines_width_button.setEnabled(enabled)
@@ -4379,7 +4351,7 @@ class ProjectPanel(QWidget):
             BASEMAP_WIDTH_PROPERTY, "1" if checked else "0"
         )
         self._mark_isoline_override("width")
-        for name in ALL_ISOLINE_LAYERS:
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             layer = self._layer(name)
             if layer is not None:
                 _repaint_layer(layer)
@@ -4403,7 +4375,7 @@ class ProjectPanel(QWidget):
     def _set_isoline_color(self, color):
         self._capture_isoline_baseline()
         self._isoline_color = QColor(color)
-        for name in ALL_ISOLINE_LAYERS:
+        for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
             apply_isoline_color(self._layer(name), self._isoline_color)
         # Цвет выбрал пользователь: подложка больше его не меняет.
         self._set_basemap_state(
@@ -4435,7 +4407,7 @@ class ProjectPanel(QWidget):
         """Возвращает выбранный цвет после перезагрузки слоёв проекта."""
         self._capture_isoline_baseline()
         if self._isoline_color is not None:
-            for name in ALL_ISOLINE_LAYERS:
+            for name in (ISOLINES_LAYER, GLACIER_ISOLINES_LAYER):
                 apply_isoline_color(self._layer(name), self._isoline_color)
         self._update_isoline_controls()
 
