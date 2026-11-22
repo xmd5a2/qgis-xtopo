@@ -1179,6 +1179,167 @@ class PolygonToLinesFallbackTest(unittest.TestCase):
         self.assertEqual(Path(default).suffix, ".gpkg")
 
 
+class AdminNameFallbackTest(unittest.TestCase):
+    """Названия стран собираются из замкнутых линий, если нет отношения."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = Config(
+            qgis_projects_dir=self.directory.name, project_name="logic"
+        )
+        self.config.ensure_directories()
+        self.target = (
+            self.config.vector_dir / "admin_level_2_relation.sqlite"
+        )
+
+    def _write_lines(self, features):
+        source = self.config.temp_dir / "lines.geojson"
+        source.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": features,
+            }),
+            encoding="utf-8",
+        )
+        save_vector(
+            source,
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            "admin_level_2_dissolved",
+        )
+
+    @staticmethod
+    def _feature(name, coordinates):
+        return {
+            "type": "Feature",
+            "properties": {"name": name},
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coordinates,
+            },
+        }
+
+    def test_closed_ring_becomes_name_polygon(self):
+        self._write_lines([
+            self._feature(
+                "Closed", [[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]
+            ),
+            self._feature("Open", [[2, 0], [3, 1]]),
+        ])
+        messages = []
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None),
+            progress=messages.append,
+        )
+        pipeline._admin_name_fallback()
+
+        self.assertTrue(self.target.exists())
+        dataset = ogr.Open(str(self.target))
+        layer = dataset.GetLayer(0)
+        features = list(layer)
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0].GetField("name"), "Closed")
+        self.assertEqual(
+            features[0].GetGeometryRef().GetGeometryName(), "MULTIPOLYGON"
+        )
+        self.assertIn("подписи собраны", messages[-1])
+
+    def test_open_lines_do_not_create_names(self):
+        self._write_lines([self._feature("Open", [[2, 0], [3, 1]])])
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        pipeline._admin_name_fallback()
+        self.assertFalse(self.target.exists())
+
+    def test_existing_relation_is_kept(self):
+        relation = self.config.temp_dir / "relation.geojson"
+        relation.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"name": "France"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [0, 0], [0, 1], [1, 1], [1, 0], [0, 0],
+                        ]],
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        save_vector(relation, self.target, "admin_level_2_relation")
+        self._write_lines([
+            self._feature(
+                "Closed", [[0, 0], [0, 2], [2, 2], [2, 0], [0, 0]]
+            ),
+        ])
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        pipeline._admin_name_fallback()
+
+        dataset = ogr.Open(str(self.target))
+        features = list(dataset.GetLayer(0))
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0].GetField("name"), "France")
+
+
+class SinglePartsFallbackTest(unittest.TestCase):
+    """Пустой singleparts у admin-границ не должен терять весь слой."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = Config(
+            qgis_projects_dir=self.directory.name, project_name="logic"
+        )
+        self.config.ensure_directories()
+        self.source = self.config.temp_dir / "lines.geojson"
+        self.source.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"name": "Line"},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0, 0], [1, 1]],
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _runner(parameters):
+        output = Path(parameters["OUTPUT"])
+        output.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(output))
+        dataset.CreateLayer("empty", geom_type=ogr.wkbUnknown)
+        dataset = None
+        return {"OUTPUT": str(output)}
+
+    def test_admin_layer_keeps_multipart_input(self):
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(self._runner)
+        )
+        result = pipeline._step(
+            "admin_level_2", str(self.source), "singleparts", {}
+        )
+        self.assertEqual(Path(result), self.source)
+        self.assertTrue(pipeline.warnings)
+
+    def test_other_layer_still_raises(self):
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(self._runner)
+        )
+        with self.assertRaises(PipelineError):
+            pipeline._step("wood", str(self.source), "singleparts", {})
+
+
 class CoastlineIntermediateTest(unittest.TestCase):
     """Промежуточные слои береговой линии и полоса поиска океана."""
 

@@ -811,8 +811,91 @@ class Pipeline:
         self.timings.set_workers(workers)
         if workers <= 1 or len(query_names) == 1:
             self._run_serial(source, query_names)
-            return self.warnings
-        return self._run_parallel(source, query_names, workers)
+        else:
+            self._run_parallel(source, query_names, workers)
+        if {"admin_level_2", "admin_level_4"} & set(query_names):
+            self._admin_name_fallback()
+        return self.warnings
+
+    def _admin_name_fallback(self):
+        """Собирает слой названий из замкнутых линий границы.
+
+        В вырезе PBF может не быть отношения страны: его члены
+        разбросаны по миру, и в вырез попадают только пограничные линии.
+        Тогда ``admin_level_*_relation`` пуст, шаблон удаляет слой
+        названий, и подписи стран не рисуются. Замкнутые линии границы
+        дают те же площадные контуры, по которым ставится подпись.
+        """
+        for level, source_name in (
+            ("admin_level_2", "admin_level_2_dissolved"),
+            ("admin_level_4", "admin_level_4_proc"),
+        ):
+            target = self.config.vector_dir / f"{level}_relation.sqlite"
+            if target.exists() and _layer_has_features(target):
+                continue
+            source = self.config.vector_dir / f"{source_name}.sqlite"
+            if not source.exists() or not _layer_has_features(source):
+                continue
+            created = self._name_polygons_from_lines(
+                source, target, f"{level}_relation"
+            )
+            if created:
+                self.progress(
+                    f"{level}: подписи собраны из линий границы, "
+                    f"объектов {created}"
+                )
+
+    def _name_polygons_from_lines(self, source, target, layer_name):
+        """Пишет MultiPolygon из замкнутых колец линейного слоя."""
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(source))
+        if dataset is None:
+            return 0
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            dataset = None
+            return 0
+        temporary = self._temp_path(layer_name, "names", "gpkg")
+        temporary.unlink(missing_ok=True)
+        writer = _GpkgWriter(
+            temporary, layer_name, layer.GetLayerDefn(),
+            layer.GetSpatialRef(), geometry_type=ogr.wkbMultiPolygon,
+            cancel=self.cancel,
+        )
+        written = 0
+        try:
+            for position, feature in enumerate(layer):
+                if (
+                    self.cancel is not None
+                    and position % 64 == 0
+                    and self.cancel.is_set()
+                ):
+                    raise InterruptedError("Preparation cancelled")
+                polygons = _closed_ring_multipolygon(
+                    feature.GetGeometryRef()
+                )
+                if polygons is None:
+                    continue
+                writer.add(feature, polygons)
+                written += 1
+            if written:
+                writer.close()
+            else:
+                writer.close(commit=False)
+        except Exception:
+            writer.close(commit=False)
+            temporary.unlink(missing_ok=True)
+            raise
+        finally:
+            layer = None
+            dataset = None
+        try:
+            if written:
+                save_vector(temporary, target, layer_name)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return written
 
     def _dependency_graph(self, query_names):
         """Кто что производит и от кого зависит каждый слой.
@@ -1158,10 +1241,28 @@ class Pipeline:
                 "OUTPUT": self._temp_path(name, "dissolved"),
             })
         if operation == "singleparts":
-            return self._algorithm("native:multiparttosingleparts", {
-                "INPUT": current,
-                "OUTPUT": self._temp_path(name, "parts"),
-            })
+            try:
+                return self._algorithm("native:multiparttosingleparts", {
+                    "INPUT": current,
+                    "OUTPUT": self._temp_path(name, "parts"),
+                })
+            except PipelineError as exc:
+                # У admin-границ разбиение иногда возвращает пустой слой.
+                # Мультитип пригоден для шаблона, а без этого вся
+                # граница пропадала бы из проекта.
+                if "produced an empty or unreadable layer" not in str(exc):
+                    raise
+                if not name.startswith("admin_level_"):
+                    raise
+                if not _layer_has_features(current):
+                    raise
+                message = (
+                    f"{name}: native:multiparttosingleparts не дал "
+                    "объектов, слой сохранён мультитипом"
+                )
+                self.progress(message)
+                self.warnings.append(message)
+                return current
         if operation == "simplify":
             return self._algorithm("native:simplifygeometries", {
                 "INPUT": current,
@@ -1883,6 +1984,38 @@ def _ring_points(line):
         x, y = line.GetPoint(index)[:2]
         ring.AddPoint_2D(x, y)
     return ring
+
+
+def _closed_ring_multipolygon(geometry):
+    """MultiPolygon только из замкнутых колец линейной геометрии.
+
+    Разомкнутые части пропускаются: площадь из них не собрать, а для
+    подписи достаточно любого замкнутого контура.
+    """
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    multiple = ogr.Geometry(ogr.wkbMultiPolygon)
+
+    def add(line):
+        ring = _ring_points(line)
+        if ring is None:
+            return False
+        polygon = ogr.Geometry(ogr.wkbPolygon)
+        polygon.AddGeometry(ring)
+        multiple.AddGeometry(polygon)
+        return True
+
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        return multiple if add(geometry) else None
+    if name == "MULTILINESTRING":
+        found = False
+        for index in range(geometry.GetGeometryCount()):
+            found = add(geometry.GetGeometryRef(index)) or found
+        return multiple if found else None
+    return None
 
 
 def _is_polygonal(geometry):
