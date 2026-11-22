@@ -224,7 +224,7 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(dock.tabs.currentIndex(), 0)
         self.assertLessEqual(dock.minimumSizeHint().height(), 640)
         self.assertFalse(dock.log_toggle.isChecked())
-        self.assertEqual(dock.overpass_server.count(), 5)
+        self.assertEqual(dock.overpass_server.count(), 4)
         self.assertEqual(
             dock.overpass_server.itemData(1),
             "https://overpass.private.coffee/api/interpreter",

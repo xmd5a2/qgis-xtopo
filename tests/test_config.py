@@ -47,8 +47,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_default_overpass_endpoints(self):
         config = Config()
-        # По умолчанию — глобальный инстанс: региональные зеркала
-        # (overpass.osm.ch) отвечают только по своей стране.
+        # По умолчанию — глобальный инстанс, а не региональное зеркало.
         self.assertEqual(
             config.overpass_endpoint,
             "https://overpass-api.de/api/interpreter",
