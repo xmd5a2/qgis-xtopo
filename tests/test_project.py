@@ -765,6 +765,28 @@ class ProjectBasemapTest(unittest.TestCase):
                 saved.clear()
 
 
+class ProjectMeasureEllipsoidTest(unittest.TestCase):
+    """Карта остаётся в EPSG:3857, но меряет по эллипсоиду WGS84."""
+
+    def test_rewrite_keeps_web_mercator_and_sets_ellipsoid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "demo.qgz"
+            rewrite_project_archive(template_path(), destination, "demo")
+            with zipfile.ZipFile(destination) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        project_block = text[
+            text.find("<projectCrs>"):text.find("</projectCrs>")
+        ]
+        self.assertIn("<authid>EPSG:3857</authid>", project_block)
+        measure_block = text[
+            text.find("<Measure>"):text.find("</Measure>")
+        ]
+        self.assertIn(
+            '<Ellipsoid type="QString">EPSG:7030</Ellipsoid>',
+            measure_block,
+        )
+
+
 class ProjectAttributionTest(unittest.TestCase):
     """Атрибуция источника рельефа попадает в подпись макета атласа."""
 
@@ -776,6 +798,24 @@ class ProjectAttributionTest(unittest.TestCase):
             text = archive.read("automap.qgs").decode("utf-8")
         self.assertIn("@dem_attribution", text)
         self.assertIn("dem_attribution", self._variables(text))
+
+    def test_template_credits_xtopo_instead_of_qgis(self):
+        with zipfile.ZipFile(template_path()) as archive:
+            text = archive.read("automap.qgs").decode("utf-8")
+        self.assertIn("QGIS-xtopo", text)
+        self.assertNotIn("QGIS v[%@qgis_short_version%]", text)
+
+    def test_rewrite_writes_xtopo_version(self):
+        from qgis_xtopo.core.resources import plugin_version
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "demo.qgz"
+            rewrite_project_archive(template_path(), destination, "demo")
+            with zipfile.ZipFile(destination) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        self.assertEqual(
+            self._variables(text)["xtopo_version"], plugin_version()
+        )
 
     def test_rewrite_writes_attribution(self):
         attribution = (
@@ -856,6 +896,14 @@ class ProjectAttributionTest(unittest.TestCase):
             "Produced using Copernicus data",
             self._variables(text)["dem_attribution"],
         )
+        project_block = text[
+            text.find("<projectCrs>"):text.find("</projectCrs>")
+        ]
+        self.assertIn("<authid>EPSG:3857</authid>", project_block)
+        measure_block = text[
+            text.find("<Measure>"):text.find("</Measure>")
+        ]
+        self.assertIn("EPSG:7030", measure_block)
 
 
 class ProjectTextEditsTest(unittest.TestCase):
@@ -899,6 +947,7 @@ class ProjectTextEditsTest(unittest.TestCase):
             _set_project_variable,
             patch_raster_resampling,
         )
+        from qgis_xtopo.core.resources import plugin_version
 
         old_font = 'fontFamily="Century Schoolbook L"'
         new_font = 'fontFamily="Noto Serif"'
@@ -923,6 +972,9 @@ class ProjectTextEditsTest(unittest.TestCase):
         )
         sequential = _set_project_variable(
             sequential, "dem_attribution", "DEM test"
+        )
+        sequential = _set_project_variable(
+            sequential, "xtopo_version", plugin_version()
         )
         sequential = patch_raster_resampling(sequential)
 

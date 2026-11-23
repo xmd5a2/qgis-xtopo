@@ -14,6 +14,21 @@ from qgis.core import (
 )
 
 
+WEB_MERCATOR_RADIUS = 6378137.0
+
+
+def mercator_ground_factor(y):
+    """Во сколько раз метр EPSG:3857 длиннее метра на местности.
+
+    В Web Mercator масштаб постоянен по широте: на 62° один метр карты
+    соответствует примерно 0,48 метра на земле.
+    """
+    latitude = 2.0 * math.atan(
+        math.exp(float(y) / WEB_MERCATOR_RADIUS)
+    ) - math.pi / 2.0
+    return math.cos(latitude)
+
+
 def scale_bar(meters_per_pixel, max_length=140.0):
     """Длина полосы шкалы в пикселях и её подпись.
 

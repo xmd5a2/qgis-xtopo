@@ -44,7 +44,7 @@ from qgis.PyQt.QtPrintSupport import QPrintDialog, QPrinter
 from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDockWidget,
     QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu,
-    QMessageBox, QProgressDialog, QPushButton, QSlider, QStyle,
+    QMessageBox, QProgressDialog, QPushButton, QRadioButton, QSlider, QStyle,
     QStyleOptionComboBox, QStylePainter, QToolBar, QToolButton, QVBoxLayout,
     QWidget,
 )
@@ -59,7 +59,7 @@ from ..core import (
     basemap, i18n, label_style, map_language, slope_style, text_size,
 )
 from ..core.project import fit_project_extent
-from ..core.resources import template_path
+from ..core.resources import plugin_version, template_path
 from .atlas import (
     SheetEditMapTool, SheetMapTool, SheetMarker, SheetSizeLabels,
 )
@@ -1713,6 +1713,12 @@ class ProjectPanel(QWidget):
             None,
         )
         if item is not None:
+            text = item.text()
+            old = "QGIS v[%@qgis_short_version%]"
+            if old in text:
+                item.setText(
+                    text.replace(old, f"QGIS-xtopo v{plugin_version()}")
+                )
             item.adjustSizeToText()
         return item
 
@@ -1730,6 +1736,9 @@ class ProjectPanel(QWidget):
         )
         if map_item is None:
             raise RuntimeError("В макете «Detailed» нет карты")
+        project_crs = QgsProject.instance().crs()
+        if project_crs.isValid():
+            map_item.setCrs(project_crs)
         map_item.attemptMove(QgsLayoutPoint(0, 0, units))
         map_item.attemptResize(QgsLayoutSize(width, height, units))
         scale_bar = next(
@@ -1752,6 +1761,11 @@ class ProjectPanel(QWidget):
             None,
         )
         if number_item is not None:
+            # В старых проектах подпись ещё печатает номер единственного
+            # листа; заменяем выражение и при экспорте.
+            number_item.setText(
+                "[% if(@atlas_totalfeatures>1,@atlas_featurenumber,'') %]"
+            )
             # В макете номер листа стоит в левом верхнем углу, но подпись
             # центрирована в своей рамке: слева от цифры пустого места
             # больше, чем сверху. Прижимаем текст влево и добавляем к
@@ -3060,9 +3074,43 @@ class ProjectPanel(QWidget):
             if name != "QgsMeasureDialog":
                 continue
             dialog.installEventFilter(self)
+            self._prefer_ellipsoid_measure(dialog)
             connected = True
         if connected:
             self._measure_dialogs_connected = True
+
+    def _prefer_ellipsoid_measure(self, dialog=None):
+        """Включает измерение по эллипсоиду WGS84.
+
+        Проект остаётся в EPSG:3857 ради прежней картинки, а его метры на
+        широте 62° вдвое длиннее земных.  Эллипсоидный режим даёт реальные
+        расстояния; пользователь может переключить его обратно вручную.
+        """
+        if dialog is None:
+            if self.iface is None:
+                return
+            try:
+                window = self.iface.mainWindow()
+            except Exception:
+                return
+            for candidate in window.findChildren(QDialog):
+                if self._is_measure_dialog(candidate):
+                    self._prefer_ellipsoid_measure(candidate)
+            return
+        # Готовый проект мог быть собран с Ellipsoid=NONE: без эллипсоида
+        # даже режим «На эллипсоиде» считает по плоскости.  Меняем только
+        # настройку измерения в памяти; картинка и стили не зависят от неё.
+        project = QgsProject.instance()
+        changed = project.ellipsoid() in ("", "NONE")
+        if changed:
+            project.setEllipsoid("EPSG:7030")
+        try:
+            radio = dialog.findChild(QRadioButton, "mEllipsoidal")
+        except Exception:
+            radio = None
+        if radio is not None and (changed or not radio.isChecked()):
+            radio.setChecked(False)
+            radio.setChecked(True)
 
     @staticmethod
     def _is_measure_dialog(widget):
@@ -3177,6 +3225,10 @@ class ProjectPanel(QWidget):
         for action in window.findChildren(QAction):
             if action.objectName() == object_name:
                 action.trigger()
+                if object_name.startswith("mActionMeasure"):
+                    # Окно измерения создаётся внутри trigger(); включаем
+                    # эллипсоид после возврата в цикл событий.
+                    QTimer.singleShot(0, self._prefer_ellipsoid_measure)
                 return True
         return False
 

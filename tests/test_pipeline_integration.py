@@ -522,6 +522,65 @@ class PipelineIntegrationTest(unittest.TestCase):
         # Невозможные значения не дают полосы.
         self.assertEqual(scale_bar(0)[0], 0.0)
 
+    def test_layout_scale_bar_uses_ground_meters_in_mercator(self):
+        """Линейка макета в EPSG:3857 переводит метры в земные."""
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsLayoutItemMap, QgsLayoutPoint,
+            QgsLayoutSize, QgsPrintLayout, QgsProject, QgsRectangle,
+            QgsUnitTypes,
+        )
+        from qgis_xtopo.core.measure import mercator_ground_factor
+        from qgis_xtopo.gui.layoutscalebar import LayoutScaleBarItem
+
+        project = QgsProject.instance()
+        project.clear()
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        layout.setName("scale")
+        map_item = QgsLayoutItemMap(layout)
+        map_item.attemptMove(
+            QgsLayoutPoint(0, 0, QgsUnitTypes.LayoutMillimeters)
+        )
+        map_item.attemptResize(
+            QgsLayoutSize(100, 100, QgsUnitTypes.LayoutMillimeters)
+        )
+        map_item.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        map_item.setExtent(QgsRectangle(0, 8_700_000, 100_000, 8_800_000))
+        layout.addLayoutItem(map_item)
+        bar = LayoutScaleBarItem(layout, map_item)
+        bar.attemptResize(
+            QgsLayoutSize(50, 10, QgsUnitTypes.LayoutMillimeters)
+        )
+        layout.addLayoutItem(bar)
+        try:
+            expected = 1000.0 * mercator_ground_factor(8_750_000)
+            self.assertAlmostEqual(
+                bar._meters_per_mm(), expected, places=3
+            )
+            self.assertLess(bar._meters_per_mm(), 1000.0)
+        finally:
+            project.clear()
+
+    def test_mercator_scale_bar_uses_ground_meters(self):
+        """Метры EPSG:3857 на широте 62° примерно вдвое длиннее земных."""
+        import math
+
+        from qgis_xtopo.core.measure import (
+            WEB_MERCATOR_RADIUS,
+            mercator_ground_factor,
+        )
+
+        latitude = math.radians(61.5)
+        y = WEB_MERCATOR_RADIUS * math.log(
+            math.tan(math.pi / 4.0 + latitude / 2.0)
+        )
+        self.assertAlmostEqual(
+            mercator_ground_factor(y),
+            math.cos(latitude),
+            places=6,
+        )
+        self.assertAlmostEqual(mercator_ground_factor(0.0), 1.0, places=9)
+
     def test_sheet_scale_label(self):
         """Масштаб листа — ширина местности, делённая на ширину страницы."""
         from qgis_xtopo.core.measure import format_scale
@@ -1114,6 +1173,44 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_measure_dialog_prefers_ellipsoid(self):
+        """Окно измерения открывается в режиме эллипсоида WGS84."""
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtWidgets import QDialog, QRadioButton
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        panel = ProjectPanel(Iface(canvas))
+        dialog = QDialog()
+        radio = QRadioButton(dialog)
+        radio.setObjectName("mEllipsoidal")
+        radio.setChecked(False)
+        from qgis.core import QgsCoordinateReferenceSystem, QgsProject
+
+        project = QgsProject.instance()
+        old_crs = project.crs()
+        old_ellipsoid = project.ellipsoid()
+        project.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        project.setEllipsoid("NONE")
+        try:
+            panel._prefer_ellipsoid_measure(dialog)
+            self.assertTrue(radio.isChecked())
+            self.assertEqual(project.ellipsoid(), "EPSG:7030")
+        finally:
+            project.setEllipsoid(old_ellipsoid)
+            project.setCrs(old_crs)
+            panel.deleteLater()
+            dialog.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
     def test_measure_dialog_close_activates_pan_tool(self):
         from unittest import mock
 
@@ -1327,7 +1424,10 @@ class PipelineIntegrationTest(unittest.TestCase):
         )
         layout.addLayoutItem(number_item)
         copyright_item = QgsLayoutItemLabel(layout)
-        copyright_item.setText("Map data OpenStreetMap contributors")
+        copyright_item.setText(
+            "Map data OpenStreetMap contributors | "
+            "QGIS v[%@qgis_short_version%]"
+        )
         layout.addLayoutItem(copyright_item)
         lower_right = _enum(QgsLayoutItem, "ReferencePoint", "LowerRight")
         copyright_item.setReferencePoint(lower_right)
@@ -1381,6 +1481,15 @@ class PipelineIntegrationTest(unittest.TestCase):
             )
             self.assertLess(number_item.pos().x(), 10.0)
             self.assertAlmostEqual(number_item.pos().y(), 0.0, places=3)
+            # Номер единственного листа не печатается.
+            self.assertIn(
+                "@atlas_totalfeatures", number_item.text()
+            )
+            # В старом проекте атрибуция QGIS заменяется на QGIS-xtopo.
+            self.assertIn("QGIS-xtopo v", copyright_item.text())
+            self.assertNotIn(
+                "QGIS v[%@qgis_short_version%]", copyright_item.text()
+            )
         finally:
             panel.deleteLater()
             project.clear()

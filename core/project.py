@@ -9,7 +9,7 @@ from pathlib import Path
 from .bbox import parse_bbox
 from . import dem_sources, text_size
 from .map_language import DETAIL_VARIABLE
-from .resources import resource_path, template_path
+from .resources import plugin_version, resource_path, template_path
 
 TEMPLATE_FONT = "Century Schoolbook L"
 SERIF_FONTS = (
@@ -802,7 +802,13 @@ def _project_text_edits(text, project_name, dem_attribution):
         (DETAIL_VARIABLE, None),
         (text_size.VARIABLE, text_size.multiplier()),
         ("dem_attribution", dem_attribution),
+        ("xtopo_version", plugin_version()),
     )))
+    edits.extend(_marker_edits(
+        text,
+        '<Ellipsoid type="QString">NONE</Ellipsoid>',
+        '<Ellipsoid type="QString">EPSG:7030</Ellipsoid>',
+    ))
     edits.extend(_raster_edits(text))
     return edits
 

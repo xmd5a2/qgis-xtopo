@@ -29,6 +29,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core import i18n, nominatim
 from ..core.bbox import BBox, parse_bbox
+from ..core.measure import mercator_ground_factor
 
 
 @dataclass(frozen=True)
@@ -354,6 +355,9 @@ class MeasuredCanvas(QgsMapCanvas):
             if not span or span <= 0:
                 return
             meters_per_pixel = span / pixels
+            # Холст в EPSG:3857: его метры растянуты с широтой, поэтому
+            # для подписи шкалы переводим их в метры на местности.
+            meters_per_pixel *= mercator_ground_factor(extent.center().y())
             metrics = painter.fontMetrics()
             font = painter.font()
             font.setPointSizeF(max(8.0, font.pointSizeF() - 1))

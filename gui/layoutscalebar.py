@@ -18,7 +18,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QPainter, QPainterPath, QPen
 
-from ..core.measure import scale_bar
+from ..core.measure import mercator_ground_factor, scale_bar
 
 SCALE_BAR_MAX_MM = 45.0
 BAR_HEIGHT_MM = 1.5
@@ -85,6 +85,10 @@ class LayoutScaleBarItem(QgsLayoutItem):
             except Exception:
                 factor = 1.0
             width_m = extent.width() * factor
+            if crs.authid() == "EPSG:3857":
+                # В Web Mercator метры растянуты с широтой: на 62°
+                # расстояние на местности вдвое меньше.
+                width_m *= mercator_ground_factor(extent.center().y())
         return width_m / map_width_mm
 
     def draw(self, context):

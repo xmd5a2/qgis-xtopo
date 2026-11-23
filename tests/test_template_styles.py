@@ -119,6 +119,21 @@ class TemplateLayoutTest(unittest.TestCase):
             self.assertTrue(packaged.exists())
 
 
+class AtlasNumberLabelTest(unittest.TestCase):
+    """Номер листа печатается только в многостраничном атласе."""
+
+    def test_number_hidden_for_single_sheet(self):
+        labels = [
+            item.get("labelText", "")
+            for item in _template_root().iter("LayoutItem")
+            if item.get("type") == "65641"
+            and "@atlas_featurenumber" in item.get("labelText", "")
+        ]
+        self.assertEqual(len(labels), 1)
+        self.assertIn("@atlas_totalfeatures", labels[0])
+        self.assertIn(">1", labels[0])
+
+
 class TemplateFilterExpressionTest(unittest.TestCase):
     """Выражения шаблона — валидные выражения QGIS.
 
