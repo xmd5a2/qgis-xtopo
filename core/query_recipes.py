@@ -99,8 +99,10 @@ def pack_roads():
     return step("pack_roads")
 
 
-def linestopolygons(drop_others=False):
-    return step("linestopolygons", drop_others=drop_others)
+def linestopolygons(drop_others=False, optional=False):
+    return step(
+        "linestopolygons", drop_others=drop_others, optional=optional
+    )
 
 
 RECIPES = {
@@ -268,9 +270,11 @@ RECIPES = {
     "strait": Recipe([
         # Шаблон ждёт два файла: strait.sqlite (исходные объекты — точки
         # проливов и линии) и strait_skel.sqlite (остовные линии
-        # многоугольников проливов).
+        # многоугольников проливов). Полигонов может не быть вовсе:
+        # natural=strait обычно задан открытой линией или точкой. Тогда
+        # рецепт заканчивается на уже сохранённом strait.sqlite.
         save(),
-        linestopolygons(drop_others=True), fix(),
+        linestopolygons(drop_others=True, optional=True), fix(),
         label_axis(), save("_skel"),
     ]),
     "coastline": Recipe([

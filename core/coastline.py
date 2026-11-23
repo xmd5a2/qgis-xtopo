@@ -113,6 +113,25 @@ def _has_features(path):
         dataset = None
 
 
+def _geometry_area(geometry):
+    """Площадь только площадных частей геометрии.
+
+    Пересечение двух полигонов может оказаться линией, точкой или
+    коллекцией. GetArea у не-площадной геометрии пишет предупреждение
+    GDAL и возвращает 0, поэтому площадь собирается по частям.
+    """
+    if geometry is None or geometry.IsEmpty():
+        return 0.0
+    if geometry.GetGeometryName() in ("POLYGON", "MULTIPOLYGON"):
+        return geometry.GetArea()
+    total = 0.0
+    for index in range(geometry.GetGeometryCount()):
+        part = geometry.GetGeometryRef(index)
+        if part is not None:
+            total += _geometry_area(part)
+    return total
+
+
 def _polygon_area(path):
     """Суммарная площадь полигональных объектов слоя."""
     from osgeo import ogr
@@ -131,7 +150,7 @@ def _polygon_area(path):
         for feature in layer:
             geometry = feature.GetGeometryRef()
             if geometry is not None and not geometry.IsEmpty() and geometry.GetDimension() == 2:
-                area += geometry.GetArea()
+                area += _geometry_area(geometry)
         return area
     finally:
         dataset = None
@@ -172,7 +191,7 @@ def _intersection_area(first_path, second_path):
                 except Exception:
                     continue
                 if common is not None and not common.IsEmpty():
-                    area += common.GetArea()
+                    area += _geometry_area(common)
             second_layer.SetSpatialFilter(None)
         return area
     finally:
@@ -221,7 +240,7 @@ def _largest_polygon(source, destination):
             geometry = feature.GetGeometryRef()
             if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
                 continue
-            area = geometry.GetArea()
+            area = _geometry_area(geometry)
             if area > best_area:
                 best_area = area
                 best = geometry.Clone()
@@ -287,7 +306,7 @@ def _write_polygons(source, destination):
             geometry = feature.GetGeometryRef()
             if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
                 continue
-            if geometry.GetArea() <= MIN_POLYGON_AREA:
+            if _geometry_area(geometry) <= MIN_POLYGON_AREA:
                 continue
             if geometry.GetGeometryName() == "POLYGON":
                 geometry = ogr.ForceToMultiPolygon(geometry)

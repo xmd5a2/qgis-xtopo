@@ -712,6 +712,7 @@
   "{}: слой {} сохранён": "{}: saved {} layer",
   "{}: пропущено (исходный слой не удался)": "{}: skipped (source layer failed)",
   "{}: объектов нет, пропущено": "{}: no objects, skipped",
+  "{}: остальные шаги пропущены, обрабатывать нечего": "{}: the remaining steps were skipped, nothing left to process",
   "{}: пропущено (неразрешённая зависимость)": "{}: skipped (unresolved dependency)",
   "{}: пропущено ({})": "{}: skipped ({})",
   "{}: пропущено, исходный слой не удался": "{}: skipped, source layer failed",

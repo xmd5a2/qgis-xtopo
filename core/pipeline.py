@@ -668,6 +668,63 @@ def _geometry_family_flags(geometry, flatten, polygon_types, line_types):
     return polygons, lines
 
 
+def _geometry_kinds(geometry, flatten):
+    """Семейства геометрии внутри объекта: точки, линии, площади."""
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return set()
+    kind = flatten(geometry.GetGeometryType())
+    if kind in (ogr.wkbPoint, ogr.wkbMultiPoint):
+        return {"point"}
+    if kind in (
+        ogr.wkbLineString, ogr.wkbMultiLineString,
+        ogr.wkbCircularString, ogr.wkbCompoundCurve,
+    ):
+        return {"line"}
+    if kind in (
+        ogr.wkbPolygon, ogr.wkbMultiPolygon, ogr.wkbCurvePolygon,
+    ):
+        return {"polygon"}
+    kinds = set()
+    for index in range(geometry.GetGeometryCount()):
+        kinds |= _geometry_kinds(geometry.GetGeometryRef(index), flatten)
+    return kinds
+
+
+def _layer_has_mixed_geometry(path):
+    """Есть ли в слое объекты разных семейств (точки, линии, площади).
+
+    QGIS создаёт промежуточный GeoPackage с типом по первому объекту и
+    предупреждает о каждом объекте другого семейства. Для смешанного
+    слоя промежуточный файл пишется в GeoJSON: объявленного типа слоя
+    у него нет, и предупреждение не возникает.
+    """
+    from osgeo import ogr
+
+    try:
+        dataset = ogr.Open(str(path))
+    except Exception:
+        dataset = None
+    if dataset is None:
+        return False
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return False
+        flatten = getattr(ogr, "wkbFlatten", None) or ogr.GT_Flatten
+        kinds = set()
+        for feature in layer:
+            kinds |= _geometry_kinds(feature.GetGeometryRef(), flatten)
+            if len(kinds) > 1:
+                return True
+        return False
+    except Exception:
+        return False
+    finally:
+        dataset = None
+
+
 def _recipe_outputs(name):
     """Файлы, которые производит рецепт слоя.
 
@@ -998,6 +1055,15 @@ class Pipeline:
                     self.timings.add_step(
                         name, operation, time.monotonic() - started
                     )
+                    if current is None:
+                        # Шаг решил, что дальше обрабатывать нечего
+                        # (у пролива не оказалось площадей). Уже
+                        # сохранённые файлы остаются в проекте.
+                        self.progress(
+                            f"{name}: остальные шаги пропущены, "
+                            "обрабатывать нечего"
+                        )
+                        break
             except PipelineError as exc:
                 self.warnings.append(f"{name}: {exc}; layer skipped")
                 self.progress(f"{name}: skipped ({exc})")
@@ -1218,11 +1284,14 @@ class Pipeline:
             self._missing_layer(name, parameters["name"])
             return current
         if operation == "fix":
+            extension = parameters.get("extension")
+            if extension is None and _layer_has_mixed_geometry(current):
+                # GeoPackage объявил бы слой по первому объекту и
+                # предупредил о каждом объекте другого семейства.
+                extension = "geojson"
             return self._algorithm("native:fixgeometries", {
                 "INPUT": current,
-                "OUTPUT": self._temp_path(
-                    name, "fixed", parameters.get("extension")
-                ),
+                "OUTPUT": self._temp_path(name, "fixed", extension),
             })
         if operation == "dissolve":
             field = parameters.get("field")
@@ -1292,11 +1361,7 @@ class Pipeline:
                 "OUTPUT": self._temp_path(name, "buffered"),
             })
         if operation == "centroid":
-            return self._algorithm("native:centroids", {
-                "INPUT": current,
-                "ALL_PARTS": False,
-                "OUTPUT": self._temp_path(name, "centroids"),
-            })
+            return self._centroids(name, current)
         if operation == "polygonstolines":
             polygons, lines = _layer_geometry_families(current)
             if not polygons:
@@ -1317,7 +1382,9 @@ class Pipeline:
             })
         if operation == "linestopolygons":
             return self._lines_to_polygons(
-                name, current, drop_others=parameters.get("drop_others", False)
+                name, current,
+                drop_others=parameters.get("drop_others", False),
+                optional=parameters.get("optional", False),
             )
         if operation == "explode":
             return self._algorithm("native:explodelines", {
@@ -1804,7 +1871,8 @@ class Pipeline:
         )
         return writer.path
 
-    def _lines_to_polygons(self, name, current, drop_others=False):
+    def _lines_to_polygons(self, name, current, drop_others=False,
+                           optional=False):
         """Замкнутые линии превращает в полигоны.
 
         Площадные дороги и площади OSM заданы замкнутым контуром, но
@@ -1813,6 +1881,10 @@ class Pipeline:
         отбрасываются: площадный слой (ледники) должен состоять только из
         полигонов — разомкнутый контур ледника это ошибка данных, на карте
         он всё равно не рисуется, а в слое портит тип геометрии.
+
+        ``optional`` — площадей может не быть законно (natural=strait
+        обычно задан линией): шаг возвращает None, и рецепт
+        заканчивается на уже сохранённых файлах без предупреждения.
         """
         from osgeo import ogr
 
@@ -1849,6 +1921,8 @@ class Pipeline:
         finally:
             source = None
         if not writer.count:
+            if optional:
+                return None
             raise PipelineError("no objects left after converting lines to polygons")
         self.progress(f"{name}: converted {converted} closed lines to polygons")
         if dropped:
@@ -1896,7 +1970,7 @@ class Pipeline:
                     continue
                 label_name = _label_name(feature)
                 outline = None
-                if label_name:
+                if label_name and _is_polygonal(geometry):
                     try:
                         outline = (geometry.GetEnvelope(), geometry.GetArea())
                     except Exception:  # noqa: BLE001 - битая геометрия не дубликат
@@ -1926,6 +2000,54 @@ class Pipeline:
         label_cache.store(self.config, key, path)
         self.progress(f"{name}: label lines for {built} objects")
         return writer.path
+
+    def _centroids(self, name, current):
+        """Одна точка на объект; пустые геометрии пропускаются.
+
+        native:centroids оставляет пустую линию в точечном слое: после
+        fixgeometries коллекция точек превращается в MULTILINESTRING
+        EMPTY, и GeoPackage предупреждает о несовпадении типа. Центроид
+        здесь считается тем же OGR, но пустой результат не пишется.
+        """
+        from osgeo import ogr
+
+        source = ogr.Open(str(current))
+        if source is None:
+            raise PipelineError(f"Cannot open {current}")
+        layer = source.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        spatial_ref = layer.GetSpatialRef()
+        path = self._temp_path(name, "centroids")
+        path.unlink(missing_ok=True)
+        writer = _GpkgWriter(
+            path, name, definition, spatial_ref,
+            geometry_type=ogr.wkbPoint, cancel=self.cancel,
+        )
+        try:
+            for feature in layer:
+                if (
+                    self.cancel is not None
+                    and writer.count % 500 == 0
+                    and self.cancel.is_set()
+                ):
+                    raise InterruptedError("Preparation cancelled")
+                geometry = feature.GetGeometryRef()
+                if geometry is None or geometry.IsEmpty():
+                    continue
+                point = _centroid_geometry(geometry)
+                if point is None:
+                    continue
+                writer.add(feature, point)
+            writer.close()
+        except Exception:
+            writer.close(commit=False)
+            path.unlink(missing_ok=True)
+            raise
+        finally:
+            source = None
+        if not writer.count:
+            raise PipelineError("no centroids built")
+        return path
 
     def _split_layer(self, name, current, fields=None):
         """Делит слой на три группы по значению тега layer.
@@ -2027,6 +2149,17 @@ def _is_polygonal(geometry):
         and not geometry.IsEmpty()
         and geometry.GetGeometryName() in ("POLYGON", "MULTIPOLYGON")
     )
+
+
+def _centroid_geometry(geometry):
+    """Точка-центроид геометрии; None, если центроид пустой."""
+    try:
+        point = geometry.Centroid()
+    except Exception:
+        point = None
+    if point is None or point.IsEmpty():
+        return None
+    return point
 
 
 def _difference_lines(geometry, overlay_geometries):

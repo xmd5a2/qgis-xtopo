@@ -68,6 +68,16 @@ def label_line_geometry(geometry, main_flow=False):
     return line
 
 
+def _is_surface(geometry):
+    """Площадная геометрия: полигон или мультиполигон."""
+    if geometry is None or geometry.IsEmpty():
+        return False
+    flatten = getattr(ogr, "wkbFlatten", None) or ogr.GT_Flatten
+    return flatten(geometry.GetGeometryType()) in (
+        ogr.wkbPolygon, ogr.wkbMultiPolygon,
+    )
+
+
 def label_line(geom, main_flow=False):
     """Точки линии подписи для полигона.
 
@@ -83,7 +93,10 @@ def label_line(geom, main_flow=False):
     else:
         parts = [geom.GetGeometryRef(index)
                  for index in range(geom.GetGeometryCount())]
-    parts = [part for part in parts if part is not None and not part.IsEmpty()]
+    parts = [
+        part for part in parts
+        if part is not None and not part.IsEmpty() and _is_surface(part)
+    ]
     if not parts:
         return []
     measured = []
@@ -758,7 +771,7 @@ def _single_polygon(geometry, clone=True):
     best_area = -1.0
     for index in range(geometry.GetGeometryCount()):
         part = geometry.GetGeometryRef(index)
-        if part is None:
+        if not _is_surface(part):
             continue
         area = part.GetArea()
         if area > best_area:

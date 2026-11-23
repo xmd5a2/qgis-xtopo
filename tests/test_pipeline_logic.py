@@ -239,6 +239,23 @@ class SaveVectorTest(unittest.TestCase):
             lines = self._collection(directory, "lines.geojson", [line])
             self.assertEqual(_geometry_type(lines), "LINESTRING")
 
+    def test_mixed_geometry_is_detected_for_intermediate_files(self):
+        """fix() пишет смешанный слой в GeoJSON, однородный — в GeoPackage."""
+        from qgis_xtopo.core.pipeline import _layer_has_mixed_geometry
+
+        polygon = {
+            "type": "MultiPolygon",
+            "coordinates": [[[[0, 0], [1, 0], [1, 1], [0, 0]]]],
+        }
+        point = {"type": "Point", "coordinates": [0, 0]}
+        with tempfile.TemporaryDirectory() as directory:
+            mixed = self._collection(directory, "mixed.geojson", [point, polygon])
+            self.assertTrue(_layer_has_mixed_geometry(mixed))
+            polygons = self._collection(
+                directory, "polygons.geojson", [polygon]
+            )
+            self.assertFalse(_layer_has_mixed_geometry(polygons))
+
 
 class ZeroElevationTest(unittest.TestCase):
     """ele=0.0 в OSM — ошибка ввода, подпись должна взять рельеф."""
@@ -683,6 +700,104 @@ class AreaRoadTest(unittest.TestCase):
                 self.assertIn(name, ("POLYGON", "MULTIPOLYGON"), feature.GetField("id"))
             dataset = None
 
+    def test_optional_conversion_without_polygons_returns_none(self):
+        """У пролива без площадей шаг заканчивает рецепт без предупреждения."""
+        from osgeo import ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline, PipelineError
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="area",
+                bbox="1,1,3,3",
+                array_queries=["strait"],
+            )
+            config.ensure_directories()
+            source = config.temp_dir / "strait.geojson"
+            source.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"id": "open-way"},
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[1, 1], [2, 2]],
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"id": "node"},
+                        "geometry": {"type": "Point", "coordinates": [1, 1]},
+                    },
+                ],
+            }), encoding="utf-8")
+            pipeline = Pipeline(config, BBox(1, 1, 3, 3), _FakeRunner(None))
+            step = {
+                "drop_others": True, "optional": True,
+            }
+            self.assertIsNone(
+                pipeline._step("strait", source, "linestopolygons", step)
+            )
+            with self.assertRaises(PipelineError):
+                pipeline._step(
+                    "strait", source, "linestopolygons",
+                    {"drop_others": True},
+                )
+
+    def test_strait_without_polygons_is_not_skipped(self):
+        """Слой пролива остаётся в проекте без предупреждения."""
+        from unittest import mock
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="area",
+                bbox="1,1,3,3",
+                array_queries=["strait"],
+            )
+            config.ensure_directories()
+            source = config.temp_dir / "strait.geojson"
+            source.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"id": "line"},
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[1, 1], [2, 2]],
+                        },
+                    },
+                    {
+                        "type": "Feature",
+                        "properties": {"id": "point"},
+                        "geometry": {"type": "Point", "coordinates": [1, 1]},
+                    },
+                ],
+            }), encoding="utf-8")
+            messages = []
+            pipeline = Pipeline(
+                config, BBox(1, 1, 3, 3), _FakeRunner(None),
+                progress=messages.append,
+            )
+            with mock.patch.object(
+                Pipeline, "_source_geojson", return_value=source
+            ):
+                self.assertTrue(pipeline._run_layer("strait", None, 1, 1))
+            self.assertEqual(pipeline.warnings, [])
+            self.assertTrue((config.vector_dir / "strait.sqlite").exists())
+            self.assertFalse((config.vector_dir / "strait_skel.sqlite").exists())
+            self.assertTrue(
+                any("остальные шаги пропущены" in message
+                    for message in messages),
+                messages,
+            )
+
     def test_layer_recipe_saves_polygons(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(
@@ -776,6 +891,56 @@ class LabelAxisTest(unittest.TestCase):
             )
             dataset = None
 
+    def test_line_feature_does_not_trigger_area_warning(self):
+        """GetArea не вызывается у линий: GDAL иначе пишет предупреждение."""
+        from osgeo import gdal, ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "wetland.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("wetland", None, ogr.wkbUnknown)
+            layer.CreateField(ogr.FieldDefn("id", ogr.OFTString))
+            layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+            line = ogr.Geometry(ogr.wkbLineString)
+            line.AddPoint_2D(0.0, 0.0)
+            line.AddPoint_2D(0.02, 0.006)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("id", "way/1")
+            feature.SetField("name", "Протока")
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            corners = ((0.0, 0.0), (0.02, 0.0), (0.02, 0.006), (0.0, 0.006))
+            for x, y in corners + corners[:1]:
+                ring.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("id", "relation/1")
+            feature.SetField("name", "Болото")
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+            dataset = None
+
+            messages = []
+
+            def handler(_cls, _number, message):
+                if "OGR_G_Area" in message:
+                    messages.append(message)
+
+            pipeline = Pipeline(config, BBox(0, 0, 0.02, 0.006), _FakeRunner(None))
+            gdal.PushErrorHandler(handler)
+            try:
+                pipeline._label_axis("wetland", source, False)
+            finally:
+                gdal.PopErrorHandler()
+            self.assertEqual(messages, [])
+
     def test_skips_duplicate_name_and_outline(self):
         from osgeo import ogr
 
@@ -836,6 +1001,61 @@ class LabelAxisTest(unittest.TestCase):
             names = [feature.GetField("name") for feature in layer
                      if feature.GetField("name") == "Feegletscher"]
             self.assertEqual(len(names), 1)
+            dataset = None
+
+
+class CentroidStepTest(unittest.TestCase):
+    """Шаг centroid пишет точки и не оставляет пустые геометрии."""
+
+    def test_empty_geometry_is_not_written_to_point_layer(self):
+        from osgeo import gdal, ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "power_plant.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("power_plant", None, ogr.wkbUnknown)
+            layer.CreateField(ogr.FieldDefn("id", ogr.OFTString))
+            geometries = (
+                ("point", "POINT (0 0)"),
+                ("polygon", "POLYGON ((1 1, 2 1, 2 2, 1 1))"),
+                ("line", "LINESTRING (3 3, 4 4)"),
+                ("empty", "MULTILINESTRING EMPTY"),
+            )
+            for identifier, wkt in geometries:
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetField("id", identifier)
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+                layer.CreateFeature(feature)
+            dataset = None
+
+            messages = []
+
+            def handler(_cls, _number, message):
+                if "inserted into layer" in message:
+                    messages.append(message)
+
+            pipeline = Pipeline(config, BBox(0, 0, 4, 4), _FakeRunner(None))
+            gdal.PushErrorHandler(handler)
+            try:
+                output = pipeline._step(
+                    "power_plant", source, "centroid", {}
+                )
+            finally:
+                gdal.PopErrorHandler()
+            self.assertEqual(messages, [])
+            dataset = ogr.Open(str(output))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(ogr.GT_Flatten(layer.GetGeomType()), ogr.wkbPoint)
+            self.assertEqual(layer.GetFeatureCount(), 3)
+            for feature in layer:
+                self.assertEqual(
+                    feature.GetGeometryRef().GetGeometryName(), "POINT"
+                )
             dataset = None
 
 
@@ -1505,6 +1725,32 @@ class CoastlineIntermediateTest(unittest.TestCase):
                     mock.patch.object(coastline, "_has_features", return_value=True):
                 self.assertTrue(coastline.prepare_coastline(config, None))
         return recorded, calls
+
+    def test_intersection_area_ignores_non_surface_parts(self):
+        """Пересечение полигонов бывает линией: GetArea у неё не зовётся."""
+        from osgeo import gdal, ogr
+
+        from qgis_xtopo.core.coastline import _geometry_area
+
+        messages = []
+
+        def handler(_cls, _number, message):
+            if "OGR_G_Area" in message:
+                messages.append(message)
+
+        line = ogr.CreateGeometryFromWkt("LINESTRING (0 0, 1 1)")
+        collection = ogr.CreateGeometryFromWkt(
+            "GEOMETRYCOLLECTION ("
+            "POLYGON ((0 0, 1 0, 1 1, 0 0)),"
+            "LINESTRING (0 0, 2 2))"
+        )
+        gdal.PushErrorHandler(handler)
+        try:
+            self.assertEqual(_geometry_area(line), 0.0)
+            self.assertAlmostEqual(_geometry_area(collection), 0.5)
+        finally:
+            gdal.PopErrorHandler()
+        self.assertEqual(messages, [])
 
     def test_split_and_vertices_are_geopackages(self):
         recorded, _calls = self._recorded()
