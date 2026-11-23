@@ -1285,6 +1285,35 @@ class RuleScaleRangeTest(unittest.TestCase):
             )
 
 
+class WaterLabelMinimumFeatureSizeTest(unittest.TestCase):
+    """Маленькие водоёмы не подписываются.
+
+    `minFeatureSize` требует, чтобы полигон занимал на карте не меньше
+    заданного размера в миллиметрах; иначе подпись длинного названия
+    выходит далеко за пределы почти невидимого озера.
+    """
+
+    def test_active_water_label_rules_require_two_mm(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        labeling = layers["water names continental"].find("labeling")
+        self.assertIsNotNone(labeling)
+        for rule in labeling.iter("rule"):
+            if rule.find("settings") is None or rule.get("active") == "0":
+                continue
+            rendering = rule.find("settings/rendering")
+            self.assertIsNotNone(
+                rendering, rule.get("filter") or rule.get("description")
+            )
+            self.assertGreaterEqual(
+                float(rendering.get("minFeatureSize") or 0),
+                2.0,
+                rule.get("filter") or rule.get("description"),
+            )
+
+
 class BridgeIconScaleTest(unittest.TestCase):
     """Значки мостов не должны попадать на обзорные масштабы."""
 
