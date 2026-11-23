@@ -3088,7 +3088,12 @@ class ProjectPanel(QWidget):
             if name != "QgsMeasureDialog":
                 continue
             dialog.installEventFilter(self)
-            self._prefer_ellipsoid_measure(dialog)
+            # QgsMeasureTool создаёт окна измерения ещё до загрузки
+            # плагинов и держит их скрытыми. Менять настройку проекта
+            # при подключении нельзя: скрытое окно испортило бы новый
+            # проект и вызвало вопрос «сохранить проект?» при старте.
+            if dialog.isVisible():
+                self._prefer_ellipsoid_measure(dialog)
             connected = True
         if connected:
             self._measure_dialogs_connected = True
@@ -3115,9 +3120,20 @@ class ProjectPanel(QWidget):
         # даже режим «На эллипсоиде» считает по плоскости.  Меняем только
         # настройку измерения в памяти; картинка и стили не зависят от неё.
         project = QgsProject.instance()
+        try:
+            was_dirty = project.isDirty()
+        except Exception:
+            was_dirty = False
         changed = project.ellipsoid() in ("", "NONE")
         if changed:
             project.setEllipsoid("EPSG:7030")
+            # Измерение не должно вызывать вопрос «сохранить проект?»:
+            # флаг изменений возвращаем как был. Значение сохранится,
+            # если пользователь всё равно сохранит проект.
+            try:
+                project.setDirty(was_dirty)
+            except Exception:
+                pass
         try:
             radio = dialog.findChild(QRadioButton, "mEllipsoidal")
         except Exception:
@@ -3189,6 +3205,10 @@ class ProjectPanel(QWidget):
             # Инструмент снимается не сразу: проверяем холст, когда
             # обработка закрытия окна закончится.
             self._measure_dialog_timer.start(0)
+        elif event.type() == QEvent.Show and self._is_measure_dialog(obj):
+            # Окна измерения существуют с самого старта QGIS, но скрыты.
+            # Включаем эллипсоид, только когда пользователь открыл окно.
+            self._prefer_ellipsoid_measure(obj)
         return super().eventFilter(obj, event)
 
     def _cancel_sheet_tools(self):

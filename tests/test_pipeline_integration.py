@@ -1177,8 +1177,10 @@ class PipelineIntegrationTest(unittest.TestCase):
     def test_measure_dialog_prefers_ellipsoid(self):
         """Окно измерения открывается в режиме эллипсоида WGS84."""
         from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtCore import QEvent
         from qgis.PyQt.QtWidgets import QDialog, QRadioButton
         from qgis_xtopo.gui.projectpanel import ProjectPanel
+        from unittest import mock
 
         class Iface:
             def __init__(self, canvas):
@@ -1198,15 +1200,37 @@ class PipelineIntegrationTest(unittest.TestCase):
         project = QgsProject.instance()
         old_crs = project.crs()
         old_ellipsoid = project.ellipsoid()
+        old_dirty = project.isDirty()
         project.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
         project.setEllipsoid("NONE")
         try:
+            # Смена эллипсоида не должна помечать проект изменённым:
+            # иначе QGIS спрашивает «сохранить проект?» при закрытии.
+            project.setDirty(False)
             panel._prefer_ellipsoid_measure(dialog)
             self.assertTrue(radio.isChecked())
             self.assertEqual(project.ellipsoid(), "EPSG:7030")
+            self.assertFalse(project.isDirty())
+
+            # Настройка применяется и к окну, открытому штатным
+            # инструментом QGIS, по событию Show.
+            project.setEllipsoid("NONE")
+            project.setDirty(False)
+            dialog2 = QDialog()
+            radio2 = QRadioButton(dialog2)
+            radio2.setObjectName("mEllipsoidal")
+            with mock.patch.object(
+                ProjectPanel, "_is_measure_dialog", return_value=True
+            ):
+                panel.eventFilter(dialog2, QEvent(QEvent.Show))
+            self.assertTrue(radio2.isChecked())
+            self.assertEqual(project.ellipsoid(), "EPSG:7030")
+            self.assertFalse(project.isDirty())
+            dialog2.deleteLater()
         finally:
             project.setEllipsoid(old_ellipsoid)
             project.setCrs(old_crs)
+            project.setDirty(old_dirty)
             panel.deleteLater()
             dialog.deleteLater()
             canvas.deleteLater()
