@@ -1678,7 +1678,7 @@ class SinglePartsFallbackTest(unittest.TestCase):
 class CoastlineIntermediateTest(unittest.TestCase):
     """Промежуточные слои береговой линии и полоса поиска океана."""
 
-    def _recorded(self):
+    def _recorded(self, closed_only=False):
         from unittest import mock
 
         from qgis_xtopo.core import coastline, pipeline
@@ -1713,10 +1713,25 @@ class CoastlineIntermediateTest(unittest.TestCase):
                 name = "open_lines.geojson" if open_only else "lines.geojson"
                 return base / name
 
+            def write_selected(source, destination, closed):
+                if closed:
+                    return base / "rings.geojson"
+                return None if closed_only else base / "open_parts.geojson"
+
+            def largest(source, destination):
+                return destination
+
             with mock.patch.object(pipeline, "ProcessingRunner", FakeRunner), \
                     mock.patch.object(pipeline, "save_vector"), \
                     mock.patch.object(
                         coastline, "_write_lines", side_effect=write_lines,
+                    ), \
+                    mock.patch.object(
+                        coastline, "_write_selected_lines",
+                        side_effect=write_selected,
+                    ), \
+                    mock.patch.object(
+                        coastline, "_largest_polygon", side_effect=largest,
                     ), \
                     mock.patch.object(
                         coastline, "_write_polygons",
@@ -1758,6 +1773,25 @@ class CoastlineIntermediateTest(unittest.TestCase):
             self.assertEqual(
                 Path(recorded[algorithm]["OUTPUT"]).suffix, ".gpkg", algorithm
             )
+
+    def test_split_uses_only_open_parts(self):
+        """Кольца островов не режут охват: они вычитаются площадями."""
+        recorded, _calls = self._recorded()
+        self.assertEqual(
+            Path(recorded["native:splitwithlines"]["LINES"]).name,
+            "open_parts.geojson",
+        )
+
+    def test_closed_rings_are_subtracted_not_split(self):
+        recorded, calls = self._recorded(closed_only=True)
+        algorithms = [algorithm for algorithm, _parameters in calls]
+        self.assertNotIn("native:splitwithlines", algorithms)
+        self.assertNotIn("native:singlesidedbuffer", algorithms)
+        self.assertIn("native:polygonize", algorithms)
+        self.assertIn("native:difference", algorithms)
+        self.assertEqual(
+            Path(recorded["native:polygonize"]["INPUT"]).name, "rings.geojson"
+        )
 
     def test_side_buffer_keeps_a_strip_along_the_coast(self):
         """Сужение меньше половины ширины, иначе полоса вырождается."""

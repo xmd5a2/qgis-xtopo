@@ -3113,6 +3113,73 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertIn(geometry.GetGeometryName(), ("LINESTRING", "LINEARRING"))
         self.assertEqual(_line_geometries(None), [])
 
+    def test_coastline_selected_lines_split_rings(self):
+        """Замкнутые кольца и незамкнутые линии пишутся отдельно."""
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _write_selected_lines
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "lines.geojson"
+            dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                str(source)
+            )
+            layer = dataset.CreateLayer("lines", None, ogr.wkbLineString)
+            for wkt in (
+                "LINESTRING (0 0, 1 1)",
+                "LINESTRING (2 2, 2 3, 3 3, 2 2)",
+            ):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+                layer.CreateFeature(feature)
+            dataset = None
+
+            open_path = _write_selected_lines(
+                source, root / "open.geojson", closed=False
+            )
+            ring_path = _write_selected_lines(
+                source, root / "rings.geojson", closed=True
+            )
+            self.assertIsNotNone(open_path)
+            self.assertIsNotNone(ring_path)
+            self.assertEqual(self._feature_count(open_path), 1)
+            self.assertEqual(self._feature_count(ring_path), 1)
+            self.assertIsNone(_write_selected_lines(
+                ring_path, root / "open_empty.geojson", closed=False
+            ))
+
+    @staticmethod
+    def _feature_count(path):
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(path))
+        layer = dataset.GetLayer(0)
+        count = sum(1 for _feature in layer)
+        dataset = None
+        return count
+
+    def test_coastline_layer_validity_check(self):
+        """Повторная починка островов нужна только при невалидных объектах."""
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _layer_is_valid
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, wkt in (
+                ("valid.geojson", "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))"),
+                ("invalid.geojson", "POLYGON ((0 0, 1 1, 1 0, 0 1, 0 0))"),
+            ):
+                path = root / name
+                dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                    str(path)
+                )
+                layer = dataset.CreateLayer("island", None, ogr.wkbPolygon)
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+                layer.CreateFeature(feature)
+                dataset = None
+                self.assertEqual(_layer_is_valid(path), name == "valid.geojson")
+
     def test_coastline_largest_polygon_fallback(self):
         from osgeo import ogr
         from qgis_xtopo.core.coastline import _largest_polygon

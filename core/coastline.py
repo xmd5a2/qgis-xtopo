@@ -57,11 +57,10 @@ def _is_closed_ring(geometry):
     return abs(first[0] - last[0]) < 1e-12 and abs(first[1] - last[1]) < 1e-12
 
 
-def _write_lines(source, destination, open_only=False):
-    """Write only line geometries; closed coastline ways arrive as polygons.
+def _write_line_features(source, destination, keep=None):
+    """Пишет линейные части объектов, для которых верно ``keep``.
 
-    ``open_only`` drops the closed rings: those are islands and they must
-    not take part in the search for the water side of the coastline.
+    Возвращает путь или ``None``, если подходящих линий не оказалось.
     """
     from osgeo import ogr
 
@@ -79,18 +78,53 @@ def _write_lines(source, destination, open_only=False):
     layer = output.CreateLayer(
         "coastline", source_layer.GetSpatialRef(), geom_type=ogr.wkbLineString
     )
+    written = 0
     try:
         for feature in source_layer:
             for geometry in _line_geometries(feature.GetGeometryRef()):
-                if open_only and _is_closed_ring(geometry):
+                if keep is not None and not keep(geometry):
                     continue
                 item = ogr.Feature(layer.GetLayerDefn())
                 item.SetGeometry(geometry)
                 layer.CreateFeature(item)
+                written += 1
     finally:
         output = None
         dataset = None
+    if not written:
+        destination.unlink(missing_ok=True)
+        return None
     return destination
+
+
+def _write_lines(source, destination, open_only=False):
+    """Write only line geometries; closed coastline ways arrive as polygons.
+
+    ``open_only`` drops the closed rings: those are islands and they must
+    not take part in the search for the water side of the coastline.
+    """
+    if open_only:
+        _write_line_features(
+            source, destination, keep=lambda geometry: not _is_closed_ring(geometry)
+        )
+    else:
+        _write_line_features(source, destination)
+    return Path(destination)
+
+
+def _write_selected_lines(source, destination, closed):
+    """Пишет только замкнутые кольца или только незамкнутые линии.
+
+    После растворения одиночные ways складываются в кольца островов.
+    Такие кольца не нужно резать прямоугольником охвата: их площадь
+    вычитается из результата одним ``difference``.  Для архипелага это
+    заметно быстрее, чем ``splitwithlines``, который прогоняет каждое
+    кольцо по всем уже полученным частям охвата.
+    """
+    keep = _is_closed_ring if closed else (
+        lambda geometry: not _is_closed_ring(geometry)
+    )
+    return _write_line_features(source, destination, keep=keep)
 
 
 def _has_features(path):
@@ -109,6 +143,39 @@ def _has_features(path):
         return layer is not None and layer.GetNextFeature() is not None
     except Exception:
         return True
+    finally:
+        dataset = None
+
+
+def _layer_is_valid(path):
+    """Все ли геометрии слоя корректны.
+
+    Слой ``island`` рецепт уже чинит перед сохранением. Повторная
+    ``fixgeometries`` переписывает десятки мегабайт впустую, поэтому
+    чинить его ещё раз нужно только при невалидных объектах — например,
+    в проекте, собранном старой версией плагина.
+    """
+    try:
+        from osgeo import ogr
+    except ImportError:
+        return False
+    try:
+        dataset = ogr.Open(str(path))
+    except Exception:
+        dataset = None
+    if dataset is None:
+        return False
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return False
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is not None and not geometry.IsValid():
+                return False
+        return True
+    except Exception:
+        return False
     finally:
         dataset = None
 
@@ -424,9 +491,6 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
     try:
         notify("Береговая линия: подготовка линий")
         line_source = _write_lines(lines, config.temp_dir / "coastline_lines.geojson")
-        open_source = _write_lines(
-            lines, config.temp_dir / "coastline_open_lines.geojson", open_only=True
-        )
         dissolved = _run(runner, "native:dissolve", {
             "INPUT": str(line_source),
             "FIELD": [],
@@ -441,14 +505,49 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         })
 
         notify("Береговая линия: разделение охвата")
+        # Замкнутые кольца островов не режут охват: splitwithlines
+        # прогоняет каждое кольцо по всем уже полученным частям, и на
+        # архипелаге это квадратично.  Кольца вычитаются площадями, а
+        # охват режется только незамкнутым берегом.
+        open_parts = _write_selected_lines(
+            simplified,
+            config.temp_dir / "coastline_open_parts.geojson",
+            closed=False,
+        )
+        rings = _write_selected_lines(
+            simplified, config.temp_dir / "coastline_rings.geojson", closed=True
+        )
+        ring_polygons = None
+        if rings is not None:
+            ring_polygons = _run(runner, "native:polygonize", {
+                "INPUT": str(rings),
+                "KEEP_FIELDS": False,
+                "OUTPUT": _temp(config, "coastline_rings_polygons.geojson"),
+            })
+            ring_polygons = _run(runner, "native:fixgeometries", {
+                "INPUT": ring_polygons,
+                "OUTPUT": _temp(config, "coastline_rings_fixed.geojson"),
+            })
         # Разрезанные части и точки-вершины — GeoPackage: у GeoJSON нет
         # пространственного индекса, и native:extractbylocation предупреждает
         # о полном переборе вершин для каждой части области.
-        split = _run(runner, "native:splitwithlines", {
-            "INPUT": str(crop),
-            "LINES": simplified,
-            "OUTPUT": _temp(config, "coastline_split.gpkg"),
-        })
+        split = str(crop)
+        if open_parts is not None:
+            split = _run(runner, "native:splitwithlines", {
+                "INPUT": str(crop),
+                "LINES": str(open_parts),
+                "OUTPUT": _temp(config, "coastline_split.gpkg"),
+            })
+        if ring_polygons is not None:
+            split = _run(runner, "native:difference", {
+                "INPUT": split,
+                "OVERLAY": ring_polygons,
+                "OUTPUT": _temp(config, "coastline_rings_diff.gpkg"),
+            })
+            split = _run(runner, "native:multiparttosingleparts", {
+                "INPUT": split,
+                "OUTPUT": _temp(config, "coastline_rings_parts.gpkg"),
+            })
 
         notify("Береговая линия: определение стороны океана")
         # Сторону океана показывают только незамкнутые линии берега:
@@ -457,7 +556,15 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         # области, а море не заливалось вовсе).
         island = config.vector_dir / "island.sqlite"
         ocean = None
-        if _has_features(open_source):
+        open_source = None
+        if open_parts is not None:
+            # Буфер строится по исходным, нерастворённым ways: dissolve
+            # меняет направление части линий, и сторона воды теряется.
+            open_source = _write_lines(
+                lines,
+                config.temp_dir / "coastline_open_lines.geojson",
+                open_only=True,
+            )
             ocean = _side_ocean(runner, config, split, open_source, 1)
         if (ocean is not None and _has_features(ocean)
                 and not _looks_like_land(ocean, island)):
@@ -469,19 +576,19 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
                     "неверно, повтор с другой стороны"
                 )
             retried = None
-            if _has_features(open_source):
+            if open_source is not None:
                 retried = _side_ocean(runner, config, split, open_source, 0)
             if (retried is not None and _has_features(retried)
                     and not _looks_like_land(retried, island)):
                 ocean = retried
             else:
-                # Все берега замкнуты в кольца: сторону воды по
-                # направлению линий не определить.  Океан — крупнейшая
-                # часть, на которые берег разбил охват.
+                # Незамкнутого берега нет — охват уже разрезан кольцами,
+                # и океан это крупнейшая часть. Тот же запасной вариант
+                # нужен, когда обе стороны не прошли проверку.
                 ocean = _largest_polygon(
                     split, _temp(config, "coastline_ocean_largest.geojson")
                 )
-                if ocean is not None:
+                if ocean is not None and open_source is not None:
                     notify(
                         "WARNING: Береговая линия: океан взят как "
                         "крупнейшая часть охвата"
@@ -505,13 +612,15 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
 
         if island.exists() and _has_features(island):
             notify("Береговая линия: вычитание островов")
-            island_fixed = _run(runner, "native:fixgeometries", {
-                "INPUT": str(island),
-                "OUTPUT": _temp(config, "coastline_islands_fixed.geojson"),
-            })
+            island_source = str(island)
+            if not _layer_is_valid(island):
+                island_source = _run(runner, "native:fixgeometries", {
+                    "INPUT": island_source,
+                    "OUTPUT": _temp(config, "coastline_islands_fixed.geojson"),
+                })
             ocean = _run(runner, "native:difference", {
                 "INPUT": ocean,
-                "OVERLAY": island_fixed,
+                "OVERLAY": island_source,
                 "OUTPUT": _temp(config, "coastline_ocean_islands.geojson"),
             })
 
