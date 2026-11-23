@@ -2812,6 +2812,33 @@ class PoiSuppressionTest(unittest.TestCase):
         far = self._point(10.2, 70.0, rank=9)
         self.assertEqual(_prune_band([top, far], 0, 178571.0, 70.0), [])
 
+    def test_early_stop_keeps_coarse_level_threshold(self):
+        """Кандидат высокого LOD не прекращает поиск порога уровня 2.
+
+        Ближний подавитель уровня 5 (800 м) не должен останавливать
+        обход: порог уровня 2 ищется по своим кандидатам, и более
+        далёкий (2,5 км) обязан попасть в результат.
+        """
+        from qgis_xtopo.core.poi_icons import _nearest_thresholds
+
+        cell_lat = 1000.0 / 111320.0
+        cell_lon = cell_lat
+        grid = {}
+
+        def add(meters, lod):
+            lon = meters / 111320.0
+            grid.setdefault((int(lon // cell_lon), 0), []).append(
+                (lon, 0.0, 111320.0, lod)
+            )
+
+        add(800.0, 5)
+        add(2500.0, 2)
+        thresholds = _nearest_thresholds(
+            grid, 0.0, 0.0, 3000.0, cell_lon, cell_lat,
+        )
+        self.assertAlmostEqual(thresholds[2], 2500.0, places=6)
+        self.assertAlmostEqual(thresholds[5], 800.0, places=6)
+
 
 class PoiRuleScaleTest(unittest.TestCase):
     """Диапазон масштаба проверяется до вычисления фильтра."""
