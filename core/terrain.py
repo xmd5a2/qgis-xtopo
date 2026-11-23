@@ -1672,6 +1672,20 @@ def _subtract_water_from_layer(layer, water_paths, target_srs,
             parts.extend(line_parts(geometry.GetGeometryRef(index)))
         return parts
 
+    # Море — один мультиполигон с тысячами дырок-островов.  Проверка
+    # Intersects с ним для каждой горизонтали заново обходит все кольца:
+    # на архипелаге это десятки секунд.  PreparedGeometry строит индекс
+    # рёбер один раз, а Difference по-прежнему считается по исходному
+    # полигону, поэтому результат не меняется.
+    prepared = []
+    for polygon in polygons:
+        create = getattr(polygon, "CreatePreparedGeometry", None)
+        try:
+            prepared_polygon = create() if create is not None else None
+        except Exception:  # noqa: BLE001 - без индекса результат тот же
+            prepared_polygon = None
+        prepared.append(prepared_polygon)
+
     index = _EnvelopeGrid(envelope)
     feature_envelopes = {}
     layer.ResetReading()
@@ -1700,8 +1714,14 @@ def _subtract_water_from_layer(layer, water_paths, target_srs,
                 if key_index < 0 or feature.GetField(key_index) not in only_keys:
                     continue
             geometry = feature.GetGeometryRef()
-            if (geometry is None or geometry.IsEmpty()
-                    or not polygon.Intersects(geometry)):
+            if geometry is None or geometry.IsEmpty():
+                continue
+            prepared_polygon = prepared[position]
+            if prepared_polygon is not None:
+                intersects = prepared_polygon.Intersects(geometry)
+            else:
+                intersects = polygon.Intersects(geometry)
+            if not intersects:
                 continue
             if touched_out is not None and id_index >= 0:
                 touched_out.add(feature.GetField(id_index))

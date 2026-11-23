@@ -9,8 +9,10 @@ OsmAnd при равном ``order`` рисует меньший полигон 
 подписи не меняются.
 """
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 from . import i18n
+from .cpu import cpu_workers
 
 # Пары (верхний слой, нижний слой). Верхний слой сейчас закрывает нижний;
 # если нижний полигон меньше, из верхнего вычитается их пересечение.
@@ -46,6 +48,48 @@ PAIR_MIN_AREA_M2 = {
     ("water", "island"): 10.0,
 }
 METRES_PER_DEGREE = 111320.0
+
+# С какого числа кандидатов площади пересечений считаются параллельно.
+# На архипелаге один полигон моря пересекает больше тысячи островов, и
+# последовательные Intersection занимают секунды.
+PARALLEL_INTERSECTIONS_MIN = 64
+
+
+def _intersection_areas(geometry, candidates, cancel=None):
+    """Площади пересечения кандидатов с геометрией, параллельно.
+
+    Возвращает список в порядке кандидатов.  ``geometry`` не меняется,
+    поэтому результат от порядка не зависит.  Площадь нужна только для
+    отсева заведомо мелких пересечений: точная разность всё равно
+    пересчитывается последовательно, иначе изменился бы результат при
+    перекрывающихся кандидатах.
+    """
+    workers = min(cpu_workers(limit=8), len(candidates))
+    if workers <= 1:
+        return None
+    size = (len(candidates) + workers - 1) // workers
+    chunks = [
+        candidates[start:start + size]
+        for start in range(0, len(candidates), size)
+    ]
+
+    def measure(chunk):
+        upper = geometry.Clone()
+        areas = []
+        for position, candidate in enumerate(chunk):
+            if (cancel is not None and position % 64 == 0
+                    and cancel.is_set()):
+                raise InterruptedError("Preparation cancelled")
+            intersection = _intersection(upper, candidate)
+            areas.append(
+                0.0 if intersection is None or intersection.IsEmpty()
+                else _area_m2(intersection)
+            )
+        return areas
+
+    with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        parts = list(pool.map(measure, chunks))
+    return [area for part in parts for area in part]
 
 
 def resolve_polygon_overlaps(config, progress=None, cancel=None):
@@ -195,6 +239,7 @@ def _cut_layer(upper_path, lowers, cancel):
                 (name, area, layer) for name, area, _, layer in lower_layers
             ):
                 lower_layer.SetSpatialFilter(geometry)
+                candidates = []
                 for candidate in lower_layer:
                     if cancel is not None and cancel.is_set():
                         raise InterruptedError("Preparation cancelled")
@@ -205,6 +250,17 @@ def _cut_layer(upper_path, lowers, cancel):
                     if lower_geometry is None:
                         continue
                     if lower_geometry.Area() >= original_area:
+                        continue
+                    candidates.append(lower_geometry.Clone())
+                lower_layer.SetSpatialFilter(None)
+                # Геометрия только уменьшается, поэтому площадь
+                # пересечения с ней не больше исходной: мелкие можно
+                # отсеять, не трогая текущую геометрию.
+                areas = None
+                if len(candidates) >= PARALLEL_INTERSECTIONS_MIN:
+                    areas = _intersection_areas(geometry, candidates, cancel)
+                for position, lower_geometry in enumerate(candidates):
+                    if areas is not None and areas[position] < lower_min_area:
                         continue
                     intersection = _intersection(geometry, lower_geometry)
                     if intersection is None or intersection.IsEmpty():
@@ -219,7 +275,6 @@ def _cut_layer(upper_path, lowers, cancel):
                         continue
                     geometry = cut
                     changed[lower_name] += 1
-                lower_layer.SetSpatialFilter(None)
             geometry = _polygonal_parts(geometry) or geometry
             _write_feature(
                 output_layer, feature, geometry,

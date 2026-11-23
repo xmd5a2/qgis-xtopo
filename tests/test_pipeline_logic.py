@@ -2587,6 +2587,51 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
         self.assertEqual(_interior_rings(geometry), 1)
 
+    def test_parallel_candidate_check_matches_serial(self):
+        """Параллельный отсев кандидатов не меняет результат."""
+        from unittest import mock
+
+        from qgis_xtopo.core import polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            upper = "POLYGON((0 0,0 10,10 10,10 0,0 0))"
+            lowers = []
+            for index in range(80):
+                x = 0.1 + (index % 10) * 0.9
+                y = 0.1 + (index // 10) * 1.1
+                size = 0.1 if index % 2 == 0 else 0.00005
+                lowers.append(
+                    f"POLYGON(({x} {y},{x} {y + size},"
+                    f"{x + size} {y + size},{x + size} {y},{x} {y}))"
+                )
+            serial_path = config.vector_dir / "upper_serial.sqlite"
+            parallel_path = config.vector_dir / "upper_parallel.sqlite"
+            _write_polygon_layer(serial_path, "upper", [upper])
+            _write_polygon_layer(parallel_path, "upper", [upper])
+            lower_path = config.vector_dir / "lowers.sqlite"
+            _write_polygon_layer(lower_path, "lowers", lowers)
+            pair = [("lowers", lower_path, 100.0)]
+            with mock.patch.object(
+                polygon_overlaps, "PARALLEL_INTERSECTIONS_MIN", 10 ** 9
+            ):
+                serial = polygon_overlaps._cut_layer(
+                    serial_path, pair, None
+                )
+            with mock.patch.object(
+                polygon_overlaps, "PARALLEL_INTERSECTIONS_MIN", 1
+            ):
+                parallel = polygon_overlaps._cut_layer(
+                    parallel_path, pair, None
+                )
+            serial_geometry = _read_geometries(serial_path)[0]
+            parallel_geometry = _read_geometries(parallel_path)[0]
+        self.assertEqual(serial, parallel)
+        self.assertEqual(serial["lowers"], 40)
+        self.assertEqual(
+            serial_geometry.ExportToWkb(), parallel_geometry.ExportToWkb()
+        )
+
     def test_attributes_are_preserved(self):
         from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
 

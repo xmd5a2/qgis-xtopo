@@ -2880,6 +2880,8 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             timings.add_stage(
                 "маска воды и отмывка", time.monotonic() - started,
             )
+            report("Изолинии рельефа")
+            started = time.monotonic()
             gdal_log.LOG.install()
             try:
                 terrain.prepare_terrain_isolines(
@@ -2888,6 +2890,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                 )
             finally:
                 gdal_log.LOG.restore()
+            timings.add_stage("изолинии", time.monotonic() - started)
         if "peak" in config.array_queries:
             report("Проверка пиков")
             started = time.monotonic()
