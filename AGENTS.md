@@ -106,6 +106,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   на `MultiPoint`; слои шаблона, читающие эти файлы, объявляют тот же
   тип. У безымянных групп `building` сохраняются только ключевые поля и
   `area_m2`. Подробности — `docs/agents/drivers.md`.
+- **Суша острова может быть только в relation `boundary=land_area`.**
+  GDAL не отдаёт way-члены отношений отдельными полигонами, поэтому
+  `resources/queries/island.txt` включает `way/relation
+  boundary=land_area` наравне с `place=island/islet/archipelago`. Без
+  этого Тикехау и Матаива не попадают в `island.sqlite`, не вычитаются
+  из океана и остаются под водой. Подробности — `docs/agents/drivers.md`.
 - **Подсыхание ручьёв — поле `dry_rank`.** `core/stream_drying.py`
   обрабатывает `stream` и `stream_intermittent`, растворяет сеть по
   тегам и скрывает верхнюю часть потока от истока: 250 м на 1:150000,
@@ -121,6 +127,13 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   висят над исчезнувшим ручьём. `drystream` не участвует. Упаковка
   `stream`/`stream_intermittent` включает `dry_rank` в ключ.
   Подробности — `docs/agents/styles.md`.
+- **Подводные вершины определяются по воде, а не по `ele`.** Шаг
+  `core/underwater.py` удаляет точки слоёв `peak`, `volcano`,
+  `volcano_dirt` и их центроидов, попавшие в `water_dissolved`/`water`;
+  наземные пики с отрицательной высотой (`Cinder Hill` -29 м,
+  `Mars Hill` -69 м) сохраняются. Вулканы с
+  `volcano:type=submarine` удаляются и без маски. Подробности —
+  `docs/agents/peaks.md`.
 - **Подавление значков POI в шаблоне берётся из поля `hide`.** Правила
   слоёв POI читают готовые пороги, которые считает
   `core/poi_icons.py`; выражений с `overlay_nearest` для подавления
