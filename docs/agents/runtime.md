@@ -43,7 +43,7 @@
   начало `sys.path` и сбрасывает уже импортированный пустой пакет. Каталог в
   `.gitignore`, удалять его не обязательно.
 - Не трогать работающий QGIS (`pgrep -x qgis.bin`); запускать с временным
-  профилем: `qgis --profiles-path /tmp/... --code script.py`.
+  профилем: `qgis --profiles-path /mnt/data/temp/qgis-profile --code script.py`.
 - Панель открывается при `QGIS_XTOPO_OPEN=1`; показ — по
   `iface.initializationCompleted`, иначе восстановление окон перезапишет
   `show()`.
@@ -103,6 +103,12 @@ image.save('/mnt/data/temp/map.png')
 через `QgsCoordinateTransform`. У `QgsRectangle` нет `combine` и `united` —
 объединять через `combineExtentWith`. Готовый PNG класть в `/mnt/data/temp`, не
 в репозиторий. Рабочие данные пользователя можно читать, но не изменять.
+
+`waitForFinished()` в примере безопасен только для простого слоя без
+выражений. Для проекта целиком он блокирует event loop, а `overlay_nearest`,
+`layer_property`, `raster_value` и `raster_statistic` из потока рендера ждут
+главный поток — это дедлок. Готовые обёртки с ожиданием через `QEventLoop` —
+`qgis-render-profile/profile_render.py` и `qgis-xtopo-bench/render_project.py`.
 
 ## Windows-инсталлятор
 
