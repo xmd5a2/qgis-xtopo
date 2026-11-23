@@ -453,6 +453,52 @@ class UnderwaterTest(unittest.TestCase):
                 set(),
             )
 
+    def test_peak_in_island_hole_is_kept(self):
+        """Точка в дырке морского полигона — суша, а не подводный объект."""
+        from osgeo import ogr, osr
+
+        from qgis_xtopo.core.underwater import remove_underwater
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="underwater"
+            )
+            config.ensure_directories()
+            water_path = config.vector_dir / "water_dissolved.sqlite"
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(water_path)
+            )
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            layer = dataset.CreateLayer(
+                "water_dissolved", srs, ogr.wkbPolygon
+            )
+            outer = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
+                outer.AddPoint_2D(x, y)
+            inner = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in ((0.4, 0.4), (0.6, 0.4), (0.6, 0.6),
+                         (0.4, 0.6), (0.4, 0.4)):
+                inner.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(outer)
+            polygon.AddGeometry(inner)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+            dataset = None
+
+            self._write_points(config.vector_dir / "peak.sqlite", "peak", [
+                {"@id": "node/1", "ele": "-10", "x": 0.2, "y": 0.2},
+                {"@id": "node/2", "ele": "-10", "x": 0.5, "y": 0.5},
+                {"@id": "node/3", "ele": "-10", "x": 2.0, "y": 2.0},
+            ])
+            self.assertEqual(remove_underwater(config), 1)
+            self.assertEqual(
+                self._identifiers(config.vector_dir / "peak.sqlite"),
+                {"node/2", "node/3"},
+            )
+
 
 class ProgressTrackerTest(unittest.TestCase):
     def test_progress_moves_through_stages(self):

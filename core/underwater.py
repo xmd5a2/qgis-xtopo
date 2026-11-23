@@ -68,10 +68,19 @@ def _water_index(dataset, cancel=None):
         qgis_geometry.fromWkb(geometry.ExportToIsoWkb())
         if qgis_geometry.isNull():
             continue
+        # Море — один мультиполигон с тысячами дырок: QgsGeometry.contains
+        # обходит их заново для каждой вершины.  Подготовленная GEOS-
+        # геометрия строит индекс рёбер один раз.
+        shape = geometry.Clone()
+        create = getattr(shape, "CreatePreparedGeometry", None)
+        try:
+            prepared = create() if create is not None else None
+        except Exception:  # noqa: BLE001 - останется обычная проверка
+            prepared = None
         item = QgsFeature(len(geometries))
         item.setGeometry(qgis_geometry)
         insert(item)
-        geometries.append(qgis_geometry)
+        geometries.append((qgis_geometry, shape, prepared))
     return index, geometries
 
 
@@ -81,17 +90,24 @@ def _contains_point(index, geometries, geometry):
     Для площадных объектов берётся центроид: именно он становится точкой
     вулкана на карте.
     """
+    from osgeo import ogr
     from qgis.core import QgsGeometry, QgsPointXY
 
     if geometry.GetGeometryName() != "POINT":
         geometry = geometry.Centroid()
     if geometry is None or geometry.IsEmpty():
         return False
-    point = QgsGeometry.fromPointXY(
-        QgsPointXY(geometry.GetX(), geometry.GetY())
-    )
+    x = geometry.GetX()
+    y = geometry.GetY()
+    point = QgsGeometry.fromPointXY(QgsPointXY(x, y))
+    ogr_point = ogr.Geometry(ogr.wkbPoint)
+    ogr_point.AddPoint_2D(x, y)
     for fid in index.intersects(point.boundingBox()):
-        if geometries[fid].contains(point):
+        qgis_geometry, _shape, prepared = geometries[fid]
+        if prepared is not None:
+            if prepared.Contains(ogr_point):
+                return True
+        elif qgis_geometry.contains(point):
             return True
     return False
 
