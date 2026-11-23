@@ -3180,6 +3180,101 @@ class PipelineIntegrationTest(unittest.TestCase):
                 dataset = None
                 self.assertEqual(_layer_is_valid(path), name == "valid.geojson")
 
+    @staticmethod
+    def _id_layer(path, features):
+        from osgeo import ogr
+
+        dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(str(path))
+        layer = dataset.CreateLayer("data", None, ogr.wkbUnknown)
+        layer.CreateField(ogr.FieldDefn("@id", ogr.OFTString))
+        for identifier, wkt in features:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("@id", identifier)
+            feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    def test_island_overlay_skips_coastline_ways(self):
+        """Острова-однофамильцы уже вычтены кольцами берега."""
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _write_island_overlay
+
+        square = "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            coastline = self._id_layer(root / "coastline.geojson", [
+                ("way/1", square),
+                ("way/2", "LINESTRING (0 0, 1 1)"),
+            ])
+            island = self._id_layer(root / "island.geojson", [
+                ("way/1", square),
+                ("way/3", "POLYGON ((2 2, 2 3, 3 3, 3 2, 2 2))"),
+            ])
+            result = _write_island_overlay(
+                island, coastline, root / "extra.geojson"
+            )
+            self.assertIsNotNone(result)
+            dataset = ogr.Open(str(result))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(sum(1 for _feature in layer), 1)
+            dataset = None
+
+            self.assertIsNone(_write_island_overlay(
+                island,
+                self._id_layer(root / "only_coast.geojson", [
+                    ("way/1", square),
+                    ("way/3", "POLYGON ((2 2, 2 3, 3 3, 3 2, 2 2))"),
+                ]),
+                root / "empty.geojson",
+            ))
+
+    def test_island_overlay_keeps_tiny_rings(self):
+        """Кольцо, которое схлопнет упрощение, остаётся в накладке."""
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _write_island_overlay
+
+        tiny = "POLYGON ((0 0, 0 0.00005, 0.00005 0.00005, 0.00005 0, 0 0))"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = _write_island_overlay(
+                self._id_layer(root / "island.geojson", [("way/1", tiny)]),
+                self._id_layer(root / "coastline.geojson", [("way/1", tiny)]),
+                root / "extra.geojson",
+            )
+            self.assertIsNotNone(result)
+            dataset = ogr.Open(str(result))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(sum(1 for _feature in layer), 1)
+            dataset = None
+
+    def test_island_overlay_without_ids_uses_full_layer(self):
+        """Без @id фильтровать нечем, слой возвращается целиком."""
+        from osgeo import ogr
+        from qgis_xtopo.core.coastline import _write_island_overlay
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("coastline.geojson", "island.geojson"):
+                dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                    str(root / name)
+                )
+                layer = dataset.CreateLayer("data", None, ogr.wkbPolygon)
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetGeometry(ogr.CreateGeometryFromWkt(
+                    "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))"
+                ))
+                layer.CreateFeature(feature)
+                dataset = None
+            self.assertEqual(
+                _write_island_overlay(
+                    root / "island.geojson",
+                    root / "coastline.geojson",
+                    root / "extra.geojson",
+                ),
+                root / "island.geojson",
+            )
+
     def test_coastline_largest_polygon_fallback(self):
         from osgeo import ogr
         from qgis_xtopo.core.coastline import _largest_polygon

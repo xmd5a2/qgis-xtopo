@@ -31,6 +31,13 @@ MIN_POLYGON_AREA = 1e-8
 # водных точек, поэтому для крупных слоёв проверка пропускается.
 LOOKS_LIKE_LAND_MAX_ISLANDS = 2000
 
+# Для крупного архипелага слой island почти целиком состоит из тех же
+# OSM-way, что уже лежат в coastline.sqlite. Вычитать их из океана не
+# нужно: они уже вычтены кольцами берега, а пересечение с океаном даёт
+# лишь полосы от упрощения.  Фильтр по @id включается только на больших
+# слоях, чтобы не менять результат небольших охватов.
+ISLAND_ID_FILTER_MIN_FEATURES = 5000
+
 
 def _line_geometries(geometry):
     if geometry is None or geometry.IsEmpty():
@@ -142,6 +149,82 @@ def _write_selected_lines(source, destination, closed):
         lambda geometry: not _is_closed_ring(geometry)
     )
     return _write_line_features(source, destination, keep=keep)
+
+
+def _write_island_overlay(island, coastline, destination):
+    """Полигоны островов, которых нет среди coastline-объектов.
+
+    Слой ``island`` частично собран из тех же OSM-way, что и ``coastline``:
+    они уже вычтены кольцами берега.  Повторно вычитать десятки тысяч
+    таких полигонов — значит обрабатывать полосы упрощения длиной в
+    миллионы сегментов.  Возвращает ``None``, если лишних островов нет,
+    и исходный путь, если в слоях нет ``@id`` и фильтровать нечем.
+    """
+    from osgeo import ogr
+
+    coastline_dataset = ogr.Open(str(coastline))
+    if coastline_dataset is None:
+        return Path(island)
+    coastline_layer = coastline_dataset.GetLayer(0)
+    coastline_definition = coastline_layer.GetLayerDefn()
+    coastline_id = coastline_definition.GetFieldIndex("@id")
+    if coastline_id < 0:
+        coastline_dataset = None
+        return Path(island)
+    polygon_ids = set()
+    for feature in coastline_layer:
+        geometry = feature.GetGeometryRef()
+        if geometry is not None and geometry.GetDimension() == 2:
+            value = feature.GetField(coastline_id)
+            # Совсем мелкие кольца упрощение может схлопнуть в ноль.
+            # Такие острова оставляем в накладке, иначе они окажутся водой.
+            if value is not None and geometry.GetArea() > MIN_POLYGON_AREA:
+                polygon_ids.add(value)
+    coastline_dataset = None
+
+    dataset = ogr.Open(str(island))
+    if dataset is None:
+        return Path(island)
+    source_layer = dataset.GetLayer(0)
+    definition = source_layer.GetLayerDefn()
+    island_id = definition.GetFieldIndex("@id")
+    if island_id < 0:
+        dataset = None
+        return Path(island)
+    driver = ogr.GetDriverByName(_driver_name(destination))
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(str(destination))
+    if output is None:
+        dataset = None
+        raise CoastlineError(f"Cannot create {destination}")
+    layer = output.CreateLayer(
+        "islands", source_layer.GetSpatialRef(), geom_type=ogr.wkbMultiPolygon
+    )
+    written = 0
+    try:
+        for feature in source_layer:
+            if feature.GetField(island_id) in polygon_ids:
+                continue
+            geometry = feature.GetGeometryRef()
+            if (geometry is None or geometry.IsEmpty()
+                    or geometry.GetDimension() != 2):
+                continue
+            if geometry.GetGeometryName() == "POLYGON":
+                geometry = ogr.ForceToMultiPolygon(geometry)
+            elif geometry.GetGeometryName() != "MULTIPOLYGON":
+                continue
+            item = ogr.Feature(layer.GetLayerDefn())
+            item.SetGeometry(geometry)
+            layer.CreateFeature(item)
+            written += 1
+    finally:
+        output = None
+        dataset = None
+    if not written:
+        destination.unlink(missing_ok=True)
+        return None
+    return destination
 
 
 def _has_features(path):
@@ -633,12 +716,13 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         # (в дельте Дуная океаном оказывался крошечный обломок у края
         # области, а море не заливалось вовсе).
         island = config.vector_dir / "island.sqlite"
+        island_count = _count_features(island) if island.exists() else 0
         # Крупный слой островов делает _looks_like_land дороже самого
         # океана, а его сигнал в архипелаге ненадёжен: острова без
         # coastline-кольца лежат внутри моря и дают «пересечение» с ним.
         check_islands = (
             island.exists()
-            and _count_features(island) <= LOOKS_LIKE_LAND_MAX_ISLANDS
+            and island_count <= LOOKS_LIKE_LAND_MAX_ISLANDS
         )
         ocean = None
         open_source = None
@@ -701,16 +785,27 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         if island.exists() and _has_features(island):
             notify("Береговая линия: вычитание островов")
             island_source = str(island)
-            if not _layer_is_valid(island):
-                island_source = _run(runner, "native:fixgeometries", {
-                    "INPUT": island_source,
-                    "OUTPUT": _temp(config, "coastline_islands_fixed.gpkg"),
+            if island_count > ISLAND_ID_FILTER_MIN_FEATURES:
+                filtered = _write_island_overlay(
+                    island,
+                    lines,
+                    config.temp_dir / "coastline_islands_extra.gpkg",
+                )
+                island_source = str(filtered) if filtered is not None else None
+            if island_source is None:
+                notify("Береговая линия: острова уже в кольцах берега")
+            else:
+                if (island_source == str(island)
+                        and not _layer_is_valid(island)):
+                    island_source = _run(runner, "native:fixgeometries", {
+                        "INPUT": island_source,
+                        "OUTPUT": _temp(config, "coastline_islands_fixed.gpkg"),
+                    })
+                ocean = _run(runner, "native:difference", {
+                    "INPUT": ocean,
+                    "OVERLAY": island_source,
+                    "OUTPUT": _temp(config, "coastline_ocean_islands.gpkg"),
                 })
-            ocean = _run(runner, "native:difference", {
-                "INPUT": ocean,
-                "OVERLAY": island_source,
-                "OUTPUT": _temp(config, "coastline_ocean_islands.gpkg"),
-            })
 
         water = config.vector_dir / "water_dissolved.sqlite"
         existing = None
