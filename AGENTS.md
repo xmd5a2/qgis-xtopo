@@ -151,6 +151,11 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `_apply_edits`; отдельные `str.replace`/срезы копировали бы весь текст.
   Архив пишется с `ARCHIVE_COMPRESSLEVEL = 1`, а `writestr(ZipInfo, ...)`
   требует явного `compresslevel`. Подробности — `docs/agents/runtime.md`.
+- **Горячие пути подготовки данных — PBF и значки POI.** В PBF геометрия
+  объекта читается один раз, имена и индексы полей кэшируются; пороги
+  подавления значков ищутся кольцами с ранней остановкой и минимумом по
+  уровням детализации. Подробности — `docs/agents/drivers.md` и
+  `docs/agents/labels.md`.
 - **Потоки**: перед удалением панели все QThread останавливаются
   (`shutdown_workers`); свой сигнал `finished` в QThread не объявлять.
   Подробности — `docs/agents/ui.md`.

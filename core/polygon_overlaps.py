@@ -180,7 +180,7 @@ def _cut_layer(upper_path, lowers, cancel):
             if polygonal is None:
                 # Линии и прочие не-полигоны в площадных слоях не трогаем.
                 _write_feature(
-                    output_layer, source_definition, feature, geometry,
+                    output_layer, feature, geometry,
                 )
                 written += 1
                 continue
@@ -222,7 +222,7 @@ def _cut_layer(upper_path, lowers, cancel):
                 lower_layer.SetSpatialFilter(None)
             geometry = _polygonal_parts(geometry) or geometry
             _write_feature(
-                output_layer, source_definition, feature, geometry,
+                output_layer, feature, geometry,
             )
             written += 1
         output_layer.CommitTransaction()
@@ -293,12 +293,13 @@ def _collect_polygons(geometry, result):
             _collect_polygons(geometry.GetGeometryRef(index), result)
 
 
-def _write_feature(output_layer, source_definition, feature, geometry):
+def _write_feature(output_layer, feature, geometry):
     from osgeo import ogr
 
     output_feature = ogr.Feature(output_layer.GetLayerDefn())
-    for index in range(source_definition.GetFieldCount()):
-        output_feature.SetField(index, feature.GetField(index))
+    # Поля копируются одним вызовом C++: прежний цикл GetField/SetField
+    # на каждом объекте стоил около сотни миллисекунд на тысячи объектов.
+    output_feature.SetFrom(feature)
     output_feature.SetGeometry(geometry)
     if output_layer.CreateFeature(output_feature) != ogr.OGRERR_NONE:
         raise RuntimeError(f"не удалось записать объект {feature.GetFID()}")

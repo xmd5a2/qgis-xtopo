@@ -48,7 +48,6 @@ QGIS не разводит значки разных слоёв: кластер�
 не замедляются.
 """
 
-import io
 import heapq
 import math
 import re
@@ -59,6 +58,7 @@ from xml.etree import ElementTree
 
 from .cpu import cpu_workers
 from .peak_placement import NAME_TAGS
+from .project import _maplayer_spans
 from .resources import RESOURCES_DIR, template_path
 
 AUX_LAYER_NAME = "poi icons"
@@ -84,12 +84,6 @@ _TEMPLATE_DATA = {}
 _TEMPLATE_VARIABLES = {}
 
 LOD_LEVELS = (2, 3, 4, 5, 6)
-# Уровни, начиная с заданного: подавитель с уровнем L попадает в пороги
-# всех уровней не ниже L.
-_LEVELS_FROM = {
-    lod: tuple(level for level in LOD_LEVELS if level >= lod)
-    for lod in range(0, max(LOD_LEVELS) + 2)
-}
 # Соседние ячейки сетки: вокруг точки.
 _NEIGHBOUR_OFFSETS = tuple(
     (dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
@@ -433,13 +427,43 @@ def _label_rules(element):
     return result
 
 
+def _layer_tree_order(text):
+    """Порядок слоёв в дереве проекта: имена ``layer-tree-layer``.
+
+    Открывающие теги вырезаются поиском подстроки и разбираются по
+    одному: полный ``iterparse`` 74 МБ шаблона тратит больше секунды
+    только на обход событий, а нужны здесь лишь имена.
+    """
+    order = []
+    position = 0
+    marker = "<layer-tree-layer"
+    while True:
+        found = text.find(marker, position)
+        if found < 0:
+            break
+        end = text.find(">", found)
+        if end < 0:
+            break
+        tag = text[found:end + 1]
+        if not tag.endswith("/>"):
+            tag = tag[:-1] + "/>"
+        try:
+            name = ElementTree.fromstring(tag).get("name")
+        except ElementTree.ParseError:
+            name = None
+        if name:
+            order.append(name)
+        position = end + 1
+    return order
+
+
 def _template_data(path=None):
     """Компактные данные шаблона: значки, препятствия и источники.
 
     XML шаблона занимает десятки мегабайт, а полное дерево — сотни.
-    Поэтому шаблон читается потоково: каждый ``maplayer`` разбирается и
-    сразу превращается в правила, после чего элемент освобождается.
-    В памяти остаются только нужные для подготовки данные.
+    Поэтому разбираются только блоки ``maplayer``, найденные поиском
+    подстроки, и сразу превращаются в правила; остальной текст
+    проекта (стили, макеты, дерево) не разбирается.
     """
     path = Path(path or template_path())
     cached = _TEMPLATE_DATA.get(path)
@@ -448,29 +472,23 @@ def _template_data(path=None):
     with zipfile.ZipFile(path) as archive:
         name = next(n for n in archive.namelist() if n.endswith(".qgs"))
         payload = archive.read(name)
-    order = []
+    text = payload.decode("utf-8")
+    del payload
+    order = _layer_tree_order(text)
     sources = {}
     layers = []
     obstacles = []
-    for _event, element in ElementTree.iterparse(
-        io.BytesIO(payload), events=("end",)
-    ):
-        if element.tag == "layer-tree-layer":
-            layer_name = element.get("name")
-            if layer_name:
-                order.append(layer_name)
-            element.clear()
-        elif element.tag == "maplayer":
-            name = element.findtext("layername")
-            if name and not name.startswith(AUX_LAYER_NAME):
-                sources[name] = element.findtext("datasource") or ""
-                layer = _poi_layer(element, name)
-                if layer is not None:
-                    layers.append(layer)
-                obstacle = _obstacle_layer(element, name)
-                if obstacle is not None:
-                    obstacles.append(obstacle)
-            element.clear()
+    for start, end in _maplayer_spans(text):
+        element = ElementTree.fromstring(text[start:end])
+        name = element.findtext("layername")
+        if name and not name.startswith(AUX_LAYER_NAME):
+            sources[name] = element.findtext("datasource") or ""
+            layer = _poi_layer(element, name)
+            if layer is not None:
+                layers.append(layer)
+            obstacle = _obstacle_layer(element, name)
+            if obstacle is not None:
+                obstacles.append(obstacle)
     positions = {
         name: index for index, name in enumerate(order, start=1)
     }
@@ -1330,14 +1348,14 @@ def _uses_detail_level(tree):
     return any(_uses_detail_level(child) for child in tree.children)
 
 
-def _visible_bands(evaluator, tree, feature, bands, detailed):
+def _visible_bands(evaluator, tree, feature, bands, detailed, scales=None):
     """Диапазоны, в которых точка видна, её LOD и размер значка.
 
     Возвращает список (индекс диапазона, минимальный LOD, размер значка).
     """
     result = []
     for index, band in enumerate(bands):
-        scale = _band_scale(band)
+        scale = scales[index] if scales is not None else _band_scale(band)
         if detailed:
             level = None
             for candidate in LOD_LEVELS:
@@ -1369,6 +1387,7 @@ def _collect_points(config, layers, bands, cancel=None):
         if layer is not None:
             project.addMapLayer(layer)
     points = []
+    scales = [_band_scale(band) for band in bands]
     for info in layers:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Preparation cancelled")
@@ -1383,7 +1402,7 @@ def _collect_points(config, layers, bands, cancel=None):
         priorities = []
         for feature in layer.getFeatures():
             visible = _visible_bands(
-                evaluator, info.root, feature, bands, detailed,
+                evaluator, info.root, feature, bands, detailed, scales,
             )
             if not visible:
                 continue
@@ -1545,7 +1564,9 @@ def _prune_band(points, index, scale, latitude_max):
         (point.sizes.get(index, 0.0) if point.sizes else 0.0) * scale / 1000.0
         for point in entries
     ]
+    limits_sq = [value * value for value in limits]
     cosines = [math.cos(math.radians(point.lat)) for point in entries]
+    metric_sq = 111320.0 * 111320.0
     max_limit = max(limits, default=0.0)
     if max_limit <= 0:
         return []
@@ -1572,11 +1593,16 @@ def _prune_band(points, index, scale, latitude_max):
                     # что и в выражении шаблона, — с cos(широты).  Без
                     # него расстояние завышалось, и служебный слой терял
                     # точки-подавители: значки накладывались.
-                    distance = math.hypot(
-                        (neighbour.lon - point.lon) * cosines[position],
-                        neighbour.lat - point.lat,
-                    ) * 111320.0
-                    if distance > limits[other]:
+                    east = (neighbour.lon - point.lon) * cosines[position]
+                    north = neighbour.lat - point.lat
+                    distance_sq = (east * east + north * north) * metric_sq
+                    limit = limits[other]
+                    if distance_sq > limits_sq[other] * 1.000000001:
+                        continue
+                    # У самой границы радиуса решение принимается
+                    # прежним точным сравнением.
+                    distance = math.hypot(east, north) * 111320.0
+                    if distance > limit:
                         continue
                     if neighbour.rank > point.rank:
                         # Более низкий приоритет соседа: эта точка
@@ -1769,12 +1795,13 @@ def _cell_distance(cx, cy, gx, gy, cell_lon, cell_lat, cos_lat):
     return math.sqrt(dlon * dlon + dlat * dlat)
 
 
-def _heap_cells(gx, gy, radius, cell_lon, cell_lat, cos_lat, best):
+def _heap_cells(gx, gy, radius, cell_lon, cell_lat, cos_lat, state):
     """Ячейки сетки по возрастанию расстояния до них.
 
     Нужен, когда радиус больше ячейки: подавитель может лежать в
     нескольких ячейках, и перебирать квадрат вокруг точки дорого.
     Обход останавливается, когда до ячейки дальше найденного порога.
+    ``state[0]`` — текущий ближайший порог, общий для всех уровней.
     """
     heap = [(0.0, gx, gy)]
     seen = {(gx, gy)}
@@ -1782,7 +1809,7 @@ def _heap_cells(gx, gy, radius, cell_lon, cell_lat, cos_lat, best):
         distance, cx, cy = heapq.heappop(heap)
         if distance > radius:
             break
-        nearest = best[LOD_LEVELS[0]]
+        nearest = state[0]
         if nearest is not None and nearest <= distance:
             break
         yield cx, cy
@@ -1797,6 +1824,35 @@ def _heap_cells(gx, gy, radius, cell_lon, cell_lat, cos_lat, best):
                     _cell_distance(nx, ny, gx, gy, cell_lon, cell_lat,
                                    cos_lat), nx, ny,
                 ))
+
+
+# Кольца ячеек вокруг точки для поиска в пределах 5×5: ячейки
+# разбиты по расстоянию от центральной, чтобы остановить обход,
+# когда до следующего кольца уже дальше найденного порога.
+_CELL_RINGS = tuple(
+    tuple(
+        (dx, dy)
+        for dx in range(-ring, ring + 1)
+        for dy in range(-ring, ring + 1)
+        if max(abs(dx), abs(dy)) == ring
+    )
+    for ring in range(3)
+)
+
+
+def _ring_cells(gx, gy, radius, step, state):
+    """Ячейки 5×5 от центра наружу с ранней остановкой."""
+    for ring, offsets in enumerate(_CELL_RINGS):
+        if ring:
+            lower = (ring - 1) * step
+            current = state[0]
+            if current is not None:
+                if lower >= current:
+                    break
+            elif lower > radius:
+                break
+        for dx, dy in offsets:
+            yield gx + dx, gy + dy
 
 
 def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
@@ -1825,57 +1881,72 @@ def _nearest_thresholds(grid, lon, lat, radius, cell_lon, cell_lat):
     не на каждую проверку.
     """
     cos_lat = math.cos(math.radians(lat))
+    meridian = 111320.0 * cos_lat
     gx = int(lon // cell_lon)
     gy = int(lat // cell_lat)
-    best = {level: None for level in LOD_LEVELS}
+    # Порог хранится отдельно для каждого LOD: уровень кандидата
+    # действует на все уровни не ниже своего, поэтому итоговый порог
+    # уровня — минимум по уровням не выше него.  Так на кандидата
+    # приходится одно сравнение вместо обновления пяти слотов.
+    limits = dict.fromkeys(LOD_LEVELS)
+    state = [None]
+    radius_sq = radius * radius
+    min_sq = MIN_SUPPRESSION_DISTANCE * MIN_SUPPRESSION_DISTANCE
     # Ячейка по широте может быть меньше радиуса: размер сетки
     # ограничен 1000 м, а радиус последнего диапазона больше.  Тогда
     # подавитель в радиусе может лежать в нескольких ячейках от
     # точки, и блок 5×5 его не покроет — идёт обход по расстоянию.
     if radius <= cell_lat * 111320.0:
-        cells = (
-            (gx + dx, gy + dy)
-            for dx in (-2, -1, 0, 1, 2)
-            for dy in (-2, -1, 0, 1, 2)
+        cells = _ring_cells(
+            gx, gy, radius,
+            min(cell_lon * meridian, cell_lat * 111320.0), state,
         )
     else:
         cells = _heap_cells(
-            gx, gy, radius, cell_lon, cell_lat, cos_lat, best,
+            gx, gy, radius, cell_lon, cell_lat, cos_lat, state,
         )
+    grid_get = grid.get
     for cx, cy in cells:
-        for candidate, meridian, lod in grid.get((cx, cy), ()):
-            dlon = candidate.lon - lon
-            dlat = candidate.lat - lat
-            metric = math.sqrt(
-                (dlon * 111320.0 * cos_lat) ** 2
-                + (dlat * 111320.0) ** 2
-            )
-            if metric > radius:
+        for cand_lon, cand_lat, cand_meridian, lod in grid_get((cx, cy), ()):
+            dlon = cand_lon - lon
+            dlat = cand_lat - lat
+            east = dlon * 111320.0 * cos_lat
+            north = dlat * 111320.0
+            # Квадрат расстояния отсекает далёких соседей без корня;
+            # у самой границы радиуса решение принимается прежним
+            # точным сравнением.
+            distance_sq = east ** 2 + north ** 2
+            if distance_sq > radius_sq * 1.000000001:
                 continue
-            if metric <= MIN_SUPPRESSION_DISTANCE:
+            if distance_sq <= min_sq:
                 # Точка на том же месте не вытесняет: выражение
                 # шаблона отбрасывает такие кандидаты.
                 continue
+            metric = math.sqrt(distance_sq)
+            if metric > radius:
+                continue
             # Конверт поиска overlay_nearest задаётся широтой
             # кандидата: он тоже ограничивает подавление.
-            value = max(
-                metric,
-                meridian * abs(dlon),
-                meridian * abs(dlat),
-            )
-            levels = _LEVELS_FROM.get(lod)
-            if levels is None:
-                levels = tuple(
-                    level for level in LOD_LEVELS if level >= lod
-                )
-            current = best.get(lod)
-            if current is not None and value >= current:
-                continue
-            for level in levels:
-                previous = best[level]
-                if previous is None or value < previous:
-                    best[level] = value
-    return best
+            value = metric
+            alt = cand_meridian * abs(dlon)
+            if alt > value:
+                value = alt
+            alt = cand_meridian * abs(dlat)
+            if alt > value:
+                value = alt
+            current = limits[lod]
+            if current is None or value < current:
+                limits[lod] = value
+                if state[0] is None or value < state[0]:
+                    state[0] = value
+    result = {}
+    best = None
+    for level in LOD_LEVELS:
+        value = limits[level]
+        if value is not None and (best is None or value < best):
+            best = value
+        result[level] = best
+    return result
 
 
 def _suppression_distances(points, records, bands, needed=None, cancel=None):
@@ -1950,7 +2021,8 @@ def _suppression_distances(points, records, bands, needed=None, cancel=None):
                     (int(point.lon // cell_lon), int(point.lat // cell_lat)),
                     [],
                 ).append((
-                    point,
+                    point.lon,
+                    point.lat,
                     111320.0 * math.cos(math.radians(point.lat)),
                     point.bands.get(index, 2),
                 ))
@@ -2119,15 +2191,28 @@ def _write_aux(config, records, crs, file_name):
                 for number in range(definition.GetFieldCount())
             }
             layer.StartTransaction()
+            rank_index = indexes["rank"]
+            lod_index = indexes["lod"]
+            layer_index = indexes["layer"]
+            # Объект и геометрию можно переиспользовать: драйвер
+            # копирует их в таблицу, а создание десятков тысяч
+            # обёрток Feature стоит заметную долю времени записи.
+            feature = ogr.Feature(definition)
+            geometry = ogr.Geometry(ogr.wkbPoint)
             for point in items:
-                feature = ogr.Feature(definition)
-                feature.SetField(indexes["rank"], point.rank)
-                feature.SetField(indexes["lod"], point.bands[index])
-                feature.SetField(indexes["layer"], point.name)
-                feature.SetGeometry(ogr.CreateGeometryFromWkt(
-                    f"POINT ({point.lon:.9f} {point.lat:.9f})"))
+                feature.SetFID(-1)
+                feature.SetField(rank_index, point.rank)
+                feature.SetField(lod_index, point.bands[index])
+                feature.SetField(layer_index, point.name)
+                # Координаты округляются до девяти знаков, как в прежнем
+                # WKT: точка собирается напрямую, без разбора строки.
+                geometry.SetPoint_2D(
+                    0, float(f"{point.lon:.9f}"), float(f"{point.lat:.9f}"),
+                )
+                feature.SetGeometry(geometry)
                 layer.CreateFeature(feature)
-                feature = None
+            feature = None
+            geometry = None
             layer.CommitTransaction()
     finally:
         dataset = None

@@ -433,11 +433,6 @@ def _kind_for_layer(layer_name, feature):
     return "relation"
 
 
-def _field(feature, name):
-    index = feature.GetFieldIndex(name)
-    return feature.GetField(index) if index >= 0 else None
-
-
 def _source_properties(properties, allowed):
     """Свойства для записи в источник: только нужные рецепту.
 
@@ -511,7 +506,7 @@ def _field_entries(definition, cache=None):
     поле каждого объекта.  На миллионе объектов это десятки секунд,
     хотя набор полей у слоя не меняется.
     """
-    key = getattr(definition, "GetName", lambda: id(definition))()
+    key = ("fields", getattr(definition, "GetName", lambda: id(definition))())
     entries = cache.get(key) if cache is not None else None
     if entries is None:
         entries = []
@@ -524,29 +519,52 @@ def _field_entries(definition, cache=None):
     return entries
 
 
-def _feature_properties(feature, definition, kind, fields=None):
+def _internal_indexes(definition, cache=None):
+    """Индексы служебных полей слоя, один раз на файл."""
+    definition_key = getattr(definition, "GetName", lambda: id(definition))()
+    key = ("internal", definition_key)
+    indexes = cache.get(key) if cache is not None else None
+    if indexes is None:
+        indexes = {}
+        for name in ("osm_id", "osm_way_id", "other_tags"):
+            index = definition.GetFieldIndex(name)
+            if index >= 0:
+                indexes[name] = index
+        if cache is not None:
+            cache[key] = indexes
+    return indexes
+
+
+def _feature_properties(feature, definition, kind, fields=None, internal=None):
     if fields is None:
         fields = _field_entries(definition)
+    if internal is None:
+        internal = _internal_indexes(definition)
     # Сначала известные поля драйвера OSM: они важнее одноимённых тегов из
     # other_tags, иначе тег в другом регистре переименовал бы «name».
     properties = {}
-    getter = getattr(feature, "GetFieldAsString", feature.GetField)
     for index, name in fields:
-        value = getter(index)
-        if value is not None and str(value) != "":
-            properties[name] = str(value)
+        value = feature.GetFieldAsString(index)
+        if value:
+            properties[name] = value
 
-    osm_id = _field(feature, "osm_id")
+    osm_id = _field_at(feature, internal.get("osm_id"))
     if kind == "way":
-        osm_id = _field(feature, "osm_way_id") or osm_id
+        osm_id = _field_at(feature, internal.get("osm_way_id")) or osm_id
     if osm_id in (None, "", 0, "0"):
         return {}
     properties["@id"] = f"{kind}/{osm_id}"
     properties["@type"] = kind
-    for key, value in parse_tags(_field(feature, "other_tags")).items():
+    for key, value in parse_tags(
+        _field_at(feature, internal.get("other_tags"))
+    ).items():
         if key not in properties:
             properties[key] = value
     return properties
+
+
+def _field_at(feature, index):
+    return feature.GetField(index) if index is not None else None
 
 
 def _point_count(geometry):
@@ -615,13 +633,13 @@ def _clean_geometry(geometry):
     return geometry
 
 
-def _feature_geometry_json(feature):
+def _feature_geometry_json(geometry):
     """Геометрия объекта в виде готового JSON.
 
     Строка берётся прямо из GDAL: разбирать и собирать JSON заново
     для каждой геометрии (особенно крупных полигонов) дорого.
     """
-    geometry = _clean_geometry(feature.GetGeometryRef())
+    geometry = _clean_geometry(geometry)
     if geometry is None:
         return None
     try:
@@ -805,6 +823,7 @@ def _iter_features(dataset, cancel=None):
         )
     count = 0
     last_layer = ""
+    last_layer_object = None
     while True:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("PBF processing cancelled")
@@ -821,7 +840,12 @@ def _iter_features(dataset, cancel=None):
         if feature is None:
             return
         count += 1
-        last_layer = layer.GetName() if layer is not None else ""
+        if layer is not None:
+            if layer is not last_layer_object:
+                last_layer_object = layer
+                last_layer = layer.GetName()
+        else:
+            last_layer = ""
         yield feature, last_layer
 
 
@@ -1029,12 +1053,13 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                     # (см. _iter_features).
                     for feature, layer_name in _iter_features(dataset, cancel):
                         features_seen += 1
+                        raw_geometry = feature.GetGeometryRef()
                         if use_filter:
-                            raw = feature.GetGeometryRef()
-                            if raw is not None and not raw.IsEmpty():
+                            if (raw_geometry is not None
+                                    and not raw_geometry.IsEmpty()):
                                 try:
                                     read_box = _extend_box(
-                                        read_box, *raw.GetEnvelope()
+                                        read_box, *raw_geometry.GetEnvelope()
                                     )
                                 except Exception:
                                     pass
@@ -1049,7 +1074,6 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                                     f"objects ({percent}%)"
                                 )
 
-                        raw_geometry = feature.GetGeometryRef()
                         if raw_geometry is None or raw_geometry.IsEmpty():
                             continue
                         try:
@@ -1065,6 +1089,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         properties = _feature_properties(
                             feature, definition, kind,
                             _field_entries(definition, field_cache),
+                            _internal_indexes(definition, field_cache),
                         )
                         if not properties:
                             continue
@@ -1074,7 +1099,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                             continue
                         # Геометрию в JSON переводим только для объектов,
                         # которые действительно попадут в выход.
-                        geometry = _feature_geometry_json(feature)
+                        geometry = _feature_geometry_json(raw_geometry)
                         if geometry is None:
                             continue
                         identity = (layer_name, properties.get("@id"))
@@ -1246,6 +1271,7 @@ def _count_features(dataset, definitions, index, bbox_geometry, bbox, cancel,
         properties = _feature_properties(
             feature, definition, kind,
             _field_entries(definition, field_cache),
+            _internal_indexes(definition, field_cache),
         )
         if properties and index.matching_names(kind, properties):
             identity = (layer_name, properties.get("@id"))

@@ -382,6 +382,9 @@ class _FakeDefinition:
     def GetFieldDefn(self, index):
         return _FakeFieldDefn(self._names[index])
 
+    def GetFieldIndex(self, name):
+        return self._names.index(name) if name in self._names else -1
+
 
 class _FakeFeature:
     def __init__(self, osm_id, tags, x, y):
@@ -396,6 +399,10 @@ class _FakeFeature:
 
     def GetField(self, index):
         return list(self._values.values())[index]
+
+    def GetFieldAsString(self, index):
+        value = list(self._values.values())[index]
+        return "" if value is None else str(value)
 
 
 class _FakeLayer:
