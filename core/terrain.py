@@ -1220,9 +1220,9 @@ def _transform_raster(source_path, destination_path, operation, dtype=None,
                       nodata=None, cancel=None):
     """Пишет растр поблочно, применяя поэлементную функцию.
 
-    Читать весь растр в numpy нельзя: уклон и отмывка вдвое крупнее DEM,
-    и на области 300 км массив занимает больше четырёх гигабайт.
-    Блок 2048×2048 — это около 16 МБ на float32.
+    Читать весь растр в numpy нельзя: на области 300 км массив DEM
+    высокого разрешения занимает больше четырёх гигабайт.  Блок
+    2048×2048 — это около 16 МБ на float32.
 
     ``dtype`` — тип данных выхода (по умолчанию float32); для значений
     0…255 достаточно байта на пиксель.  ``nodata`` — значение nodata на
@@ -1704,7 +1704,7 @@ def _subtract_water_from_layer(layer, water_paths, target_srs,
         index.add(feature_envelope, fid)
 
     changed = 0
-    for polygon in polygons:
+    for position, polygon in enumerate(polygons):
         polygon_envelope = polygon.GetEnvelope()
         for fid in list(index.find(polygon_envelope)):
             feature = layer.GetFeature(fid)
