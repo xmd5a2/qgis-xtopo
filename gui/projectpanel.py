@@ -1072,8 +1072,8 @@ class ProjectPanel(QWidget):
         return box
 
     def _build_atlas_ui(self, layout):
-        self.atlas_group = QGroupBox("Атлас", self)
-        group_layout = QVBoxLayout(self.atlas_group)
+        self.export_group = QGroupBox("Экспорт", self)
+        group_layout = QVBoxLayout(self.export_group)
         group_layout.setContentsMargins(4, 4, 4, 4)
         group_layout.setSpacing(2)
 
@@ -1108,6 +1108,13 @@ class ProjectPanel(QWidget):
         quality.addStretch(1)
         group_layout.addLayout(quality)
 
+        self.sheets_group = QGroupBox(
+            "Атлас (несколько листов с нумерацией)", self
+        )
+        sheets_layout = QVBoxLayout(self.sheets_group)
+        sheets_layout.setContentsMargins(4, 4, 4, 4)
+        sheets_layout.setSpacing(2)
+
         sheet_buttons = QHBoxLayout()
         sheet_buttons.setSpacing(2)
         self.add_sheet_button = QPushButton(
@@ -1139,18 +1146,22 @@ class ProjectPanel(QWidget):
         ):
             button.setIconSize(QSize(16, 16))
             sheet_buttons.addWidget(button)
-        group_layout.addLayout(sheet_buttons)
+        bold = self.add_sheet_button.font()
+        bold.setBold(True)
+        self.add_sheet_button.setFont(bold)
+        sheets_layout.addLayout(sheet_buttons)
 
         self.sheets_label = QLabel("Листов: 0 — будет экспортирован текущий вид")
         self.sheets_label.setWordWrap(True)
-        group_layout.addWidget(self.sheets_label)
+        sheets_layout.addWidget(self.sheets_label)
         hint = QLabel(
             "«Добавить» — нарисовать рамку, «Изменить» — двигать её."
         )
         hint.setWordWrap(True)
-        group_layout.addWidget(hint)
+        sheets_layout.addWidget(hint)
         # Подписи с переносом строк: без пересчёта высоты текст обрезается.
         self._wrapped_labels = [self.sheets_label, hint]
+        group_layout.addWidget(self.sheets_group)
 
         export_buttons = QHBoxLayout()
         self.preview_button = QPushButton(
@@ -1160,6 +1171,9 @@ class ProjectPanel(QWidget):
         self.preview_button.setToolTip(
             "Собрать листы в HD и открыть просмотрщик"
         )
+        bold = self.preview_button.font()
+        bold.setBold(True)
+        self.preview_button.setFont(bold)
         export_buttons.addWidget(self.preview_button)
         self.export_png_button = QPushButton(
             QgsApplication.getThemeIcon("mActionFileSave.svg"), "PNG"
@@ -1176,7 +1190,7 @@ class ProjectPanel(QWidget):
             button.setIconSize(QSize(16, 16))
             export_buttons.addWidget(button)
         group_layout.addLayout(export_buttons)
-        layout.addWidget(self.atlas_group)
+        layout.addWidget(self.export_group)
 
         self.page_format.currentIndexChanged.connect(self._atlas_page_changed)
         self.page_orientation.currentIndexChanged.connect(

@@ -222,7 +222,8 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(dock.tabs.tabText(dock.project_tab_index), "Проект")
         self.assertFalse(dock.tabs.isTabEnabled(dock.project_tab_index))
         self.assertEqual(dock.tabs.currentIndex(), 0)
-        self.assertLessEqual(dock.minimumSizeHint().height(), 640)
+        # Подблок «Атлас» с заголовком добавляет высоту рамки.
+        self.assertLessEqual(dock.minimumSizeHint().height(), 680)
         self.assertFalse(dock.log_toggle.isChecked())
         self.assertEqual(dock.overpass_server.count(), 4)
         self.assertEqual(
@@ -1533,6 +1534,13 @@ class PipelineIntegrationTest(unittest.TestCase):
         )
         panel = ProjectPanel(Iface(canvas))
         try:
+            self.assertEqual(panel.export_group.title(), "Экспорт")
+            self.assertEqual(
+                panel.sheets_group.title(),
+                "Атлас (несколько листов с нумерацией)",
+            )
+            self.assertTrue(panel.add_sheet_button.font().bold())
+            self.assertTrue(panel.preview_button.font().bold())
             panel.add_sheet_button.setChecked(True)
             self.assertIs(canvas.mapTool(), panel._sheet_tool)
             panel.add_sheet_button.setChecked(False)
@@ -1545,7 +1553,9 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertEqual(len(panel._sheets), 2)
             self.assertIn("2", panel.sheets_label.text())
             self.assertTrue(panel.edit_sheet_button.isEnabled())
-            self.assertEqual(panel.atlas_group.layout().itemAt(2).count(), 4)
+            self.assertEqual(
+                panel.sheets_group.layout().itemAt(0).count(), 4
+            )
             panel.edit_sheet_button.setChecked(True)
             self.assertIs(canvas.mapTool(), panel._edit_sheet_tool)
             panel._sheet_edited(0, QgsRectangle(0, 0, 900, 636.3))
