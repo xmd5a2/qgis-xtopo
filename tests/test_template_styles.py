@@ -1398,6 +1398,61 @@ class TextMaskReferencesTest(unittest.TestCase):
                     self.assertNotEqual(mask.get("maskEnabled"), "1", name)
 
 
+class IconMaskReferencesTest(unittest.TestCase):
+    """Все источники маски значков должны резать один и тот же полный набор."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("id"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        cls.masks = [
+            (layer, symbol_layer)
+            for layer in cls.layers.values()
+            for symbol_layer in layer.iter("layer")
+            if symbol_layer.get("class") == "MaskMarker"
+        ]
+
+    def test_all_sources_share_one_mask_value(self):
+        values = set()
+        for layer, symbol_layer in self.masks:
+            name = layer.findtext("layername")
+            option = _find_option(symbol_layer, "mask_symbollayers")
+            self.assertIsNotNone(option, name)
+            value = option.get("value") or ""
+            self.assertNotIn(";;", value, name)
+            self.assertNotIn(",", value, name)
+            values.add(value)
+        self.assertTrue(self.masks)
+        self.assertEqual(
+            len(values), 1,
+            "разные MaskMarker маскируют разные наборы symbol layer",
+        )
+
+    def test_each_target_masks_all_its_symbol_layers(self):
+        self.assertTrue(self.masks)
+        option = _find_option(self.masks[0][1], "mask_symbollayers")
+        parts = (option.get("value") or "").split(";")
+        self.assertEqual(len(parts) % 2, 0)
+        targets = {}
+        for index in range(0, len(parts), 2):
+            targets.setdefault(parts[index], set()).add(parts[index + 1])
+        self.assertTrue(targets)
+        for layer_id, masked in targets.items():
+            layer = self.layers[layer_id]
+            name = layer.findtext("layername")
+            self.assertIn(layer.get("geometry"), ("Line", "Polygon"), name)
+            renderer = layer.find("renderer-v2")
+            self.assertIsNotNone(renderer, name)
+            actual = {
+                symbol_layer.get("id")
+                for symbol_layer in renderer.iter("layer")
+            }
+            self.assertNotIn(None, actual, name)
+            self.assertEqual(masked, actual, name)
+
+
 class ServiceRoadLodTest(unittest.TestCase):
     """Два уровня service: без service=* до 300k, с service=* до 100k."""
 

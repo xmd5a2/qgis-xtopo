@@ -13,6 +13,7 @@
 | `check_peak_placement.py` | проверяет положение пиков OSM по рельефу |
 | `bench_label_line.py` | замер скорости линий подписи и сравнение со старой цепочкой GRASS |
 | `make_label_fixtures.py` | собирает компактные копии отмеченных объектов для тестов линии подписи |
+| `update_icon_masks.py` | обновляет единый список масок значков `MaskMarker` в `automap.qgz` |
 | `render_peak_review.py` | рисует фрагменты карты с изолиниями по CSV разметки |
 | `make_peak_map.py` | собирает интерактивную карту пиков по CSV |
 | `dem_compare_server.py` + `dem_compare.html` | сравнение наборов DEM между собой |
@@ -26,6 +27,25 @@
 `suppression_to_data.py`, `track_length_filter.py`), удалены после
 применения: результат уже в шаблоне, автоматизация их не запускает.
 Их код остаётся в истории git.
+
+## Маски значков
+
+`tools/update_icon_masks.py` пересобирает `mask_symbollayers` у всех
+`MaskMarker` в `automap.qgz`: цели берутся из текущих масок, устаревшие и
+точечные слои отбрасываются, каждому целевому линейному или площадному
+слою назначается полный набор symbol layer id. Все источники получают
+один и тот же список, иначе QGIS предупреждает «Different sets of symbol
+layers are masked by different sources» и оставляет произвольный набор.
+
+```sh
+python3 tools/update_icon_masks.py --dry-run
+python3 tools/update_icon_masks.py
+python3 tools/update_icon_masks.py --output /tmp/automap.qgz
+```
+
+Запускать после добавления symbol layer в целевые слои (дороги, вода,
+изолинии и т.п.) или после пересборки их стилей. Проверка —
+`IconMaskReferencesTest` в `tests/test_template_styles.py`.
 
 ## Замер скорости линий подписи
 
