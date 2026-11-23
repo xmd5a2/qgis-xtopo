@@ -27,6 +27,11 @@ DEFAULT_ZOOM = 1.0
 # в 1.5 раза крупнее (QgsMapCanvas::setMagnificationFactor).
 MAGNIFICATION_FACTOR = 1.5
 
+# Уровень сжатия .qgz.  Проект — это один qgs на десятки мегабайт, и на
+# уровне 6 deflate тратит около 0,7 с на запись.  Уровень 1 пишет втрое
+# быстрее, а архив больше всего на пару мегабайт; читается он быстрее.
+ARCHIVE_COMPRESSLEVEL = 1
+
 # Фильтры правил, ссылающиеся на слои, которых может не быть в готовом
 # проекте: пустые слои вырезаются при сборке, а обращение overlay_* к
 # отсутствующему слою обращает фильтр в NULL.  try(...) возвращает
@@ -240,7 +245,34 @@ def _write_crop(config):
     return path
 
 
-MAPLAYER_PATTERN = re.compile(r"<maplayer\b[^>]*>.*?</maplayer>", re.S)
+def _maplayer_spans(text):
+    """Границы блоков ``maplayer`` через str.find.
+
+    Регулярное выражение с ``.*?`` на 74 МБ проекта идёт около 0,4 с;
+    поиск подстроки в C — в двадцать раз быстрее и даёт те же границы.
+    """
+    position = 0
+    opening = "<maplayer"
+    closing = "</maplayer>"
+    while True:
+        start = text.find(opening, position)
+        if start < 0:
+            break
+        boundary = start + len(opening)
+        if boundary < len(text) and text[boundary] not in " \t\r\n>/":
+            position = boundary
+            continue
+        open_end = text.find(">", boundary)
+        if open_end < 0:
+            break
+        end = text.find(closing, open_end)
+        if end < 0:
+            break
+        end += len(closing)
+        yield start, end
+        position = end
+
+
 LAYER_TREE_PATTERN = re.compile(
     r'<layer-tree-layer\b[^>]*\bid="([^"]+)"[^>]*(?:/>|>.*?</layer-tree-layer>)',
     re.S,
@@ -349,29 +381,39 @@ def _drop_removed_references(text, removed):
     return text
 
 
+def _empty_layer_ids(blocks, base_dir):
+    """ID слоёв с пустым источником."""
+    return {
+        layer_id
+        for _start, _end, _block, layer_id, datasource in blocks
+        if layer_id and datasource is not None
+        and _is_empty_datasource(datasource, base_dir)
+    }
+
+
 def _remove_empty_layers(text, base_dir):
     removed = set()
     blocks = []
-    for match in MAPLAYER_PATTERN.finditer(text):
-        block = match.group(0)
+    for start, end in _maplayer_spans(text):
+        block = text[start:end]
         layer_id = _element(block, "id")
         datasource = _element(block, "datasource")
-        if layer_id and datasource is not None:
-            if _is_empty_datasource(html.unescape(datasource), base_dir):
-                removed.add(layer_id)
-        blocks.append((match, layer_id))
+        if datasource is not None:
+            datasource = html.unescape(datasource)
+        blocks.append((start, end, block, layer_id, datasource))
+    removed = _empty_layer_ids(blocks, base_dir)
     if not removed:
         return text, removed
 
     pieces = []
     previous = 0
-    for match, layer_id in blocks:
+    for start, end, block, layer_id, _datasource in blocks:
         pieces.append(
-            _drop_removed_references(text[previous:match.start()], removed)
+            _drop_removed_references(text[previous:start], removed)
         )
         if layer_id not in removed:
-            pieces.append(match.group(0))
-        previous = match.end()
+            pieces.append(block)
+        previous = end
     pieces.append(_drop_removed_references(text[previous:], removed))
     return "".join(pieces), removed
 
@@ -383,13 +425,18 @@ def _rewrite_archive(path, transform):
     temporary = path.with_suffix(path.suffix + ".tmp")
     changed = False
     with zipfile.ZipFile(path) as archive:
-        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as output:
+        with zipfile.ZipFile(
+            temporary, "w", zipfile.ZIP_DEFLATED,
+            compresslevel=ARCHIVE_COMPRESSLEVEL,
+        ) as output:
             for item in archive.infolist():
                 data = archive.read(item.filename)
                 updated = transform(item.filename, data)
                 if updated != data:
                     changed = True
-                output.writestr(item, updated)
+                output.writestr(
+                    item, updated, compresslevel=ARCHIVE_COMPRESSLEVEL
+                )
     if changed:
         os.replace(temporary, path)
     else:
@@ -459,6 +506,58 @@ def _filter_resampling(match):
     return _set_attribute(match.group(0), "zoomedInResampler", "cubic")
 
 
+def _patch_raster_block(block):
+    if not GDAL_PROVIDER_PATTERN.search(block):
+        return block
+    block = RESAMPLING_ELEMENT_PATTERN.sub(
+        _provider_resampling, block,
+    )
+    block = RESAMPLING_STAGE_PATTERN.sub(
+        "<resamplingStage>provider</resamplingStage>", block,
+    )
+    block = RASTER_RESAMPLER_PATTERN.sub(
+        _filter_resampling, block,
+    )
+    return block
+
+
+def _apply_edits(text, edits, font_old=None, font_new=None):
+    """Собирает текст один раз по списку правок ``(начало, конец, текст)``."""
+    if not edits:
+        return text
+    edits.sort()
+    pieces = []
+    previous = 0
+    replace_font = bool(font_old and font_new)
+    for start, end, replacement in edits:
+        piece = text[previous:start]
+        if replace_font:
+            piece = piece.replace(font_old, font_new)
+            replacement = replacement.replace(font_old, font_new)
+        pieces.append(piece)
+        pieces.append(replacement)
+        previous = end
+    tail = text[previous:]
+    if replace_font:
+        tail = tail.replace(font_old, font_new)
+    pieces.append(tail)
+    return "".join(pieces)
+
+
+def _raster_edits(text):
+    """Правки растровых слоёв: их всего несколько из сотен."""
+    edits = []
+    for start, end in _maplayer_spans(text):
+        open_end = text.find(">", start)
+        if 'type="raster"' not in text[start:open_end + 1]:
+            continue
+        block = text[start:end]
+        patched = _patch_raster_block(block)
+        if patched != block:
+            edits.append((start, end, patched))
+    return edits
+
+
 def patch_raster_resampling(text):
     """Настраивает передискретизацию растров рельефа.
 
@@ -466,25 +565,7 @@ def patch_raster_resampling(text):
     свой метод при увеличении.  Слой-плитка (подложка OpenStreetMap)
     не трогаем: у него нет файла на диске и пересчитывать нечего.
     """
-    def fix_layer(match):
-        block = match.group(0)
-        opening = block.split(">", 1)[0]
-        if 'type="raster"' not in opening:
-            return block
-        if not GDAL_PROVIDER_PATTERN.search(block):
-            return block
-        block = RESAMPLING_ELEMENT_PATTERN.sub(
-            _provider_resampling, block,
-        )
-        block = RESAMPLING_STAGE_PATTERN.sub(
-            "<resamplingStage>provider</resamplingStage>", block,
-        )
-        block = RASTER_RESAMPLER_PATTERN.sub(
-            _filter_resampling, block,
-        )
-        return block
-
-    return MAPLAYER_PATTERN.sub(fix_layer, text)
+    return _apply_edits(text, _raster_edits(text))
 
 
 def patch_label_candidates(text):
@@ -621,6 +702,111 @@ def _set_project_variable(text, name, value):
     return text
 
 
+def _updated_variable_contents(names_content, values_content, updates):
+    """Новые списки переменных без пересборки всего текста проекта."""
+    name_entries = list(VARIABLE_VALUE_PATTERN.finditer(names_content))
+    name_list = [entry.group(1) for entry in name_entries]
+    value_entries = list(VARIABLE_VALUE_PATTERN.finditer(values_content))
+    replacements = []
+    for name, value in updates:
+        if name not in name_list:
+            continue
+        position = name_list.index(name)
+        if position >= len(value_entries):
+            continue
+        entry = value_entries[position]
+        escaped = html.escape(str(value), quote=False)
+        if entry.group(1) is None:
+            replacements.append(
+                (entry.start(), entry.end(), f"<value>{escaped}</value>")
+            )
+        else:
+            replacements.append((entry.start(1), entry.end(1), escaped))
+    for start, end, replacement in sorted(replacements, reverse=True):
+        values_content = (
+            values_content[:start] + replacement + values_content[end:]
+        )
+    for name, value in updates:
+        if name in name_list:
+            continue
+        escaped = html.escape(str(value), quote=False)
+        names_content += (
+            f"\n        <value>{html.escape(name, quote=False)}</value>"
+        )
+        values_content += f"\n        <value>{escaped}</value>"
+    return names_content, values_content
+
+
+def _variable_edits(text, updates, level=None):
+    """Правки переменных проекта одним проходом по их небольшим спискам."""
+    names = VARIABLE_NAMES_PATTERN.search(text)
+    values = VARIABLE_VALUES_PATTERN.search(text)
+    if names is None or values is None:
+        return []
+    name_list = [
+        item.group(1)
+        for item in VARIABLE_VALUE_PATTERN.finditer(names.group(1))
+    ]
+    resolved = []
+    for name, value in updates:
+        if name == DETAIL_VARIABLE:
+            if name not in name_list:
+                continue
+            if value is None:
+                if level is None:
+                    from .map_language import level_of_detail
+
+                    level = level_of_detail()
+                value = level
+        resolved.append((name, value))
+    names_content, values_content = _updated_variable_contents(
+        names.group(1), values.group(1), resolved
+    )
+    edits = []
+    if names_content != names.group(1):
+        edits.append((names.start(1), names.end(1), names_content))
+    if values_content != values.group(1):
+        edits.append((values.start(1), values.end(1), values_content))
+    return edits
+
+
+def _marker_edits(text, marker, replacement):
+    """Правки всех вхождений фиксированной строки."""
+    edits = []
+    position = 0
+    while True:
+        found = text.find(marker, position)
+        if found < 0:
+            break
+        edits.append((found, found + len(marker), replacement))
+        position = found + len(marker)
+    return edits
+
+
+def _project_text_edits(text, project_name, dem_attribution):
+    """Все правки qgs для новой подготовки, кроме замены шрифта."""
+    edits = _marker_edits(
+        text, 'projectname="automap"', f'projectname="{project_name}"'
+    )
+    edits.extend(_marker_edits(
+        text, "<title>automap</title>", f"<title>{project_name}</title>"
+    ))
+    marker = "\n  <properties>\n"
+    position = text.find(marker)
+    if position >= 0:
+        edits.append((
+            position, position + len(marker),
+            marker + '    <qgis_xtopo type="bool">true</qgis_xtopo>\n',
+        ))
+    edits.extend(_variable_edits(text, (
+        (DETAIL_VARIABLE, None),
+        (text_size.VARIABLE, text_size.multiplier()),
+        ("dem_attribution", dem_attribution),
+    )))
+    edits.extend(_raster_edits(text))
+    return edits
+
+
 def rewrite_project_archive(source, destination, project_name, dem_attribution=""):
     source = Path(source)
     destination = Path(destination)
@@ -633,30 +819,19 @@ def rewrite_project_archive(source, destination, project_name, dem_attribution="
     new_font = f'fontFamily="{font}"' if font and font != TEMPLATE_FONT else None
 
     with zipfile.ZipFile(source) as archive:
-        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as output:
+        with zipfile.ZipFile(
+            temporary, "w", zipfile.ZIP_DEFLATED,
+            compresslevel=ARCHIVE_COMPRESSLEVEL,
+        ) as output:
             for item in archive.infolist():
                 data = archive.read(item.filename)
                 name = item.filename
                 if name.endswith(".qgs"):
                     text = data.decode("utf-8")
-                    text = text.replace('projectname="automap"', f'projectname="{project_name}"')
-                    text = text.replace("<title>automap</title>", f"<title>{project_name}</title>")
-                    text = text.replace(
-                        "\n  <properties>\n",
-                        "\n  <properties>\n"
-                        '    <qgis_xtopo type="bool">true</qgis_xtopo>\n',
-                        1,
+                    edits = _project_text_edits(
+                        text, project_name, dem_attribution
                     )
-                    if new_font:
-                        text = text.replace(old_font, new_font)
-                    text = _set_detail_variable(text)
-                    text = _set_project_variable(
-                        text, text_size.VARIABLE, text_size.multiplier()
-                    )
-                    text = _set_project_variable(
-                        text, "dem_attribution", dem_attribution
-                    )
-                    text = patch_raster_resampling(text)
+                    text = _apply_edits(text, edits, old_font, new_font)
                     data = text.encode("utf-8")
                     name = f"{project_name}.qgs"
                 elif name.endswith(".qgd"):

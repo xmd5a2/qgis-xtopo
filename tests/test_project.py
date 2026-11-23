@@ -858,6 +858,81 @@ class ProjectAttributionTest(unittest.TestCase):
         )
 
 
+class ProjectTextEditsTest(unittest.TestCase):
+    """Пакетные правки qgs совпадают с прежними пошаговыми."""
+
+    TEXT = (
+        '<qgis projectname="automap">\n'
+        "  <title>automap</title>\n"
+        "  <properties>\n"
+        '    <variableNames type="QStringList">\n'
+        "        <value>level_of_detail</value>\n"
+        "        <value>dem_attribution</value>\n"
+        "    </variableNames>\n"
+        '    <variableValues type="QStringList">\n'
+        "        <value>4</value>\n"
+        "        <value />\n"
+        "    </variableValues>\n"
+        "  </properties>\n"
+        '  <maplayer type="vector"><id>vector</id></maplayer>\n'
+        '  <maplayer type="raster"><id>dem</id>'
+        '<provider encoding="UTF-8">gdal</provider>'
+        "<pipe><provider>"
+        '<resampling maxOversampling="2" enabled="false" '
+        'zoomedInResamplingMethod="nearestNeighbour" />'
+        "</provider><rasterresampler maxOversampling=\"2\" />"
+        "<resamplingStage>resamplingFilter</resamplingStage>"
+        "</pipe></maplayer>\n"
+        '  <maplayer type="vector" '
+        'fontFamily="Century Schoolbook L"><id>x</id></maplayer>\n'
+        "</qgis>"
+    )
+
+    def test_combined_edits_match_sequential(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import map_language, text_size
+        from qgis_xtopo.core.project import (
+            _apply_edits,
+            _project_text_edits,
+            _set_detail_variable,
+            _set_project_variable,
+            patch_raster_resampling,
+        )
+
+        old_font = 'fontFamily="Century Schoolbook L"'
+        new_font = 'fontFamily="Noto Serif"'
+        text = self.TEXT
+        sequential = text.replace(
+            'projectname="automap"', 'projectname="speed"'
+        )
+        sequential = sequential.replace(
+            "<title>automap</title>", "<title>speed</title>"
+        )
+        sequential = sequential.replace(
+            "\n  <properties>\n",
+            "\n  <properties>\n"
+            '    <qgis_xtopo type="bool">true</qgis_xtopo>\n',
+            1,
+        )
+        sequential = sequential.replace(old_font, new_font)
+        with mock.patch.object(map_language, "level_of_detail", return_value=5):
+            sequential = _set_detail_variable(sequential)
+        sequential = _set_project_variable(
+            sequential, text_size.VARIABLE, text_size.multiplier()
+        )
+        sequential = _set_project_variable(
+            sequential, "dem_attribution", "DEM test"
+        )
+        sequential = patch_raster_resampling(sequential)
+
+        with mock.patch.object(map_language, "level_of_detail", return_value=5):
+            edits = _project_text_edits(text, "speed", "DEM test")
+        combined = _apply_edits(text, edits, old_font, new_font)
+        self.assertEqual(combined, sequential)
+        self.assertIn("<value>5</value>", combined)
+
+
 class ProjectFilePathTest(unittest.TestCase):
     def test_path(self):
         path = project_file_path("/tmp/projects", "demo")

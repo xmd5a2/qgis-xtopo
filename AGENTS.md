@@ -145,6 +145,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 - **Пустые слои** вырезаются при сборке; обращение `overlay_*` к отсутствующему
   слою даёт NULL и скрывает объекты. Поэтому такие фильтры обёрнуты в
   `try(..., запасное значение)` (`patch_overlay_filters`).
+- **qgs собирается одним проходом правок.** Шаблон — один qgs на десятки
+  мегабайт, поэтому блоки `maplayer` ищутся через `str.find`
+  (`project._maplayer_spans`), а все правки применяются списком в
+  `_apply_edits`; отдельные `str.replace`/срезы копировали бы весь текст.
+  Архив пишется с `ARCHIVE_COMPRESSLEVEL = 1`, а `writestr(ZipInfo, ...)`
+  требует явного `compresslevel`. Подробности — `docs/agents/runtime.md`.
 - **Потоки**: перед удалением панели все QThread останавливаются
   (`shutdown_workers`); свой сигнал `finished` в QThread не объявлять.
   Подробности — `docs/agents/ui.md`.
