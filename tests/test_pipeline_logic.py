@@ -1738,7 +1738,13 @@ class CoastlineIntermediateTest(unittest.TestCase):
                         side_effect=lambda source, destination: destination,
                     ), \
                     mock.patch.object(coastline, "_has_features", return_value=True):
-                self.assertTrue(coastline.prepare_coastline(config, None))
+                messages = []
+                self.assertTrue(
+                    coastline.prepare_coastline(
+                        config, None, progress=messages.append
+                    ),
+                    messages,
+                )
         return recorded, calls
 
     def test_intersection_area_ignores_non_surface_parts(self):
@@ -1769,7 +1775,7 @@ class CoastlineIntermediateTest(unittest.TestCase):
 
     def test_split_and_vertices_are_geopackages(self):
         recorded, _calls = self._recorded()
-        for algorithm in ("native:splitwithlines", "native:pointonsurface"):
+        for algorithm in ("native:polygonize", "native:pointonsurface"):
             self.assertEqual(
                 Path(recorded[algorithm]["OUTPUT"]).suffix, ".gpkg", algorithm
             )
@@ -1777,10 +1783,13 @@ class CoastlineIntermediateTest(unittest.TestCase):
     def test_split_uses_only_open_parts(self):
         """Кольца островов не режут охват: они вычитаются площадями."""
         recorded, _calls = self._recorded()
-        self.assertEqual(
-            Path(recorded["native:splitwithlines"]["LINES"]).name,
-            "open_parts.geojson",
-        )
+        layers = [
+            Path(item).name
+            for item in recorded["native:mergevectorlayers"]["LAYERS"]
+        ]
+        self.assertIn("open_parts.geojson", layers)
+        self.assertIn("native:dissolve", recorded)
+        self.assertIn("native:polygonize", recorded)
 
     def test_closed_rings_are_subtracted_not_split(self):
         recorded, calls = self._recorded(closed_only=True)
@@ -1813,8 +1822,9 @@ class CoastlineIntermediateTest(unittest.TestCase):
             parameters for algorithm, parameters in calls
             if algorithm == "native:dissolve"
         ]
-        self.assertEqual(len(dissolves), 1)
-        self.assertEqual(Path(dissolves[0]["INPUT"]).name, "lines.geojson")
+        inputs = [Path(item["INPUT"]).name for item in dissolves]
+        self.assertIn("lines.geojson", inputs)
+        self.assertNotIn("open_lines.geojson", inputs)
 
 
 class EmptySourceOutputsTest(unittest.TestCase):

@@ -25,6 +25,12 @@ SIDE_BUFFER_INSET = 0.3 * SIDE_BUFFER_WIDTH
 # геометрий, а не водоём.  1e-8°² — это порядка десятых долей м².
 MIN_POLYGON_AREA = 1e-8
 
+# Проверка «океан похож на острова» перебирает все полигоны слоя island
+# и считает площадь пересечения.  В архипелаге полигонов десятки тысяч,
+# и проверка стоит минуты; сторону воды там надёжно задаёт большинство
+# водных точек, поэтому для крупных слоёв проверка пропускается.
+LOOKS_LIKE_LAND_MAX_ISLANDS = 2000
+
 
 def _line_geometries(geometry):
     if geometry is None or geometry.IsEmpty():
@@ -57,6 +63,17 @@ def _is_closed_ring(geometry):
     return abs(first[0] - last[0]) < 1e-12 and abs(first[1] - last[1]) < 1e-12
 
 
+def _driver_name(destination):
+    """Драйвер промежуточного слоя по расширению.
+
+    GeoPackage держит крупные геометрии и имеет пространственный индекс.
+    GeoJSON годится только для небольших слоёв: OGR отказывается читать
+    объект больше нескольких десятков мегабайт, а растворённый берег
+    архипелага — это одна линия на миллионы вершин.
+    """
+    return "GPKG" if Path(destination).suffix.lower() == ".gpkg" else "GeoJSON"
+
+
 def _write_line_features(source, destination, keep=None):
     """Пишет линейные части объектов, для которых верно ``keep``.
 
@@ -67,7 +84,7 @@ def _write_line_features(source, destination, keep=None):
     dataset = ogr.Open(str(source))
     if dataset is None:
         raise CoastlineError(f"Cannot open {source}")
-    driver = ogr.GetDriverByName("GeoJSON")
+    driver = ogr.GetDriverByName(_driver_name(destination))
     destination = Path(destination)
     destination.unlink(missing_ok=True)
     output = driver.CreateDataSource(str(destination))
@@ -180,6 +197,27 @@ def _layer_is_valid(path):
         dataset = None
 
 
+def _count_features(path):
+    """Число объектов слоя."""
+    from osgeo import ogr
+
+    try:
+        dataset = ogr.Open(str(path))
+    except Exception:
+        dataset = None
+    if dataset is None:
+        return 0
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return 0
+        return sum(1 for _feature in layer)
+    except Exception:
+        return 0
+    finally:
+        dataset = None
+
+
 def _geometry_area(geometry):
     """Площадь только площадных частей геометрии.
 
@@ -227,6 +265,8 @@ def _intersection_area(first_path, second_path):
     """Площадь пересечения полигонов двух слоёв."""
     from osgeo import ogr
 
+    from .pipeline import _prepared_geometry
+
     first = ogr.Open(str(first_path))
     second = ogr.Open(str(second_path))
     if first is None or second is None:
@@ -245,13 +285,21 @@ def _intersection_area(first_path, second_path):
             geometry = feature.GetGeometryRef()
             if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
                 continue
+            # Океан — один полигон с десятками тысяч дыр.  Без
+            # подготовленной геометрии Intersects строит индекс рёбер
+            # заново на каждый остров, и проверка идёт часами.
+            prepared = _prepared_geometry(geometry)
             second_layer.SetSpatialFilter(geometry)
             for other in second_layer:
                 other_geometry = other.GetGeometryRef()
                 if (other_geometry is None or other_geometry.IsEmpty()
                         or other_geometry.GetDimension() != 2):
                     continue
-                if not geometry.Intersects(other_geometry):
+                if prepared is not None:
+                    intersects = prepared.Intersects(other_geometry)
+                else:
+                    intersects = geometry.Intersects(other_geometry)
+                if not intersects:
                     continue
                 try:
                     common = geometry.Intersection(other_geometry)
@@ -317,7 +365,7 @@ def _largest_polygon(source, destination):
         return None
     if best.GetGeometryName() == "POLYGON":
         best = ogr.ForceToMultiPolygon(best)
-    driver = ogr.GetDriverByName("GeoJSON")
+    driver = ogr.GetDriverByName(_driver_name(destination))
     destination = Path(destination)
     destination.unlink(missing_ok=True)
     output = driver.CreateDataSource(str(destination))
@@ -348,7 +396,7 @@ def _write_polygons(source, destination):
     dataset = ogr.Open(str(source))
     if dataset is None:
         raise CoastlineError(f"Cannot open {source}")
-    driver = ogr.GetDriverByName("GeoJSON")
+    driver = ogr.GetDriverByName(_driver_name(destination))
     destination = Path(destination)
     destination.unlink(missing_ok=True)
     output = driver.CreateDataSource(str(destination))
@@ -437,7 +485,7 @@ def _side_ocean(runner, config, split, open_source, side):
         "SEGMENTS": 5,
         "JOIN_STYLE": 0,
         "MITER_LIMIT": 2,
-        "OUTPUT": _temp(config, f"coastline_side_{tag}.geojson"),
+        "OUTPUT": _temp(config, f"coastline_side_{tag}.gpkg"),
     })
     thin = _run(runner, "native:buffer", {
         "INPUT": one_side,
@@ -447,29 +495,42 @@ def _side_ocean(runner, config, split, open_source, side):
         "JOIN_STYLE": 0,
         "MITER_LIMIT": 2,
         "DISSOLVE": False,
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_thin.geojson"),
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_thin.gpkg"),
     })
     parts = _run(runner, "native:multiparttosingleparts", {
         "INPUT": thin,
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_parts.geojson"),
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_parts.gpkg"),
     })
     clipped = _run(runner, "native:intersection", {
         "INPUT": parts,
         "OVERLAY": str(config.crop_path),
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_clipped.geojson"),
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_clipped.gpkg"),
     })
-    # Точка берётся строго внутри отступа по водной стороне, а часть
-    # области выбирается по «содержит»: вершина на самой линии берега
-    # принадлежит сразу двум частям, и океаном выбирался обломок.
+    # Точка берётся строго внутри отступа по водной стороне: вершина на
+    # самой линии берега принадлежит сразу двум частям, и океаном
+    # выбирался обломок.  Часть области определяется по числу попавших в
+    # неё точек.
     vertices = _run(runner, "native:pointonsurface", {
         "INPUT": clipped,
         "OUTPUT": _temp(config, f"coastline_side_{tag}_vertices.gpkg"),
     })
-    return _run(runner, "native:extractbylocation", {
-        "INPUT": split,
-        "INTERSECT": vertices,
-        "PREDICATE": [1],
-        "OUTPUT": _temp(config, f"coastline_ocean_{tag}.geojson"),
+    # Части охвата выбираются по числу попавших в них водных точек, а не
+    # по «содержит хотя бы одну»: единичные way с обратным направлением
+    # дают точку на суше, и одного такого попадания хватало, чтобы в
+    # океан попала вся материковая часть охвата.  Земля получает доли
+    # процента точек, настоящие водоёмы — почти все свои.
+    total = _count_features(vertices)
+    threshold = max(1, int(total * 0.01))
+    counted = _run(runner, "native:countpointsinpolygon", {
+        "POLYGONS": split,
+        "POINTS": vertices,
+        "FIELD": "vcount",
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_count.gpkg"),
+    })
+    return _run(runner, "native:extractbyexpression", {
+        "INPUT": counted,
+        "EXPRESSION": f'"vcount" >= {threshold}',
+        "OUTPUT": _temp(config, f"coastline_ocean_{tag}.gpkg"),
     })
 
 
@@ -490,18 +551,18 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
     runner = ProcessingRunner(progress=progress, cancel=cancel)
     try:
         notify("Береговая линия: подготовка линий")
-        line_source = _write_lines(lines, config.temp_dir / "coastline_lines.geojson")
+        line_source = _write_lines(lines, config.temp_dir / "coastline_lines.gpkg")
         dissolved = _run(runner, "native:dissolve", {
             "INPUT": str(line_source),
             "FIELD": [],
             "SEPARATE_DISJOINT": False,
-            "OUTPUT": _temp(config, "coastline_dissolved.geojson"),
+            "OUTPUT": _temp(config, "coastline_dissolved.gpkg"),
         })
         simplified = _run(runner, "native:simplifygeometries", {
             "INPUT": dissolved,
             "METHOD": 0,
             "TOLERANCE": 0.00005,
-            "OUTPUT": _temp(config, "coastline_simplified.geojson"),
+            "OUTPUT": _temp(config, "coastline_simplified.gpkg"),
         })
 
         notify("Береговая линия: разделение охвата")
@@ -511,31 +572,48 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         # охват режется только незамкнутым берегом.
         open_parts = _write_selected_lines(
             simplified,
-            config.temp_dir / "coastline_open_parts.geojson",
+            config.temp_dir / "coastline_open_parts.gpkg",
             closed=False,
         )
         rings = _write_selected_lines(
-            simplified, config.temp_dir / "coastline_rings.geojson", closed=True
+            simplified, config.temp_dir / "coastline_rings.gpkg", closed=True
         )
         ring_polygons = None
         if rings is not None:
             ring_polygons = _run(runner, "native:polygonize", {
                 "INPUT": str(rings),
                 "KEEP_FIELDS": False,
-                "OUTPUT": _temp(config, "coastline_rings_polygons.geojson"),
+                "OUTPUT": _temp(config, "coastline_rings_polygons.gpkg"),
             })
             ring_polygons = _run(runner, "native:fixgeometries", {
                 "INPUT": ring_polygons,
-                "OUTPUT": _temp(config, "coastline_rings_fixed.geojson"),
+                "OUTPUT": _temp(config, "coastline_rings_fixed.gpkg"),
             })
-        # Разрезанные части и точки-вершины — GeoPackage: у GeoJSON нет
-        # пространственного индекса, и native:extractbylocation предупреждает
-        # о полном переборе вершин для каждой части области.
+        # Промежуточные слои — GeoPackage: он держит крупные геометрии и
+        # имеет пространственный индекс.
         split = str(crop)
         if open_parts is not None:
-            split = _run(runner, "native:splitwithlines", {
+            # splitwithlines режет охват каждой линией и на длинном берегу
+            # с десятками тысяч вершин уходит в минуты.  Unary union за один
+            # проход делает линии узлованными, а polygonize строит все части
+            # охвата сразу; на берегу Финляндии это доли секунды.
+            boundary = _run(runner, "native:boundary", {
                 "INPUT": str(crop),
-                "LINES": str(open_parts),
+                "OUTPUT": _temp(config, "coastline_crop_boundary.gpkg"),
+            })
+            graph = _run(runner, "native:mergevectorlayers", {
+                "LAYERS": [str(open_parts), boundary],
+                "OUTPUT": _temp(config, "coastline_graph.gpkg"),
+            })
+            graph = _run(runner, "native:dissolve", {
+                "INPUT": graph,
+                "FIELD": [],
+                "SEPARATE_DISJOINT": False,
+                "OUTPUT": _temp(config, "coastline_graph_noded.gpkg"),
+            })
+            split = _run(runner, "native:polygonize", {
+                "INPUT": graph,
+                "KEEP_FIELDS": False,
                 "OUTPUT": _temp(config, "coastline_split.gpkg"),
             })
         if ring_polygons is not None:
@@ -555,6 +633,13 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         # (в дельте Дуная океаном оказывался крошечный обломок у края
         # области, а море не заливалось вовсе).
         island = config.vector_dir / "island.sqlite"
+        # Крупный слой островов делает _looks_like_land дороже самого
+        # океана, а его сигнал в архипелаге ненадёжен: острова без
+        # coastline-кольца лежат внутри моря и дают «пересечение» с ним.
+        check_islands = (
+            island.exists()
+            and _count_features(island) <= LOOKS_LIKE_LAND_MAX_ISLANDS
+        )
         ocean = None
         open_source = None
         if open_parts is not None:
@@ -562,12 +647,13 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             # меняет направление части линий, и сторона воды теряется.
             open_source = _write_lines(
                 lines,
-                config.temp_dir / "coastline_open_lines.geojson",
+                config.temp_dir / "coastline_open_lines.gpkg",
                 open_only=True,
             )
             ocean = _side_ocean(runner, config, split, open_source, 1)
         if (ocean is not None and _has_features(ocean)
-                and not _looks_like_land(ocean, island)):
+                and (not check_islands
+                     or not _looks_like_land(ocean, island))):
             pass
         else:
             if ocean is not None and _has_features(ocean):
@@ -579,14 +665,15 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             if open_source is not None:
                 retried = _side_ocean(runner, config, split, open_source, 0)
             if (retried is not None and _has_features(retried)
-                    and not _looks_like_land(retried, island)):
+                    and (not check_islands
+                         or not _looks_like_land(retried, island))):
                 ocean = retried
             else:
                 # Незамкнутого берега нет — охват уже разрезан кольцами,
                 # и океан это крупнейшая часть. Тот же запасной вариант
                 # нужен, когда обе стороны не прошли проверку.
                 ocean = _largest_polygon(
-                    split, _temp(config, "coastline_ocean_largest.geojson")
+                    split, _temp(config, "coastline_ocean_largest.gpkg")
                 )
                 if ocean is not None and open_source is not None:
                     notify(
@@ -596,10 +683,11 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
         if ocean is None or not _has_features(ocean):
             notify("WARNING: Береговая линия: океан не построен")
             return False
-        ocean = _run(runner, "native:fixgeometries", {
-            "INPUT": ocean,
-            "OUTPUT": _temp(config, "coastline_ocean_fixed.geojson"),
-        })
+        if not _layer_is_valid(ocean):
+            ocean = _run(runner, "native:fixgeometries", {
+                "INPUT": ocean,
+                "OUTPUT": _temp(config, "coastline_ocean_fixed.gpkg"),
+            })
         ocean = _run(runner, "native:fieldcalculator", {
             "INPUT": ocean,
             "FIELD_NAME": "natural",
@@ -607,7 +695,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             "FIELD_LENGTH": 20,
             "FIELD_PRECISION": 0,
             "FORMULA": "'water'",
-            "OUTPUT": _temp(config, "coastline_ocean_water.geojson"),
+            "OUTPUT": _temp(config, "coastline_ocean_water.gpkg"),
         })
 
         if island.exists() and _has_features(island):
@@ -616,25 +704,25 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             if not _layer_is_valid(island):
                 island_source = _run(runner, "native:fixgeometries", {
                     "INPUT": island_source,
-                    "OUTPUT": _temp(config, "coastline_islands_fixed.geojson"),
+                    "OUTPUT": _temp(config, "coastline_islands_fixed.gpkg"),
                 })
             ocean = _run(runner, "native:difference", {
                 "INPUT": ocean,
                 "OVERLAY": island_source,
-                "OUTPUT": _temp(config, "coastline_ocean_islands.geojson"),
+                "OUTPUT": _temp(config, "coastline_ocean_islands.gpkg"),
             })
 
         water = config.vector_dir / "water_dissolved.sqlite"
         existing = None
         if water.exists() and _has_features(water):
             existing = _write_polygons(
-                water, config.temp_dir / "coastline_existing_water.geojson"
+                water, config.temp_dir / "coastline_existing_water.gpkg"
             )
         if existing is not None:
             notify("Береговая линия: объединение с внутренними водами")
             merged = _run(runner, "native:mergevectorlayers", {
                 "LAYERS": [str(existing), ocean],
-                "OUTPUT": _temp(config, "coastline_merged.geojson"),
+                "OUTPUT": _temp(config, "coastline_merged.gpkg"),
             })
             # Растворение останавливается на первом невалидном объекте, а
             # во внутренних водах попадается полигон с самопересечением.
@@ -642,21 +730,21 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             # в water_dissolved — и море на карте не рисуется вовсе.
             merged = _run(runner, "native:fixgeometries", {
                 "INPUT": merged,
-                "OUTPUT": _temp(config, "coastline_merged_fixed.geojson"),
+                "OUTPUT": _temp(config, "coastline_merged_fixed.gpkg"),
             })
             ocean = _run(runner, "native:dissolve", {
                 "INPUT": merged,
                 "FIELD": [],
                 "SEPARATE_DISJOINT": False,
-                "OUTPUT": _temp(config, "coastline_merged_dissolved.geojson"),
+                "OUTPUT": _temp(config, "coastline_merged_dissolved.gpkg"),
             })
 
         final = _run(runner, "native:multiparttosingleparts", {
             "INPUT": ocean,
-            "OUTPUT": _temp(config, "coastline_water_parts.geojson"),
+            "OUTPUT": _temp(config, "coastline_water_parts.gpkg"),
         })
         final = _write_polygons(
-            final, config.temp_dir / "coastline_water_polygons.geojson"
+            final, config.temp_dir / "coastline_water_polygons.gpkg"
         )
         if final is None:
             notify("WARNING: Береговая линия: в воде нет полигонов")
