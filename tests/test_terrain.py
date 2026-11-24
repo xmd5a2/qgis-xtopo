@@ -2773,6 +2773,9 @@ class ContourTilingTest(unittest.TestCase):
             )
             config.ensure_directories()
             config.isolines_step = 50
+            # Мок видит только ветку одного процесса: в дочернем
+            # процессе подмена _contour_tile не наследуется.
+            config.parallel_workers = 1
             shutil.copy2(
                 self.source, config.raster_dir / "merged_dem.tif"
             )
@@ -2839,6 +2842,96 @@ class ContourTilingTest(unittest.TestCase):
                 for key, values in read_levels(name, "SRC").items():
                     self.assertIn(key, detail)
                     self.assertEqual(values, detail[key])
+
+    def test_process_tiles_match_single_process(self):
+        """Процессы тайлов дают те же изолинии, что один процесс."""
+        from unittest import mock
+
+        from osgeo import ogr, osr
+
+        from qgis_xtopo.core import terrain
+        from qgis_xtopo.core.config import Config
+
+        if terrain._worker_python()[0] is None:
+            self.skipTest("отдельный Python с GDAL недоступен")
+        if terrain._isolines_process_workers(4) < 2:
+            self.skipTest("мало ядер для процессов тайлов")
+
+        def prepare(directory, workers):
+            config = Config(
+                qgis_projects_dir=str(directory), project_name="iso"
+            )
+            config.ensure_directories()
+            config.isolines_step = 50
+            config.parallel_workers = workers
+            shutil.copy2(
+                self.source, config.raster_dir / "merged_dem.tif"
+            )
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(config.vector_dir / "glacier.sqlite")
+            )
+            layer = dataset.CreateLayer("glacier", srs, ogr.wkbPolygon)
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in (
+                (0.15, 0.15), (0.45, 0.15), (0.45, 0.45),
+                (0.15, 0.45), (0.15, 0.15),
+            ):
+                ring.AddPoint(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+            dataset = None
+            with mock.patch.object(
+                terrain, "_contour_tile_side", return_value=2
+            ), mock.patch.object(
+                terrain, "_contour_workers", return_value=1
+            ):
+                terrain.generate_isolines(
+                    config, BBox(0.0, 0.0, 0.6, 0.6)
+                )
+            return read_rows(config)
+
+        def read_rows(config):
+            result = {}
+            for name in (
+                "isolines_full.sqlite",
+                "isolines_full_overview.sqlite",
+                "isolines_regular.sqlite",
+                "isolines_glacier.sqlite",
+                "isolines_regular_overview.sqlite",
+                "isolines_glacier_overview.sqlite",
+            ):
+                dataset = ogr.Open(str(config.vector_dir / name))
+                self.assertIsNotNone(dataset, name)
+                layer = dataset.GetLayer(0)
+                definition = layer.GetLayerDefn()
+                has_src = definition.GetFieldIndex("SRC") >= 0
+                values = []
+                for feature in layer:
+                    item = [
+                        feature.GetField("ID"),
+                        feature.GetField("ELEV"),
+                    ]
+                    if has_src:
+                        item.append(feature.GetField("SRC"))
+                    item.append(
+                        feature.GetGeometryRef().ExportToWkb().hex()
+                    )
+                    values.append(tuple(item))
+                values.sort()
+                result[name] = values
+                dataset = None
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            single = prepare(root / "single", 1)
+            parallel = prepare(root / "parallel", 0)
+        self.assertEqual(single, parallel)
 
     def test_tile_simplification_reduces_vertices(self):
         """В тайле два слоя: подробный и упрощённый, уровни общие."""

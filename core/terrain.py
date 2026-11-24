@@ -1,7 +1,10 @@
 import gzip
+import json
 import math
 import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -67,6 +70,18 @@ GEOGRAPHIC_SCALE = 111120.0
 # Сколько долей ядер можно занять расчётом контуров: больше потоков —
 # быстрее, но дальше потолок, GEOS держит GIL, и лишние потоки мешают.
 CONTOUR_TILE_WORKERS_RATIO = 0.75
+
+# Оценка памяти одного процесса обработки тайла: окно DEM, контуры тайла
+# и загруженные полигоны воды и ледников.
+ISOLINE_PROCESS_BYTES = 1536 * 1024 * 1024
+
+# Отладочный выключатель процессов: тесты и ручные прогоны.
+NO_ISOLINE_PROCESSES_ENV = "QGIS_XTOPO_NO_ISOLINE_PROCESSES"
+
+# Успешно найденный интерпретатор для процессов тайлов: проверка с
+# импортом QGIS стоит около секунды, повторять её на каждой сборке незачем.
+# ``None`` — ещё не проверяли; ``(None, env)`` — подходящего нет.
+_WORKER_PYTHON = None
 
 
 def _gdal():
@@ -2520,6 +2535,11 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     if not source.exists():
         raise RuntimeError("DEM raster is missing")
     try:
+        destination = _generate_isolines_processes(
+            config, source, progress, cancel,
+        )
+        if destination is not None:
+            return destination
         shapes = _contour_shapefiles(config, source, progress, cancel)
     finally:
         if smooth_source is not None:
@@ -2703,6 +2723,534 @@ def _contour_shapefiles(config, source, progress, cancel):
         (path, "" if index == 0 else ISOLINES_OVERVIEW_SUFFIX)
         for index, (path, _dataset) in enumerate(outputs)
     ]
+
+
+def _worker_python():
+    """Python, в котором импортируются плагин и GDAL, или ``None``.
+
+    Отдельный интерпретатор нужен потому, что контуры и геометрические
+    операции держат GIL.  В QGIS на Linux ``sys.executable`` — обычный
+    Python; в Windows рядом с qgis-bin.exe лежит python3.exe.  Если ни
+    один вариант не импортирует плагин, стадия считается в одном
+    процессе — медленнее, но без риска.
+    """
+    global _WORKER_PYTHON
+    if _WORKER_PYTHON is not None:
+        return _WORKER_PYTHON
+    root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    # Дочерний Python должен видеть те же каталоги, что и QGIS: на Windows
+    # пакет qgis лежит в apps/qgis*/python и не попадает в sys.path
+    # обычного python3.exe автоматически.
+    entries = [str(root)]
+    entries.extend(
+        item for item in sys.path if item and os.path.isdir(item)
+    )
+    if env.get("PYTHONPATH"):
+        entries.extend(env["PYTHONPATH"].split(os.pathsep))
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
+    script = Path(__file__).with_name("terrain_worker.py")
+    candidates = []
+    if sys.executable:
+        candidates.append(sys.executable)
+        folder = Path(sys.executable).parent
+        for name in ("python3.exe", "python.exe", "python3", "python"):
+            candidates.append(str(folder / name))
+    try:
+        from qgis.core import QgsApplication
+
+        prefix = Path(QgsApplication.prefixPath())
+        for relative in ("bin", "apps/Python312", "apps/Python311"):
+            for name in ("python3.exe", "python.exe", "python3", "python"):
+                candidates.append(str(prefix / relative / name))
+    except Exception:  # noqa: BLE001 - QGIS может быть не импортирован
+        pass
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    seen = set()
+    for candidate in candidates:
+        key = os.path.normcase(os.path.abspath(candidate))
+        if key in seen or not Path(candidate).is_file():
+            continue
+        seen.add(key)
+        try:
+            result = subprocess.run(
+                [candidate, str(script), "--check"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            _WORKER_PYTHON = (candidate, env)
+            return _WORKER_PYTHON
+    _WORKER_PYTHON = (None, env)
+    return _WORKER_PYTHON
+
+
+def _isolines_process_workers(tiles):
+    """Сколько процессов одновременно обрабатывают тайлы.
+
+    Потолок по ядрам тот же, что у потоков, но память считается иначе:
+    процесс держит окно DEM и полигоны воды и ледников.
+    """
+    from .memory import worker_cap
+
+    available = os.cpu_count() or 2
+    limit = max(1, int(available * CONTOUR_TILE_WORKERS_RATIO))
+    return max(1, min(
+        tiles, limit, worker_cap(ISOLINE_PROCESS_BYTES, cpu_limit=limit)
+    ))
+
+
+def _quote_sql(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _quote_sql_path(path):
+    return str(path).replace("'", "''")
+
+
+def _merge_tile_layers(destination, sources, offsets, src_offsets=None):
+    """Склеивает слои ``isolines`` из файлов тайлов.
+
+    ``offsets`` сдвигает поле ``ID``, ``src_offsets`` — ссылку ``SRC``
+    обзорного слоя на подробную линию.  Первый файл копируется целиком:
+    так сохраняются схема слоя и пространственный индекс, а вставка
+    остальных идёт одним SQL-запросом на тайл.
+    """
+    _, ogr, _ = _gdal()
+    if not sources:
+        return 0
+    destination.unlink(missing_ok=True)
+    shutil.copy2(sources[0], destination)
+    dataset = ogr.Open(str(destination), 1)
+    if dataset is None:
+        raise RuntimeError(f"Cannot open contour tile: {destination}")
+    layer = dataset.GetLayer(0)
+    definition = layer.GetLayerDefn()
+    fields = [
+        definition.GetFieldDefn(index).GetName()
+        for index in range(definition.GetFieldCount())
+    ]
+    geometry_name = layer.GetGeometryColumn() or "GEOMETRY"
+    names = fields + [geometry_name]
+    targets = [_quote_sql(name) for name in names]
+    dataset.ExecuteSQL("DELETE FROM isolines")
+    for position, source in enumerate(sources):
+        dataset.ExecuteSQL(
+            f"ATTACH DATABASE '{_quote_sql_path(source)}' AS src"
+        )
+        select = []
+        for name in names:
+            if name.lower() == "id":
+                select.append(f"{_quote_sql(name)} + {int(offsets[position])}")
+            elif src_offsets is not None and name.lower() == "src":
+                select.append(
+                    f"{_quote_sql(name)} + {int(src_offsets[position])}"
+                )
+            else:
+                select.append(_quote_sql(name))
+        dataset.ExecuteSQL(
+            f"INSERT INTO isolines ({', '.join(targets)}) "
+            f"SELECT {', '.join(select)} FROM src.isolines"
+        )
+        dataset.ExecuteSQL("DETACH DATABASE src")
+    count = layer.GetFeatureCount()
+    dataset = None
+    return count
+
+
+def _write_full_from_shapefile(source, destination, temp_dir):
+    """Пишет итоговый ``isolines_full`` так же, как прежний конвейер.
+
+    Прежний путь получал этот файл из shapefile и потому сжимал
+    геометрию SpatiaLite.  Промежуточный shapefile здесь нужен только
+    ради той же схемы и кодировки: разрезание по ледникам уже сделано
+    по несжатым данным тайлов.
+    """
+    gdal, _, _ = _gdal()
+    shape = temp_dir / f"{destination.stem}_shape.shp"
+    for path in temp_dir.glob(shape.stem + ".*"):
+        path.unlink(missing_ok=True)
+    result = gdal.VectorTranslate(
+        str(shape), str(source),
+        options=["-f", "ESRI Shapefile", "-nln", "isolines"],
+    )
+    if result is None:
+        raise RuntimeError(f"Failed to write contour shapefile: {shape}")
+    result = None
+    destination.unlink(missing_ok=True)
+    result = gdal.VectorTranslate(
+        str(destination), str(shape),
+        options=[
+            "-nln", "isolines",
+            "-dsco", "SPATIALITE=YES",
+            "-lco", "COMPRESS_GEOM=YES",
+        ],
+    )
+    if result is None:
+        raise RuntimeError(f"Failed to write contour lines: {destination}")
+    result = None
+    for path in temp_dir.glob(shape.stem + ".*"):
+        path.unlink(missing_ok=True)
+
+
+def _clean_isolines_tiles(config):
+    """Убирает промежуточные файлы тайлов, оставшиеся от прошлой сборки."""
+    for pattern in (
+        "isolines_tile*.sqlite*",
+        "isolines_full_raw*.sqlite*",
+        "isolines_job_*.json",
+        "isolines_worker_*.log",
+        "isolines_full*_shape.*",
+        "isolines_full.shp",
+        "isolines_full.shx",
+        "isolines_full.dbf",
+        "isolines_full.prj",
+        "isolines_full_overview.shp",
+        "isolines_full_overview.shx",
+        "isolines_full_overview.dbf",
+        "isolines_full_overview.prj",
+    ):
+        for path in config.temp_dir.glob(pattern):
+            path.unlink(missing_ok=True)
+    for pattern in (
+        "isolines_regular_tile*.sqlite*",
+        "isolines_glacier_tile*.sqlite*",
+    ):
+        for path in config.vector_dir.glob(pattern):
+            path.unlink(missing_ok=True)
+
+
+class _IsolineWorkerError(RuntimeError):
+    """Процесс тайла завершился с ошибкой."""
+
+
+def _read_worker_result(text):
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
+
+
+def _run_isolines_workers(jobs, python, env, workers, progress, cancel):
+    """Запускает процессы тайлов и возвращает их результаты."""
+    script = Path(__file__).with_name("terrain_worker.py")
+    pending = list(jobs)
+    running = {}
+    results = []
+    done = 0
+    try:
+        while pending or running:
+            while pending and len(running) < workers:
+                job, job_path = pending.pop(0)
+                index = job["index"]
+                log_path = Path(job["temp_dir"]) / f"isolines_worker_{index}.log"
+                log_file = log_path.open("w", encoding="utf-8")
+                process = subprocess.Popen(
+                    [python, str(script), str(job_path)],
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+                running[index] = (process, log_path, log_file)
+            finished = [
+                index for index, (process, _log, _file) in running.items()
+                if process.poll() is not None
+            ]
+            for index in finished:
+                process, log_path, log_file = running.pop(index)
+                log_file.close()
+                try:
+                    text = log_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError:
+                    text = ""
+                result = _read_worker_result(text)
+                if process.returncode != 0 or result is None:
+                    tail = "\n".join(text.splitlines()[-20:])
+                    raise _IsolineWorkerError(
+                        f"тайл {index} не обработан: {tail}"
+                    )
+                results.append(result)
+                done += 1
+                if progress:
+                    progress(f"Contour lines: tile {done} of {len(jobs)}")
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            if not finished:
+                time.sleep(0.2)
+    finally:
+        for process, _log_path, log_file in running.values():
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            log_file.close()
+    results.sort(key=lambda item: item["index"])
+    return results
+
+
+def _merge_isolines_parallel(config, results, simplify, progress,
+                             glacier_available):
+    """Склеивает результаты тайлов в итоговые слои."""
+    detail_offsets = []
+    overview_offsets = []
+    detail_total = 0
+    overview_total = 0
+    for result in results:
+        detail_offsets.append(detail_total)
+        overview_offsets.append(overview_total)
+        detail_total += result["detail"]
+        overview_total += result["overview"]
+
+    detail_sources = [
+        config.temp_dir / f"isolines_tile{result['index']}.sqlite"
+        for result in results
+    ]
+    raw_full = config.temp_dir / "isolines_full_raw.sqlite"
+    _merge_tile_layers(raw_full, detail_sources, detail_offsets)
+
+    overview_destination = config.vector_dir / "isolines_full_overview.sqlite"
+    raw_overview = None
+    if simplify > 0:
+        overview_sources = [
+            config.temp_dir / f"isolines_tile{result['index']}_overview.sqlite"
+            for result in results
+        ]
+        raw_overview = config.temp_dir / "isolines_full_overview_raw.sqlite"
+        _merge_tile_layers(
+            raw_overview, overview_sources, overview_offsets, detail_offsets,
+        )
+    # Полные слои тайлов больше не нужны: дальше склеиваются только
+    # готовые regular/glacier, а промежуточный shapefile пишется из raw.
+    for path in config.temp_dir.glob("isolines_tile*.sqlite*"):
+        path.unlink(missing_ok=True)
+
+    destination = config.vector_dir / "isolines_full.sqlite"
+    _write_full_from_shapefile(raw_full, destination, config.temp_dir)
+    raw_full.unlink(missing_ok=True)
+    if raw_overview is not None:
+        _write_full_from_shapefile(
+            raw_overview, overview_destination, config.temp_dir,
+        )
+        raw_overview.unlink(missing_ok=True)
+    else:
+        overview_destination.unlink(missing_ok=True)
+
+    regular_destination = config.vector_dir / "isolines_regular.sqlite"
+    glacier_destination = config.vector_dir / "isolines_glacier.sqlite"
+    regular_overview = (
+        config.vector_dir / "isolines_regular_overview.sqlite"
+    )
+    glacier_overview = (
+        config.vector_dir / "isolines_glacier_overview.sqlite"
+    )
+    if glacier_available:
+        regular_sources = [
+            config.vector_dir / f"isolines_regular_tile{result['index']}.sqlite"
+            for result in results
+        ]
+        glacier_sources = [
+            config.vector_dir / f"isolines_glacier_tile{result['index']}.sqlite"
+            for result in results
+        ]
+        _merge_tile_layers(
+            regular_destination, regular_sources, detail_offsets,
+        )
+        for path in regular_sources:
+            path.unlink(missing_ok=True)
+        _merge_tile_layers(
+            glacier_destination, glacier_sources, detail_offsets,
+        )
+        for path in glacier_sources:
+            path.unlink(missing_ok=True)
+        if simplify > 0:
+            regular_overview_sources = [
+                config.vector_dir
+                / f"isolines_regular_tile{result['index']}_overview.sqlite"
+                for result in results
+            ]
+            glacier_overview_sources = [
+                config.vector_dir
+                / f"isolines_glacier_tile{result['index']}_overview.sqlite"
+                for result in results
+            ]
+            _merge_tile_layers(
+                regular_overview, regular_overview_sources,
+                overview_offsets, detail_offsets,
+            )
+            for path in regular_overview_sources:
+                path.unlink(missing_ok=True)
+            _merge_tile_layers(
+                glacier_overview, glacier_overview_sources,
+                overview_offsets, detail_offsets,
+            )
+            for path in glacier_overview_sources:
+                path.unlink(missing_ok=True)
+        else:
+            regular_overview.unlink(missing_ok=True)
+            glacier_overview.unlink(missing_ok=True)
+    else:
+        # Ледников нет: все линии остаются обычными, как в
+        # _finish_isoline_set.
+        shutil.copy2(destination, regular_destination)
+        glacier_destination.unlink(missing_ok=True)
+        if simplify > 0:
+            shutil.copy2(overview_destination, regular_overview)
+            glacier_overview.unlink(missing_ok=True)
+        else:
+            regular_overview.unlink(missing_ok=True)
+            glacier_overview.unlink(missing_ok=True)
+
+    if progress:
+        water_cut = sum(result["water_cut"] for result in results)
+        progress(f"Contour lines cut by water: {water_cut}")
+        progress(f"Contour lines: {detail_total} segments")
+        if glacier_available:
+            progress(
+                "Glacier contour lines ready: "
+                f"{sum(result['glacier'] for result in results)}"
+            )
+            progress(
+                "Contour lines outside glaciers: "
+                f"{sum(result['regular'] for result in results)}"
+            )
+    for path in config.temp_dir.glob("isolines_tile*.sqlite*"):
+        path.unlink(missing_ok=True)
+    for path in config.temp_dir.glob("isolines_full_raw*.sqlite*"):
+        path.unlink(missing_ok=True)
+    for path in config.vector_dir.glob("isolines_regular_tile*.sqlite*"):
+        path.unlink(missing_ok=True)
+    for path in config.vector_dir.glob("isolines_glacier_tile*.sqlite*"):
+        path.unlink(missing_ok=True)
+    return destination
+
+
+def _has_glacier_polygons(config):
+    """Есть ли в слое ледников хотя бы один непустой полигон."""
+    _, ogr, _ = _gdal()
+    path = config.vector_dir / "glacier.sqlite"
+    if not path.exists():
+        return False
+    dataset = ogr.Open(str(path))
+    if dataset is None:
+        return False
+    layer = dataset.GetLayer(0)
+    if layer is None:
+        dataset = None
+        return False
+    for feature in layer:
+        geometry = feature.GetGeometryRef()
+        if geometry is not None and not geometry.IsEmpty():
+            dataset = None
+            return True
+    dataset = None
+    return False
+
+
+def _generate_isolines_processes(config, source, progress, cancel):
+    """Считает изолинии тайлами в отдельных процессах.
+
+    Возвращает путь к ``isolines_full.sqlite`` или ``None``, если
+    процессы недоступны: тогда вызывающий код использует прежний
+    последовательный путь.
+    """
+    if os.environ.get(NO_ISOLINE_PROCESSES_ENV):
+        return None
+    if config.parallel_workers == 1:
+        return None
+    gdal, _, osr = _gdal()
+    raster = gdal.Open(str(source))
+    if raster is None:
+        return None
+    pixels = raster.RasterXSize * raster.RasterYSize
+    side = _contour_tile_side(pixels)
+    if side <= 1:
+        raster = None
+        return None
+    spatial_ref = osr.SpatialReference()
+    spatial_ref.ImportFromWkt(raster.GetProjection())
+    simplify = _contour_simplify_tolerance(
+        spatial_ref, config.isolines_step
+    )
+    tiles = _contour_tiles(raster, side, CONTOUR_HALO)
+    raster = None
+    workers = _isolines_process_workers(len(tiles))
+    if workers < 2:
+        return None
+    python, env = _worker_python()
+    if python is None:
+        if progress:
+            progress(
+                "WARNING: отдельный Python для тайлов не найден; "
+                "контуры считаются одним потоком"
+            )
+        return None
+
+    glacier_path = config.vector_dir / "glacier.sqlite"
+    glacier_available = _has_glacier_polygons(config)
+    water_paths = [str(path) for path in _water_mask_paths(config)]
+    _clean_isolines_tiles(config)
+    jobs = []
+    for index, tile in enumerate(tiles):
+        job = {
+            "index": index,
+            "source": str(source),
+            "tile": tile,
+            "step": config.isolines_step,
+            "simplify": simplify,
+            "temp_dir": str(config.temp_dir),
+            "vector_dir": str(config.vector_dir),
+            "water_paths": water_paths,
+            "glacier_path": str(glacier_path) if glacier_available else "",
+        }
+        job_path = config.temp_dir / f"isolines_job_{index}.json"
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        jobs.append((job, job_path))
+    if progress:
+        progress("Generating contour lines")
+    try:
+        results = _run_isolines_workers(
+            jobs, python, env, workers, progress, cancel,
+        )
+        return _merge_isolines_parallel(
+            config, results, simplify, progress, glacier_available,
+        )
+    except _IsolineWorkerError as exc:
+        if progress:
+            progress(
+                f"WARNING: {exc}; контуры считаются одним потоком"
+            )
+        _clean_isolines_tiles(config)
+        return None
+    except InterruptedError:
+        _clean_isolines_tiles(config)
+        raise
+    except Exception as exc:  # noqa: BLE001 - работает запасной путь
+        if progress:
+            progress(
+                f"WARNING: {exc}; контуры считаются одним потоком"
+            )
+        _clean_isolines_tiles(config)
+        return None
+    finally:
+        for path in config.temp_dir.glob("isolines_job_*.json"):
+            path.unlink(missing_ok=True)
+        for path in config.temp_dir.glob("isolines_worker_*.log"):
+            path.unlink(missing_ok=True)
 
 
 def _finish_isoline_set(config, shape_path, suffix, progress,
