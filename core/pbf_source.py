@@ -376,6 +376,9 @@ class PbfDataset:
     notes: list = field(default_factory=list)
     dataset: object = None
     temp_files: list = field(default_factory=list)
+    # Исходные PBF: по ним fallback названий границ читает теги отношений,
+    # которые драйвер GDAL выбрасывает вместе с неполной геометрией.
+    source_paths: list = field(default_factory=list)
 
     def close(self):
         self.dataset = None
@@ -1180,6 +1183,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
         warnings=warnings,
         notes=notes,
         temp_files=temp_files,
+        source_paths=[str(path) for path in paths],
     )
 
 

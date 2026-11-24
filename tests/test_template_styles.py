@@ -351,6 +351,45 @@ class AdminBoundaryOrderTest(unittest.TestCase):
                 )
 
 
+class MaritimeAdminLabelTest(unittest.TestCase):
+    """Названия на морских границах ставятся отдельным правилом.
+
+    Открытая граница превращается в тонкий полигон, в который обычная
+    подпись с `fitInPolygonOnly=1` не помещается. Правило `maritime`
+    разрешает вынести её наружу.
+    """
+
+    LAYERS = (
+        "admin level 2 (country names)",
+        "admin level 4 (region names)",
+    )
+
+    def test_maritime_label_rule_allows_outside_placement(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        for name in self.LAYERS:
+            rules = layers[name].find("labeling/rules").findall("rule")
+            maritime = [
+                rule for rule in rules
+                if "maritime = 'yes'" in (rule.get("filter") or "")
+            ]
+            self.assertEqual(len(maritime), 1, name)
+            rule = maritime[0]
+            self.assertIsNone(rule.get("scalemindenom"), name)
+            self.assertIsNone(rule.get("scalemaxdenom"), name)
+            placement = rule.find("settings/placement")
+            self.assertIsNotNone(placement, name)
+            self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
+            for other in rules:
+                if other is rule:
+                    continue
+                self.assertIn(
+                    "maritime", other.get("filter") or "", name
+                )
+
+
 class LandcoverLayerOrderTest(unittest.TestCase):
     """Порядок площадных слоёв: Topo и видимость прибрежных болот."""
 

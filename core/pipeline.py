@@ -5,12 +5,13 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from urllib.parse import unquote
 
 from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
-    peak_filter, poi_icons, polygon_overlaps, project, road_packing, sources,
-    stream_drying, terrain, underwater,
+    osmium_tool, peak_filter, poi_icons, polygon_overlaps, project,
+    road_packing, sources, stream_drying, terrain, underwater,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -28,6 +29,9 @@ _LAYER_STAGE = "обработка слоёв"
 # Этапы, которые идут одновременно с обработкой слоёв: их времена не
 # складываются в общее время подготовки.
 _PARALLEL_STAGES = ("источник OSM", "рельеф")
+
+# Полуширина полигона вдоль открытой границы для подписи, градусы.
+OPEN_BORDER_BUFFER_DEGREES = 0.0005
 
 # QGIS сообщает о невалидной геометрии по-разному: собственные строки
 # локализованы, а GEOS добавляет английские TopologyException и
@@ -784,7 +788,7 @@ class _GpkgWriter:
     """Потоковая запись в GeoPackage одной транзакцией."""
 
     def __init__(self, path, layer_name, definition, spatial_ref=None,
-                 geometry_type=None, cancel=None):
+                 geometry_type=None, cancel=None, extra_fields=()):
         from osgeo import ogr
 
         self.path = Path(path)
@@ -811,10 +815,17 @@ class _GpkgWriter:
         for index in range(definition.GetFieldCount()):
             field = definition.GetFieldDefn(index)
             self.layer.CreateField(ogr.FieldDefn(field.GetName(), field.GetType()))
+        existing = {
+            self.layer.GetLayerDefn().GetFieldDefn(index).GetName()
+            for index in range(self.layer.GetLayerDefn().GetFieldCount())
+        }
+        for name in extra_fields:
+            if name not in existing:
+                self.layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
         # Иначе GPKG фиксирует каждый объект отдельной транзакцией.
         self.layer.StartTransaction()
 
-    def add(self, feature, geometry=None):
+    def add(self, feature, geometry=None, values=None):
         from osgeo import ogr
 
         if self.cancel is not None and self.count % 64 == 0 and self.cancel.is_set():
@@ -826,6 +837,9 @@ class _GpkgWriter:
         # Копирование полей в C++ в разы дешевле цикла по сотням
         # колонок: на смешанных слоях этот цикл держал GIL.
         output.SetFrom(feature)
+        for name, value in (values or {}).items():
+            if value and definition.GetFieldIndex(name) >= 0:
+                output.SetField(name, value)
         if geometry is not None:
             output.SetGeometry(geometry)
         self.layer.CreateFeature(output)
@@ -873,18 +887,24 @@ class Pipeline:
         else:
             self._run_parallel(source, query_names, workers)
         if {"admin_level_2", "admin_level_4"} & set(query_names):
-            self._admin_name_fallback()
+            self._admin_name_fallback(source)
         return self.warnings
 
-    def _admin_name_fallback(self):
-        """Собирает слой названий из замкнутых линий границы.
+    def _admin_name_fallback(self, source=None):
+        """Собирает слой названий из линий границы.
 
         В вырезе PBF может не быть отношения страны: его члены
         разбросаны по миру, и в вырез попадают только пограничные линии.
         Тогда ``admin_level_*_relation`` пуст, шаблон удаляет слой
         названий, и подписи стран не рисуются. Замкнутые линии границы
         дают те же площадные контуры, по которым ставится подпись.
+
+        Открытую морскую границу нельзя замкнуть в кольцо. Если теги
+        отношения сохранились в исходном PBF, название берётся оттуда,
+        а линия превращается в тонкий полигон: подпись идёт вдоль
+        границы, как у обычного контура страны.
         """
+        pending = []
         for level, source_name in (
             ("admin_level_2", "admin_level_2_dissolved"),
             ("admin_level_4", "admin_level_4_proc"),
@@ -892,11 +912,19 @@ class Pipeline:
             target = self.config.vector_dir / f"{level}_relation.sqlite"
             if target.exists() and _layer_has_features(target):
                 continue
-            source = self.config.vector_dir / f"{source_name}.sqlite"
-            if not source.exists() or not _layer_has_features(source):
+            source_path = self.config.vector_dir / f"{source_name}.sqlite"
+            if not source_path.exists() or not _layer_has_features(source_path):
                 continue
+            pending.append((
+                level, target, source_path, level.rsplit("_", 1)[-1],
+            ))
+        if not pending:
+            return
+        names = self._admin_relation_names(source)
+        for level, target, source_path, level_number in pending:
             created = self._name_polygons_from_lines(
-                source, target, f"{level}_relation"
+                source_path, target, f"{level}_relation",
+                names=names, level=level_number,
             )
             if created:
                 self.progress(
@@ -904,8 +932,50 @@ class Pipeline:
                     f"объектов {created}"
                 )
 
-    def _name_polygons_from_lines(self, source, target, layer_name):
-        """Пишет MultiPolygon из замкнутых колец линейного слоя."""
+    def _admin_relation_names(self, source):
+        """Названия отношений admin_level из исходных PBF.
+
+        Драйвер GDAL выбрасывает отношение целиком, если в вырез попала
+        только часть его членов, поэтому теги читает osmium. Без osmium
+        остаются только имена самих линий и замкнутые кольца.
+        """
+        paths = list(
+            getattr(getattr(source, "dataset", None), "source_paths", ())
+            or ()
+        )
+        if not paths:
+            return {}
+        executable = osmium_tool.find_osmium(self.config.temp_dir)
+        if not executable:
+            return {}
+        names = {}
+        for path in paths:
+            try:
+                text = osmium_tool.run(
+                    executable,
+                    [
+                        "tags-filter", "-R", "--no-progress", "-f", "opl",
+                        path,
+                        "r/admin_level=2", "r/admin_level=4",
+                    ],
+                    cancel=self.cancel,
+                )
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - подписи не критичны
+                self.warnings.append(
+                    f"admin_level: названия из {Path(path).name} "
+                    f"не прочитаны: {exc}"
+                )
+                continue
+            _merge_admin_relation_tags(
+                names, _parse_admin_relation_tags(text)
+            )
+        return names
+
+    def _name_polygons_from_lines(self, source, target, layer_name,
+                                  names=None, level=None):
+        """Пишет MultiPolygon из замкнутых колец и открытых границ."""
         from osgeo import ogr
 
         dataset = ogr.Open(str(source))
@@ -915,12 +985,14 @@ class Pipeline:
         if layer is None:
             dataset = None
             return 0
+        entry = (names or {}).get(level or "", {})
+        extra_fields = set(entry.get("fields", ()))
         temporary = self._temp_path(layer_name, "names", "gpkg")
         temporary.unlink(missing_ok=True)
         writer = _GpkgWriter(
             temporary, layer_name, layer.GetLayerDefn(),
             layer.GetSpatialRef(), geometry_type=ogr.wkbMultiPolygon,
-            cancel=self.cancel,
+            cancel=self.cancel, extra_fields=sorted(extra_fields),
         )
         written = 0
         try:
@@ -931,12 +1003,16 @@ class Pipeline:
                     and self.cancel.is_set()
                 ):
                     raise InterruptedError("Preparation cancelled")
-                polygons = _closed_ring_multipolygon(
-                    feature.GetGeometryRef()
-                )
+                geometry = feature.GetGeometryRef()
+                values = _admin_feature_tags(feature, entry)
+                polygons = _closed_ring_multipolygon(geometry)
                 if polygons is None:
-                    continue
-                writer.add(feature, polygons)
+                    if not values:
+                        continue
+                    polygons = _open_line_multipolygon(geometry)
+                    if polygons is None:
+                        continue
+                writer.add(feature, polygons, values=values)
                 written += 1
             if written:
                 writer.close()
@@ -2140,6 +2216,98 @@ def _closed_ring_multipolygon(geometry):
             found = add(geometry.GetGeometryRef(index)) or found
         return multiple if found else None
     return None
+
+
+def _open_line_multipolygon(geometry):
+    """Тонкий полигон вдоль открытой линии для подписи по периметру."""
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    try:
+        buffered = geometry.Buffer(OPEN_BORDER_BUFFER_DEGREES)
+    except Exception:
+        return None
+    if buffered is None or buffered.IsEmpty():
+        return None
+    if buffered.GetGeometryName() == "POLYGON":
+        buffered = ogr.ForceToMultiPolygon(buffered)
+    if buffered is None or buffered.GetGeometryName() != "MULTIPOLYGON":
+        return None
+    return buffered
+
+
+def _admin_feature_tags(feature, entry):
+    """Имя отношения для линии границы по её ``@id``."""
+    index = feature.GetFieldIndex("@id")
+    if index < 0:
+        return None
+    value = str(feature.GetField(index) or "")
+    kind, _, identifier = value.partition("/")
+    if not identifier.isdigit():
+        return None
+    key = "ways" if kind == "way" else "relations" if kind == "relation" else ""
+    tags = entry.get(key, {}).get(int(identifier)) if key else None
+    if not tags:
+        return None
+    names = {
+        name: value for name, value in tags.items()
+        if name == "name" or name.startswith("name:")
+    }
+    return names or None
+
+
+def _parse_admin_relation_tags(text):
+    """Теги и члены отношений admin_level из вывода osmium в OPL."""
+    names = {}
+    for line in (text or "").splitlines():
+        if not line.startswith("r"):
+            continue
+        tags = {}
+        members = []
+        for token in line.split(" ")[1:]:
+            if token.startswith("T"):
+                for item in token[1:].split(","):
+                    key, separator, value = item.partition("=")
+                    if separator and key:
+                        tags[unquote(key)] = unquote(value)
+            elif token.startswith("M"):
+                members.extend(
+                    int(value) for value in re.findall(r"w(\d+)@", token)
+                )
+        level = tags.get("admin_level", "")
+        if level not in ("2", "4"):
+            continue
+        entry = names.setdefault(
+            level, {"ways": {}, "relations": {}, "fields": set()}
+        )
+        relation_id = _osm_id(line)
+        if relation_id is not None:
+            entry["relations"][relation_id] = tags
+        for member in members:
+            entry["ways"].setdefault(member, tags)
+        for key in tags:
+            if key == "name" or key.startswith("name:"):
+                entry["fields"].add(key)
+    return names
+
+
+def _osm_id(line):
+    """Числовой id из первого поля строки OPL (``r60189``)."""
+    match = re.match(r"[rnw](\d+)", line or "")
+    return int(match.group(1)) if match else None
+
+
+def _merge_admin_relation_tags(target, source):
+    """Дополняет теги отношений при чтении нескольких PBF."""
+    for level, entry in (source or {}).items():
+        current = target.setdefault(
+            level, {"ways": {}, "relations": {}, "fields": set()}
+        )
+        for key in ("ways", "relations"):
+            for identifier, tags in entry.get(key, {}).items():
+                current[key].setdefault(identifier, tags)
+        current["fields"].update(entry.get("fields", ()))
 
 
 def _is_polygonal(geometry):

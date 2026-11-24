@@ -1590,10 +1590,14 @@ class AdminNameFallbackTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _feature(name, coordinates):
+    def _feature(name, coordinates, **properties):
+        values = {}
+        if name is not None:
+            values["name"] = name
+        values.update(properties)
         return {
             "type": "Feature",
-            "properties": {"name": name},
+            "properties": values,
             "geometry": {
                 "type": "LineString",
                 "coordinates": coordinates,
@@ -1632,6 +1636,92 @@ class AdminNameFallbackTest(unittest.TestCase):
         )
         pipeline._admin_name_fallback()
         self.assertFalse(self.target.exists())
+
+    def test_open_line_with_relation_name_becomes_name_polygon(self):
+        self._write_lines([
+            self._feature(
+                None, [[0, 0], [0, 1]],
+                **{"@id": "way/123", "maritime": "yes"},
+            ),
+        ])
+        names = {
+            "2": {
+                "ways": {123: {"name": "Морская", "name:en": "Maritime"}},
+                "relations": {},
+                "fields": {"name", "name:en"},
+            },
+        }
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            self.target, "admin_level_2_relation",
+            names=names, level="2",
+        )
+        self.assertEqual(created, 1)
+        dataset = ogr.Open(str(self.target))
+        feature = next(iter(dataset.GetLayer(0)))
+        self.assertEqual(feature.GetField("name"), "Морская")
+        self.assertEqual(feature.GetField("name:en"), "Maritime")
+        self.assertEqual(feature.GetField("maritime"), "yes")
+        geometry = feature.GetGeometryRef()
+        self.assertEqual(geometry.GetGeometryName(), "MULTIPOLYGON")
+        self.assertGreater(geometry.Area(), 0)
+
+    def test_relation_tags_are_parsed_from_opl(self):
+        from qgis_xtopo.core.pipeline import _parse_admin_relation_tags
+
+        names = _parse_admin_relation_tags(
+            "r60189 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=2,name=Россия,name:en=Russia "
+            "Mw97376702@outer,w2@inner\n"
+            "r42 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=4,name=Регион Mw5@outer"
+        )
+        self.assertEqual(names["2"]["relations"][60189]["name"], "Россия")
+        self.assertEqual(names["2"]["ways"][97376702]["name"], "Россия")
+        self.assertEqual(names["2"]["ways"][2]["name"], "Россия")
+        self.assertEqual(names["4"]["ways"][5]["name"], "Регион")
+        self.assertIn("name:en", names["2"]["fields"])
+
+    def test_relation_names_are_read_from_source_pbf(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import osmium_tool
+
+        source = SimpleNamespace(
+            dataset=SimpleNamespace(source_paths=["slice.osm.pbf"])
+        )
+        opl = (
+            "r60189 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=2,name=Россия Mw97376702@outer"
+        )
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        with mock.patch.object(
+            osmium_tool, "find_osmium", return_value="osmium"
+        ), mock.patch.object(
+            osmium_tool, "run", return_value=opl
+        ) as run:
+            names = pipeline._admin_relation_names(source)
+        self.assertEqual(names["2"]["ways"][97376702]["name"], "Россия")
+        self.assertEqual(run.call_count, 1)
+
+    def test_relation_names_without_osmium_are_empty(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import osmium_tool
+
+        source = SimpleNamespace(
+            dataset=SimpleNamespace(source_paths=["slice.osm.pbf"])
+        )
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        with mock.patch.object(osmium_tool, "find_osmium", return_value=None):
+            self.assertEqual(pipeline._admin_relation_names(source), {})
 
     def test_existing_relation_is_kept(self):
         relation = self.config.temp_dir / "relation.geojson"
