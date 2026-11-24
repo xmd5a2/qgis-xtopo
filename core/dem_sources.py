@@ -1476,7 +1476,7 @@ def auto_priority(bbox):
     return AUTO_PRIORITY
 
 
-def _coverage(availability, key, sonny_tiles):
+def coverage(availability, key, sonny_tiles=()):
     """Множество тайлов 1°×1°, покрытых набором."""
     if key == SONNY_SOURCE:
         return set(sonny_tiles)
@@ -1502,14 +1502,14 @@ def auto_plan(bbox, availability, sonny_tiles=(), priority=None,
         if land is not None:
             tiles &= set(land)
     order = tuple(priority) if priority else auto_priority(bbox)
-    coverage = {
-        key: _coverage(availability, key, sonny_tiles)
+    covered = {
+        key: coverage(availability, key, sonny_tiles)
         for key in order
     }
     plan = {}
     for tile in sorted(tiles):
         for key in order:
-            if tile in coverage[key]:
+            if tile in covered[key]:
                 plan[tile] = key
                 break
     return plan
@@ -1631,7 +1631,7 @@ def auto_source_keys(availability, sonny_tiles=()):
     """Наборы, участвующие в мозаике, в порядке приоритета."""
     keys = []
     for key in AUTO_PRIORITY:
-        if _coverage(availability, key, sonny_tiles):
+        if coverage(availability, key, sonny_tiles):
             keys.append(key)
     return keys
 

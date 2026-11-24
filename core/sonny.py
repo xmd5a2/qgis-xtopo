@@ -39,6 +39,10 @@ from . import i18n
 
 USER_AGENT = "qgis-xtopo/1.0"
 
+# Байт за чтение из сети: по таким порциям видно скорость загрузки, и
+# медленный тайл можно прервать, не дожидаясь всего файла.
+HTTP_CHUNK = 256 * 1024
+
 # Страница со списком файлов папки: отдаёт всё содержимое одним
 # запросом, в отличие от обычной страницы папки (там первая страница).
 FOLDER_VIEW = "https://docs.google.com/embeddedfolderview?id={folder}"
@@ -140,8 +144,12 @@ def parse_listing(html):
     return result
 
 
-def _http_bytes(url, timeout=60, retries=3, cancel=None):
-    """Загрузка с повторами: Drive иногда отвечает 429."""
+def _http_bytes(url, timeout=60, retries=3, cancel=None, on_chunk=None):
+    """Загрузка с повторами: Drive иногда отвечает 429.
+
+    ``on_chunk`` вызывается после каждой прочитанной порции: сторож
+    скорости рельефа может прервать медленную загрузку своим исключением.
+    """
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT}
     )
@@ -151,7 +159,15 @@ def _http_bytes(url, timeout=60, retries=3, cancel=None):
             raise InterruptedError
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read()
+                parts = []
+                while True:
+                    chunk = response.read(HTTP_CHUNK)
+                    if not chunk:
+                        break
+                    if on_chunk is not None:
+                        on_chunk(len(chunk))
+                    parts.append(chunk)
+                return b"".join(parts)
         except (urllib.error.URLError, TimeoutError) as exc:
             last = exc
             if cancel is not None and cancel.is_set():
@@ -438,11 +454,13 @@ def _extract(zip_path, destination):
     return Path(destination) / os.path.basename(names[0])
 
 
-def download_tile(dataset, file_id, name, destination, progress=None):
+def download_tile(dataset, file_id, name, destination, progress=None,
+                  cancel=None, on_bytes=None):
     """Скачивает один тайл и возвращает путь к файлу для чтения GDAL.
 
     Для 1″ драйвер SRTMHGT читает ``.hgt`` сам, для 0,5″ возвращается
     VRT-обёртка.  ``name`` — имя скачиваемого файла для журнала.
+    ``on_bytes`` получает длину каждой прочитанной порции.
     """
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
@@ -454,7 +472,9 @@ def download_tile(dataset, file_id, name, destination, progress=None):
                 name, i18n.tr(dataset.title),
             )
         )
-    data = _http_bytes(url, timeout=300, retries=3)
+    data = _http_bytes(
+        url, timeout=300, retries=3, cancel=cancel, on_chunk=on_bytes,
+    )
     if not data.startswith(b"PK"):
         # Google отдаёт HTML со страницей ошибки или предупреждения.
         raise RuntimeError("unexpected response, not a zip archive")
@@ -473,11 +493,11 @@ def download_tile(dataset, file_id, name, destination, progress=None):
 
 
 def tile_paths(catalogue, tile_dir, dataset_key, tiles, progress=None,
-               cancel=None):
+               cancel=None, on_bytes=None):
     """Скачивает тайлы набора и возвращает пути для чтения GDAL.
 
     Файлы кладутся в кэш, поэтому повторная сборка проекта не качает их
-    заново.
+    заново.  ``on_bytes`` получает длину каждой прочитанной порции.
     """
     dataset = DATASET_BY_KEY[dataset_key]
     folder = Path(tile_dir) / dataset_key
@@ -498,7 +518,7 @@ def tile_paths(catalogue, tile_dir, dataset_key, tiles, progress=None,
             target.unlink(missing_ok=True)
             path = download_tile(
                 dataset, file_id, f"{tile_name(*tile)}.zip",
-                folder, progress=progress,
+                folder, progress=progress, cancel=cancel, on_bytes=on_bytes,
             )
         if path.suffix.lower() == ".hgt" and dataset.samples not in (
             SRTMHGT_SAMPLES

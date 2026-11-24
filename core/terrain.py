@@ -197,6 +197,110 @@ class _Speed:
             return True
 
 
+# Набор рельефа, который за минуту не отдал и 200 КБ/с, заменяется
+# следующим по приоритету: иначе одна медленная выдача задерживает
+# подготовку на десятки минут.  Порог умышленно низкий — у быстрых
+# зеркал скорость в разы выше, у перегруженных в разы ниже.
+SLOW_DOWNLOAD_RATE = 200 * 1024
+SLOW_DOWNLOAD_WINDOW = 60.0
+
+
+class SlowDownload(RuntimeError):
+    """Набор рельефа отдаёт данные медленнее порога."""
+
+
+class _SpeedGuard:
+    """Сторож скорости скачивания одного набора рельефа.
+
+    Скорость оценивается окнами по :data:`SLOW_DOWNLOAD_WINDOW` секунд.
+    У Sonny байты приходят из читающего цикла (:meth:`add`); для
+    растровых наборов GDAL не даёт отдельного счётчика для одного
+    набора, а общий сетевой счётчик процесса смешал бы рельеф с
+    параллельной загрузкой OSM.  Поэтому меряется прирост файлов слоя —
+    тайлы, приведённые к общей сетке, пишутся в них по мере чтения;
+    величина пропорциональна прочитанным по сети данным.
+
+    Окно начинается с начала загрузки набора; подпись ссылок и проверка
+    каталога в него не входят.  Сторож с ``measure`` стартует при
+    создании, сторож без него — с первого байта в :meth:`add`.
+    """
+
+    def __init__(self, measure=None, window=SLOW_DOWNLOAD_WINDOW,
+                 threshold=SLOW_DOWNLOAD_RATE):
+        self._measure = measure
+        self._window = window
+        self._threshold = threshold
+        self._lock = threading.Lock()
+        self._extra = 0
+        self._base = self._measure_bytes()
+        self._mark_bytes = 0
+        self._mark_time = time.monotonic() if measure is not None else None
+        self.slow = False
+        self.speed = 0.0
+
+    def _measure_bytes(self):
+        if self._measure is None:
+            return 0
+        try:
+            return int(self._measure() or 0)
+        except OSError:
+            return 0
+
+    def _total(self):
+        return self._extra + max(0, self._measure_bytes() - self._base)
+
+    def add(self, size):
+        """Добавляет прочитанные байты; :class:`SlowDownload` — медленно."""
+        with self._lock:
+            if self._mark_time is None:
+                self._mark_time = time.monotonic()
+            self._extra += size
+        self.check()
+        if self.slow:
+            raise SlowDownload(self.reason())
+
+    def check(self):
+        """True — последнее окно оказалось медленнее порога."""
+        with self._lock:
+            if self.slow:
+                return True
+            if self._mark_time is None:
+                return False
+            now = time.monotonic()
+            elapsed = now - self._mark_time
+            if elapsed <= 0 or elapsed < self._window:
+                return False
+            total = self._total()
+            self.speed = max(0, total - self._mark_bytes) / elapsed
+            self._mark_time = now
+            self._mark_bytes = total
+            if self.speed < self._threshold:
+                self.slow = True
+            return self.slow
+
+    def reason(self):
+        """Короткая причина для журнала: измеренная скорость и порог."""
+        return (
+            f"{self.speed / 1024:.0f} КБ/с < "
+            f"{self._threshold / 1024:.0f} КБ/с"
+        )
+
+
+def _layer_bytes(root, prefix):
+    """Байты, записанные слоем: сам растр и окна предзагрузки."""
+    total = 0
+    for entry in Path(root).glob(prefix + "*"):
+        try:
+            if entry.is_dir():
+                total += sum(child.stat().st_size for child in entry.iterdir())
+            else:
+                total += entry.stat().st_size
+        except OSError:
+            # Файл мог исчезнуть между обходом каталога и stat.
+            continue
+    return total
+
+
 def download_srtm(bbox, destination, progress=None, cancel=None, cache_dir=None,
                   status=None, tiles=None, required_tiles=None):
     destination = Path(destination)
@@ -503,12 +607,15 @@ def _native_resolution(path):
         dataset = None
 
 
-def _warp_callback(cancel, status, label):
-    """Обратный вызов GDAL: отмена и проценты в строке состояния."""
+def _warp_callback(cancel, status, label, guard=None):
+    """Обратный вызов GDAL: отмена, сторож скорости и проценты."""
     state = {"last": 0.0}
 
     def callback(complete, message, data):
         if cancel is not None and cancel.is_set():
+            return 0
+        if guard is not None and guard.check():
+            # Медленный набор прерывается: его тайлы берёт следующий.
             return 0
         now = time.monotonic()
         if status and now - state["last"] >= 0.5:
@@ -520,7 +627,7 @@ def _warp_callback(cancel, status, label):
 
 
 def _warp_with_retry(gdal, target, sources, options, label, cancel=None,
-                     progress=None, refresh=None):
+                     progress=None, refresh=None, guard=None):
     """gdal.Warp с повторами: сетевой сбой не должен валить рельеф.
 
     ``refresh`` вызывается перед повторной попыткой и возвращает новые
@@ -528,6 +635,9 @@ def _warp_with_retry(gdal, target, sources, options, label, cancel=None,
     большого окна может идти дольше.  Если после всех попыток растр так и
     не собрался, в сообщении остаётся причина от GDAL — иначе в журнале
     видно только название набора.
+
+    ``guard`` прерывает сборку медленного набора без повторных попыток:
+    медленное зеркало от повтора быстрее не станет.
     """
     target = Path(target)
     detail = ""
@@ -542,6 +652,8 @@ def _warp_with_retry(gdal, target, sources, options, label, cancel=None,
         if result is not None:
             return result
         target.unlink(missing_ok=True)
+        if guard is not None and guard.slow:
+            raise SlowDownload(guard.reason())
         if attempt == WARP_ATTEMPTS:
             break
         reason = f": {detail}" if detail else ""
@@ -696,7 +808,8 @@ def _mosaic_grid(span_x, span_y, resolutions):
     return max(span_x / width, span_y / height), width, height
 
 
-def _layer_options(gdal, bounds, width, height, cancel, status, label):
+def _layer_options(gdal, bounds, width, height, cancel, status, label,
+                   guard=None):
     """Параметры приведения растра к общей сетке мозаики."""
     return gdal.WarpOptions(
         format="GTiff",
@@ -710,16 +823,19 @@ def _layer_options(gdal, bounds, width, height, cancel, status, label):
         dstNodata=-32768,
         creationOptions=["COMPRESS=LZW", "BIGTIFF=YES", "TILED=YES"],
         multithread=True,
-        callback=_warp_callback(cancel, status, label),
+        callback=_warp_callback(cancel, status, label, guard),
     )
 
 
 def _write_layer(gdal, sources, bounds, width, height, destination, name,
-                 cancel, status, label, progress=None):
+                 cancel, status, label, progress=None, guard=None):
     """Приводит набор источников к общей сетке и пишет слой мозаики.
 
     Источники, которые не открылись (отсутствующий тайл набора),
     пропускаются: в мозаике останется пустое место.
+
+    ``guard`` следит за скоростью: медленный набор прерывается
+    исключением :class:`SlowDownload`.
     """
     # Удалённые COG читаются по HTTP Range, и чтение многих маленьких
     # блоков через сеть — самая долгая часть.  Окна тайлов скачиваются
@@ -728,7 +844,7 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
     if len(sources) > 1:
         local = _fetch_cog_windows(
             gdal, sources, bounds, width, height, destination, name, cancel,
-            progress=progress,
+            progress=progress, guard=guard,
         )
         if local is not None:
             sources = local
@@ -736,7 +852,7 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
     try:
         return _warp_sources(
             gdal, sources, bounds, width, height, destination, name,
-            cancel, status, label, progress=progress,
+            cancel, status, label, progress=progress, guard=guard,
         )
     finally:
         if parts_dir is not None:
@@ -744,7 +860,7 @@ def _write_layer(gdal, sources, bounds, width, height, destination, name,
 
 
 def _warp_sources(gdal, sources, bounds, width, height, destination, name,
-                  cancel, status, label, progress=None):
+                  cancel, status, label, progress=None, guard=None):
     datasets = []
     for source in sources:
         if cancel is not None and cancel.is_set():
@@ -759,11 +875,13 @@ def _warp_sources(gdal, sources, bounds, width, height, destination, name,
         return None
     target = Path(destination) / name
     temporary = target.with_name(target.name + ".part")
-    options = _layer_options(gdal, bounds, width, height, cancel, status, label)
+    options = _layer_options(
+        gdal, bounds, width, height, cancel, status, label, guard
+    )
     try:
         _warp_with_retry(
             gdal, temporary, datasets, options, label,
-            cancel=cancel, progress=progress,
+            cancel=cancel, progress=progress, guard=guard,
         )
     finally:
         for dataset in datasets:
@@ -773,7 +891,7 @@ def _warp_sources(gdal, sources, bounds, width, height, destination, name,
 
 
 def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
-                       name, cancel, progress=None):
+                       name, cancel, progress=None, guard=None):
     """Готовит удалённые COG локально, параллельно.
 
     Каждый источник приводится к общей сетке мозаики отдельным warp'ом:
@@ -847,6 +965,7 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
                 outputType=gdal.GDT_Int16,
                 dstNodata=-32768,
                 creationOptions=["COMPRESS=LZW", "BIGTIFF=YES", "TILED=YES"],
+                callback=_warp_callback(cancel, None, name, guard),
             )
             result = gdal.Warp(str(path), dataset, options=options)
             dataset = None
@@ -864,6 +983,9 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
             if path is not None:
                 local[index] = path
                 changed = True
+    if guard is not None and guard.slow:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+        raise SlowDownload(guard.reason())
     if not changed:
         shutil.rmtree(parts_dir, ignore_errors=True)
         return None
@@ -871,7 +993,7 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
 
 
 def _cog_layer(source_key, cells, bounds, width, height, destination,
-                progress=None, cancel=None, status=None):
+               progress=None, cancel=None, status=None):
     """Слой мозаики из растрового набора (COG читается по HTTP Range)."""
     gdal, _, _ = _gdal()
     item = dem_sources.source(source_key)
@@ -879,10 +1001,13 @@ def _cog_layer(source_key, cells, bounds, width, height, destination,
     sources = _cog_sources(source_key, window, progress=progress, cancel=cancel)
     if not sources:
         return None
+    guard = _SpeedGuard(
+        measure=lambda: _layer_bytes(destination, f"layer_{source_key}.tif")
+    )
     return _write_layer(
         gdal, sources, bounds, width, height, destination,
         f"layer_{source_key}.tif", cancel, status, item.short,
-        progress=progress,
+        progress=progress, guard=guard,
     )
 
 
@@ -924,9 +1049,12 @@ def _sonny_layers(cells, catalogue, tile_dir, bounds, width, height,
         dataset_cells = groups.get(dataset.key)
         if not dataset_cells:
             continue
+        # Сторож для каждого набора отдельно: локальная сборка слоя
+        # между загрузками не должна выглядеть медленной сетью.
+        guard = _SpeedGuard()
         paths = sonny.tile_paths(
             catalogue, tile_dir, dataset.key, dataset_cells,
-            progress=progress, cancel=cancel,
+            progress=progress, cancel=cancel, on_bytes=guard.add,
         )
         files = [str(path) for _cell, path in paths]
         if not files:
@@ -954,6 +1082,45 @@ def _mosaic_resolution(groups):
     return resolutions
 
 
+def _slow_source_targets(moved, left):
+    """Куда ушли тайлы медленного набора, для сообщения в журнал."""
+    parts = [
+        f"{i18n.tr(dem_sources.source(key).short)}: {len(cells)}"
+        for key, cells in moved.items()
+    ]
+    if left:
+        # Нераспределённые тайлы добирает SRTM, как и упавший набор.
+        parts.append(
+            f"{i18n.tr(dem_sources.source('srtm').short)}: {len(left)}"
+        )
+    return ", ".join(parts)
+
+
+def _replace_slow_source(key, cells, groups, coverage, order, pending):
+    """Отдаёт тайлы медленного набора следующим по приоритету.
+
+    Возвращает ``(moved, left)``: наборы с их новыми тайлами и тайлы,
+    для которых подходящего набора в списке не осталось (их доберёт
+    SRTM).  Наборы, чей слой ещё не собран, добавляются в очередь
+    ``pending``: для новых ячеек нужен отдельный слой.
+    """
+    moved = {}
+    left = set(cells)
+    position = order.index(key)
+    for candidate in order[position + 1:]:
+        if not left:
+            break
+        covered = left & coverage.get(candidate, set())
+        if not covered:
+            continue
+        groups.setdefault(candidate, set()).update(covered)
+        moved[candidate] = moved.get(candidate, set()) | covered
+        left -= covered
+        if candidate not in pending:
+            pending.append(candidate)
+    return moved, left
+
+
 def download_auto_dem(bbox, destination, progress=None, cancel=None,
                       cache_dir=None, status=None, availability=None,
                       sonny_catalogue=None, sonny_tiles_dir=None,
@@ -968,7 +1135,7 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     перекрывают менее приоритетный.
 
     ``priority`` задаёт свой порядок выбора наборов: для набора Sonny
-    DTM это ``(Sonny, Copernicus, SRTM)``.  В ``used`` дописываются
+    DTM это ``(Sonny, FABDEM, Copernicus, SRTM)``.  В ``used`` дописываются
     ключи наборов, вошедших в мозаику, — для строки атрибуции; в
     ``counts`` — число тайлов, доставшихся каждому набору.
 
@@ -1026,9 +1193,6 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     groups = {}
     for cell, key in plan.items():
         groups.setdefault(key, set()).add(cell)
-    if counts is not None:
-        counts.clear()
-        counts.update({key: len(value) for key, value in groups.items()})
     if progress:
         parts = []
         for key in order:
@@ -1055,9 +1219,16 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
         )
 
     layers = []
-    built = set()
-    for key in AUTO_ORDER:
-        cells = groups.get(key)
+    served = {}
+    failed_cells = set()
+    coverage = {
+        key: dem_sources.coverage(availability, key, sonny_cells)
+        for key in order
+    }
+    pending = [key for key in AUTO_ORDER if groups.get(key)]
+    while pending:
+        key = pending.pop(0)
+        cells = groups.get(key, set()) - served.get(key, set())
         if not cells:
             continue
         if key == "srtm":
@@ -1082,6 +1253,23 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
                         progress=progress, cancel=cancel, status=status,
                     )
                     made = [layer] if layer else []
+            except SlowDownload as exc:
+                # Медленное зеркало не ждём: тайлы берут наборы ниже по
+                # списку приоритета, для новых ячеек собирается слой.
+                groups.pop(key, None)
+                moved, left = _replace_slow_source(
+                    key, cells, groups, coverage, order, pending,
+                )
+                failed_cells |= left
+                if progress:
+                    progress(i18n.trf(
+                        "WARNING: {} отдаёт слишком медленно ({}); "
+                        "тайлы берут: {}",
+                        i18n.tr(dem_sources.source(key).short),
+                        exc,
+                        _slow_source_targets(moved, left),
+                    ))
+                continue
             except InterruptedError:
                 raise
             except Exception as exc:  # noqa: BLE001 - набор заменит SRTM
@@ -1092,9 +1280,10 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
                     )
                 made = []
         if not made:
+            failed_cells |= cells
             continue
         layers.extend(made)
-        built.add(key)
+        served.setdefault(key, set()).update(cells)
         if used is not None and key not in used:
             used.append(key)
 
@@ -1103,26 +1292,23 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     # приоритет у SRTM самый низкий.  Если SRTM уже в мозаике, для
     # недостающих ячеек делается отдельный слой: иначе в DEM остаются
     # дырки на месте упавшего набора.
-    failed = set(groups) - built
-    if failed:
-        cells = set()
-        for key in failed:
-            cells |= groups[key]
-        fill = "layer_srtm.tif" if "srtm" not in built else "layer_srtm_fill.tif"
+    if failed_cells:
+        fill = ("layer_srtm.tif" if "srtm" not in served
+                else "layer_srtm_fill.tif")
         layer = _srtm_layer(
-            cells, padded, width, height, layers_dir, cache_dir=cache_dir,
-            progress=progress, cancel=cancel, status=status, name=fill,
+            failed_cells, padded, width, height, layers_dir,
+            cache_dir=cache_dir, progress=progress, cancel=cancel,
+            status=status, name=fill,
         )
         if layer:
             layers.insert(0, layer)
-            built.add("srtm")
+            served.setdefault("srtm", set()).update(failed_cells)
             if used is not None and "srtm" not in used:
                 used.append("srtm")
-            if counts is not None:
-                # Набор не дал ни одного тайла, SRTM закрыл их все.
-                for key in failed:
-                    counts[key] = 0
-                counts["srtm"] = counts.get("srtm", 0) + len(cells)
+
+    if counts is not None:
+        counts.clear()
+        counts.update({key: len(value) for key, value in served.items()})
 
     if not layers:
         if net.offline():

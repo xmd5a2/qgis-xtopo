@@ -473,6 +473,49 @@ class TerrainTest(unittest.TestCase):
         self.assertFalse(meter2.add(1024))
         self.assertEqual(meter2.speed, 0.0)
 
+    def test_speed_guard_marks_slow_download(self):
+        """Нулевой прирост файлов слоя за окно — набор слишком медленный."""
+        from qgis_xtopo.core import terrain
+
+        size = [0]
+        guard = terrain._SpeedGuard(
+            measure=lambda: size[0], window=0.0, threshold=1024
+        )
+        self.assertTrue(guard.check())
+        self.assertIn("КБ/с", guard.reason())
+
+    def test_speed_guard_accepts_fast_download(self):
+        from qgis_xtopo.core import terrain
+
+        size = [0]
+        guard = terrain._SpeedGuard(
+            measure=lambda: size[0], window=0.0, threshold=1024
+        )
+        size[0] = 10 * 1024
+        self.assertFalse(guard.check())
+        self.assertFalse(guard.slow)
+
+    def test_speed_guard_counts_only_growth(self):
+        """Уже записанные файлы слоя не засчитываются как скорость."""
+        from qgis_xtopo.core import terrain
+
+        size = [1024 * 1024]
+        guard = terrain._SpeedGuard(
+            measure=lambda: size[0], window=0.0, threshold=1024
+        )
+        size[0] += 2 * 1024
+        self.assertFalse(guard.check())
+        self.assertGreater(guard.speed, 1024)
+        self.assertFalse(guard.slow)
+
+    def test_speed_guard_counts_read_bytes(self):
+        from qgis_xtopo.core import terrain
+
+        guard = terrain._SpeedGuard(window=0.0, threshold=1024)
+        with self.assertRaises(terrain.SlowDownload):
+            guard.add(0)
+        self.assertTrue(guard.slow)
+
     def test_glacier_isolines_are_clipped_by_glaciers(self):
         from osgeo import ogr, osr
 
@@ -2163,6 +2206,43 @@ class WarpRetryTest(unittest.TestCase):
         self.assertIn("ALOS AW3D30", str(caught.exception))
         self.assertIn("Operation timed out", str(caught.exception))
 
+    def test_slow_layer_aborts_warp_without_retry(self):
+        """Медленный набор прерывает warp сразу, без повторных попыток."""
+        from qgis_xtopo.core import terrain
+
+        calls = []
+
+        class FakeGdal:
+            GDT_Int16 = 3
+
+            @staticmethod
+            def Open(source):
+                return object()
+
+            @staticmethod
+            def WarpOptions(**options):
+                return options
+
+            @staticmethod
+            def Warp(target, sources, options=None):
+                calls.append(list(sources))
+                options["callback"](0.01, "", None)
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            guard = terrain._SpeedGuard(
+                measure=lambda: 0, window=0.0, threshold=1024
+            )
+            with self.assertRaises(terrain.SlowDownload):
+                terrain._warp_sources(
+                    FakeGdal, ["/vsicurl/https://example.invalid/a.tif"],
+                    terrain.BBox(0.0, 0.0, 1.0, 1.0), 10, 10,
+                    Path(directory), "layer.tif", None, None, "тест",
+                    guard=guard,
+                )
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(guard.slow)
+
 
 class AutoMosaicTest(unittest.TestCase):
     def test_mosaic_grid_prefers_finest_that_fits(self):
@@ -2301,6 +2381,92 @@ class AutoMosaicTest(unittest.TestCase):
             "ALOS AW3D30" in line and "CURL error" in line
             for line in messages
         ))
+
+    def test_auto_slow_source_replaced_by_next_priority(self):
+        """Медленный набор заменяется следующим по списку приоритета."""
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, sonny, terrain
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        covered = frozenset({(46, 7)})
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True, covered_tiles=covered
+            )
+            for key in ("3dep", "alos", "srtm")
+        }
+        calls = []
+        messages = []
+
+        def fake_layer(key, cells, bounds, width, height, destination, **_kw):
+            calls.append(key)
+            if key == "3dep":
+                raise terrain.SlowDownload("120 КБ/с < 200 КБ/с")
+            path = Path(destination) / f"layer_{key}.tif"
+            path.write_bytes(b"tif")
+            return path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                dem_sources, "auto_plan", return_value={(46, 7): "3dep"}
+            ), mock.patch.object(
+                sonny, "load_catalogue", return_value={}
+            ), mock.patch.object(
+                sonny, "catalogue_tiles", return_value={}
+            ), mock.patch.object(
+                terrain, "_cog_layer", side_effect=fake_layer
+            ):
+                used = []
+                counts = {}
+                target = terrain.download_auto_dem(
+                    bbox, root / "out", progress=messages.append,
+                    availability=availability, used=used, counts=counts,
+                    required_tiles=frozenset({(46, 7)}),
+                )
+            self.assertTrue(target.exists())
+        self.assertEqual(calls, ["3dep", "alos"])
+        self.assertEqual(used, ["alos"])
+        self.assertEqual(counts, {"alos": 1})
+        text = "\n".join(messages)
+        self.assertIn("3DEP", text)
+        self.assertIn("слишком медленно", text)
+        self.assertIn("ALOS AW3D30", text)
+        self.assertIn("120 КБ/с", text)
+
+    def test_slow_source_cells_follow_priority(self):
+        """Тайлы медленного набора расходятся по следующим в списке."""
+        from qgis_xtopo.core import terrain
+
+        cells = {(46, 7), (46, 8)}
+        coverage = {
+            "alos": {(46, 7)},
+            "cop30": {(46, 7), (46, 8)},
+            "srtm": set(cells),
+        }
+        groups = {"3dep": set(cells)}
+        pending = []
+        moved, left = terrain._replace_slow_source(
+            "3dep", cells, groups, coverage,
+            ("3dep", "alos", "cop30", "srtm"), pending,
+        )
+        self.assertEqual(moved, {"alos": {(46, 7)}, "cop30": {(46, 8)}})
+        self.assertEqual(left, set())
+        self.assertEqual(pending, ["alos", "cop30"])
+        self.assertEqual(groups["alos"], {(46, 7)})
+        self.assertEqual(groups["cop30"], {(46, 8)})
+
+    def test_slow_source_without_cover_left_to_srtm(self):
+        from qgis_xtopo.core import terrain
+
+        cells = {(46, 7)}
+        moved, left = terrain._replace_slow_source(
+            "3dep", cells, {"3dep": set(cells)}, {},
+            ("3dep", "alos", "srtm"), [],
+        )
+        self.assertEqual(moved, {})
+        self.assertEqual(left, cells)
 
     def test_auto_empty_plan_without_land_is_quiet(self):
         """Пустой охват без суши не считает сетевой сбой отсутствием суши."""
