@@ -2889,6 +2889,8 @@ class ContourTilingTest(unittest.TestCase):
                 terrain, "_contour_tile_side", return_value=2
             ), mock.patch.object(
                 terrain, "_contour_workers", return_value=1
+            ), mock.patch.object(
+                terrain, "ISOLINE_CHUNK", 50
             ):
                 terrain.generate_isolines(
                     config, BBox(0.0, 0.0, 0.6, 0.6)

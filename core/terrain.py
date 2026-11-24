@@ -75,6 +75,12 @@ CONTOUR_TILE_WORKERS_RATIO = 0.75
 # и загруженные полигоны воды и ледников.
 ISOLINE_PROCESS_BYTES = 1536 * 1024 * 1024
 
+# Сколько линий тайла отдавать одному процессу разрезания по ледникам.
+# Стоимость операции определяется числом полигонов-кандидатов, и в
+# пределах тайла она распределена неравномерно: части по 4000 строк
+# выравнивают самый тяжёлый тайл, не плодя лишних файлов.
+ISOLINE_CHUNK = 4000
+
 # Отладочный выключатель процессов: тесты и ручные прогоны.
 NO_ISOLINE_PROCESSES_ENV = "QGIS_XTOPO_NO_ISOLINE_PROCESSES"
 
@@ -2865,39 +2871,31 @@ def _merge_tile_layers(destination, sources, offsets, src_offsets=None):
     return count
 
 
-def _write_full_from_shapefile(source, destination, temp_dir):
-    """Пишет итоговый ``isolines_full`` так же, как прежний конвейер.
+def _write_full_layer(source, destination):
+    """Пишет итоговый ``isolines_full`` из склеенного слоя тайлов.
 
-    Прежний путь получал этот файл из shapefile и потому сжимал
-    геометрию SpatiaLite.  Промежуточный shapefile здесь нужен только
-    ради той же схемы и кодировки: разрезание по ледникам уже сделано
-    по несжатым данным тайлов.
+    Схема и сжатие геометрии должны совпадать с прежним конвейером:
+    слой — SpatiaLite с ``LINESTRING`` и ``COMPRESS_GEOM``.  Промежуточный
+    shapefile больше не нужен — прямой перевод даёт те же данные и заметно
+    быстрее.
     """
     gdal, _, _ = _gdal()
-    shape = temp_dir / f"{destination.stem}_shape.shp"
-    for path in temp_dir.glob(shape.stem + ".*"):
-        path.unlink(missing_ok=True)
-    result = gdal.VectorTranslate(
-        str(shape), str(source),
-        options=["-f", "ESRI Shapefile", "-nln", "isolines"],
-    )
-    if result is None:
-        raise RuntimeError(f"Failed to write contour shapefile: {shape}")
-    result = None
     destination.unlink(missing_ok=True)
     result = gdal.VectorTranslate(
-        str(destination), str(shape),
+        str(destination), str(source),
         options=[
+            "-f", "SQLite",
             "-nln", "isolines",
             "-dsco", "SPATIALITE=YES",
+            "-lco", "FORMAT=SPATIALITE",
+            "-lco", "GEOMETRY_NAME=GEOMETRY",
+            "-lco", "LAUNDER=NO",
             "-lco", "COMPRESS_GEOM=YES",
         ],
     )
     if result is None:
         raise RuntimeError(f"Failed to write contour lines: {destination}")
     result = None
-    for path in temp_dir.glob(shape.stem + ".*"):
-        path.unlink(missing_ok=True)
 
 
 def _clean_isolines_tiles(config):
@@ -2906,7 +2904,10 @@ def _clean_isolines_tiles(config):
         "isolines_tile*.sqlite*",
         "isolines_full_raw*.sqlite*",
         "isolines_job_*.json",
+        "isolines_split_job_*.json",
+        "isolines_merge_job_*.json",
         "isolines_worker_*.log",
+        "isolines_merge_*.log",
         "isolines_full*_shape.*",
         "isolines_full.shp",
         "isolines_full.shx",
@@ -2942,8 +2943,10 @@ def _read_worker_result(text):
     return None
 
 
-def _run_isolines_workers(jobs, python, env, workers, progress, cancel):
-    """Запускает процессы тайлов и возвращает их результаты."""
+def _run_workers(jobs, python, env, workers, progress, cancel,
+                 log_prefix="isolines_worker",
+                 progress_template="Contour lines: tile {done} of {total}"):
+    """Запускает процессы заданий и возвращает их результаты."""
     script = Path(__file__).with_name("terrain_worker.py")
     pending = list(jobs)
     running = {}
@@ -2954,7 +2957,7 @@ def _run_isolines_workers(jobs, python, env, workers, progress, cancel):
             while pending and len(running) < workers:
                 job, job_path = pending.pop(0)
                 index = job["index"]
-                log_path = Path(job["temp_dir"]) / f"isolines_worker_{index}.log"
+                log_path = Path(job["temp_dir"]) / f"{log_prefix}_{index}.log"
                 log_file = log_path.open("w", encoding="utf-8")
                 process = subprocess.Popen(
                     [python, str(script), str(job_path)],
@@ -2980,12 +2983,16 @@ def _run_isolines_workers(jobs, python, env, workers, progress, cancel):
                 if process.returncode != 0 or result is None:
                     tail = "\n".join(text.splitlines()[-20:])
                     raise _IsolineWorkerError(
-                        f"тайл {index} не обработан: {tail}"
+                        f"процесс {index} не отработал: {tail}"
                     )
                 results.append(result)
                 done += 1
-                if progress:
-                    progress(f"Contour lines: tile {done} of {len(jobs)}")
+                if progress and progress_template:
+                    progress(
+                        progress_template.format(
+                            done=done, total=len(jobs)
+                        )
+                    )
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Preparation cancelled")
             if not finished:
@@ -3003,130 +3010,215 @@ def _run_isolines_workers(jobs, python, env, workers, progress, cancel):
     return results
 
 
-def _merge_isolines_parallel(config, results, simplify, progress,
-                             glacier_available):
-    """Склеивает результаты тайлов в итоговые слои."""
-    detail_offsets = []
-    overview_offsets = []
+def _chunk_sources(config, results, prefix, kind, tail, offsets):
+    """Файлы частей одного слоя тайлов и сдвиги поля ``ID``.
+
+    ``kind`` — ``detail`` или ``overview``: от него зависит, сколько строк
+    было в тайле после вычитания воды.  Части идут в порядке номеров,
+    поэтому итоговые строки остаются в прежнем порядке.
+    """
+    sources = []
+    shifts = []
+    for result in results:
+        rows = result[
+            "detail_rows" if kind == "detail" else "overview_rows"
+        ]
+        parts = max(1, math.ceil(rows / ISOLINE_CHUNK)) if rows else 0
+        for part in range(parts):
+            sources.append(
+                config.vector_dir
+                / f"isolines_{prefix}_tile{result['index']}_p{part}{tail}.sqlite"
+            )
+            shifts.append(offsets[result["index"]])
+    return sources, shifts
+
+
+def _merge_isolines_parallel(config, results, split_results, simplify, progress,
+                             glacier_available, python, env, workers, cancel):
+    """Склеивает результаты тайлов в итоговые слои.
+
+    Полные слои и пары ``regular``/``glacier`` независимы, поэтому
+    склеиваются отдельными процессами: перенос сотен мегабайт и запись
+    SpatiaLite плохо делят GIL и заметно ускоряются параллельно.
+    """
+    detail_offsets = {}
+    overview_offsets = {}
     detail_total = 0
     overview_total = 0
     for result in results:
-        detail_offsets.append(detail_total)
-        overview_offsets.append(overview_total)
+        index = result["index"]
+        detail_offsets[index] = detail_total
+        overview_offsets[index] = overview_total
         detail_total += result["detail"]
         overview_total += result["overview"]
 
+    destination = config.vector_dir / "isolines_full.sqlite"
+    overview_destination = config.vector_dir / "isolines_full_overview.sqlite"
+    jobs = []
     detail_sources = [
         config.temp_dir / f"isolines_tile{result['index']}.sqlite"
         for result in results
     ]
-    raw_full = config.temp_dir / "isolines_full_raw.sqlite"
-    _merge_tile_layers(raw_full, detail_sources, detail_offsets)
-
-    overview_destination = config.vector_dir / "isolines_full_overview.sqlite"
-    raw_overview = None
+    tasks = [{
+        "full": True,
+        "raw": str(config.temp_dir / "isolines_full_raw.sqlite"),
+        "destination": str(destination),
+        "sources": [str(path) for path in detail_sources],
+        "offsets": [detail_offsets[result["index"]] for result in results],
+    }]
+    jobs.append({
+        "mode": "merge", "index": len(jobs), "tasks": tasks,
+        "temp_dir": str(config.temp_dir),
+    })
     if simplify > 0:
         overview_sources = [
             config.temp_dir / f"isolines_tile{result['index']}_overview.sqlite"
             for result in results
         ]
-        raw_overview = config.temp_dir / "isolines_full_overview_raw.sqlite"
-        _merge_tile_layers(
-            raw_overview, overview_sources, overview_offsets, detail_offsets,
-        )
-    # Полные слои тайлов больше не нужны: дальше склеиваются только
-    # готовые regular/glacier, а промежуточный shapefile пишется из raw.
-    for path in config.temp_dir.glob("isolines_tile*.sqlite*"):
-        path.unlink(missing_ok=True)
+        tasks = [{
+            "full": True,
+            "raw": str(
+                config.temp_dir / "isolines_full_overview_raw.sqlite"
+            ),
+            "destination": str(overview_destination),
+            "sources": [str(path) for path in overview_sources],
+            "offsets": [
+                overview_offsets[result["index"]] for result in results
+            ],
+            "src_offsets": [
+                detail_offsets[result["index"]] for result in results
+            ],
+        }]
+        jobs.append({
+            "mode": "merge", "index": len(jobs), "tasks": tasks,
+            "temp_dir": str(config.temp_dir),
+        })
 
-    destination = config.vector_dir / "isolines_full.sqlite"
-    _write_full_from_shapefile(raw_full, destination, config.temp_dir)
-    raw_full.unlink(missing_ok=True)
-    if raw_overview is not None:
-        _write_full_from_shapefile(
-            raw_overview, overview_destination, config.temp_dir,
-        )
-        raw_overview.unlink(missing_ok=True)
-    else:
-        overview_destination.unlink(missing_ok=True)
-
-    regular_destination = config.vector_dir / "isolines_regular.sqlite"
-    glacier_destination = config.vector_dir / "isolines_glacier.sqlite"
-    regular_overview = (
-        config.vector_dir / "isolines_regular_overview.sqlite"
-    )
-    glacier_overview = (
-        config.vector_dir / "isolines_glacier_overview.sqlite"
-    )
     if glacier_available:
-        regular_sources = [
-            config.vector_dir / f"isolines_regular_tile{result['index']}.sqlite"
-            for result in results
-        ]
-        glacier_sources = [
-            config.vector_dir / f"isolines_glacier_tile{result['index']}.sqlite"
-            for result in results
-        ]
-        _merge_tile_layers(
-            regular_destination, regular_sources, detail_offsets,
+        regular_destination = config.vector_dir / "isolines_regular.sqlite"
+        glacier_destination = config.vector_dir / "isolines_glacier.sqlite"
+        regular_sources, regular_offsets = _chunk_sources(
+            config, results, "regular", "detail", "", detail_offsets,
         )
-        for path in regular_sources:
-            path.unlink(missing_ok=True)
-        _merge_tile_layers(
-            glacier_destination, glacier_sources, detail_offsets,
+        glacier_sources, glacier_offsets = _chunk_sources(
+            config, results, "glacier", "detail", "", detail_offsets,
         )
-        for path in glacier_sources:
-            path.unlink(missing_ok=True)
+        tasks = [
+            {
+                "destination": str(regular_destination),
+                "sources": [str(path) for path in regular_sources],
+                "offsets": regular_offsets,
+            },
+            {
+                "destination": str(glacier_destination),
+                "sources": [str(path) for path in glacier_sources],
+                "offsets": glacier_offsets,
+            },
+        ]
         if simplify > 0:
-            regular_overview_sources = [
-                config.vector_dir
-                / f"isolines_regular_tile{result['index']}_overview.sqlite"
-                for result in results
-            ]
-            glacier_overview_sources = [
-                config.vector_dir
-                / f"isolines_glacier_tile{result['index']}_overview.sqlite"
-                for result in results
-            ]
-            _merge_tile_layers(
-                regular_overview, regular_overview_sources,
-                overview_offsets, detail_offsets,
+            regular_overview = (
+                config.vector_dir / "isolines_regular_overview.sqlite"
             )
-            for path in regular_overview_sources:
-                path.unlink(missing_ok=True)
-            _merge_tile_layers(
-                glacier_overview, glacier_overview_sources,
-                overview_offsets, detail_offsets,
+            glacier_overview = (
+                config.vector_dir / "isolines_glacier_overview.sqlite"
             )
-            for path in glacier_overview_sources:
-                path.unlink(missing_ok=True)
-        else:
-            regular_overview.unlink(missing_ok=True)
-            glacier_overview.unlink(missing_ok=True)
+            regular_overview_sources, regular_overview_offsets = (
+                _chunk_sources(
+                    config, results, "regular", "overview", "_overview",
+                    overview_offsets,
+                )
+            )
+            glacier_overview_sources, glacier_overview_offsets = (
+                _chunk_sources(
+                    config, results, "glacier", "overview", "_overview",
+                    overview_offsets,
+                )
+            )
+            tasks.append({
+                "destination": str(regular_overview),
+                "sources": [str(path) for path in regular_overview_sources],
+                "offsets": regular_overview_offsets,
+                "src_offsets": [
+                    detail_offsets[
+                        int(Path(path).name.split("_tile")[1].split("_")[0])
+                    ]
+                    for path in regular_overview_sources
+                ],
+            })
+            tasks.append({
+                "destination": str(glacier_overview),
+                "sources": [str(path) for path in glacier_overview_sources],
+                "offsets": glacier_overview_offsets,
+                "src_offsets": [
+                    detail_offsets[
+                        int(Path(path).name.split("_tile")[1].split("_")[0])
+                    ]
+                    for path in glacier_overview_sources
+                ],
+            })
+        jobs.append({
+            "mode": "merge", "index": len(jobs), "tasks": tasks,
+            "temp_dir": str(config.temp_dir),
+        })
     else:
+        regular_overview = (
+            config.vector_dir / "isolines_regular_overview.sqlite"
+        )
+        glacier_overview = (
+            config.vector_dir / "isolines_glacier_overview.sqlite"
+        )
+
+    if progress:
+        progress("Склейка контуров")
+    job_paths = []
+    for job in jobs:
+        path = config.temp_dir / f"isolines_merge_job_{job['index']}.json"
+        path.write_text(json.dumps(job), encoding="utf-8")
+        job_paths.append((job, path))
+    _run_workers(
+        job_paths, python, env, workers, progress, cancel,
+        log_prefix="isolines_merge", progress_template=None,
+    )
+
+    if not glacier_available:
         # Ледников нет: все линии остаются обычными, как в
         # _finish_isoline_set.
-        shutil.copy2(destination, regular_destination)
-        glacier_destination.unlink(missing_ok=True)
+        shutil.copy2(destination, config.vector_dir / "isolines_regular.sqlite")
+        (config.vector_dir / "isolines_glacier.sqlite").unlink(
+            missing_ok=True
+        )
         if simplify > 0:
-            shutil.copy2(overview_destination, regular_overview)
+            shutil.copy2(
+                overview_destination,
+                config.vector_dir / "isolines_regular_overview.sqlite",
+            )
             glacier_overview.unlink(missing_ok=True)
         else:
-            regular_overview.unlink(missing_ok=True)
+            (config.vector_dir / "isolines_regular_overview.sqlite").unlink(
+                missing_ok=True
+            )
             glacier_overview.unlink(missing_ok=True)
+    elif simplify == 0:
+        overview_destination.unlink(missing_ok=True)
+        regular_overview.unlink(missing_ok=True)
+        glacier_overview.unlink(missing_ok=True)
 
     if progress:
         water_cut = sum(result["water_cut"] for result in results)
         progress(f"Contour lines cut by water: {water_cut}")
         progress(f"Contour lines: {detail_total} segments")
         if glacier_available:
+            detail_results = [
+                result for result in split_results
+                if result.get("kind") == "detail"
+            ]
             progress(
                 "Glacier contour lines ready: "
-                f"{sum(result['glacier'] for result in results)}"
+                f"{sum(result['glacier'] for result in detail_results)}"
             )
             progress(
                 "Contour lines outside glaciers: "
-                f"{sum(result['regular'] for result in results)}"
+                f"{sum(result['regular'] for result in detail_results)}"
             )
     for path in config.temp_dir.glob("isolines_tile*.sqlite*"):
         path.unlink(missing_ok=True)
@@ -3135,6 +3227,8 @@ def _merge_isolines_parallel(config, results, simplify, progress,
     for path in config.vector_dir.glob("isolines_regular_tile*.sqlite*"):
         path.unlink(missing_ok=True)
     for path in config.vector_dir.glob("isolines_glacier_tile*.sqlite*"):
+        path.unlink(missing_ok=True)
+    for _job, path in job_paths:
         path.unlink(missing_ok=True)
     return destination
 
@@ -3200,13 +3294,13 @@ def _generate_isolines_processes(config, source, progress, cancel):
             )
         return None
 
-    glacier_path = config.vector_dir / "glacier.sqlite"
     glacier_available = _has_glacier_polygons(config)
     water_paths = [str(path) for path in _water_mask_paths(config)]
     _clean_isolines_tiles(config)
     jobs = []
     for index, tile in enumerate(tiles):
         job = {
+            "mode": "contour",
             "index": index,
             "source": str(source),
             "tile": tile,
@@ -3215,7 +3309,6 @@ def _generate_isolines_processes(config, source, progress, cancel):
             "temp_dir": str(config.temp_dir),
             "vector_dir": str(config.vector_dir),
             "water_paths": water_paths,
-            "glacier_path": str(glacier_path) if glacier_available else "",
         }
         job_path = config.temp_dir / f"isolines_job_{index}.json"
         job_path.write_text(json.dumps(job), encoding="utf-8")
@@ -3223,11 +3316,61 @@ def _generate_isolines_processes(config, source, progress, cancel):
     if progress:
         progress("Generating contour lines")
     try:
-        results = _run_isolines_workers(
+        results = _run_workers(
             jobs, python, env, workers, progress, cancel,
         )
+        split_results = []
+        if glacier_available:
+            split_jobs = []
+            job_index = len(jobs)
+            for result in results:
+                index = result["index"]
+                for kind, tail, suffix_tail in (
+                    ("detail", "", ""),
+                    ("overview", "_overview", "_overview"),
+                ):
+                    rows = result[
+                        "detail_rows" if kind == "detail"
+                        else "overview_rows"
+                    ]
+                    if not rows:
+                        continue
+                    parts = max(1, math.ceil(rows / ISOLINE_CHUNK))
+                    for part in range(parts):
+                        start = part * ISOLINE_CHUNK + 1
+                        end = min(rows, (part + 1) * ISOLINE_CHUNK) + 1
+                        suffix = f"_tile{index}_p{part}{suffix_tail}"
+                        job = {
+                            "mode": "split",
+                            "index": job_index,
+                            "source": str(
+                                config.temp_dir
+                                / f"isolines_tile{index}{tail}.sqlite"
+                            ),
+                            "kind": kind,
+                            "suffix": suffix,
+                            "fid_range": [start, end],
+                            "temp_dir": str(config.temp_dir),
+                            "vector_dir": str(config.vector_dir),
+                        }
+                        job_path = (
+                            config.temp_dir
+                            / f"isolines_split_job_{job_index}.json"
+                        )
+                        job_path.write_text(
+                            json.dumps(job), encoding="utf-8"
+                        )
+                        split_jobs.append((job, job_path))
+                        job_index += 1
+            split_results = _run_workers(
+                split_jobs, python, env, workers, progress, cancel,
+                progress_template=(
+                    "Разрезание контуров по ледникам: {done} из {total}"
+                ),
+            )
         return _merge_isolines_parallel(
-            config, results, simplify, progress, glacier_available,
+            config, results, split_results, simplify, progress,
+            glacier_available, python, env, workers, cancel,
         )
     except _IsolineWorkerError as exc:
         if progress:
@@ -3247,10 +3390,15 @@ def _generate_isolines_processes(config, source, progress, cancel):
         _clean_isolines_tiles(config)
         return None
     finally:
-        for path in config.temp_dir.glob("isolines_job_*.json"):
-            path.unlink(missing_ok=True)
-        for path in config.temp_dir.glob("isolines_worker_*.log"):
-            path.unlink(missing_ok=True)
+        for pattern in (
+            "isolines_job_*.json",
+            "isolines_split_job_*.json",
+            "isolines_merge_job_*.json",
+            "isolines_worker_*.log",
+            "isolines_merge_*.log",
+        ):
+            for path in config.temp_dir.glob(pattern):
+                path.unlink(missing_ok=True)
 
 
 def _finish_isoline_set(config, shape_path, suffix, progress,
@@ -3442,13 +3590,17 @@ def _glacier_polygons(config):
 
 
 def _split_isolines_by_glaciers(config, shape_path, progress=None,
-                                suffix=""):
+                                suffix="", fid_range=None):
     """Делит изолинии на части внутри ледников и вне их.
 
     Внутри ледника изолинии относятся к леднику (в исходном проекте они
     красились синим), поэтому обычные изолинии на площади ледника убираются.
     Возвращает путь к слою изолиний внутри ледников; None — если ледников
     нет или слой с ними недоступен.
+
+    ``fid_range`` — половина открытого интервала ``(start, end)`` по
+    ``ogc_fid``.  Так тяжёлый тайл режется на части, не копируя его в
+    отдельные файлы: строки обрабатываются независимо.
     """
     from osgeo import ogr
 
@@ -3474,6 +3626,11 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None,
     regular_written = 0
     try:
         source_layer = source.GetLayer(0)
+        if fid_range is not None:
+            start, end = fid_range
+            source_layer.SetAttributeFilter(
+                f"ogc_fid >= {int(start)} AND ogc_fid < {int(end)}"
+            )
         definition = source_layer.GetLayerDefn()
         field_count = definition.GetFieldCount()
         glacier_output = driver.CreateDataSource(str(glacier_destination))
@@ -3551,14 +3708,15 @@ def _split_isolines_by_glaciers(config, shape_path, progress=None,
     return glacier_destination
 
 
-def _generate_glacier_isolines(config, shape_path, progress=None, suffix=""):
+def _generate_glacier_isolines(config, shape_path, progress=None, suffix="",
+                               fid_range=None):
     """Контурные линии, обрезанные по полигонам ледников.
 
     Обычные изолинии при этом тоже пересобираются: на площади ледников
     их нет, там рисуются ледниковые (синие).
     """
     return _split_isolines_by_glaciers(
-        config, shape_path, progress, suffix=suffix
+        config, shape_path, progress, suffix=suffix, fid_range=fid_range
     )
 
 

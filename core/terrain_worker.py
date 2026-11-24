@@ -1,10 +1,10 @@
-"""Процесс обработки одного тайла изолиний.
+"""Процесс обработки изолиний: тайл, часть разрезания или склейка.
 
 Контуры, вычитание воды и разрезание по ледникам держат GIL: потоки на
 этой стадии не только не ускоряют расчёт, но и замедляют его.  Поэтому
-тайл целиком считается в отдельном процессе, а готовые слои пишутся в
-SQLite-файлы.  Родитель склеивает их в том же порядке, в каком тайлы
-идут в растре, — так номера линий и ссылки ``SRC`` остаются прежними.
+работа идёт отдельными процессами, а результаты пишутся в SQLite-файлы.
+Родитель склеивает их в порядке номеров тайлов и частей — так номера
+линий и ссылки ``SRC`` остаются прежними.
 
 Скрипт запускается обычным Python из QGIS и не создаёт QgsApplication:
 нужны только GDAL/OGR.
@@ -54,7 +54,7 @@ def _write_layer(path, layer, fields):
 
     Индекс строится только у итоговых файлов: на промежуточном слое он
     замедляет вставку и не нужен — слой сразу читается разрезанием по
-    ледникам.
+    ледникам.  Возвращает число записанных линий.
     """
     from osgeo import ogr
 
@@ -69,6 +69,7 @@ def _write_layer(path, layer, fields):
     for name, kind in fields:
         target.CreateField(ogr.FieldDefn(name, kind))
     target.StartTransaction()
+    written = 0
     for feature in layer:
         geometry = feature.GetGeometryRef()
         if geometry is None or geometry.IsEmpty():
@@ -83,8 +84,10 @@ def _write_layer(path, layer, fields):
         item.SetGeometry(geometry)
         target.CreateFeature(item)
         item = None
+        written += 1
     target.CommitTransaction()
     dataset = None
+    return written
 
 
 def _count_features(path):
@@ -98,11 +101,10 @@ def _count_features(path):
     return count
 
 
-def _run(job):
+def _run_contour(job):
     from osgeo import ogr
 
     terrain = _load_terrain()
-
     gdal, _ogr, _osr = terrain._gdal()
     # Как и в основном процессе, не ждём fsync на каждой транзакции.
     gdal.SetConfigOption("OGR_SQLITE_SYNCHRONOUS", "OFF")
@@ -118,7 +120,6 @@ def _run(job):
     temp_dir = Path(job["temp_dir"])
     vector_dir = Path(job["vector_dir"])
     water_paths = [Path(path) for path in job["water_paths"]]
-    glacier_path = Path(job["glacier_path"]) if job["glacier_path"] else None
 
     dataset, detail_count = terrain._contour_tile(
         (source, tile, step), simplify
@@ -137,59 +138,95 @@ def _run(job):
             overview, water_paths, spatial_ref, only_keys=touched,
         )
 
-    suffix = f"_tile{index}"
     detail_path = temp_dir / f"isolines_tile{index}.sqlite"
     overview_path = temp_dir / f"isolines_tile{index}_overview.sqlite"
-    _write_layer(
+    detail_rows = _write_layer(
         detail_path, detailed,
         (("ID", ogr.OFTInteger), ("ELEV", ogr.OFTReal)),
     )
+    overview_rows = 0
     if overview is not None:
-        _write_layer(
+        overview_rows = _write_layer(
             overview_path, overview,
             (("ID", ogr.OFTInteger), ("ELEV", ogr.OFTReal),
              ("SRC", ogr.OFTInteger)),
         )
     dataset = None
 
-    result = {
+    return {
         "index": index,
         "detail": detail_count,
         "overview": overview_count,
+        "detail_rows": detail_rows,
+        "overview_rows": overview_rows,
         "water_cut": water_cut,
-        "regular": 0,
-        "glacier": 0,
-        "regular_overview": 0,
-        "glacier_overview": 0,
     }
-    if glacier_path is not None and glacier_path.exists():
-        config = type(
-            "Config", (),
-            {"vector_dir": vector_dir, "temp_dir": temp_dir},
-        )
-        if terrain._generate_glacier_isolines(
-            config, detail_path, progress=None, suffix=suffix,
-        ) is None:
-            raise RuntimeError("glacier split failed for detail layer")
-        result["regular"] = _count_features(
+
+
+def _run_split(job):
+    terrain = _load_terrain()
+    gdal, _ogr, _osr = terrain._gdal()
+    gdal.SetConfigOption("OGR_SQLITE_SYNCHRONOUS", "OFF")
+    gdal.SetConfigOption("GDAL_CACHEMAX", str(256))
+
+    source = Path(job["source"])
+    suffix = job["suffix"]
+    temp_dir = Path(job["temp_dir"])
+    vector_dir = Path(job["vector_dir"])
+    config = type(
+        "Config", (), {"vector_dir": vector_dir, "temp_dir": temp_dir}
+    )
+    if terrain._generate_glacier_isolines(
+        config, source, progress=None, suffix=suffix,
+        fid_range=job.get("fid_range"),
+    ) is None:
+        raise RuntimeError("glacier split failed")
+    return {
+        "index": job["index"],
+        "kind": job.get("kind", ""),
+        "regular": _count_features(
             vector_dir / f"isolines_regular{suffix}.sqlite"
-        )
-        result["glacier"] = _count_features(
+        ),
+        "glacier": _count_features(
             vector_dir / f"isolines_glacier{suffix}.sqlite"
-        )
-        if overview is not None:
-            if terrain._generate_glacier_isolines(
-                config, overview_path, progress=None,
-                suffix=suffix + "_overview",
-            ) is None:
-                raise RuntimeError("glacier split failed for overview layer")
-            result["regular_overview"] = _count_features(
-                vector_dir / f"isolines_regular{suffix}_overview.sqlite"
+        ),
+    }
+
+
+def _run_merge(job):
+    terrain = _load_terrain()
+    gdal, _ogr, _osr = terrain._gdal()
+    gdal.SetConfigOption("OGR_SQLITE_SYNCHRONOUS", "OFF")
+    for task in job["tasks"]:
+        destination = Path(task["destination"])
+        sources = [Path(path) for path in task["sources"]]
+        if not sources:
+            destination.unlink(missing_ok=True)
+            continue
+        src_offsets = task.get("src_offsets")
+        if task.get("full"):
+            raw = Path(task["raw"])
+            terrain._merge_tile_layers(
+                raw, sources, task["offsets"], src_offsets,
             )
-            result["glacier_overview"] = _count_features(
-                vector_dir / f"isolines_glacier{suffix}_overview.sqlite"
+            terrain._write_full_layer(raw, destination)
+            raw.unlink(missing_ok=True)
+        else:
+            terrain._merge_tile_layers(
+                destination, sources, task["offsets"], src_offsets,
             )
-    return result
+    return {"index": job["index"]}
+
+
+def _run(job):
+    mode = job.get("mode", "contour")
+    if mode == "contour":
+        return _run_contour(job)
+    if mode == "split":
+        return _run_split(job)
+    if mode == "merge":
+        return _run_merge(job)
+    raise ValueError(f"unknown job mode: {mode}")
 
 
 def main():

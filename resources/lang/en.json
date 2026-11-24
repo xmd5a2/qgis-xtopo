@@ -741,6 +741,8 @@
   "не удалось скачать {}: {}": "cannot download {}: {}",
   "Использован {}": "Using {}",
   "Изолинии: тайл {} из {}": "Contour lines: tile {} of {}",
+  "Разрезание контуров по ледникам: {} из {}": "Splitting contour lines by glaciers: {} of {}",
+  "Склейка контуров": "Merging contour lines",
   "Рельеф: в охвате нет суши, тайлы DEM не нужны": "Terrain: no land in the extent, DEM tiles are not needed",
   "Рельеф: для суши выбранного охвата нет данных DEM": "Terrain: no DEM data for the land in the selected extent",
   "Рельеф: нет соединения с сервером — тайлы DEM не скачаны: {}. Проверьте настройки прокси ({}) и доступность сети.": "Terrain: no server connection — DEM tiles were not downloaded: {}. Check the proxy settings ({}) and network availability.",
