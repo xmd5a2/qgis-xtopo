@@ -7,8 +7,15 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapCanvasItem, QgsMapTool, QgsRubberBand
-from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from qgis.PyQt.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
+from qgis.PyQt.QtGui import (
+    QColor,
+    QFont,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 
 from ..core.measure import distance_area, format_length, format_scale
 
@@ -18,6 +25,52 @@ def _enum(owner, group, name):
         return getattr(getattr(owner, group), name)
     except AttributeError:
         return getattr(owner, name)
+
+
+def _middle_button_event(event, event_type, buttons):
+    """Копия события мыши с средней кнопкой для панорамирования холста.
+
+    QgsMapCanvas перетаскивается только средней кнопкой; правая кнопка
+    в инструментах листов отправляется ему как средняя, чтобы работало
+    штатное панорамирование (карта едет без перерисовки на каждом шаге).
+    """
+    position = QPointF(event.pos())
+    modifiers = _enum(Qt, "KeyboardModifier", "NoModifier")
+    button = _enum(Qt, "MouseButton", "MiddleButton")
+    try:
+        return QMouseEvent(event_type, position, button, buttons, modifiers)
+    except TypeError:
+        return QMouseEvent(
+            event_type, position, position, button, buttons, modifiers
+        )
+
+
+class _RightButtonPan:
+    """Перетаскивание карты правой кнопкой в инструментах листов атласа."""
+
+    def _start_right_pan(self, event):
+        if event.button() != _enum(Qt, "MouseButton", "RightButton"):
+            return False
+        self.canvas.mousePressEvent(
+            _middle_button_event(
+                event,
+                _enum(QEvent, "Type", "MouseButtonPress"),
+                _enum(Qt, "MouseButton", "MiddleButton"),
+            )
+        )
+        return True
+
+    def _finish_right_pan(self, event):
+        if event.button() != _enum(Qt, "MouseButton", "RightButton"):
+            return False
+        self.canvas.mouseReleaseEvent(
+            _middle_button_event(
+                event,
+                _enum(QEvent, "Type", "MouseButtonRelease"),
+                _enum(Qt, "MouseButton", "NoButton"),
+            )
+        )
+        return True
 
 
 class SheetMarker(QgsMapCanvasItem):
@@ -229,7 +282,7 @@ class SheetHandles(QgsMapCanvasItem):
             painter.drawRect(QRectF(point.x() - 4, point.y() - 4, 8, 8))
 
 
-class SheetEditMapTool(QgsMapTool):
+class SheetEditMapTool(_RightButtonPan, QgsMapTool):
     """Move atlas sheets and resize them by their corners."""
 
     sheetEdited = pyqtSignal(int, object)
@@ -309,6 +362,8 @@ class SheetEditMapTool(QgsMapTool):
         return None, None
 
     def canvasPressEvent(self, event):
+        if self._start_right_pan(event):
+            return
         if event.button() != _enum(Qt, "MouseButton", "LeftButton"):
             return
         map_point = self.toMapCoordinates(event.pos())
@@ -385,6 +440,8 @@ class SheetEditMapTool(QgsMapTool):
             self.sheetPreview.emit(self._index, rectangle)
 
     def canvasReleaseEvent(self, event):
+        if self._finish_right_pan(event):
+            return
         if (
             self._operation is None
             or event.button() != _enum(Qt, "MouseButton", "LeftButton")
@@ -423,7 +480,7 @@ class SheetEditMapTool(QgsMapTool):
                 pass
 
 
-class SheetMapTool(QgsMapTool):
+class SheetMapTool(_RightButtonPan, QgsMapTool):
     """Draw atlas sheets with the aspect ratio of the selected page."""
 
     sheetDrawn = pyqtSignal(object)
@@ -450,6 +507,8 @@ class SheetMapTool(QgsMapTool):
         self.marker.set_number(self.number)
 
     def canvasPressEvent(self, event):
+        if self._start_right_pan(event):
+            return
         if event.button() != _enum(Qt, "MouseButton", "LeftButton"):
             return
         self.start_point = self.toMapCoordinates(event.pos())
@@ -469,6 +528,8 @@ class SheetMapTool(QgsMapTool):
         self.marker.set_map_point(rectangle.center())
 
     def canvasReleaseEvent(self, event):
+        if self._finish_right_pan(event):
+            return
         if (
             self.start_point is None
             or event.button() != _enum(Qt, "MouseButton", "LeftButton")

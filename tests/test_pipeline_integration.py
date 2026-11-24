@@ -928,6 +928,73 @@ class PipelineIntegrationTest(unittest.TestCase):
             canvas.deleteLater()
             self.app.processEvents()
 
+    def test_sheet_tools_pan_with_right_button(self):
+        """Правая кнопка перетаскивает карту в обоих режимах листов."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, Qt
+        from qgis.PyQt.QtGui import QMouseEvent
+        from qgis_xtopo.gui.atlas import SheetEditMapTool, SheetMapTool
+
+        def mouse_event(kind, point, button, buttons):
+            position = QPointF(point)
+            try:
+                return QMouseEvent(
+                    kind, position, button, buttons, Qt.NoModifier
+                )
+            except TypeError:
+                return QMouseEvent(
+                    kind, position, position, button, buttons, Qt.NoModifier
+                )
+
+        factories = (
+            ("draw", lambda canvas: SheetMapTool(canvas, 1.0)),
+            ("edit", lambda canvas: SheetEditMapTool(canvas, [], 1.0)),
+        )
+        for mode, factory in factories:
+            canvas = QgsMapCanvas()
+            canvas.resize(400, 300)
+            canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+            canvas.setExtent(QgsRectangle(0, 0, 400, 300))
+            tool = factory(canvas)
+            canvas.setMapTool(tool)
+            try:
+                center = canvas.center()
+                # Холст панорамирует средней кнопкой; инструмент
+                # подменяет правую кнопку на неё.
+                canvas.mouseMoveEvent(
+                    mouse_event(
+                        QEvent.MouseMove, QPoint(100, 100),
+                        Qt.NoButton, Qt.NoButton,
+                    )
+                )
+                canvas.mousePressEvent(
+                    mouse_event(
+                        QEvent.MouseButtonPress, QPoint(100, 100),
+                        Qt.RightButton, Qt.RightButton,
+                    )
+                )
+                canvas.mouseMoveEvent(
+                    mouse_event(
+                        QEvent.MouseMove, QPoint(140, 120),
+                        Qt.NoButton, Qt.RightButton,
+                    )
+                )
+                canvas.mouseReleaseEvent(
+                    mouse_event(
+                        QEvent.MouseButtonRelease, QPoint(140, 120),
+                        Qt.RightButton, Qt.NoButton,
+                    )
+                )
+                self.assertNotEqual(
+                    canvas.center(), center, f"режим {mode} не панорамирует"
+                )
+            finally:
+                tool.deactivate()
+                tool.dispose()
+                canvas.deleteLater()
+                self.app.processEvents()
+
     def test_atlas_active_sheet_selection_and_delete(self):
         from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
         from qgis.gui import QgsMapCanvas
