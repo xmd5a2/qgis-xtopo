@@ -2302,6 +2302,115 @@ class AutoMosaicTest(unittest.TestCase):
             for line in messages
         ))
 
+    def test_auto_empty_plan_without_land_is_quiet(self):
+        """Пустой охват без суши не считает сетевой сбой отсутствием суши."""
+        from unittest import mock
+
+        from qgis_xtopo.core import sonny, terrain
+
+        with tempfile.TemporaryDirectory() as directory:
+            messages = []
+            with mock.patch.object(
+                sonny, "load_catalogue", return_value={}
+            ), mock.patch.object(
+                sonny, "catalogue_tiles", return_value={}
+            ):
+                result = terrain.download_auto_dem(
+                    BBox(122.2, 72.5, 126.6, 74.0),
+                    Path(directory) / "out",
+                    progress=messages.append,
+                    availability={},
+                    required_tiles=frozenset(),
+                )
+        self.assertIsNone(result)
+        self.assertEqual(messages, [])
+
+    def test_auto_empty_plan_offline_names_connection(self):
+        """Без проверки источников сообщение говорит о сети, а не о суше."""
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, net, sonny, terrain
+
+        availability = {
+            "cop30": dem_sources.Availability(
+                available=True, checked=False
+            ),
+            "srtm": dem_sources.Availability(
+                available=False, checked=True
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(
+                sonny, "load_catalogue", return_value={}
+            ), mock.patch.object(
+                sonny, "catalogue_tiles", return_value={}
+            ), mock.patch.object(
+                net, "last_error",
+                return_value="[Errno 111] В соединении отказано",
+            ):
+                with self.assertRaises(terrain.TerrainUnavailable) as caught:
+                    terrain.download_auto_dem(
+                        BBox(122.2, 72.5, 126.6, 74.0),
+                        Path(directory) / "out",
+                        availability=availability,
+                        required_tiles=frozenset({(73, 124)}),
+                    )
+        text = str(caught.exception)
+        self.assertIn("соединени", text)
+        self.assertIn("В соединении отказано", text)
+        self.assertNotIn("нет суши", text)
+        self.assertNotIn("прокси", text)
+
+    def test_connection_warning_mentions_proxy_only_when_enabled(self):
+        """Совет про прокси появляется только при включённом прокси."""
+        from unittest import mock
+
+        from qgis_xtopo.core import net, terrain
+
+        with mock.patch.object(net, "last_error", return_value="timeout"):
+            try:
+                net.set_proxy_label("")
+                without = terrain._connection_warning()
+                net.set_proxy_label("SOCKS5 127.0.0.1:1080")
+                with_proxy = terrain._connection_warning()
+            finally:
+                net.set_proxy_label("")
+        self.assertNotIn("прокси", without)
+        self.assertIn("127.0.0.1:1080", with_proxy)
+        self.assertIn("прокси", with_proxy)
+
+    def test_offline_auto_keeps_project_without_terrain(self):
+        """Нет сети: карта собирается без рельефа, в журнале — причина."""
+        from unittest import mock
+
+        from qgis_xtopo.core import terrain
+        from qgis_xtopo.core.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory)
+            config.ensure_directories()
+            config.generate_terrain = True
+            config.download_terrain_tiles = True
+            config.generate_terrain_isolines = False
+            config.terrain_source = "auto"
+            messages = []
+            with mock.patch.object(
+                terrain, "download_auto_dem",
+                side_effect=terrain.TerrainUnavailable(
+                    "Рельеф: нет соединения с сервером"
+                ),
+            ):
+                key = terrain.prepare_terrain_raster(
+                    config, BBox(122.2, 72.5, 126.6, 74.0),
+                    messages.append,
+                    required_tiles=frozenset({(73, 124)}),
+                )
+        self.assertIsNone(key)
+        self.assertTrue(any(
+            line.startswith("WARNING:") and "соединени" in line
+            for line in messages
+        ))
+
 
 class CogDownloadTest(unittest.TestCase):
     def test_download_cog_dem_uses_cache(self):

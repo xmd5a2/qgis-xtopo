@@ -40,6 +40,36 @@ _lock = threading.Lock()
 # общий запрет (его ставит mark_offline() без хоста).
 _offline_until = {}
 _last_error = ""
+# Активный прокси для сообщений об ошибках соединения.  Пусто — прокси
+# выключен: тогда про прокси в журнале и окнах не упоминаем.
+_proxy_label = ""
+
+# Тексты, по которым видно, что ответа не было: ошибки urllib, GDAL и
+# сетевых прокси.  Исключение может быть обёрнуто в SourceError, поэтому
+# причину ищем и по тексту.
+_CONNECTION_TEXT = (
+    "urlopen error",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "connection timed out",
+    "network is unreachable",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "could not resolve host",
+    "could not connect",
+    "failed to connect",
+    "curl error",
+    "operation timed out",
+    "timed out",
+    "timeout",
+    "в соединении отказано",
+    "соединение не установлено",
+    "соединение сброшено",
+    "сеть недоступна",
+    "socks5:",
+    "прокси вернул",
+)
 
 
 def _host_of(url):
@@ -64,6 +94,59 @@ def is_network_error(exc):
     if isinstance(exc, OSError):
         return exc.errno in _NETWORK_ERRNOS
     return False
+
+
+def is_connection_error(value):
+    """Ошибка соединения: исключение или уже собранный текст.
+
+    Сообщение может быть обёрнуто в SourceError или RuntimeError, поэтому
+    кроме типа исключения проверяются характерные строки urllib, GDAL и
+    SOCKS5.
+    """
+    if isinstance(value, BaseException):
+        if is_network_error(value):
+            return True
+        value = str(value)
+    text = str(value or "").casefold()
+    return any(marker in text for marker in _CONNECTION_TEXT)
+
+
+def last_error():
+    """Текст последней ошибки соединения (пустой — сбоев не было)."""
+    with _lock:
+        return _last_error
+
+
+def set_proxy_label(label=""):
+    """Запоминает адрес активного прокси для сообщений о сбоях.
+
+    Пустая строка означает, что прокси выключен.
+    """
+    global _proxy_label
+    with _lock:
+        _proxy_label = str(label or "")
+
+
+def proxy_label():
+    """Адрес активного прокси (пустая строка — прокси не используется)."""
+    with _lock:
+        return _proxy_label
+
+
+def connection_advice():
+    """Совет к ошибке соединения: про прокси — только если он включён."""
+    from . import i18n
+
+    label = proxy_label()
+    if label:
+        return i18n.trf(
+            "Нет соединения с сервером (прокси {}). Проверьте настройки "
+            "прокси и доступность сети.",
+            label,
+        )
+    return i18n.tr(
+        "Нет соединения с сервером. Проверьте доступность сети."
+    )
 
 
 def offline(url=None):

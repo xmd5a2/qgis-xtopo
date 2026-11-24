@@ -241,6 +241,15 @@
   запрет снимают. Ответ сервера с кодом ошибки (HTTPError) запрета не ставит.
   Opener подставляет `DEFAULT_TIMEOUT`, если вызывающий код таймаут не задал.
   Ставится в `proxy.apply()` и для `dem_sources._OPENER`.
+- **Ошибка соединения объясняется в журнале и окне ошибки.** Если
+  исключение (в том числе обёрнутое в `SourceError`) похоже на сетевой
+  сбой, `dockwidget._connection_hint` добавляет к тексту ошибки совет
+  проверить доступность сети. Про прокси сообщается только при включённом
+  прокси (`net.set_proxy_label` из `proxy.apply`): тогда в журнал попадает
+  и его адрес. Рельеф обходится без падения: `TerrainUnavailable`
+  превращается в `WARNING` с последней сетевой ошибкой из
+  `net.last_error()`, проект собирается без DEM. Проверки —
+  `tests.test_network`, `tests.test_terrain`, `ConnectionErrorHintTest`.
 - **Прокси — `core/proxy.py`.** Кнопка в углу вкладок открывает диалог;
   `proxy.apply()` ставит opener urllib (через предохранитель), opener
   dem_sources и `QNetworkProxy`. Для GDAL `/vsicurl` выставляется

@@ -237,6 +237,56 @@ class ProxyIconTest(unittest.TestCase):
             self.assertEqual(pixmap.pixelColor(0, 15).alpha(), 0)
 
 
+class ConnectionErrorHintTest(unittest.TestCase):
+    """Ошибка соединения подсказывает про прокси только при нём."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def setUp(self):
+        from qgis_xtopo.core import net
+
+        net.set_proxy_label("")
+
+    def tearDown(self):
+        from qgis_xtopo.core import net
+
+        net.set_proxy_label("")
+
+    def test_configured_proxy_is_named_in_hint(self):
+        from qgis_xtopo.core import net
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        net.set_proxy_label("127.0.0.1:1080")
+        hint = XtopoDockWidget._connection_hint(
+            "<urlopen error [Errno 111] В соединении отказано>"
+        )
+        self.assertIn("127.0.0.1:1080", hint)
+        self.assertTrue(
+            "прокси" in hint or "proxy" in hint.casefold()
+        )
+
+    def test_no_proxy_mention_when_proxy_disabled(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        hint = XtopoDockWidget._connection_hint(
+            "<urlopen error [Errno 111] В соединении отказано>"
+        )
+        self.assertTrue(hint)
+        self.assertNotIn("прокси", hint)
+        self.assertNotIn("proxy", hint.casefold())
+
+    def test_unrelated_error_has_no_network_hint(self):
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        self.assertEqual(
+            XtopoDockWidget._connection_hint("Ошибка разбора файла"), ""
+        )
+
+
 class ProxyCheckOnShowTest(unittest.TestCase):
     """Значок прокси проверяется при показе панели."""
 

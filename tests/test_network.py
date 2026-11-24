@@ -116,3 +116,36 @@ class GuardTest(unittest.TestCase):
             urllib.error.HTTPError("u", 404, "nf", {}, None)
         ))
         self.assertFalse(net.is_network_error(ValueError()))
+
+    def test_connection_error_recognises_wrapped_text(self):
+        """Причина видна и через обёртку SourceError с текстом urlopen."""
+        self.assertTrue(net.is_connection_error(
+            "<urlopen error [Errno 111] В соединении отказано>"
+        ))
+        self.assertTrue(net.is_connection_error(
+            "Не удалось загрузить индекс Geofabrik: timeout"
+        ))
+        self.assertTrue(net.is_connection_error(
+            "SOCKS5: неверный логин или пароль"
+        ))
+        self.assertTrue(net.is_connection_error(
+            "CURL error 7: Failed to connect to example"
+        ))
+        self.assertFalse(net.is_connection_error("Ошибка разбора файла"))
+
+    def test_last_error_keeps_connection_reason(self):
+        net.mark_offline("<urlopen error [Errno 111]>", "example.org")
+        self.assertEqual(net.last_error(), "<urlopen error [Errno 111]>")
+        net.mark_online()
+        self.assertEqual(net.last_error(), "")
+
+    def test_connection_advice_mentions_proxy_only_when_enabled(self):
+        try:
+            net.set_proxy_label("")
+            self.assertNotIn("прокси", net.connection_advice())
+            net.set_proxy_label("127.0.0.1:1080")
+            advice = net.connection_advice()
+            self.assertIn("127.0.0.1:1080", advice)
+            self.assertIn("прокси", advice)
+        finally:
+            net.set_proxy_label("")

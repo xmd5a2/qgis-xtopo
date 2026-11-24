@@ -366,6 +366,9 @@ class PipelineWorker(QThread):
         super().__init__(parent)
         self.config = config
         self.cancel_event = threading.Event()
+        # Последнее исключение: по нему видно, была ли ошибка соединения,
+        # хотя сигнал передаёт только текст.
+        self.error = None
 
     def run(self):
         # Общее время подготовки: от начала до готового проекта.
@@ -378,6 +381,7 @@ class PipelineWorker(QThread):
         except InterruptedError:
             self.cancelled.emit()
         except Exception as exc:
+            self.error = exc
             self.failed.emit(str(exc))
         else:
             self.completed.emit(str(path), time.monotonic() - started)
@@ -1001,6 +1005,7 @@ class XtopoDockWidget(QDockWidget):
         поэтому при выгрузке настройку QGIS надо вернуть как было.
         """
         _restore_application_proxy(self._application_proxy)
+        net.set_proxy_label("")
 
     def _fit_language_button(self):
         """Высота угловых кнопок — по строке заголовков вкладок.
@@ -4146,7 +4151,16 @@ class XtopoDockWidget(QDockWidget):
         if self.source_mode.currentData() in FILE_MODES:
             self._schedule_map_index()
 
+    @staticmethod
+    def _connection_hint(message, error=None):
+        """Подсказка при ошибке соединения: прокси — только если включён."""
+        value = error if error is not None else message
+        if not net.is_connection_error(value):
+            return ""
+        return net.connection_advice()
+
     def _failed(self, message):
+        worker = self.worker
         self.worker = None
         self._set_running(False)
         self._set_status("Ошибка")
@@ -4154,7 +4168,15 @@ class XtopoDockWidget(QDockWidget):
         self._append_log(
             i18n.trf("Ошибка: {}", i18n.tr(message))
         )
-        QMessageBox.critical(self, "QGIS-xtopo", i18n.tr(message))
+        hint = self._connection_hint(
+            message, getattr(worker, "error", None)
+        )
+        if hint:
+            self._append_log(hint)
+        text = i18n.tr(message)
+        if hint:
+            text = f"{text}\n\n{hint}"
+        QMessageBox.critical(self, "QGIS-xtopo", text)
 
     def _cancelled(self):
         self.worker = None

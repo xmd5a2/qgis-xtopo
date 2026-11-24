@@ -300,6 +300,11 @@ def apply(config=None):
     """Ставит прокси для urllib, opener источников DEM и сокетов Qt."""
     if config is None:
         config = load()
+    # Сообщения о сетевых сбоях подсказывают про прокси только тогда,
+    # когда он действительно включён.
+    net.set_proxy_label(
+        config.address() if config.enabled and config.host else ""
+    )
     handlers = _handlers(config)
     net.install(urllib.request.build_opener(*handlers))
     # dem_sources держит собственный opener (мультиадресный HTTPS).

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .bbox import BBox
-from . import dem_sources, disk_space, i18n, sonny, terrain_cache
+from . import dem_sources, disk_space, i18n, net, sonny, terrain_cache
 
 CHUNK = 256 * 1024
 
@@ -148,6 +148,27 @@ def _valid_raster(path):
         )
     finally:
         dataset = None
+
+
+class TerrainUnavailable(RuntimeError):
+    """DEM не собран; причина известна и должна попасть в журнал."""
+
+
+def _connection_warning():
+    """Понятное сообщение о сетевом сбое при скачивании рельефа."""
+    reason = net.last_error().strip() or net.OFFLINE_REASON
+    label = net.proxy_label()
+    if label:
+        return i18n.trf(
+            "Рельеф: нет соединения с сервером — тайлы DEM не скачаны: {}. "
+            "Проверьте настройки прокси ({}) и доступность сети.",
+            reason, label,
+        )
+    return i18n.trf(
+        "Рельеф: нет соединения с сервером — тайлы DEM не скачаны: {}. "
+        "Проверьте доступность сети.",
+        reason,
+    )
 
 
 class _Speed:
@@ -954,6 +975,11 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     ``required_tiles`` — тайлы, где есть суша (Natural Earth и берег из
     OSM).  Остальные не скачиваются: их высоты всё равно станут nodata
     после маски воды.
+
+    Если суша есть, а тайлов для неё подобрать не удалось, бросается
+    :class:`TerrainUnavailable` с понятной причиной: непроверенные из-за
+    сети источники или отсутствие покрытия.  Пустой ``required_tiles`` —
+    это океанский охват, а не ошибка: функция просто ничего не делает.
     """
     gdal, _, _ = _gdal()
     destination = Path(destination)
@@ -979,9 +1005,23 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
             if cell in required_tiles
         }
     if not plan:
-        if progress:
-            progress("Рельеф: в охвате нет суши, тайлы DEM не нужны")
-        return
+        if required_tiles is not None and not required_tiles:
+            # Суши в охвате нет: скачивать нечего, и в журнал ничего
+            # дополнительно писать не нужно — это скажет вызывающая
+            # стадия своим сообщением.
+            return
+        unchecked = [
+            dem_sources.source(key).short for key in order
+            if availability.get(key) is not None
+            and not availability[key].checked
+        ]
+        if unchecked:
+            # Источники не проверены из-за сети: раньше здесь писалось
+            # «нет суши», что вводило в заблуждение.
+            raise TerrainUnavailable(_connection_warning())
+        raise TerrainUnavailable(
+            i18n.tr("Рельеф: для суши выбранного охвата нет данных DEM")
+        )
 
     groups = {}
     for cell, key in plan.items():
@@ -1085,6 +1125,8 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
                 counts["srtm"] = counts.get("srtm", 0) + len(cells)
 
     if not layers:
+        if net.offline():
+            raise TerrainUnavailable(_connection_warning())
         raise RuntimeError("Нет данных рельефа для выбранного охвата")
 
     target = destination / "dem_auto.tif"
@@ -2806,6 +2848,10 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     ``required_tiles`` — тайлы с сушей: океанские не скачиваются, их
     высоты всё равно станут nodata после маски воды.
 
+    Если DEM получить не удалось (нет сети, прокси или покрытия), стадия
+    не прерывает сборку карты: в журнал пишется ``WARNING`` с причиной,
+    а функция возвращает ``None``.
+
     В ``used_out`` дописываются ключи наборов DEM, вошедших в мозаику:
     по ним пишется атрибуция.  Сама атрибуция пишется в конце сборки
     проекта одним проходом — переписывать архив проекта из этого потока
@@ -2830,70 +2876,92 @@ def prepare_terrain_raster(config, bbox, progress=None, cancel=None,
     source_key = config.resolved_terrain_source()
     source = dem_sources.source(source_key)
     used = []
-    if source.manual:
-        if not config.terrain_src_dir:
-            raise RuntimeError("terrain_src_dir is required for the manual DEM source")
-        _clear_terrain_input(config)
-        copy_dem_tiles(bbox, config.terrain_src_dir, config.terrain_input_dir, progress=progress)
-    elif config.download_terrain_tiles:
-        _clear_terrain_input(config)
-        if source_key == dem_sources.AUTO_SOURCE:
-            download_auto_dem(
-                bbox,
-                config.terrain_input_dir,
+    try:
+        if source.manual:
+            if not config.terrain_src_dir:
+                raise RuntimeError(
+                    "terrain_src_dir is required for the manual DEM source"
+                )
+            _clear_terrain_input(config)
+            copy_dem_tiles(
+                bbox, config.terrain_src_dir, config.terrain_input_dir,
                 progress=progress,
-                cancel=cancel,
-                cache_dir=config.terrain_cache_dir,
-                status=status,
-                sonny_catalogue=sonny.catalogue_dir(),
-                sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
-                used=used,
-                required_tiles=required_tiles,
             )
-        elif source_key == dem_sources.SONNY_SOURCE:
-            download_sonny_dem(
-                bbox,
-                config.terrain_input_dir,
-                progress=progress,
-                cancel=cancel,
-                cache_dir=config.terrain_cache_dir,
-                status=status,
-                sonny_catalogue=sonny.catalogue_dir(),
-                sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
-                used=used,
-            )
-        elif source_key == "cop30":
-            used = _download_cop30(
-                config,
-                bbox,
-                progress=progress,
-                cancel=cancel,
-                status=status,
-                required_tiles=required_tiles,
-            )
-        else:
-            download_dem(
-                source_key,
-                bbox,
-                config.terrain_input_dir,
-                progress=progress,
-                cancel=cancel,
-                cache_dir=config.terrain_cache_dir,
-                status=status,
-                required_tiles=required_tiles,
-            )
-        if used:
-            _extend_used(used_out, used)
+        elif config.download_terrain_tiles:
+            _clear_terrain_input(config)
+            if source_key == dem_sources.AUTO_SOURCE:
+                download_auto_dem(
+                    bbox,
+                    config.terrain_input_dir,
+                    progress=progress,
+                    cancel=cancel,
+                    cache_dir=config.terrain_cache_dir,
+                    status=status,
+                    sonny_catalogue=sonny.catalogue_dir(),
+                    sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
+                    used=used,
+                    required_tiles=required_tiles,
+                )
+            elif source_key == dem_sources.SONNY_SOURCE:
+                download_sonny_dem(
+                    bbox,
+                    config.terrain_input_dir,
+                    progress=progress,
+                    cancel=cancel,
+                    cache_dir=config.terrain_cache_dir,
+                    status=status,
+                    sonny_catalogue=sonny.catalogue_dir(),
+                    sonny_tiles_dir=sonny.tile_cache_dir(config.projects_dir),
+                    used=used,
+                )
+            elif source_key == "cop30":
+                used = _download_cop30(
+                    config,
+                    bbox,
+                    progress=progress,
+                    cancel=cancel,
+                    status=status,
+                    required_tiles=required_tiles,
+                )
+            else:
+                download_dem(
+                    source_key,
+                    bbox,
+                    config.terrain_input_dir,
+                    progress=progress,
+                    cancel=cancel,
+                    cache_dir=config.terrain_cache_dir,
+                    status=status,
+                    required_tiles=required_tiles,
+                )
+    except TerrainUnavailable as exc:
+        # Сеть или покрытие не дали DEM: карта собирается без рельефа,
+        # а в журнале остаётся понятная причина вместо «нет суши».
+        if progress:
+            progress(f"WARNING: {exc}")
+        return None
+    if used:
+        _extend_used(used_out, used)
 
     for archive in list(config.terrain_input_dir.glob("*.zip")):
         shutil.unpack_archive(str(archive), str(config.terrain_input_dir))
         archive.unlink(missing_ok=True)
 
     if not any(path.is_file() for path in config.terrain_input_dir.iterdir()):
-        if progress:
-            progress(
-                "WARNING: Рельеф: в охвате нет суши, тайлы DEM не нужны"
+        if required_tiles is not None and not required_tiles:
+            message = i18n.tr(
+                "Рельеф: в охвате нет суши, тайлы DEM не нужны"
             )
+        elif (not source.manual and config.download_terrain_tiles
+              and net.offline()):
+            message = _connection_warning()
+        else:
+            message = i18n.tr(
+                "Рельеф: тайлы DEM не найдены — проверьте выбранный "
+                "источник рельефа и доступность сети"
+            )
+        if progress:
+            progress(f"WARNING: {message}")
         return None
 
     # Хест исходных тайлов считаем до конвертации: содержимое .hgt

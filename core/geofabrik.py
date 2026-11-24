@@ -14,7 +14,7 @@ from pathlib import Path
 
 from qgis.core import QgsGeometry, QgsRectangle
 
-from . import disk_space, i18n
+from . import disk_space, i18n, net
 
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
@@ -370,6 +370,10 @@ def fetch_index(config, progress=None, cancel=None):
     except InterruptedError:
         raise
     except Exception as exc:
+        if progress and net.is_connection_error(exc):
+            # Предупреждение выше уже содержит текст urlopen; отдельная
+            # строка подсказывает, где искать причину.
+            progress(net.connection_advice())
         if cached:
             warning = f"Не удалось обновить индекс Geofabrik: {exc}"
             meta["fetched_at"] = now - INDEX_TTL + RETRY_TTL
