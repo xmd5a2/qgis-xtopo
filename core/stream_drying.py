@@ -18,6 +18,7 @@ import bisect
 import heapq
 import math
 import os
+import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
@@ -191,10 +192,16 @@ def _geometry_parts(geometry):
         return []
     kind = geometry.GetGeometryName()
     if kind == "LINESTRING":
-        points = [
-            (geometry.GetX(index), geometry.GetY(index))
-            for index in range(geometry.GetPointCount())
-        ]
+        get_points = getattr(geometry, "GetPoints", None)
+        if get_points is not None:
+            points = get_points()
+            if points and len(points[0]) > 2:
+                points = [(point[0], point[1]) for point in points]
+        else:
+            points = [
+                (geometry.GetX(index), geometry.GetY(index))
+                for index in range(geometry.GetPointCount())
+            ]
         cleaned = [points[0]] if points else []
         for point in points[1:]:
             if _distance(point, cleaned[-1]) > 1e-9:
@@ -423,6 +430,7 @@ def _dissolve(pieces, incident):
             continue
         chain = [start]
         visited.add(start)
+        head = []
         current = start
         while True:
             node = pieces[current].up
@@ -437,8 +445,10 @@ def _dissolve(pieces, incident):
             if len(candidates) != 1:
                 break
             current = candidates[0]
-            chain.insert(0, current)
+            head.append(current)
             visited.add(current)
+        if head:
+            chain = head[::-1] + chain
         current = start
         while True:
             node = pieces[current].down
@@ -695,30 +705,75 @@ def _upstream_values(branches, followers, groups, totals):
     """Длина самого длинного пути от истока до низа ветви.
 
     Длины ветвей вдоль пути суммируются, поэтому разбиение OSM на
-    короткие сегменты не меняет результат.  На циклах значение
-    ограничено общей длиной компоненты.
+    короткие сегменты не меняет результат.  Циклы схлопываются в сильно
+    связные компоненты: путь по циклу можно продолжать сколько угодно,
+    поэтому компонента даёт сумму своих ветвей и ограничена общей длиной
+    связной компоненты.
     """
-    values = [branch.length for branch in branches]
+    count = len(branches)
+    successors = [
+        [item for item in followers.get(branch.down, ()) if item != position]
+        for position, branch in enumerate(branches)
+    ]
+    # Итеративный Косараджу: рекурсия не выдержит длинных цепочек.
+    order = []
+    visited = bytearray(count)
+    for start in range(count):
+        if visited[start]:
+            continue
+        visited[start] = 1
+        stack = [(start, 0)]
+        while stack:
+            position, index = stack[-1]
+            edges = successors[position]
+            if index < len(edges):
+                stack[-1] = (position, index + 1)
+                follower = edges[index]
+                if not visited[follower]:
+                    visited[follower] = 1
+                    stack.append((follower, 0))
+            else:
+                order.append(position)
+                stack.pop()
+    reverse = [[] for _ in range(count)]
+    for position, edges in enumerate(successors):
+        for follower in edges:
+            reverse[follower].append(position)
+    component_of = [-1] * count
+    components = []
+    for start in reversed(order):
+        if component_of[start] >= 0:
+            continue
+        identifier = len(components)
+        members = []
+        component_of[start] = identifier
+        stack = [start]
+        while stack:
+            position = stack.pop()
+            members.append(position)
+            for predecessor in reverse[position]:
+                if component_of[predecessor] < 0:
+                    component_of[predecessor] = identifier
+                    stack.append(predecessor)
+        components.append(members)
     group_of = {}
     for root, positions in groups.items():
         for position in positions:
             group_of[position] = root
-    heap = [(-value, position) for position, value in enumerate(values)]
-    heapq.heapify(heap)
-    while heap:
-        negative, position = heapq.heappop(heap)
-        value = -negative
-        if value < values[position] - 1e-9:
-            continue
-        node = branches[position].down
-        for follower in followers.get(node, ()):
-            if follower == position:
-                continue
-            limit = totals[group_of[follower]]
-            candidate = min(value + branches[follower].length, limit)
-            if candidate > values[follower] + 1e-9:
-                values[follower] = candidate
-                heapq.heappush(heap, (-candidate, follower))
+    values = [0.0] * count
+    for identifier, members in enumerate(components):
+        upstream = 0.0
+        for position in members:
+            for predecessor in reverse[position]:
+                if component_of[predecessor] != identifier:
+                    upstream = max(upstream, values[predecessor])
+        # У одиночной вершины это её собственная длина, у цикла —
+        # сумма всех ветвей компоненты.
+        value = upstream + sum(
+            branches[position].length for position in members
+        )
+        for position in members:
+            values[position] = min(value, totals[group_of[position]])
     return values
 
 
@@ -950,6 +1005,13 @@ def _protect_polygons(polygons, branches, down_values, cancel=None):
     if not polygons:
         return set()
     index = _build_bbox_index(_polygon_boxes(polygons))
+    prepared = []
+    for polygon in polygons:
+        create = getattr(polygon, "CreatePreparedGeometry", None)
+        try:
+            prepared.append(create() if create is not None else None)
+        except Exception:
+            prepared.append(None)
     best = {}
     for position, branch in enumerate(branches):
         if cancel is not None and position % 500 == 0 and cancel.is_set():
@@ -966,8 +1028,13 @@ def _protect_polygons(polygons, branches, down_values, cancel=None):
         point = _point_geometry(branch.points[-1])
         for polygon_position in candidates:
             polygon = polygons[polygon_position]
+            shape = prepared[polygon_position]
             try:
-                if not polygon.Intersects(line):
+                if shape is not None:
+                    intersects = shape.Intersects(line)
+                else:
+                    intersects = polygon.Intersects(line)
+                if not intersects:
                     continue
                 if polygon.Distance(point) <= OUTLET_TOLERANCE:
                     continue
@@ -985,24 +1052,33 @@ def _protect_polygons(polygons, branches, down_values, cancel=None):
 
 def _coastline_outlets(lines, branches, cancel=None):
     """Находит ветви, нижний конец которых выходит на берег."""
+    from qgis.core import QgsRectangle
+
     if not lines:
         return set()
-    boxes = [line.GetEnvelope() for line in lines]
+    boxes = []
+    for line in lines:
+        min_x, max_x, min_y, max_y = line.GetEnvelope()
+        boxes.append((min_x, min_y, max_x, max_y))
+    index = _build_bbox_index(boxes)
     outlets = set()
     for position, branch in enumerate(branches):
         if cancel is not None and position % 500 == 0 and cancel.is_set():
             raise InterruptedError("Preparation cancelled")
-        point = _point_geometry(branch.points[-1])
-        for line, box in zip(lines, boxes):
-            if (
-                point.GetX() < box[0] - OUTLET_TOLERANCE
-                or point.GetX() > box[1] + OUTLET_TOLERANCE
-                or point.GetY() < box[2] - OUTLET_TOLERANCE
-                or point.GetY() > box[3] + OUTLET_TOLERANCE
-            ):
-                continue
+        x, y = branch.points[-1]
+        rectangle = QgsRectangle(
+            x - OUTLET_TOLERANCE, y - OUTLET_TOLERANCE,
+            x + OUTLET_TOLERANCE, y + OUTLET_TOLERANCE,
+        )
+        candidates = index.intersects(rectangle)
+        if not candidates:
+            continue
+        point = None
+        for line_position in candidates:
+            if point is None:
+                point = _point_geometry((x, y))
             try:
-                if line.Distance(point) <= OUTLET_TOLERANCE:
+                if lines[line_position].Distance(point) <= OUTLET_TOLERANCE:
                     outlets.add(position)
                     break
             except Exception:
@@ -1125,9 +1201,11 @@ def _write_layer(path, fields, srs, branches, ranks, output_transform=None,
                     except Exception:
                         pass
             feature.SetField(rank_index, int(ranks[position]))
-            points = _transform_points(output_transform, branch.points)
+            line = _line_geometry(branch.points)
+            if output_transform is not None:
+                line.Transform(output_transform)
             multi = ogr.Geometry(ogr.wkbMultiLineString)
-            multi.AddGeometry(_line_geometry(points))
+            multi.AddGeometry(line)
             feature.SetGeometry(multi)
             layer.CreateFeature(feature)
             written += 1
@@ -1151,45 +1229,46 @@ def _set_arrow_ranks(path, ranks_by_id, default=0, cancel=None):
     разрезан на ветви с разными рангами, берётся худший ранг: стрелка
     не должна висеть над участком, который уже скрыт.
     """
-    from osgeo import ogr
-
     if not path.exists():
         return 0
-    source = ogr.Open(str(path), 1)
-    if source is None:
-        return 0
-    layer = source.GetLayer(0)
-    definition = layer.GetLayerDefn()
-    id_index = definition.GetFieldIndex("@id")
-    if id_index < 0:
-        layer = None
-        source = None
-        return 0
-    rank_index = definition.GetFieldIndex(FIELD)
-    if rank_index < 0:
-        layer.CreateField(ogr.FieldDefn(FIELD, ogr.OFTInteger))
-        rank_index = layer.GetLayerDefn().GetFieldIndex(FIELD)
-    written = 0
+    table = path.stem
+    connection = sqlite3.connect(str(path))
     try:
-        layer.StartTransaction()
-        for feature in layer:
-            if cancel is not None and written % 500 == 0 and cancel.is_set():
+        columns = {
+            row[1].lower(): row[1]
+            for row in connection.execute(
+                f'PRAGMA table_info("{table}")'
+            )
+        }
+        id_field = columns.get("@id")
+        if id_field is None:
+            return 0
+        rank_field = columns.get(FIELD)
+        if rank_field is None:
+            connection.execute(
+                f'ALTER TABLE "{table}" ADD COLUMN "{FIELD}" INTEGER'
+            )
+            rank_field = FIELD
+        rows = connection.execute(
+            f'SELECT rowid, "{id_field}" FROM "{table}"'
+        ).fetchall()
+        updates = []
+        for position, (row_id, value) in enumerate(rows):
+            if cancel is not None and position % 500 == 0 and cancel.is_set():
                 raise InterruptedError("Preparation cancelled")
-            key = _text(feature.GetField(id_index))
-            rank = ranks_by_id.get(key, default)
-            feature.SetField(rank_index, int(rank))
-            if layer.SetFeature(feature) != 0:
-                raise OSError(f"Cannot update {path}")
-            written += 1
-        layer.CommitTransaction()
+            updates.append((int(ranks_by_id.get(_text(value), default)),
+                            row_id))
+        connection.executemany(
+            f'UPDATE "{table}" SET "{rank_field}" = ? WHERE rowid = ?',
+            updates,
+        )
+        connection.commit()
     except Exception:
-        layer.RollbackTransaction()
-        layer = None
-        source = None
+        connection.rollback()
         raise
-    layer = None
-    source = None
-    return written
+    finally:
+        connection.close()
+    return len(rows)
 
 
 def _source_starts(directory, branches, followers, transform=None,
