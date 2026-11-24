@@ -1347,6 +1347,29 @@ class RuleScaleRangeTest(unittest.TestCase):
             )
 
 
+class IslandLabelAreaTest(unittest.TestCase):
+    """На обзорных масштабах подписываются только крупные острова.
+
+    Иначе в дельте Лены десятки названий мелких островов закрывают карту.
+    """
+
+    def test_overview_rule_requires_large_island(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        rules = layers["island polygon"].find("labeling/rules").findall("rule")
+        overview = [
+            rule for rule in rules
+            if rule.get("scalemindenom") == "300000"
+            and rule.get("scalemaxdenom") is None
+        ]
+        self.assertEqual(len(overview), 1)
+        self.assertEqual(
+            overview[0].get("filter"), "area_calc>150000000"
+        )
+
+
 class WaterLabelMinimumFeatureSizeTest(unittest.TestCase):
     """Маленькие водоёмы не подписываются.
 
