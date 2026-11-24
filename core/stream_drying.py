@@ -18,9 +18,10 @@ import bisect
 import heapq
 import math
 import os
-import sqlite3
 from collections import defaultdict
 from pathlib import Path
+
+from . import sqlite_fields
 
 FIELD = "dry_rank"
 LAYERS = ("stream", "stream_intermittent")
@@ -706,9 +707,10 @@ def _upstream_values(branches, followers, groups, totals):
 
     Длины ветвей вдоль пути суммируются, поэтому разбиение OSM на
     короткие сегменты не меняет результат.  Циклы схлопываются в сильно
-    связные компоненты: путь по циклу можно продолжать сколько угодно,
-    поэтому компонента даёт сумму своих ветвей и ограничена общей длиной
-    связной компоненты.
+    связные компоненты.  Обход цикла с положительной суммой длин
+    повторяется, пока значение не упрётся в общую длину связной
+    компоненты; так же насыщаются все ветви ниже него.  Цикл из ветвей
+    нулевой длины ничего не добавляет и остаётся обычным путём.
     """
     count = len(branches)
     successors = [
@@ -761,17 +763,31 @@ def _upstream_values(branches, followers, groups, totals):
         for position in positions:
             group_of[position] = root
     values = [0.0] * count
+    saturated = [False] * len(components)
     for identifier, members in enumerate(components):
         upstream = 0.0
         for position in members:
             for predecessor in reverse[position]:
-                if component_of[predecessor] != identifier:
-                    upstream = max(upstream, values[predecessor])
-        # У одиночной вершины это её собственная длина, у цикла —
-        # сумма всех ветвей компоненты.
-        value = upstream + sum(
+                other = component_of[predecessor]
+                if other == identifier:
+                    continue
+                upstream = max(upstream, values[predecessor])
+                if saturated[other]:
+                    saturated[identifier] = True
+        internal = sum(
             branches[position].length for position in members
         )
+        if len(members) > 1 and internal > 0.0:
+            # Полный обход цикла добавляет его длину, поэтому прежний
+            # расчёт упирался в общую длину связной компоненты.
+            saturated[identifier] = True
+        if saturated[identifier]:
+            for position in members:
+                values[position] = totals[group_of[position]]
+            continue
+        # У одиночной вершины это её собственная длина, у цикла из
+        # нулевых ветвей — ничего.
+        value = upstream + internal
         for position in members:
             values[position] = min(value, totals[group_of[position]])
     return values
@@ -1232,7 +1248,7 @@ def _set_arrow_ranks(path, ranks_by_id, default=0, cancel=None):
     if not path.exists():
         return 0
     table = path.stem
-    connection = sqlite3.connect(str(path))
+    connection = sqlite_fields.connect(path)
     try:
         columns = {
             row[1].lower(): row[1]

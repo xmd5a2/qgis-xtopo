@@ -198,37 +198,44 @@ def _evaluate(source_path, layer_name, fields, overlay_paths):
 
 
 def _write_fields(path, values):
-    """Записывает посчитанные значения в поля слоя."""
-    from osgeo import ogr
+    """Записывает посчитанные значения в поля слоя.
 
-    ogr.UseExceptions()
-    dataset = ogr.Open(str(path), 1)
-    if dataset is None:
+    Запись идёт через SQLite напрямую: обновление строки через GDAL в
+    Spatialite переписывает геометрию и пространственный индекс и стоит
+    около сотни миллисекунд на объект, через SQLite — микросекунды.
+    """
+    if not values:
         return
+    from . import sqlite_fields
+
+    connection = sqlite_fields.connect(path)
     try:
-        layer = dataset.GetLayer(0)
-        if layer is None:
-            return
-        indexes = {}
-        for field in values[next(iter(values))] if values else ():
-            index = layer.FindFieldIndex(field, True)
-            if index < 0:
-                layer.CreateField(ogr.FieldDefn(field, ogr.OFTInteger))
-                index = layer.FindFieldIndex(field, True)
-            indexes[field] = index
-        for fid, row in values.items():
-            feature = layer.GetFeature(fid)
-            if feature is None:
-                continue
-            for field, value in row.items():
-                index = indexes.get(field, -1)
-                if index < 0:
-                    continue
-                if value is None:
-                    feature.SetFieldNull(index)
-                else:
-                    feature.SetField(index, int(round(float(value))))
-            layer.SetFeature(feature)
-        layer.SyncToDisk()
+        table = sqlite_fields.table_name(connection, path)
+        columns = {
+            row[1].lower(): row[1] for row in connection.execute(
+                f'PRAGMA table_info("{table}")'
+            )
+        }
+        fields = list(next(iter(values.values())))
+        sqlite_fields.ensure_fields(connection, table, columns, fields)
+        primary = sqlite_fields.primary_key(connection, table)
+        if primary.lower() not in columns:
+            primary = "rowid"
+        for name in fields:
+            column = columns[name.lower()]
+            updates = [
+                (
+                    None if row.get(name) is None
+                    else int(round(float(row[name]))),
+                    fid,
+                )
+                for fid, row in values.items()
+            ]
+            connection.executemany(
+                f'UPDATE "{table}" SET "{column}" = ? '
+                f'WHERE "{primary}" = ?',
+                updates,
+            )
+        connection.commit()
     finally:
-        dataset = None
+        connection.close()

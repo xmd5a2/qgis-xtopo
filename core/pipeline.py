@@ -2899,6 +2899,13 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     terrain_keys = {}
     terrain_used = []
     terrain_seconds = [0.0]
+    # Слои пишутся во временном каталоге, а готовый проект заменяется
+    # только после успешной сборки.  Ждать fsync на каждой транзакции
+    # не нужно: восемь потоков упираются в диск, а содержимое файлов
+    # от этого режима не меняется.
+    from osgeo import gdal as _gdal
+    sqlite_synchronous = _gdal.GetConfigOption("OGR_SQLITE_SYNCHRONOUS")
+    _gdal.SetConfigOption("OGR_SQLITE_SYNCHRONOUS", "OFF")
     try:
         report("Создание проекта QGIS")
         # Создание проекта и подготовка источника OSM друг от друга не
@@ -3220,4 +3227,7 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # Сборка не удалась: прежние слои остаются на месте, а
             # недоделанная сборка убирается.
             project.discard_staging(config)
+        _gdal.SetConfigOption(
+            "OGR_SQLITE_SYNCHRONOUS", sqlite_synchronous,
+        )
     return project_path

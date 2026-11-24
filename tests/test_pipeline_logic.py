@@ -4757,6 +4757,42 @@ class StreamDryingTest(unittest.TestCase):
             stream_drying.apply(directory)
             self.assertEqual(dict(self._ranks(directory))["loop"], 2)
 
+    @staticmethod
+    def _cycle_branches(cycle_length):
+        def branch(up, down, length):
+            item = stream_drying._Branch()
+            item.up = up
+            item.down = down
+            item.length = length
+            item.points = [(0.0, 0.0), (1.0, 0.0)]
+            return item
+
+        return [
+            branch(0, 1, 100.0),
+            branch(1, 2, cycle_length),
+            branch(2, 1, cycle_length),
+            branch(2, 3, 1000.0),
+        ]
+
+    def test_positive_cycle_saturates_connected_component(self):
+        # Прежний расчёт крутил значения по циклу, пока они не упирались
+        # в общую длину связной компоненты: 100 + 200 + 200 + 1000.
+        branches = self._cycle_branches(200.0)
+        groups, totals = stream_drying._components(branches)
+        values = stream_drying._upstream_values(
+            branches, {0: [0], 1: [1], 2: [2, 3]}, groups, totals,
+        )
+        self.assertEqual(values, [100.0, 1500.0, 1500.0, 1500.0])
+
+    def test_zero_length_cycle_keeps_path_values(self):
+        # Цикл из нулевых ветвей ничего не добавляет к пути.
+        branches = self._cycle_branches(0.0)
+        groups, totals = stream_drying._components(branches)
+        values = stream_drying._upstream_values(
+            branches, {0: [0], 1: [1], 2: [2, 3]}, groups, totals,
+        )
+        self.assertEqual(values, [100.0, 100.0, 100.0, 1100.0])
+
     def test_ensure_visible_sets_all_ranks(self):
         with tempfile.TemporaryDirectory() as directory:
             self._line_layer(directory, "stream", [

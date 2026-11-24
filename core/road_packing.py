@@ -179,7 +179,16 @@ def pack(directory, name, cancel=None):
 
 
 def pack_all(directory, cancel=None, progress=None):
-    """Пакует площади, здания, точки и простые линии после полей."""
+    """Пакует площади, здания, точки и простые линии после полей.
+
+    Слои независимы и пишутся в свои файлы, поэтому крупнейший идёт
+    первым, а остальные пакуются параллельно.  Так здание больше не
+    держит простаивающие ядра, пока пакуются мелкие слои.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from .memory import layer_worker_limit
+
     base = Path(directory)
     names = [
         name for name in POST_PASS_LAYERS
@@ -189,14 +198,36 @@ def pack_all(directory, cancel=None, progress=None):
         key=lambda name: (base / f"{name}.sqlite").stat().st_size,
         reverse=True,
     )
+    if not names:
+        return 0
+    workers = min(layer_worker_limit(4), len(names))
+    if workers <= 1:
+        written = 0
+        for name in names:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            count = pack(directory, name, cancel=cancel)
+            written += count
+            if progress is not None:
+                progress(f"{name}: упаковано {count} объектов")
+        return written
     written = 0
-    for name in names:
-        if cancel is not None and cancel.is_set():
-            raise InterruptedError("Preparation cancelled")
-        count = pack(directory, name, cancel=cancel)
-        written += count
-        if progress is not None:
-            progress(f"{name}: упаковано {count} объектов")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(pack, directory, name, cancel): name
+            for name in names
+        }
+        try:
+            for future in as_completed(futures):
+                name = futures[future]
+                count = future.result()
+                written += count
+                if progress is not None:
+                    progress(f"{name}: упаковано {count} объектов")
+        except Exception:
+            for future in futures:
+                future.cancel()
+            raise
     return written
 
 

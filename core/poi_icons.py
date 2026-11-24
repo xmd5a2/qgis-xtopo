@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree
 
+from . import sqlite_fields
 from .cpu import cpu_workers
 from .peak_placement import NAME_TAGS
 from .project import _maplayer_spans
@@ -1708,7 +1709,6 @@ def _write_icon_hide(config, layers, points, bands):
     висят на `UPDATE OF "GEOMETRY"`, а поле icon_hide — другое поле.
     """
     hidden = _hidden_icon_bands(points, bands)
-    import sqlite3
 
     updates = {}
     for (name, fid), indexes in hidden.items():
@@ -1723,9 +1723,9 @@ def _write_icon_hide(config, layers, points, bands):
         path = _source_path(config, info.source)
         if path is None:
             continue
-        connection = sqlite3.connect(str(path))
+        connection = sqlite_fields.connect(path)
         try:
-            table = _sqlite_table(connection, path)
+            table = sqlite_fields.table_name(connection, path)
             columns = {
                 row[1] for row in connection.execute(
                     f'PRAGMA table_info("{table}")'
@@ -1743,7 +1743,7 @@ def _write_icon_hide(config, layers, points, bands):
                 )
             values = updates.get(info.name, ())
             if values:
-                primary = _sqlite_primary_key(connection, table)
+                primary = sqlite_fields.primary_key(connection, table)
                 connection.executemany(
                     f'UPDATE "{table}" SET "{ICON_HIDE_FIELD}" = ? '
                     f'WHERE "{primary}" = ?',
@@ -2069,8 +2069,6 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
     Файлов десятки, а коммит каждого ждёт диск: пишутся они
     параллельно, иначе ожидание диска идёт впустую.
     """
-    import sqlite3
-
     by_layer = {}
     for (name, fid), per_band in distances.items():
         by_layer.setdefault(name, {})[fid] = per_band
@@ -2108,9 +2106,9 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
     def write(path):
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Preparation cancelled")
-        connection = sqlite3.connect(str(path))
+        connection = sqlite_fields.connect(path)
         try:
-            table = _sqlite_table(connection, path)
+            table = sqlite_fields.table_name(connection, path)
             columns = {
                 row[1] for row in connection.execute(
                     f'PRAGMA table_info("{table}")'
@@ -2123,7 +2121,7 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
                 )
             values = prepared[path]
             if values:
-                primary = _sqlite_primary_key(connection, table)
+                primary = sqlite_fields.primary_key(connection, table)
                 connection.executemany(
                     f'UPDATE "{table}" SET "{hide_field_name()}" = ? '
                     f'WHERE "{primary}" = ?',
@@ -2147,26 +2145,6 @@ def _write_suppression(config, layers, distances, bands, cancel=None):
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for future in as_completed([pool.submit(write, path) for path in paths]):
             future.result()
-
-
-def _sqlite_table(connection, path):
-    """Имя таблицы слоя в файле Spatialite."""
-    rows = connection.execute(
-        "SELECT f_table_name FROM geometry_columns"
-    ).fetchall()
-    if len(rows) == 1:
-        return rows[0][0]
-    if not rows:
-        raise ValueError(f"в {path} нет слоёв с геометрией")
-    raise ValueError(f"в {path} несколько слоёв: {[r[0] for r in rows]}")
-
-
-def _sqlite_primary_key(connection, table):
-    """Имя первичного ключа таблицы."""
-    for row in connection.execute(f'PRAGMA table_info("{table}")'):
-        if row[5]:
-            return row[1]
-    return "fid"
 
 
 def _write_aux(config, records, crs, file_name):
