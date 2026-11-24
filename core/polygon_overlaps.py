@@ -31,6 +31,7 @@ DEFAULT_PAIRS = (
     ("water", "island"),
     ("water", "wood"),
     ("water", "scrub"),
+    ("water", "sand"),
     ("allotments", "landuse_residential"),
 )
 

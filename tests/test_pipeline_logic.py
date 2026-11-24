@@ -2723,6 +2723,29 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
         self.assertEqual(_interior_rings(geometry), 1)
 
+    def test_water_is_cut_around_sand(self):
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "water_dissolved.sqlite",
+                "water_dissolved",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "sand.sqlite",
+                "sand",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "water_dissolved.sqlite"
+            )[0]
+        self.assertEqual(results, [("water", "sand", 1)])
+        self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 1)
+
     def test_parallel_candidate_check_matches_serial(self):
         """Параллельный отсев кандидатов не меняет результат."""
         from unittest import mock

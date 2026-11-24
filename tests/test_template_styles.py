@@ -410,12 +410,12 @@ class LandcoverLayerOrderTest(unittest.TestCase):
             "болото должно оставаться выше воды",
         )
 
-    def test_sand_stays_above_water(self):
-        # Прибрежные песчаные отмели лежат в OSM поверх моря. Если вода
-        # выше, полигон воды закрывает песок.
-        self.assertLess(
+    def test_sand_stays_below_water(self):
+        # Песок остаётся под водой: пересечение воды и песка вырезается
+        # из воды в polygon_overlaps, и отмели видны через дырку.
+        self.assertGreater(
             self.order.index("sand"), self.order.index("water"),
-            "песок должен оставаться выше воды",
+            "песок должен оставаться под водой",
         )
 
     def test_wood_and_scrub_are_above_open_land(self):
