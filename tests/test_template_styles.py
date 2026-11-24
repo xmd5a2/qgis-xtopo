@@ -1347,6 +1347,25 @@ class RuleScaleRangeTest(unittest.TestCase):
             )
 
 
+class AllotmentLabelScaleTest(unittest.TestCase):
+    """Типовые подписи садовых участков не показываются на обзоре."""
+
+    def test_labels_stop_at_150k(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        layer = layers["allotments names 300+"]
+        rule = layer.find("labeling/rules/rule")
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule.get("scalemindenom"), "1")
+        self.assertEqual(rule.get("scalemaxdenom"), "150000")
+        renderer_rule = layer.find("renderer-v2/rules/rule")
+        self.assertIsNotNone(renderer_rule)
+        self.assertEqual(renderer_rule.get("scalemindenom"), "1")
+        self.assertEqual(renderer_rule.get("scalemaxdenom"), "150000")
+
+
 class IslandLabelAreaTest(unittest.TestCase):
     """На обзорных масштабах подписываются только крупные острова.
 
