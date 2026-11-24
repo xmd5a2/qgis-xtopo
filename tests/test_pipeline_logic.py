@@ -1637,6 +1637,33 @@ class AdminNameFallbackTest(unittest.TestCase):
         pipeline._admin_name_fallback()
         self.assertFalse(self.target.exists())
 
+    def test_empty_temporary_layer_closes_as_valid_gpkg(self):
+        """Пустой GPKG-слой не должен разрушаться при закрытии.
+
+        Откат транзакции удалял таблицу вместе с rtree-триггерами, и GDAL
+        писал ``no such table`` при уничтожении DataSource.
+        """
+        from qgis_xtopo.core.pipeline import _GpkgWriter
+
+        self._write_lines([self._feature("Open", [[2, 0], [3, 1]])])
+        source = ogr.Open(
+            str(self.config.vector_dir / "admin_level_2_dissolved.sqlite")
+        )
+        layer = source.GetLayer(0)
+        path = self.config.temp_dir / "empty.gpkg"
+        writer = _GpkgWriter(
+            path, "empty", layer.GetLayerDefn(), layer.GetSpatialRef()
+        )
+        writer.close(commit=False)
+        layer = None
+        source = None
+
+        dataset = ogr.Open(str(path))
+        self.assertIsNotNone(dataset)
+        empty = dataset.GetLayer(0)
+        self.assertIsNotNone(empty)
+        self.assertEqual(empty.GetFeatureCount(), 0)
+
     def test_open_line_with_relation_name_becomes_name_polygon(self):
         self._write_lines([
             self._feature(

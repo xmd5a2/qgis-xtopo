@@ -822,8 +822,10 @@ class _GpkgWriter:
         for name in extra_fields:
             if name not in existing:
                 self.layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
-        # Иначе GPKG фиксирует каждый объект отдельной транзакцией.
-        self.layer.StartTransaction()
+        # Транзакция начинается с первым объектом: пустой GPKG-слой
+        # закрывается без неё. Иначе GPKG фиксирует каждый объект отдельной
+        # транзакцией.
+        self.started = False
 
     def add(self, feature, geometry=None, values=None):
         from osgeo import ogr
@@ -842,16 +844,28 @@ class _GpkgWriter:
                 output.SetField(name, value)
         if geometry is not None:
             output.SetGeometry(geometry)
+        if not self.started:
+            self.layer.StartTransaction()
+            self.started = True
         self.layer.CreateFeature(output)
         self.count += 1
 
     def close(self, commit=True):
+        """Закрывает слой, фиксируя записанные объекты.
+
+        ``commit=False`` означает, что результат не нужен: вызывающий код
+        удалит файл. Откат здесь не годится — GPKG удаляет вместе с ним
+        таблицу слоя, и GDAL затем ругается на пропавшую таблицу.
+        """
         if self.layer is None:
             return
-        if commit:
+        if self.started:
+            # Откат транзакции в GPKG удаляет и саму таблицу слоя: драйвер
+            # выравнивает её с началом транзакции. После этого rtree-триггеры
+            # ссылаются на несуществующую таблицу и GDAL ругается при
+            # уничтожении DataSource. Временный файл всё равно удаляет
+            # вызывающий код, поэтому прерванную запись фиксируем и закрываем.
             self.layer.CommitTransaction()
-        else:
-            self.layer.RollbackTransaction()
         self.layer = None
         self.dataset = None
 
