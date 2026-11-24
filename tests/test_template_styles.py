@@ -13,7 +13,9 @@ from collections import Counter
 from xml.etree import ElementTree
 
 from qgis_xtopo.core import poi_icons
-from qgis_xtopo.core.area_field import AREA_LAYERS
+from qgis_xtopo.core.area_field import (
+    AREA_LAYERS, LABEL_AREA_FIELD, LABEL_AREA_LAYERS,
+)
 from qgis_xtopo.core.resources import PACKAGE_DIR, template_path
 
 # Слой пересыхающей воды рисуется горизонтальной штриховкой.
@@ -1385,7 +1387,7 @@ class IslandLabelAreaTest(unittest.TestCase):
         ]
         self.assertEqual(len(overview), 1)
         self.assertEqual(
-            overview[0].get("filter"), "area_calc>150000000"
+            overview[0].get("filter"), '"area_geodesic">150000000'
         )
 
 
@@ -1416,6 +1418,57 @@ class WaterLabelMinimumFeatureSizeTest(unittest.TestCase):
                 2.0,
                 rule.get("filter") or rule.get("description"),
             )
+
+
+class WaterLabelAreaFieldTest(unittest.TestCase):
+    """Площадь для подписей воды берётся из подготовленного поля.
+
+    `$area` в контексте подписей считается по эллипсоиду для каждого
+    объекта в кадре.  Геодезическая площадь считается один раз при
+    подготовке и лежит в `area_geodesic`.
+    """
+
+    def test_labels_use_precomputed_area(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        for name, source in LABEL_AREA_LAYERS.items():
+            layer = layers[name]
+            datasource = layer.findtext("datasource") or ""
+            self.assertIn(f"{source}.sqlite", datasource, name)
+            labeling = layer.find("labeling")
+            self.assertIsNotNone(labeling, name)
+            values = [
+                value
+                for element in labeling.iter()
+                for value in element.attrib.values()
+            ]
+            self.assertTrue(
+                any(LABEL_AREA_FIELD in value for value in values), name)
+            self.assertFalse(
+                any("$area" in value for value in values), name)
+
+    def test_overview_requires_two_square_km(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        rules = layers["water names continental"].find(
+            "labeling/rules").findall("rule")
+        overview = [
+            rule for rule in rules
+            if rule.get("scalemindenom") == "300000"
+            and rule.get("scalemaxdenom") is None
+        ]
+        self.assertEqual(len(overview), 1)
+        active = [
+            rule for rule in overview[0].findall("rule")
+            if rule.get("active") != "0"
+        ]
+        self.assertEqual(len(active), 1)
+        self.assertEqual(
+            active[0].get("filter"), f'"{LABEL_AREA_FIELD}" > 2000000')
 
 
 class WaterLabelCalloutTest(unittest.TestCase):

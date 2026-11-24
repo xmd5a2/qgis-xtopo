@@ -1,14 +1,18 @@
-"""Поле площади для фильтров рендерера.
+"""Поля площади для фильтров рендерера и подписей.
 
-QGIS-выражение `$area` считает планарную площадь в СК слоя и переводит
-её в квадратные метры.  Провайдер не умеет проталкивать `$area` в SQL,
-поэтому фильтр правила проверяется для каждого объекта в кадре.  Если
-площадь лежит в обычном поле, тот же фильтр уходит в SQL, и провайдер
-читает только подходящие объекты.
+QGIS-выражение `$area` считает площадь для каждого объекта в кадре.
+Провайдер не умеет проталкивать его в SQL, поэтому фильтр правила
+проверяется вручную.  Если площадь лежит в обычном поле, тот же фильтр
+уходит в SQL, и провайдер читает только подходящие объекты.
 
-Значение `area_m2` совпадает с `$area` при `ellipsoid=NONE`, как в
-шаблоне: площадь в единицах СК слоя, умноженная на квадрат коэффициента
-перевода единиц в метры.
+`area_m2` совпадает с `$area` при `ellipsoid=NONE`: площадь в единицах
+СК слоя, умноженная на квадрат коэффициента перевода единиц в метры.
+Этим полем пользуются фильтры рендерера.
+
+Для подписей одного `area_m2` мало: на широте дельты Лены планарная
+площадь в градусах завышает её в несколько раз.  Поэтому `area_geodesic`
+считается по эллипсоиду WGS84 тем же `QgsDistanceArea`, что и `$area`
+в контексте подписей.
 """
 
 from pathlib import Path
@@ -29,6 +33,23 @@ AREA_LAYERS = {
     "water": "water_dissolved",
     "wood": "wood",
 }
+
+# Слои, у которых правила подписей или размер текста используют площадь.
+# Имя слоя в проекте -> имя файла без расширения.
+LABEL_AREA_LAYERS = {
+    "cemetery": "cemetery",
+    "desert": "desert",
+    "glacier": "glacier",
+    "island polygon": "island",
+    "mountain area": "mountain_area",
+    "nature_reserve": "nature_reserve",
+    "plateau": "plateau",
+    "sand": "sand",
+    "water intermittent": "water_intermittent_dissolved",
+    "water names continental": "water",
+}
+
+LABEL_AREA_FIELD = "area_geodesic"
 
 # QgsUnitTypes.fromUnitToUnitFactor(DistanceDegrees, DistanceMeters).
 DEGREE_TO_METER = 111319.49079327357
@@ -155,11 +176,99 @@ def add_area_field(path):
         dataset = None
 
 
+def _source_crs(layer):
+    """СК слоя в виде QgsCoordinateReferenceSystem."""
+    from qgis.core import QgsCoordinateReferenceSystem
+
+    srs = layer.GetSpatialRef()
+    if srs is not None:
+        authority = srs.GetAuthorityName(None)
+        code = srs.GetAuthorityCode(None)
+        if authority and code:
+            crs = QgsCoordinateReferenceSystem(f"{authority}:{code}")
+            if crs.isValid():
+                return crs
+        crs = QgsCoordinateReferenceSystem()
+        if crs.createFromWkt(srs.ExportToWkt()):
+            return crs
+    return QgsCoordinateReferenceSystem("EPSG:4326")
+
+
+def add_geodesic_area_field(path, field=LABEL_AREA_FIELD):
+    """Добавляет и заполняет геодезическую площадь в одном слое.
+
+    Значение совпадает с `$area` в контексте подписей: площадь по
+    эллипсоиду WGS84 в квадратных метрах.  Повторный вызов на готовом
+    слое ничего не меняет.
+    """
+    from osgeo import gdal, ogr
+    from qgis.core import (
+        QgsCoordinateTransformContext,
+        QgsDistanceArea,
+        QgsGeometry,
+    )
+
+    gdal.UseExceptions()
+    ogr.UseExceptions()
+    path = Path(path)
+    if not path.exists():
+        return False
+    dataset = gdal.OpenEx(str(path), gdal.OF_VECTOR | gdal.OF_UPDATE)
+    if dataset is None:
+        return False
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return False
+        index = layer.GetLayerDefn().GetFieldIndex(field)
+        if index >= 0:
+            for feature in layer:
+                if feature.IsFieldSetAndNotNull(index):
+                    return False
+        else:
+            layer.CreateField(ogr.FieldDefn(field, ogr.OFTReal))
+            index = layer.GetLayerDefn().GetFieldIndex(field)
+
+        distance = QgsDistanceArea()
+        distance.setSourceCrs(
+            _source_crs(layer), QgsCoordinateTransformContext())
+        distance.setEllipsoid("WGS84")
+
+        layer.StartTransaction()
+        try:
+            layer.ResetReading()
+            for feature in layer:
+                geometry = feature.GetGeometryRef()
+                area = 0.0
+                if geometry is not None and not geometry.IsEmpty():
+                    shape = QgsGeometry()
+                    shape.fromWkb(bytes(geometry.ExportToWkb()))
+                    if not shape.isEmpty():
+                        area = distance.measureArea(shape)
+                feature.SetField(index, area)
+                layer.SetFeature(feature)
+            layer.CommitTransaction()
+        except Exception:
+            layer.RollbackTransaction()
+            raise
+        return True
+    finally:
+        dataset = None
+
+
 def ensure_area_fields(vector_dir):
-    """Добавляет `area_m2` в подготовленные слои с фильтрами `$area`."""
+    """Добавляет поля площади в подготовленные слои с фильтрами."""
     vector_dir = Path(vector_dir)
+    renderer = set(AREA_LAYERS.values())
+    labels = set(LABEL_AREA_LAYERS.values())
     changed = []
-    for name in AREA_LAYERS.values():
-        if add_area_field(vector_dir / f"{name}.sqlite"):
+    for name in sorted(renderer | labels):
+        path = vector_dir / f"{name}.sqlite"
+        updated = False
+        if name in renderer:
+            updated = add_area_field(path) or updated
+        if name in labels:
+            updated = add_geodesic_area_field(path) or updated
+        if updated:
             changed.append(name)
     return changed

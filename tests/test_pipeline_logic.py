@@ -4810,6 +4810,39 @@ class AreaFieldTest(unittest.TestCase):
             # Повторный вызов не переписывает готовый слой.
             self.assertFalse(add_area_field(destination))
 
+    def test_adds_geodesic_area(self):
+        from tests import qgis_app
+        qgis_app()
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsCoordinateTransformContext,
+            QgsDistanceArea, QgsGeometry,
+        )
+        from qgis_xtopo.core.area_field import (
+            LABEL_AREA_FIELD, add_geodesic_area_field,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self._polygon(root / "polygon.geojson")
+            destination = root / "demo.sqlite"
+            save_vector(source, destination, "demo")
+            self.assertTrue(add_geodesic_area_field(destination))
+            with sqlite3.connect(destination) as connection:
+                value = connection.execute(
+                    f'SELECT "{LABEL_AREA_FIELD}" FROM demo').fetchone()[0]
+            distance = QgsDistanceArea()
+            distance.setSourceCrs(
+                QgsCoordinateReferenceSystem("EPSG:4326"),
+                QgsCoordinateTransformContext())
+            distance.setEllipsoid("WGS84")
+            shape = QgsGeometry.fromWkt(
+                "POLYGON((7 46,7.001 46,7.001 46.001,7 46.001,7 46))")
+            expected = distance.measureArea(shape)
+            self.assertGreater(expected, 0)
+            self.assertAlmostEqual(value, expected, delta=expected * 0.001)
+            # Повторный вызов не переписывает готовый слой.
+            self.assertFalse(add_geodesic_area_field(destination))
+
     def test_missing_layers_are_skipped(self):
         from qgis_xtopo.core.area_field import ensure_area_fields
 
