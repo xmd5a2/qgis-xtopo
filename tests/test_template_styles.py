@@ -1329,6 +1329,32 @@ class WaterLabelMinimumFeatureSizeTest(unittest.TestCase):
             )
 
 
+class WaterLabelCalloutTest(unittest.TestCase):
+    """У подписей воды выноски выключены.
+
+    Callout рисует линию и маркер у подписи, вынесенной за пределы
+    полигона. На обзорных масштабах это давало красный квадрат и линию
+    поверх карты, хотя подпись и без выноски ставится рядом с водоёмом.
+    """
+
+    def test_callouts_are_disabled(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        labeling = layers["water names continental"].find("labeling")
+        self.assertIsNotNone(labeling)
+        callouts = list(labeling.iter("callout"))
+        self.assertTrue(callouts)
+        for callout in callouts:
+            enabled = [
+                option.get("value")
+                for option in callout.iter("Option")
+                if option.get("name") == "enabled"
+            ]
+            self.assertEqual(enabled, ["0"])
+
+
 class BridgeIconScaleTest(unittest.TestCase):
     """Значки мостов не должны попадать на обзорные масштабы."""
 
