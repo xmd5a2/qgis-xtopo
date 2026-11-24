@@ -3094,6 +3094,12 @@ def _merge_isolines_parallel(config, results, split_results, simplify, progress,
             "temp_dir": str(config.temp_dir),
         })
 
+    regular_overview = (
+        config.vector_dir / "isolines_regular_overview.sqlite"
+    )
+    glacier_overview = (
+        config.vector_dir / "isolines_glacier_overview.sqlite"
+    )
     if glacier_available:
         regular_destination = config.vector_dir / "isolines_regular.sqlite"
         glacier_destination = config.vector_dir / "isolines_glacier.sqlite"
@@ -3116,12 +3122,6 @@ def _merge_isolines_parallel(config, results, split_results, simplify, progress,
             },
         ]
         if simplify > 0:
-            regular_overview = (
-                config.vector_dir / "isolines_regular_overview.sqlite"
-            )
-            glacier_overview = (
-                config.vector_dir / "isolines_glacier_overview.sqlite"
-            )
             regular_overview_sources, regular_overview_offsets = (
                 _chunk_sources(
                     config, results, "regular", "overview", "_overview",
@@ -3160,13 +3160,6 @@ def _merge_isolines_parallel(config, results, split_results, simplify, progress,
             "mode": "merge", "index": len(jobs), "tasks": tasks,
             "temp_dir": str(config.temp_dir),
         })
-    else:
-        regular_overview = (
-            config.vector_dir / "isolines_regular_overview.sqlite"
-        )
-        glacier_overview = (
-            config.vector_dir / "isolines_glacier_overview.sqlite"
-        )
 
     if progress:
         progress("Склейка контуров")
