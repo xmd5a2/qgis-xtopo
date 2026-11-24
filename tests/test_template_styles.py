@@ -788,6 +788,76 @@ class LabelPriorityTest(unittest.TestCase):
             self.assertGreater(min(self._priorities(name)), peak)
 
 
+class LabelHaloTest(unittest.TestCase):
+    """Обводки подписей: прозрачность, цвет и размер."""
+
+    ADMIN_LAYERS = (
+        "admin level 2 (country names)",
+        "admin level 4 (region names)",
+    )
+    WATER_COLORS = {
+        "water names continental":
+            "230,242,255,255,rgb:0.9019608,0.9490196,1,1",
+        "river": "237,245,255,255,rgb:0.9294118,0.9607843,1,1",
+    }
+    VOLCANO_COLORS = {
+        "volcano": "251,230,230,255,rgb:0.9843137,0.9019608,0.9019608,1",
+        "volcano dirt": "242,238,230,255,rgb:0.9490196,0.9333333,0.9019608,1",
+    }
+    ADMIN_COLOR = "254,247,255,255,rgb:0.9960784,0.9686275,1,1"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _buffers(self, name):
+        layer = self.layers.get(name)
+        self.assertIsNotNone(layer, f"в шаблоне нет слоя {name}")
+        buffers = list(layer.iter("text-buffer"))
+        self.assertTrue(buffers, f"у слоя {name} нет обводки подписей")
+        return buffers
+
+    def test_all_map_halos_have_20_percent_transparency(self):
+        for name, layer in self.layers.items():
+            for buffer in layer.iter("text-buffer"):
+                self.assertEqual(
+                    buffer.get("bufferOpacity"), "0.8",
+                    f"halo слоя {name} не на 20 % прозрачен",
+                )
+
+    def test_volcano_halos_are_lighter(self):
+        for name, color in self.VOLCANO_COLORS.items():
+            for buffer in self._buffers(name):
+                self.assertEqual(
+                    buffer.get("bufferColor"), color,
+                    f"halo вулкана {name} не осветлён",
+                )
+
+    def test_water_halos_are_lighter(self):
+        for name, color in self.WATER_COLORS.items():
+            colors = {
+                buffer.get("bufferColor") for buffer in self._buffers(name)
+            }
+            self.assertIn(
+                color, colors, f"halo воды {name} не осветлён"
+            )
+
+    def test_admin_halos_are_smaller_and_lighter(self):
+        for name in self.ADMIN_LAYERS:
+            for buffer in self._buffers(name):
+                self.assertEqual(
+                    buffer.get("bufferSize"), "0.66666666666666663",
+                    f"halo {name} не уменьшен в 1,5 раза",
+                )
+                self.assertEqual(
+                    buffer.get("bufferColor"), self.ADMIN_COLOR,
+                    f"halo {name} не осветлён",
+                )
+
+
 class BlockingRoadLabelsTest(unittest.TestCase):
     """Подписи слоёв-блокировщиков дорог на карте не видны.
 
