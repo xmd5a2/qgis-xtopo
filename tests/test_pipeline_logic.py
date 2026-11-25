@@ -1841,7 +1841,7 @@ class SinglePartsFallbackTest(unittest.TestCase):
 class CoastlineIntermediateTest(unittest.TestCase):
     """Промежуточные слои береговой линии и полоса поиска океана."""
 
-    def _recorded(self, closed_only=False):
+    def _recorded(self, closed_only=False, with_water=False):
         from unittest import mock
 
         from qgis_xtopo.core import coastline, pipeline
@@ -1855,6 +1855,8 @@ class CoastlineIntermediateTest(unittest.TestCase):
             vector_dir.mkdir()
             temp_dir.mkdir()
             (vector_dir / "coastline.sqlite").write_bytes(b"")
+            if with_water:
+                (vector_dir / "water_dissolved.sqlite").write_bytes(b"")
             crop = base / "crop.geojson"
             crop.write_text("{}", encoding="utf-8")
             config = SimpleNamespace(
@@ -1953,6 +1955,26 @@ class CoastlineIntermediateTest(unittest.TestCase):
         self.assertIn("open_parts.geojson", layers)
         self.assertIn("native:dissolve", recorded)
         self.assertIn("native:polygonize", recorded)
+
+    def test_inland_water_is_not_dissolved_into_ocean(self):
+        """Озеро у берега не должно сливаться с океаном.
+
+        После растворения озеро становится частью полигона океана, а
+        вырезание острова из этого полигона убирает озеро с карты.
+        """
+        _recorded, calls = self._recorded(with_water=True)
+        water_merge = next(
+            index
+            for index, (algorithm, parameters) in enumerate(calls)
+            if algorithm == "native:mergevectorlayers"
+            and any(
+                "coastline_existing_water" in str(layer)
+                for layer in parameters["LAYERS"]
+            )
+        )
+        after = [algorithm for algorithm, _ in calls[water_merge + 1:]]
+        self.assertIn("native:multiparttosingleparts", after)
+        self.assertNotIn("native:dissolve", after)
 
     def test_closed_rings_are_subtracted_not_split(self):
         recorded, calls = self._recorded(closed_only=True)

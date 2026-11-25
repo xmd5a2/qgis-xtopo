@@ -819,20 +819,19 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
                 "LAYERS": [str(existing), ocean],
                 "OUTPUT": _temp(config, "coastline_merged.gpkg"),
             })
-            # Растворение останавливается на первом невалидном объекте, а
-            # во внутренних водах попадается полигон с самопересечением.
-            # Без починки геометрии растворение падает, океан не попадает
-            # в water_dissolved — и море на карте не рисуется вовсе.
+            # Починка нужна перед разбиением: во внутренних водах
+            # попадается полигон с самопересечением, из-за которого
+            # native:multiparttosingleparts может упасть.
             merged = _run(runner, "native:fixgeometries", {
                 "INPUT": merged,
                 "OUTPUT": _temp(config, "coastline_merged_fixed.gpkg"),
             })
-            ocean = _run(runner, "native:dissolve", {
-                "INPUT": merged,
-                "FIELD": [],
-                "SEPARATE_DISJOINT": False,
-                "OUTPUT": _temp(config, "coastline_merged_dissolved.gpkg"),
-            })
+            # Не растворяем океан с внутренними водами.  Озеро у берега
+            # касается океана и после растворения становится частью его
+            # полигона; затем вырезание пересечений вычитает из большого
+            # полигона остров — вместе с ним пропадает и озеро.  Слою
+            # нужен один набор объектов, а не одна геометрия.
+            ocean = merged
 
         final = _run(runner, "native:multiparttosingleparts", {
             "INPUT": ocean,
