@@ -515,6 +515,76 @@ class MudLayerTest(unittest.TestCase):
         self.assertTrue(color.get("value").startswith("158,229,219,"))
 
 
+class ShingleLabelTest(unittest.TestCase):
+    """Подписи shingle повторяют стиль подписей sand."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _rules(self, name):
+        return self.layers[name].find("labeling/rules").findall("rule")
+
+    def test_labels_are_rule_based(self):
+        self.assertEqual(self.layers["shingle"].get("labelsEnabled"), "1")
+        self.assertEqual(
+            self.layers["shingle"].find("labeling").get("type"),
+            "rule-based",
+        )
+        self.assertEqual(len(self._rules("shingle")), 5)
+
+    def test_scale_bands_match_sand(self):
+        def bands(name):
+            return [
+                (rule.get("scalemindenom"), rule.get("scalemaxdenom"))
+                for rule in self._rules(name)
+            ]
+        self.assertEqual(bands("shingle"), bands("sand"))
+
+    def test_text_style_matches_sand(self):
+        for shingle_rule, sand_rule in zip(
+            self._rules("shingle"), self._rules("sand")
+        ):
+            shingle = shingle_rule.find("settings/text-style")
+            sand = sand_rule.find("settings/text-style")
+            for attribute in (
+                "fontSize", "textColor", "fontFamily", "fontWeight",
+                "namedStyle",
+            ):
+                self.assertEqual(
+                    shingle.get(attribute), sand.get(attribute), attribute
+                )
+            shingle_buffer = shingle.find("text-buffer")
+            sand_buffer = sand.find("text-buffer")
+            for attribute in (
+                "bufferDraw", "bufferSize", "bufferColor", "bufferOpacity",
+            ):
+                self.assertEqual(
+                    shingle_buffer.get(attribute),
+                    sand_buffer.get(attribute),
+                    attribute,
+                )
+
+    def test_shingle_keeps_its_own_name_expression(self):
+        for rule in self._rules("shingle"):
+            expression = rule.find("settings/text-style").get("fieldName")
+            self.assertIn("@name_tag_1", expression)
+            self.assertNotIn("format_sand_desert_name", expression)
+
+    def test_sand_keeps_its_name_expression(self):
+        for rule in self._rules("sand"):
+            expression = rule.find("settings/text-style").get("fieldName")
+            self.assertIn("format_sand_desert_name", expression)
+
+    def test_rule_keys_differ_from_sand(self):
+        shingle = {rule.get("key") for rule in self._rules("shingle")}
+        sand = {rule.get("key") for rule in self._rules("sand")}
+        self.assertFalse(shingle & sand)
+
+
 class IsolinesHachureTest(unittest.TestCase):
     """Сдвиг фазы штрихов задан в шаблоне для всех изолиний."""
 
