@@ -1841,7 +1841,7 @@ class SinglePartsFallbackTest(unittest.TestCase):
 class CoastlineIntermediateTest(unittest.TestCase):
     """Промежуточные слои береговой линии и полоса поиска океана."""
 
-    def _recorded(self, closed_only=False, with_water=False):
+    def _recorded(self, closed_only=False, with_water=False, with_island=False):
         from unittest import mock
 
         from qgis_xtopo.core import coastline, pipeline
@@ -1857,6 +1857,8 @@ class CoastlineIntermediateTest(unittest.TestCase):
             (vector_dir / "coastline.sqlite").write_bytes(b"")
             if with_water:
                 (vector_dir / "water_dissolved.sqlite").write_bytes(b"")
+            if with_island:
+                (vector_dir / "island.sqlite").write_bytes(b"")
             crop = base / "crop.geojson"
             crop.write_text("{}", encoding="utf-8")
             config = SimpleNamespace(
@@ -1980,6 +1982,23 @@ class CoastlineIntermediateTest(unittest.TestCase):
         after = [algorithm for algorithm, _ in calls[water_merge + 1:]]
         self.assertIn("native:multiparttosingleparts", after)
         self.assertNotIn("native:dissolve", after)
+
+    def test_islands_are_clipped_before_difference(self):
+        """Материк обрезается по охвату до вычитания из океана."""
+        _recorded, calls = self._recorded(with_island=True)
+        clip_index = next(
+            index
+            for index, (algorithm, parameters) in enumerate(calls)
+            if algorithm == "native:clip"
+            and "coastline_islands_clipped" in str(parameters["OUTPUT"])
+        )
+        difference_index = next(
+            index
+            for index, (algorithm, parameters) in enumerate(calls)
+            if algorithm == "native:difference"
+            and "coastline_ocean_islands" in str(parameters["OUTPUT"])
+        )
+        self.assertLess(clip_index, difference_index)
 
     def test_closed_rings_are_subtracted_not_split(self):
         recorded, calls = self._recorded(closed_only=True)

@@ -848,11 +848,22 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
                         "INPUT": island_source,
                         "OUTPUT": _temp(config, "coastline_islands_fixed.gpkg"),
                     })
-                ocean = _run(runner, "native:difference", {
-                    "INPUT": ocean,
-                    "OVERLAY": island_source,
-                    "OUTPUT": _temp(config, "coastline_ocean_islands.gpkg"),
+                # Полигон материка может быть больше охвата на порядки.
+                # Difference с целой Гренландией на узком охвате занимает
+                # секунды, а с обрезанным по рамке островом — сотые доли.
+                island_source = _run(runner, "native:clip", {
+                    "INPUT": island_source,
+                    "OVERLAY": str(crop),
+                    "OUTPUT": _temp(config, "coastline_islands_clipped.gpkg"),
                 })
+                if not _has_features(island_source):
+                    notify("Береговая линия: острова вне охвата")
+                else:
+                    ocean = _run(runner, "native:difference", {
+                        "INPUT": ocean,
+                        "OVERLAY": island_source,
+                        "OUTPUT": _temp(config, "coastline_ocean_islands.gpkg"),
+                    })
 
         water = config.vector_dir / "water_dissolved.sqlite"
         existing = None
