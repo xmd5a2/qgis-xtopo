@@ -38,6 +38,13 @@ LOOKS_LIKE_LAND_MAX_ISLANDS = 2000
 # слоях, чтобы не менять результат небольших охватов.
 ISLAND_ID_FILTER_MIN_FEATURES = 5000
 
+# Доля площади водной полосы, ниже которой часть охвата считается сушей.
+# Случайно попавшая на сушу короткая обратная way даёт доли процента, а
+# настоящий берег — заметно больше.  Считать площадь, а не точки, нужно
+# потому, что длинный фьорд может быть обведён одной way: pointonsurface
+# даёт для него одну-две точки, и порог по их числу отбрасывал залив.
+OCEAN_STRIP_SHARE = 0.01
+
 
 def _line_geometries(geometry):
     if geometry is None or geometry.IsEmpty():
@@ -552,6 +559,101 @@ def _temp(config, name):
     return str(path)
 
 
+def _faces_with_strip(split, strip, destination):
+    """Полигоны охвата, вдоль берега которых проходит водная полоса.
+
+    Полоса узкая, поэтому площадь её пересечения с полигоном
+    пропорциональна длине берега.  Длинный фьорд, обведённый одной
+    OSM-way, даёт всего две точки ``pointonsurface``; порог по числу
+    точек отбрасывал его целиком, а по площади — нет.
+    """
+    from osgeo import ogr
+
+    split_dataset = ogr.Open(str(split))
+    strip_dataset = ogr.Open(str(strip))
+    if split_dataset is None or strip_dataset is None:
+        if split_dataset is not None:
+            split_dataset = None
+        if strip_dataset is not None:
+            strip_dataset = None
+        raise CoastlineError(f"Cannot open {split} or {strip}")
+    split_layer = split_dataset.GetLayer(0)
+    strip_layer = strip_dataset.GetLayer(0)
+    if split_layer is None or strip_layer is None:
+        strip_dataset = None
+        split_dataset = None
+        raise CoastlineError(f"Empty layer in {split} or {strip}")
+    spatial_ref = split_layer.GetSpatialRef()
+    totals = {}
+    try:
+        for strip_feature in strip_layer:
+            strip_geometry = strip_feature.GetGeometryRef()
+            if (strip_geometry is None or strip_geometry.IsEmpty()
+                    or strip_geometry.GetDimension() != 2):
+                continue
+            split_layer.SetSpatialFilter(strip_geometry)
+            for face in split_layer:
+                face_geometry = face.GetGeometryRef()
+                if (face_geometry is None or face_geometry.IsEmpty()
+                        or face_geometry.GetDimension() != 2):
+                    continue
+                try:
+                    if not face_geometry.Intersects(strip_geometry):
+                        continue
+                    common = face_geometry.Intersection(strip_geometry)
+                except Exception:
+                    continue
+                area = _geometry_area(common)
+                if area > 0:
+                    fid = face.GetFID()
+                    totals[fid] = totals.get(fid, 0.0) + area
+        split_layer.SetSpatialFilter(None)
+    finally:
+        strip_dataset = None
+    total = sum(totals.values())
+    threshold = max(MIN_POLYGON_AREA, total * OCEAN_STRIP_SHARE)
+    selected = {fid for fid, area in totals.items() if area >= threshold}
+    if not selected:
+        split_dataset = None
+        return None
+
+    driver = ogr.GetDriverByName(_driver_name(destination))
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(str(destination))
+    if output is None:
+        split_dataset = None
+        raise CoastlineError(f"Cannot create {destination}")
+    written = 0
+    try:
+        layer = output.CreateLayer(
+            "ocean", spatial_ref, geom_type=ogr.wkbMultiPolygon
+        )
+        split_layer.ResetReading()
+        for face in split_layer:
+            if face.GetFID() not in selected:
+                continue
+            geometry = face.GetGeometryRef()
+            if (geometry is None or geometry.IsEmpty()
+                    or geometry.GetDimension() != 2):
+                continue
+            if geometry.GetGeometryName() == "POLYGON":
+                geometry = ogr.ForceToMultiPolygon(geometry)
+            elif geometry.GetGeometryName() != "MULTIPOLYGON":
+                continue
+            item = ogr.Feature(layer.GetLayerDefn())
+            item.SetGeometry(geometry)
+            layer.CreateFeature(item)
+            written += 1
+    finally:
+        output = None
+        split_dataset = None
+    if not written:
+        destination.unlink(missing_ok=True)
+        return None
+    return destination
+
+
 def _side_ocean(runner, config, split, open_source, side):
     """Части охвата, лежащие по указанную сторону берега.
 
@@ -589,32 +691,13 @@ def _side_ocean(runner, config, split, open_source, side):
         "OVERLAY": str(config.crop_path),
         "OUTPUT": _temp(config, f"coastline_side_{tag}_clipped.gpkg"),
     })
-    # Точка берётся строго внутри отступа по водной стороне: вершина на
-    # самой линии берега принадлежит сразу двум частям, и океаном
-    # выбирался обломок.  Часть области определяется по числу попавших в
-    # неё точек.
-    vertices = _run(runner, "native:pointonsurface", {
-        "INPUT": clipped,
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_vertices.gpkg"),
-    })
-    # Части охвата выбираются по числу попавших в них водных точек, а не
-    # по «содержит хотя бы одну»: единичные way с обратным направлением
-    # дают точку на суше, и одного такого попадания хватало, чтобы в
-    # океан попала вся материковая часть охвата.  Земля получает доли
-    # процента точек, настоящие водоёмы — почти все свои.
-    total = _count_features(vertices)
-    threshold = max(1, int(total * 0.01))
-    counted = _run(runner, "native:countpointsinpolygon", {
-        "POLYGONS": split,
-        "POINTS": vertices,
-        "FIELD": "vcount",
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_count.gpkg"),
-    })
-    return _run(runner, "native:extractbyexpression", {
-        "INPUT": counted,
-        "EXPRESSION": f'"vcount" >= {threshold}',
-        "OUTPUT": _temp(config, f"coastline_ocean_{tag}.gpkg"),
-    })
+    # Часть охвата выбирается по площади попавшей в неё водной полосы.
+    # Полоса узкая, поэтому площадь пропорциональна длине берега: длинный
+    # фьорд, обведённый одной way, не теряется из-за того, что
+    # pointonsurface даёт на него всего одну-две точки.
+    return _faces_with_strip(
+        split, clipped, _temp(config, f"coastline_ocean_{tag}.gpkg")
+    )
 
 
 def prepare_coastline(config, bbox, progress=None, cancel=None):
