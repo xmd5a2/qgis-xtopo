@@ -1,6 +1,6 @@
 # Кандидаты пересечений полигонов: Альпы
 
-Статус: **список на одобрение, пары ещё не добавлены**.
+Статус: **список одобрен, пары добавлены в `DEFAULT_PAIRS`**.
 Дата: 2026-11-25.
 
 ## Охват
@@ -46,9 +46,11 @@ tuebingen-regbez
   `alpha=27`, `cemetery` — `alpha=54`, `resort` — `alpha=62`,
   `camp site polygon` — `alpha=92`; они не скрывают объекты полностью.
 
-Оценки в таблице — по выборке, не точные. После одобрения пары нужно
-добавить в `core/polygon_overlaps.py:DEFAULT_PAIRS`, затем прогнать точный
-прогон на копиях слоёв.
+Оценки в таблице — по выборке, не точные. Все пары из таблицы добавлены
+в `core/polygon_overlaps.py:DEFAULT_PAIRS`; уже существовавшие
+`farmland` → `landuse_residential`, `farmland` → `industrial` и
+`wood` → `landuse_residential` не дублировались. Точный прогон на копиях
+слоёв ещё предстоит.
 
 ## Кандидаты
 
@@ -95,12 +97,13 @@ tuebingen-regbez
 2. Повторить скан по слоям проекта (условия в разделе «Как получен
    список»). Проект `alps_poly` и скрипт скана были разовыми и в
    репозиторий не входят; на новой машине нужен свой прогон.
-3. Для одобренных пар:
+3. Пары из таблицы уже добавлены. Если при новом скане появятся ещё
+   пары:
    - добавить их в `DEFAULT_PAIRS` в `core/polygon_overlaps.py`;
    - при необходимости добавить имя файла в `LAYER_FILES` (например,
      `water_intermittent` → `water_intermittent_dissolved`);
    - расширить `PolygonOverlapTest.test_landcover_pairs_are_configured`
-     и добавить тест механики для новой пары;
+     и `test_alps_pairs_are_cut`;
    - обновить `docs/agents/drivers.md`;
    - выполнить `./tools/run_tests.sh`, затем
      `python3 tools/build_plugin.py --install` и

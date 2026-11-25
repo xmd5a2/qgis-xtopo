@@ -373,8 +373,20 @@
   `("glacier", "bare_rock")` (11 и 14 объектов).
 - **Прочие вложенные площади**: `("farmland", "allotments")` и
   `("wood", "landuse_residential")` (1 и 3 объекта в охвате).
-- **Кандидаты по Альпам ещё не добавлены.** Охват, список пар и порядок
-  продолжения — `docs/alps-overlap-candidates.md`.
+- **Вложенные площади Альп.** После скана по охвату Альп добавлены пары
+  `("wood", "bare_rock")`, `("scree", "bare_rock")`,
+  `("scrub", "bare_rock")`, `("wood", "shingle")`,
+  `("grass", "shingle")`, `("wood", "industrial")`,
+  `("farmland", "greenhouse_horticulture")`,
+  `("farmyard", "greenhouse_horticulture")`,
+  `("landuse_residential", "sand")`, `("scrub", "plant_nursery")`,
+  `("wood", "plant_nursery")` и `("farmland", "plant_nursery")`.
+  Пары `("farmland", "landuse_residential")`,
+  `("farmland", "industrial")` и `("wood", "landuse_residential")` уже
+  были в списке. По выборке Альп больше всего объектов у
+  `wood` → `bare_rock` и `scree` → `bare_rock` (около 573 каждая).
+  Проверка — `PolygonOverlapTest.test_alps_pairs_are_cut`; охват и
+  список — `docs/alps-overlap-candidates.md`.
 - **Площади пересечений для вырезания считаются параллельно.**
   `polygon_overlaps._intersection_areas` делит кандидатов между потоками;
   каждый поток работает со своей копией верхней геометрии.  Площадь нужна

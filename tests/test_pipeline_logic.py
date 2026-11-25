@@ -2891,8 +2891,48 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
         self.assertEqual(_interior_rings(geometry), 1)
 
+    def test_alps_pairs_are_cut(self):
+        """Пары, отобранные по охвату Альп, вырезают нижний полигон."""
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        pairs = (
+            ("wood", "bare_rock"),
+            ("scree", "bare_rock"),
+            ("scrub", "bare_rock"),
+            ("wood", "shingle"),
+            ("grass", "shingle"),
+            ("wood", "industrial"),
+            ("farmland", "greenhouse_horticulture"),
+            ("farmyard", "greenhouse_horticulture"),
+            ("landuse_residential", "sand"),
+            ("scrub", "plant_nursery"),
+            ("wood", "plant_nursery"),
+            ("farmland", "plant_nursery"),
+        )
+        for upper, lower in pairs:
+            with self.subTest(upper=upper, lower=lower):
+                with tempfile.TemporaryDirectory() as directory:
+                    config = self._config(directory)
+                    _write_polygon_layer(
+                        config.vector_dir / f"{upper}.sqlite",
+                        upper,
+                        ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+                    )
+                    _write_polygon_layer(
+                        config.vector_dir / f"{lower}.sqlite",
+                        lower,
+                        ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+                    )
+                    results = resolve_polygon_overlaps(config)
+                    geometry = _read_geometries(
+                        config.vector_dir / f"{upper}.sqlite"
+                    )[0]
+                self.assertEqual(results, [(upper, lower, 1)])
+                self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+                self.assertEqual(_interior_rings(geometry), 1)
+
     def test_landcover_pairs_are_configured(self):
-        """Пары, отобранные по охвату Исландии, остаются в списке."""
+        """Пары, отобранные по охватам Исландии и Альп, остаются в списке."""
         from qgis_xtopo.core.polygon_overlaps import DEFAULT_PAIRS
 
         expected = {
@@ -2904,10 +2944,22 @@ class PolygonOverlapTest(unittest.TestCase):
             ("wetland", "scrub"),
             ("wetland", "water_intermittent"),
             ("grass", "beach"),
+            ("grass", "shingle"),
             ("glacier", "scree"),
             ("glacier", "bare_rock"),
             ("farmland", "allotments"),
+            ("farmland", "greenhouse_horticulture"),
+            ("farmland", "plant_nursery"),
             ("wood", "landuse_residential"),
+            ("wood", "bare_rock"),
+            ("wood", "shingle"),
+            ("wood", "industrial"),
+            ("wood", "plant_nursery"),
+            ("scrub", "bare_rock"),
+            ("scrub", "plant_nursery"),
+            ("scree", "bare_rock"),
+            ("farmyard", "greenhouse_horticulture"),
+            ("landuse_residential", "sand"),
         }
         missing = expected - set(DEFAULT_PAIRS)
         self.assertFalse(missing, f"нет пар: {sorted(missing)}")
