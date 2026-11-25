@@ -569,6 +569,8 @@ def _faces_with_strip(split, strip, destination):
     """
     from osgeo import ogr
 
+    from .pipeline import _prepared_geometry
+
     split_dataset = ogr.Open(str(split))
     strip_dataset = ogr.Open(str(strip))
     if split_dataset is None or strip_dataset is None:
@@ -585,6 +587,7 @@ def _faces_with_strip(split, strip, destination):
         raise CoastlineError(f"Empty layer in {split} or {strip}")
     spatial_ref = split_layer.GetSpatialRef()
     totals = {}
+    prepared_faces = {}
     try:
         for strip_feature in strip_layer:
             strip_geometry = strip_feature.GetGeometryRef()
@@ -597,15 +600,32 @@ def _faces_with_strip(split, strip, destination):
                 if (face_geometry is None or face_geometry.IsEmpty()
                         or face_geometry.GetDimension() != 2):
                     continue
+                fid = face.GetFID()
+                if fid not in prepared_faces:
+                    prepared_faces[fid] = _prepared_geometry(face_geometry)
+                prepared = prepared_faces[fid]
                 try:
-                    if not face_geometry.Intersects(strip_geometry):
+                    if prepared is not None:
+                        contains = prepared.Contains(strip_geometry)
+                        intersects = contains or prepared.Intersects(strip_geometry)
+                    else:
+                        contains = face_geometry.Contains(strip_geometry)
+                        intersects = contains or face_geometry.Intersects(
+                            strip_geometry
+                        )
+                    if contains:
+                        # Полоса целиком внутри части охвата: пересечение
+                        # строить не нужно, его площадь равна площади полосы.
+                        area = _geometry_area(strip_geometry)
+                    elif intersects:
+                        area = _geometry_area(
+                            face_geometry.Intersection(strip_geometry)
+                        )
+                    else:
                         continue
-                    common = face_geometry.Intersection(strip_geometry)
                 except Exception:
                     continue
-                area = _geometry_area(common)
                 if area > 0:
-                    fid = face.GetFID()
                     totals[fid] = totals.get(fid, 0.0) + area
         split_layer.SetSpatialFilter(None)
     finally:
