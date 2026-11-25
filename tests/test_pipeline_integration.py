@@ -562,6 +562,75 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             project.clear()
 
+    def test_coordinate_grid_step_and_labels(self):
+        """Шаг сетки круглый, подписи DMS со стороной света впереди."""
+        from qgis_xtopo.gui.layoutgrid import (
+            GRID_STEPS,
+            choose_grid_step,
+            format_coordinate,
+        )
+
+        # 0,4° по долготе при шаге 5′ дают около 5 столбцов,
+        # 0,3° по широте — около 4 строк.
+        self.assertAlmostEqual(
+            choose_grid_step(0.4, (5, 6)), 5.0 / 60.0, places=9
+        )
+        self.assertAlmostEqual(
+            choose_grid_step(0.3, (3, 4)), 5.0 / 60.0, places=9
+        )
+        self.assertIn(choose_grid_step(0.4, (5, 6)), GRID_STEPS)
+        self.assertEqual(format_coordinate(45.5, True), "E45°30′00″")
+        self.assertEqual(format_coordinate(-45.5, True), "W45°30′00″")
+        self.assertEqual(format_coordinate(50.75, False), "N50°45′00″")
+        self.assertEqual(format_coordinate(-0.25, False), "S00°15′00″")
+
+    def test_project_panel_coordinate_grid_item(self):
+        """Галочка добавляет сетку в макет и убирает её после экспорта."""
+        from qgis.core import (
+            QgsLayoutItemMap, QgsLayoutSize, QgsPrintLayout, QgsProject,
+            QgsUnitTypes,
+        )
+        from qgis_xtopo.gui.layoutgrid import LayoutCoordinateGridItem
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        project = QgsProject.instance()
+        project.clear()
+        panel = ProjectPanel(None)
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        layout.setName("grid")
+        map_item = QgsLayoutItemMap(layout)
+        map_item.attemptResize(
+            QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters)
+        )
+        layout.addLayoutItem(map_item)
+        try:
+            self.assertFalse(panel.export_grid.isChecked())
+            items = [
+                item for item in layout.items()
+                if isinstance(item, LayoutCoordinateGridItem)
+            ]
+            self.assertEqual(items, [])
+
+            panel.export_grid.setChecked(True)
+            panel._configure_export_grid(map_item)
+            items = [
+                item for item in layout.items()
+                if isinstance(item, LayoutCoordinateGridItem)
+            ]
+            self.assertEqual(len(items), 1)
+            self.assertGreater(items[0].zValue(), map_item.zValue())
+
+            panel._restore_export_grid()
+            items = [
+                item for item in layout.items()
+                if isinstance(item, LayoutCoordinateGridItem)
+            ]
+            self.assertEqual(items, [])
+        finally:
+            panel.deleteLater()
+            project.clear()
+
     def test_mercator_scale_bar_uses_ground_meters(self):
         """Метры EPSG:3857 на широте 62° примерно вдвое длиннее земных."""
         import math

@@ -194,6 +194,8 @@
   "Альбомная": "Landscape",
   "Портретная": "Portrait",
   "Разрешение, dpi:": "Resolution, dpi:",
+  "Координатная сетка": "Coordinate grid",
+  "Широта и долгота по краям листа: подписи снизу и справа": "Latitude and longitude along the sheet edges: labels at the bottom and right",
   "Больше dpi — выше качество и нагрузка на память. При нехватке памяти используйте 150 или 96.": "Higher dpi gives better quality but uses more memory. If memory is short, use 150 or 96.",
   "Добавить": "Add",
   "Изменить": "Edit",

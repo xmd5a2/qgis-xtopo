@@ -64,6 +64,7 @@ from .atlas import (
     SheetEditMapTool, SheetMapTool, SheetMarker, SheetSizeLabels,
 )
 from .exportpreview import ExportPreviewDialog
+from .layoutgrid import LayoutCoordinateGridItem
 from .layoutscalebar import (
     DEFAULT_BOTTOM_MM,
     DEFAULT_HEIGHT_MM,
@@ -588,6 +589,7 @@ class ProjectPanel(QWidget):
         self._layout_original_layers = None
         self._layout_scale_bar = None
         self._scale_bar_geometry = None
+        self._export_grid_item = None
         self._export_progress = None
         self._export_preview = None
         self._opacity_baseline = {}
@@ -1105,6 +1107,12 @@ class ProjectPanel(QWidget):
             "При нехватке памяти используйте 150 или 96."
         )
         quality.addWidget(self.export_dpi)
+        quality.addSpacing(8)
+        self.export_grid = QCheckBox("Координатная сетка", self)
+        self.export_grid.setToolTip(
+            "Широта и долгота по краям листа: подписи снизу и справа"
+        )
+        quality.addWidget(self.export_grid)
         quality.addStretch(1)
         group_layout.addLayout(quality)
 
@@ -1605,6 +1613,7 @@ class ProjectPanel(QWidget):
         map_item.setLayers(filtered)
 
     def _restore_map_layers(self):
+        self._restore_export_grid()
         self._restore_layout_scale_bar()
         if self._layout_original_layers is None:
             return
@@ -1615,6 +1624,35 @@ class ProjectPanel(QWidget):
         except Exception:
             pass
         self._sync_from_project()
+
+    def _configure_export_grid(self, map_item):
+        """Добавляет координатную сетку, если отмечена галочка экспорта."""
+        self._restore_export_grid()
+        if not self.export_grid.isChecked():
+            return
+        layout = map_item.layout()
+        if layout is None:
+            return
+        item = LayoutCoordinateGridItem(layout, map_item)
+        position = map_item.pagePositionWithUnits()
+        item.attemptMove(
+            QgsLayoutPoint(position.x(), position.y(), position.units())
+        )
+        item.attemptResize(map_item.sizeWithUnits())
+        item.setZValue(map_item.zValue() + 0.5)
+        layout.addLayoutItem(item)
+        self._export_grid_item = (layout, item)
+
+    def _restore_export_grid(self):
+        state = self._export_grid_item
+        if state is None:
+            return
+        self._export_grid_item = None
+        layout, item = state
+        try:
+            layout.removeLayoutItem(item)
+        except Exception:
+            pass
 
     def _replace_layout_scale_bar(self, layout, map_item, page_height):
         """Удаляет штатную шкалу макета и ставит гибкую шкалу окна охвата."""
@@ -1842,6 +1880,7 @@ class ProjectPanel(QWidget):
             else:
                 union = map_item.extent()
         self._configure_map_layers(map_item, union)
+        self._configure_export_grid(map_item)
         self._replace_layout_scale_bar(layout, map_item, height)
         if self._sheets:
             layer = self._create_atlas_layer(map_item.crs())
