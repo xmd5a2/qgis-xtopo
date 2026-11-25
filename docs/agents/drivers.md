@@ -343,6 +343,12 @@
   `water_dissolved`, поэтому песок остаётся ниже воды в дереве и виден
   через дырку; подписи воды при этом не попадают на отмели. Проверка —
   `PolygonOverlapTest.test_water_is_cut_around_sand`.
+- **Песок не прячется под лугом.** `natural=sand` relation 14978205
+  целиком лежит внутри `natural=grassland` relation 14978115; слой
+  `grass` выше `sand` в дереве и закрывал песок. Пара `("grass", "sand")`
+  в `polygon_overlaps.DEFAULT_PAIRS` вырезает песок из луга, и он виден
+  через дырку. Проверка —
+  `PolygonOverlapTest.test_grass_is_cut_around_sand`.
 - **Площади пересечений для вырезания считаются параллельно.**
   `polygon_overlaps._intersection_areas` делит кандидатов между потоками;
   каждый поток работает со своей копией верхней геометрии.  Площадь нужна

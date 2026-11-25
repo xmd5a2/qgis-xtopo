@@ -28,6 +28,7 @@ DEFAULT_PAIRS = (
     ("orchard", "landuse_residential"),
     ("grass", "industrial"),
     ("grass", "vineyard"),
+    ("grass", "sand"),
     ("water", "island"),
     ("water", "wood"),
     ("water", "scrub"),
