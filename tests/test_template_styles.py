@@ -663,6 +663,19 @@ class IsolinesSchemeTest(unittest.TestCase):
         ISOLINES_REGULAR, ISOLINES_GLACIER,
         ISOLINES_REGULAR_OVERVIEW, ISOLINES_GLACIER_OVERVIEW,
     )
+    OVERVIEW = {ISOLINES_REGULAR_OVERVIEW, ISOLINES_GLACIER_OVERVIEW}
+
+    def _expected_render(self, name):
+        values = set(self.RENDER_MAX)
+        if name in self.OVERVIEW:
+            values -= {5, 10}
+        return {str(value) for value in values}
+
+    def _expected_labels(self, name):
+        values = set(self.LABEL_MAX) | set(self.LABEL_OFF)
+        if name in self.OVERVIEW:
+            values.discard(10)
+        return {str(value) for value in values}
 
     @classmethod
     def setUpClass(cls):
@@ -712,10 +725,12 @@ class IsolinesSchemeTest(unittest.TestCase):
     def test_renderer_levels_and_scales(self):
         for name in self.LAYERS:
             rules = self._rules(name, "renderer-v2", "label")
-            self.assertEqual(
-                set(rules), {str(value) for value in self.RENDER_MAX})
+            self.assertEqual(set(rules), self._expected_render(name))
             for value, maximum in self.RENDER_MAX.items():
-                rule = rules[str(value)]
+                rule = rules.get(str(value))
+                if rule is None:
+                    self.assertIn(name, self.OVERVIEW)
+                    continue
                 self.assertNotIn(
                     "checkstate", rule.attrib,
                     f"{name}: правило {value} должно быть активным")
@@ -730,7 +745,10 @@ class IsolinesSchemeTest(unittest.TestCase):
             renderer = self.layers[name].find("renderer-v2")
             rules = self._rules(name, "renderer-v2", "label")
             for value, buckets in self.HASH_BUCKETS.items():
-                rule = rules[str(value)]
+                rule = rules.get(str(value))
+                if rule is None:
+                    self.assertIn(name, self.OVERVIEW)
+                    continue
                 for child in rule.findall("rule"):
                     bucket = self._bucket(child)
                     if bucket is None:
@@ -793,13 +811,12 @@ class IsolinesSchemeTest(unittest.TestCase):
     def test_label_levels_scales_and_visibility(self):
         for name in self.LAYERS:
             rules = self._rules(name, "labeling", "description")
-            self.assertEqual(
-                set(rules),
-                {str(value) for value in self.LABEL_MAX}
-                | {str(value) for value in self.LABEL_OFF},
-            )
+            self.assertEqual(set(rules), self._expected_labels(name))
             for value, maximum in self.LABEL_MAX.items():
-                rule = rules[str(value)]
+                rule = rules.get(str(value))
+                if rule is None:
+                    self.assertIn(name, self.OVERVIEW)
+                    continue
                 self.assertIsNone(
                     rule.get("active"),
                     f"{name}: подписи {value} должны быть включены")
@@ -828,7 +845,10 @@ class IsolinesSchemeTest(unittest.TestCase):
         for name in self.LAYERS:
             rules = self._rules(name, "labeling", "description")
             for value in set(self.LABEL_MAX) | set(self.LABEL_OFF):
-                rule = rules[str(value)]
+                rule = rules.get(str(value))
+                if rule is None:
+                    self.assertIn(name, self.OVERVIEW)
+                    continue
                 for child in rule.iter("rule"):
                     rendering = child.find("./settings/rendering")
                     if rendering is None:
@@ -894,24 +914,33 @@ class IsolinesScaleSplitTest(unittest.TestCase):
                     "1", name,
                 )
 
-    def test_overview_uses_same_style(self):
+    def test_overview_keeps_the_same_elevation_filters(self):
+        """Общие уровни высот по-прежнему описаны одинаково."""
         for fine, overview in self.PAIRS:
-            for tag in ("renderer-v2", "labeling"):
+            for tag, attribute in (
+                ("renderer-v2", "label"),
+                ("labeling", "description"),
+            ):
                 first = self.layers[fine].find(tag)
                 second = self.layers[overview].find(tag)
                 self.assertIsNotNone(first, (fine, tag))
                 self.assertIsNotNone(second, (overview, tag))
-                def rules(node):
-                    return [
-                        (
-                            rule.get("label"), rule.get("filter"),
-                            rule.get("scalemindenom"),
-                            rule.get("scalemaxdenom"),
-                            rule.get("symbol"),
-                        )
-                        for rule in node.iter("rule")
-                    ]
-                self.assertEqual(rules(first), rules(second), (fine, tag))
+                fine_rules = {
+                    rule.get(attribute): rule
+                    for rule in first.findall("./rules/rule")
+                }
+                overview_rules = {
+                    rule.get(attribute): rule
+                    for rule in second.findall("./rules/rule")
+                }
+                common = set(fine_rules) & set(overview_rules)
+                self.assertTrue(common, (fine, overview, tag))
+                for key in common:
+                    self.assertEqual(
+                        fine_rules[key].get("filter"),
+                        overview_rules[key].get("filter"),
+                        (fine, overview, tag, key),
+                    )
 
     def test_overview_reads_separate_files(self):
         for fine, overview in self.PAIRS:
@@ -2104,7 +2133,7 @@ class ServiceRoadLodTest(unittest.TestCase):
     def test_expected_layers_have_service_style(self):
         self.assertTrue(self.expected.issubset(self.layers), self.layers)
 
-    def test_plain_service_lasts_until_300k(self):
+    def test_plain_service_scale_bands_follow_visibility(self):
         for name, layer in self.layers.items():
             service = self._service_rule(layer)
             plain = self._branch(service, "else")
@@ -2129,6 +2158,10 @@ class ServiceRoadLodTest(unittest.TestCase):
                 self.assertIn("@map_scale", first.get("filter", ""), name)
                 self.assertIn(">= 3", first.get("filter", ""), name)
                 self.assertIn(">= 4", first.get("filter", ""), name)
+            elif name == "highway main":
+                # Ближний слой скрыт с 1:200000, поэтому полосы 200k+
+                # в нём недостижимы и удалены.
+                self.assertNotIn(200000, leaves, name)
             else:
                 for scale, lod in ((100000, 3), (200000, 4)):
                     self.assertIn(
@@ -2312,6 +2345,75 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
         self.assertIsNotNone(building)
         self.assertEqual(building.get("hasScaleBasedVisibilityFlag"), "1")
         self.assertEqual(building.get("minScale"), "120877")
+
+
+class DeadScaleRuleTest(unittest.TestCase):
+    """Правила не должны целиком выходить за видимость слоя."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    @staticmethod
+    def _layer_bounds(layer):
+        if layer.get("hasScaleBasedVisibilityFlag") != "1":
+            return 0.0, float("inf")
+        lower = float(layer.get("maxScale") or 0)
+        upper = float(layer.get("minScale") or 0) or float("inf")
+        return lower, upper
+
+    @staticmethod
+    def _rule_bounds(rule):
+        lower = float(rule.get("scalemindenom") or 0)
+        upper = float(rule.get("scalemaxdenom") or 0) or float("inf")
+        return lower, upper
+
+    def _dead_rules(self, rules, layer_lower, layer_upper):
+        dead = []
+
+        def walk(container, lower, upper, path):
+            for rule in container.findall("rule"):
+                rule_lower, rule_upper = self._rule_bounds(rule)
+                low = max(lower, rule_lower)
+                high = min(upper, rule_upper)
+                title = rule.get("label") or rule.get("description") or ""
+                here = path + (title,)
+                if low >= high:
+                    dead.append((here, low, high))
+                if rule.findall("rule"):
+                    walk(rule, low, high, here)
+
+        walk(rules, layer_lower, layer_upper, ())
+        return dead
+
+    def test_no_rule_lies_outside_layer_visibility(self):
+        for name, layer in self.layers.items():
+            lower, upper = self._layer_bounds(layer)
+            for tag in ("renderer-v2", "labeling"):
+                for style in layer.iter(tag):
+                    rules = style.find("rules")
+                    if rules is None:
+                        continue
+                    dead = self._dead_rules(rules, lower, upper)
+                    self.assertFalse(
+                        dead, f"{name} / {tag}: {dead[:3]}"
+                    )
+
+    def test_overview_style_has_no_provider_hidden_classes(self):
+        layer = self.layers["highway main overview"]
+        for tag in ("renderer-v2", "labeling"):
+            for style in layer.iter(tag):
+                filters = " ".join(
+                    rule.get("filter") or ""
+                    for rule in style.iter("rule")
+                )
+                for hidden in (
+                    "residential", "living_street", "pedestrian", "service",
+                ):
+                    self.assertNotIn(hidden, filters, tag)
 
 
 class PackedGeometryTest(unittest.TestCase):
