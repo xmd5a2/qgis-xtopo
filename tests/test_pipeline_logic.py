@@ -1886,13 +1886,6 @@ class CoastlineIntermediateTest(unittest.TestCase):
             def largest(source, destination):
                 return destination
 
-            def faces_with_strip(split, strip, destination):
-                recorded["faces_with_strip"] = {
-                    "SPLIT": split,
-                    "STRIP": strip,
-                }
-                return destination
-
             with mock.patch.object(pipeline, "ProcessingRunner", FakeRunner), \
                     mock.patch.object(pipeline, "save_vector"), \
                     mock.patch.object(
@@ -1906,8 +1899,7 @@ class CoastlineIntermediateTest(unittest.TestCase):
                         coastline, "_largest_polygon", side_effect=largest,
                     ), \
                     mock.patch.object(
-                        coastline, "_faces_with_strip",
-                        side_effect=faces_with_strip,
+                        coastline, "_line_length", return_value=10.0,
                     ), \
                     mock.patch.object(
                         coastline, "_write_polygons",
@@ -1951,11 +1943,12 @@ class CoastlineIntermediateTest(unittest.TestCase):
 
     def test_split_and_side_strip_are_geopackages(self):
         recorded, _calls = self._recorded()
-        for algorithm in ("native:polygonize", "native:intersection"):
+        for algorithm in (
+            "native:polygonize", "native:clip", "native:pointsalonglines",
+        ):
             self.assertEqual(
                 Path(recorded[algorithm]["OUTPUT"]).suffix, ".gpkg", algorithm
             )
-        self.assertIn("faces_with_strip", recorded)
 
     def test_split_uses_only_open_parts(self):
         """Кольца островов не режут охват: они вычитаются площадями."""
@@ -1992,72 +1985,41 @@ class CoastlineIntermediateTest(unittest.TestCase):
         recorded, calls = self._recorded(closed_only=True)
         algorithms = [algorithm for algorithm, _parameters in calls]
         self.assertNotIn("native:splitwithlines", algorithms)
-        self.assertNotIn("native:singlesidedbuffer", algorithms)
+        self.assertNotIn("native:offsetline", algorithms)
         self.assertIn("native:polygonize", algorithms)
         self.assertIn("native:difference", algorithms)
         self.assertEqual(
             Path(recorded["native:polygonize"]["INPUT"]).name, "rings.geojson"
         )
 
-    def test_ocean_faces_use_strip_area_not_point_count(self):
-        """Длинный фьорд, обведённый одной way, не теряется из-за двух точек."""
-        from qgis_xtopo.core.coastline import _faces_with_strip
+    def test_ocean_point_spacing_clamps(self):
+        """Шаг точек ограничен, чтобы число точек не зависело от охвата."""
+        from qgis_xtopo.core.coastline import (
+            OCEAN_POINT_MAX, OCEAN_POINT_MIN, OCEAN_POINT_TARGET,
+            _ocean_point_spacing,
+        )
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        self.assertEqual(_ocean_point_spacing(OCEAN_POINT_MIN / 2),
+                         OCEAN_POINT_MIN)
+        self.assertEqual(
+            _ocean_point_spacing(OCEAN_POINT_TARGET * OCEAN_POINT_MAX * 2),
+            OCEAN_POINT_MAX,
+        )
+        middle = (OCEAN_POINT_MIN + OCEAN_POINT_MAX) / 2
+        self.assertAlmostEqual(
+            _ocean_point_spacing(OCEAN_POINT_TARGET * middle), middle
+        )
 
-            split = root / "split.gpkg"
-            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(split))
-            layer = dataset.CreateLayer("split", None, ogr.wkbPolygon)
-            for wkt in (
-                "POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0))",
-                "POLYGON ((10 0, 10 10, 20 10, 20 0, 10 0))",
-            ):
-                feature = ogr.Feature(layer.GetLayerDefn())
-                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
-                layer.CreateFeature(feature)
-            dataset = None
-
-            strip = root / "strip.gpkg"
-            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(strip))
-            layer = dataset.CreateLayer("strip", None, ogr.wkbPolygon)
-            # Длинная полоса вдоль берега левого полигона — одна way, у неё
-            # была бы одна точка.  Короткая полоса в правом полигоне даёт
-            # меньше 1% общей площади и должна быть отброшена.
-            for wkt in (
-                "POLYGON ((1 1, 1 9, 1.05 9, 1.05 1, 1 1))",
-                "POLYGON ((11 1, 11 1.02, 11.05 1.02, 11.05 1, 11 1))",
-            ):
-                feature = ogr.Feature(layer.GetLayerDefn())
-                feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
-                layer.CreateFeature(feature)
-            dataset = None
-
-            result = _faces_with_strip(split, strip, root / "ocean.gpkg")
-            self.assertIsNotNone(result)
-            dataset = ogr.Open(str(result))
-            layer = dataset.GetLayer(0)
-            features = list(layer)
-            dataset = None
-            self.assertEqual(len(features), 1)
-            self.assertTrue(features[0].GetGeometryRef().Contains(
-                ogr.CreateGeometryFromWkt("POINT (5 5)")
-            ))
-
-    def test_side_buffer_keeps_a_strip_along_the_coast(self):
-        """Сужение меньше половины ширины, иначе полоса вырождается."""
+    def test_side_offset_goes_to_the_right(self):
+        """Для воды справа смещение отрицательное (offsetline: плюс — влево)."""
         recorded, _calls = self._recorded()
-        width = recorded["native:singlesidedbuffer"]["DISTANCE"]
-        inset = recorded["native:buffer"]["DISTANCE"]
-        self.assertGreater(width, 0)
-        self.assertGreater(inset + width / 2, 0)
-        self.assertGreater(width + 2 * inset, width * 0.1)
+        self.assertLess(recorded["native:offsetline"]["DISTANCE"], 0)
 
-    def test_side_buffer_uses_undissolved_open_lines(self):
+    def test_side_offset_uses_undissolved_open_lines(self):
         """Dissolve теряет направление линий и сторону воды."""
         recorded, calls = self._recorded()
         self.assertEqual(
-            Path(recorded["native:singlesidedbuffer"]["INPUT"]).name,
+            Path(recorded["native:offsetline"]["INPUT"]).name,
             "open_lines.geojson",
         )
         dissolves = [

@@ -14,12 +14,17 @@ class CoastlineError(RuntimeError):
     pass
 
 
-# Полоса по водную сторону берега: положительный буфер задаёт её ширину,
-# отрицательный убирает кромку у самой линии. Сужение должно быть заметно
-# меньше половины ширины: при равенстве полоса вырождается в линию,
-# pointonsurface даёт единичные точки у концов, и океан не находится.
-SIDE_BUFFER_WIDTH = 0.0002
-SIDE_BUFFER_INSET = 0.3 * SIDE_BUFFER_WIDTH
+# Смещение линии берега в воду, в градусах.  По этой линии равномерно
+# расставляются точки, и часть охвата получает голоса пропорционально
+# длине своего берега.  Смещение должно быть больше нуля, иначе точки
+# лягут на саму линию и попадут сразу в две части охвата.
+SIDE_OFFSET = 0.00013
+
+# Сколько точек ставить вдоль смещённой линии.  Число фиксировано, поэтому
+# стоимость выбора стороны океана не растёт вместе с длиной берега.
+OCEAN_POINT_TARGET = 12000
+OCEAN_POINT_MIN = 0.0005
+OCEAN_POINT_MAX = 0.01
 
 # Площадь в квадратных градусах: всё, что меньше, — щель на стыке
 # геометрий, а не водоём.  1e-8°² — это порядка десятых долей м².
@@ -38,12 +43,12 @@ LOOKS_LIKE_LAND_MAX_ISLANDS = 2000
 # слоях, чтобы не менять результат небольших охватов.
 ISLAND_ID_FILTER_MIN_FEATURES = 5000
 
-# Доля площади водной полосы, ниже которой часть охвата считается сушей.
+# Доля береговых точек, ниже которой часть охвата считается сушей.
 # Случайно попавшая на сушу короткая обратная way даёт доли процента, а
-# настоящий берег — заметно больше.  Считать площадь, а не точки, нужно
-# потому, что длинный фьорд может быть обведён одной way: pointonsurface
-# даёт для него одну-две точки, и порог по их числу отбрасывал залив.
-OCEAN_STRIP_SHARE = 0.01
+# настоящий берег — заметно больше.  Точки расставлены равномерно, поэтому
+# их число пропорционально длине берега: длинный фьорд, обведённый одной
+# way, больше не теряется.
+OCEAN_POINT_SHARE = 0.01
 
 
 def _line_geometries(geometry):
@@ -559,119 +564,42 @@ def _temp(config, name):
     return str(path)
 
 
-def _faces_with_strip(split, strip, destination):
-    """Полигоны охвата, вдоль берега которых проходит водная полоса.
-
-    Полоса узкая, поэтому площадь её пересечения с полигоном
-    пропорциональна длине берега.  Длинный фьорд, обведённый одной
-    OSM-way, даёт всего две точки ``pointonsurface``; порог по числу
-    точек отбрасывал его целиком, а по площади — нет.
-    """
+def _line_length(path):
+    """Суммарная длина линейных объектов слоя."""
     from osgeo import ogr
 
-    from .pipeline import _prepared_geometry
+    dataset = ogr.Open(str(path))
+    if dataset is None:
+        return 0.0
+    total = 0.0
 
-    split_dataset = ogr.Open(str(split))
-    strip_dataset = ogr.Open(str(strip))
-    if split_dataset is None or strip_dataset is None:
-        if split_dataset is not None:
-            split_dataset = None
-        if strip_dataset is not None:
-            strip_dataset = None
-        raise CoastlineError(f"Cannot open {split} or {strip}")
-    split_layer = split_dataset.GetLayer(0)
-    strip_layer = strip_dataset.GetLayer(0)
-    if split_layer is None or strip_layer is None:
-        strip_dataset = None
-        split_dataset = None
-        raise CoastlineError(f"Empty layer in {split} or {strip}")
-    spatial_ref = split_layer.GetSpatialRef()
-    totals = {}
-    prepared_faces = {}
-    try:
-        for strip_feature in strip_layer:
-            strip_geometry = strip_feature.GetGeometryRef()
-            if (strip_geometry is None or strip_geometry.IsEmpty()
-                    or strip_geometry.GetDimension() != 2):
-                continue
-            split_layer.SetSpatialFilter(strip_geometry)
-            for face in split_layer:
-                face_geometry = face.GetGeometryRef()
-                if (face_geometry is None or face_geometry.IsEmpty()
-                        or face_geometry.GetDimension() != 2):
-                    continue
-                fid = face.GetFID()
-                if fid not in prepared_faces:
-                    prepared_faces[fid] = _prepared_geometry(face_geometry)
-                prepared = prepared_faces[fid]
-                try:
-                    if prepared is not None:
-                        contains = prepared.Contains(strip_geometry)
-                        intersects = contains or prepared.Intersects(strip_geometry)
-                    else:
-                        contains = face_geometry.Contains(strip_geometry)
-                        intersects = contains or face_geometry.Intersects(
-                            strip_geometry
-                        )
-                    if contains:
-                        # Полоса целиком внутри части охвата: пересечение
-                        # строить не нужно, его площадь равна площади полосы.
-                        area = _geometry_area(strip_geometry)
-                    elif intersects:
-                        area = _geometry_area(
-                            face_geometry.Intersection(strip_geometry)
-                        )
-                    else:
-                        continue
-                except Exception:
-                    continue
-                if area > 0:
-                    totals[fid] = totals.get(fid, 0.0) + area
-        split_layer.SetSpatialFilter(None)
-    finally:
-        strip_dataset = None
-    total = sum(totals.values())
-    threshold = max(MIN_POLYGON_AREA, total * OCEAN_STRIP_SHARE)
-    selected = {fid for fid, area in totals.items() if area >= threshold}
-    if not selected:
-        split_dataset = None
-        return None
+    def add(geometry):
+        nonlocal total
+        if geometry is None or geometry.IsEmpty():
+            return
+        name = geometry.GetGeometryName()
+        if name in ("LINESTRING", "LINEARRING"):
+            total += geometry.Length()
+        elif name in ("MULTILINESTRING", "GEOMETRYCOLLECTION"):
+            for index in range(geometry.GetGeometryCount()):
+                add(geometry.GetGeometryRef(index))
 
-    driver = ogr.GetDriverByName(_driver_name(destination))
-    destination = Path(destination)
-    destination.unlink(missing_ok=True)
-    output = driver.CreateDataSource(str(destination))
-    if output is None:
-        split_dataset = None
-        raise CoastlineError(f"Cannot create {destination}")
-    written = 0
     try:
-        layer = output.CreateLayer(
-            "ocean", spatial_ref, geom_type=ogr.wkbMultiPolygon
-        )
-        split_layer.ResetReading()
-        for face in split_layer:
-            if face.GetFID() not in selected:
-                continue
-            geometry = face.GetGeometryRef()
-            if (geometry is None or geometry.IsEmpty()
-                    or geometry.GetDimension() != 2):
-                continue
-            if geometry.GetGeometryName() == "POLYGON":
-                geometry = ogr.ForceToMultiPolygon(geometry)
-            elif geometry.GetGeometryName() != "MULTIPOLYGON":
-                continue
-            item = ogr.Feature(layer.GetLayerDefn())
-            item.SetGeometry(geometry)
-            layer.CreateFeature(item)
-            written += 1
+        layer = dataset.GetLayer(0)
+        if layer is not None:
+            for feature in layer:
+                add(feature.GetGeometryRef())
     finally:
-        output = None
-        split_dataset = None
-    if not written:
-        destination.unlink(missing_ok=True)
-        return None
-    return destination
+        dataset = None
+    return total
+
+
+def _ocean_point_spacing(length):
+    """Шаг точек вдоль берега: фиксированное число точек на любой охват."""
+    return min(
+        max(length / OCEAN_POINT_TARGET, OCEAN_POINT_MIN),
+        OCEAN_POINT_MAX,
+    )
 
 
 def _side_ocean(runner, config, split, open_source, side):
@@ -680,44 +608,60 @@ def _side_ocean(runner, config, split, open_source, side):
     Входные линии не растворяются: ``native:dissolve`` меняет
     направление части линий, и сторона воды перестаёт быть той, которую
     задаёт OSM (вода справа по ходу линии).  Направление исходных
-    незамкнутых ways сохраняется, поэтому буфер строится на воде.
+    незамкнутых ways сохраняется, поэтому смещённая линия идёт по воде.
     """
     tag = "right" if side else "left"
-    one_side = _run(runner, "native:singlesidedbuffer", {
+    # У offsetline положительное расстояние смещает влево, отрицательное —
+    # вправо; side=1 означает воду справа.
+    distance = SIDE_OFFSET if not side else -SIDE_OFFSET
+    offset = _run(runner, "native:offsetline", {
         "INPUT": str(open_source),
-        "DISTANCE": SIDE_BUFFER_WIDTH,
-        "SIDE": side,
+        "DISTANCE": distance,
         "SEGMENTS": 5,
         "JOIN_STYLE": 0,
         "MITER_LIMIT": 2,
         "OUTPUT": _temp(config, f"coastline_side_{tag}.gpkg"),
     })
-    thin = _run(runner, "native:buffer", {
-        "INPUT": one_side,
-        "DISTANCE": -SIDE_BUFFER_INSET,
-        "SEGMENTS": 5,
-        "END_CAP_STYLE": 0,
-        "JOIN_STYLE": 0,
-        "MITER_LIMIT": 2,
-        "DISSOLVE": False,
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_thin.gpkg"),
-    })
-    parts = _run(runner, "native:multiparttosingleparts", {
-        "INPUT": thin,
-        "OUTPUT": _temp(config, f"coastline_side_{tag}_parts.gpkg"),
-    })
-    clipped = _run(runner, "native:intersection", {
-        "INPUT": parts,
+    if not _has_features(offset):
+        return None
+    clipped = _run(runner, "native:clip", {
+        "INPUT": str(offset),
         "OVERLAY": str(config.crop_path),
         "OUTPUT": _temp(config, f"coastline_side_{tag}_clipped.gpkg"),
     })
-    # Часть охвата выбирается по площади попавшей в неё водной полосы.
-    # Полоса узкая, поэтому площадь пропорциональна длине берега: длинный
-    # фьорд, обведённый одной way, не теряется из-за того, что
-    # pointonsurface даёт на него всего одну-две точки.
-    return _faces_with_strip(
-        split, clipped, _temp(config, f"coastline_ocean_{tag}.gpkg")
-    )
+    if not _has_features(clipped):
+        return None
+    length = _line_length(clipped)
+    if length <= 0:
+        return None
+    # Вдоль смещённой линии ставятся равномерные точки.  Их число
+    # фиксировано, поэтому стоимость не растёт с длиной берега, а голоса
+    # частей охвата пропорциональны длине их берега.  Одна длинная way
+    # фьорда получает сотни точек, а не одну.
+    points = _run(runner, "native:pointsalonglines", {
+        "INPUT": str(clipped),
+        "DISTANCE": _ocean_point_spacing(length),
+        "START_OFFSET": 0,
+        "END_OFFSET": 0,
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_points.gpkg"),
+    })
+    # Части охвата выбираются по числу попавших в них береговых точек, а
+    # не по «содержит хотя бы одну»: единичные way с обратным направлением
+    # дают точку на суше, и одного такого попадания хватало, чтобы в океан
+    # попала вся материковая часть охвата.
+    counted = _run(runner, "native:countpointsinpolygon", {
+        "POLYGONS": split,
+        "POINTS": str(points),
+        "FIELD": "vcount",
+        "OUTPUT": _temp(config, f"coastline_side_{tag}_count.gpkg"),
+    })
+    total = _count_features(points)
+    threshold = max(1, int(total * OCEAN_POINT_SHARE))
+    return _run(runner, "native:extractbyexpression", {
+        "INPUT": str(counted),
+        "EXPRESSION": f'"vcount" >= {threshold}',
+        "OUTPUT": _temp(config, f"coastline_ocean_{tag}.gpkg"),
+    })
 
 
 def prepare_coastline(config, bbox, progress=None, cancel=None):
