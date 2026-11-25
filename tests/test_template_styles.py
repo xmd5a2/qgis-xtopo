@@ -420,6 +420,13 @@ class LandcoverLayerOrderTest(unittest.TestCase):
             "песок должен оставаться под водой",
         )
 
+    def test_cemetery_stays_below_building(self):
+        # Кладбище закрывало здания внутри него: слой опущен под building.
+        self.assertGreater(
+            self.order.index("cemetery"), self.order.index("building"),
+            "кладбище не должно закрывать здания",
+        )
+
     def test_wood_and_scrub_are_above_open_land(self):
         for forest in ("wood", "scrub"):
             for open_land in self.OPEN_LAND:

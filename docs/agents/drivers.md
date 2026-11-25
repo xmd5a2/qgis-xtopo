@@ -349,6 +349,30 @@
   в `polygon_overlaps.DEFAULT_PAIRS` вырезает песок из луга, и он виден
   через дырку. Проверка —
   `PolygonOverlapTest.test_grass_is_cut_around_sand`.
+- **Под скалами и осыпями убирается луг.** `bare_rock` и `scree` стоят в
+  дереве выше `grass` (grassland, meadow, heath, fell), но их стиль —
+  SVG-штриховка без сплошной заливки, поэтому сквозь неё просвечивал
+  зелёный луг. Пары `("grass", "bare_rock")` и `("grass", "scree")`
+  вырезают луг под ними; в данных Исландии это 15 644 объекта `grass`
+  вокруг скал и 1 991 вокруг осыпей. Проверки —
+  `PolygonOverlapTest.test_grass_is_cut_around_bare_rock` и
+  `PolygonOverlapTest.test_grass_is_cut_around_scree`.
+- **Прибрежные объекты не прячутся под водой и лугом.** Пары
+  `("water", "bare_rock")`, `("water", "beach")`,
+  `("water", "shingle")` и `("grass", "beach")` вырезают мелкие
+  прибрежные площади из воды и луга. По выборке охвата Исландии это около
+  196 скал, 10 пляжей и 3 галечника под водой и 40 пляжей под луком.
+- **Болото не закрывает сухие и пересыхающие участки.** Пары
+  `("wetland", "sand")`, `("wetland", "shingle")`,
+  `("wetland", "scrub")` и `("wetland", "water_intermittent")` (около 12,
+  3, 7 и 2 объектов). Для `water_intermittent` файл слоя называется
+  `water_intermittent_dissolved.sqlite`, поэтому имя добавлено в
+  `LAYER_FILES`. Пару `("wetland", "water")` не добавляли: болото
+  намеренно остаётся выше воды (см. `LandcoverLayerOrderTest`).
+- **Ледник не закрывает скалы и осыпи.** Пары `("glacier", "scree")` и
+  `("glacier", "bare_rock")` (около 23 и 16 объектов).
+- **Прочие вложенные площади**: `("farmland", "allotments")` и
+  `("wood", "landuse_residential")` (по одному объекту в охвате).
 - **Площади пересечений для вырезания считаются параллельно.**
   `polygon_overlaps._intersection_areas` делит кандидатов между потоками;
   каждый поток работает со своей копией верхней геометрии.  Площадь нужна

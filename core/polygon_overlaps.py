@@ -14,8 +14,10 @@ from concurrent.futures import ThreadPoolExecutor
 from . import i18n
 from .cpu import cpu_workers
 
-# Пары (верхний слой, нижний слой). Верхний слой сейчас закрывает нижний;
-# если нижний полигон меньше, из верхнего вычитается их пересечение.
+# Пары (слой, из которого вычитаем, вычитаемый слой). Обычно первый слой
+# закрывает второй; у прозрачных штриховок (скалы, осыпи) первый слой —
+# фон, который просвечивает сквозь штриховку. Если второй полигон меньше,
+# из первого вычитается их пересечение.
 # Острова и островки (place=island/islet) лежат в одном слое island.
 DEFAULT_PAIRS = (
     ("farmland", "grass"),
@@ -24,21 +26,36 @@ DEFAULT_PAIRS = (
     ("farmland", "vineyard"),
     ("farmland", "orchard"),
     ("farmland", "farmyard"),
+    ("farmland", "allotments"),
     ("grass", "landuse_residential"),
     ("orchard", "landuse_residential"),
     ("grass", "industrial"),
     ("grass", "vineyard"),
     ("grass", "sand"),
+    ("grass", "bare_rock"),
+    ("grass", "scree"),
+    ("grass", "beach"),
     ("water", "island"),
     ("water", "wood"),
     ("water", "scrub"),
     ("water", "sand"),
+    ("water", "bare_rock"),
+    ("water", "beach"),
+    ("water", "shingle"),
+    ("wetland", "sand"),
+    ("wetland", "shingle"),
+    ("wetland", "scrub"),
+    ("wetland", "water_intermittent"),
+    ("glacier", "scree"),
+    ("glacier", "bare_rock"),
+    ("wood", "landuse_residential"),
     ("allotments", "landuse_residential"),
 )
 
 # Имя слоя в шаблоне не всегда совпадает с именем файла запроса.
 LAYER_FILES = {
     "water": "water_dissolved",
+    "water_intermittent": "water_intermittent_dissolved",
 }
 
 # Минимальная площадь пересечения: мелкие щели по границам не вырезаем,

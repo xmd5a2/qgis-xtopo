@@ -23,6 +23,10 @@
   (alpha 90). Data-defined `fillColor` для `wetland=tidalflat` из копии
   убран, иначе тидальные грязи оставались бы серыми. Проверка —
   `MudLayerTest`.
+- **Кладбище ниже зданий**: слой `cemetery` стоит сразу под группой
+  `marketplace`, то есть ниже `building`. Раньше он был выше зданий и
+  закрывал их внутри кладбищ. Проверка —
+  `LandcoverLayerOrderTest.test_cemetery_stays_below_building`.
 ## Растровая подложка
 
 - **Подложка проекта** (`core/basemap.py`) — слой XYZ Google sat, Bing sat

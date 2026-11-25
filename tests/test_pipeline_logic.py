@@ -2819,6 +2819,99 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
         self.assertEqual(_interior_rings(geometry), 1)
 
+    def test_grass_is_cut_around_bare_rock(self):
+        """Скалы внутри луга не должны прятаться под ним."""
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "bare_rock.sqlite",
+                "bare_rock",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "grass.sqlite"
+            )[0]
+        self.assertEqual(results, [("grass", "bare_rock", 1)])
+        self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 1)
+
+    def test_grass_is_cut_around_scree(self):
+        """Осыпь внутри луга не должна прятаться под ним."""
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "grass.sqlite",
+                "grass",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "scree.sqlite",
+                "scree",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "grass.sqlite"
+            )[0]
+        self.assertEqual(results, [("grass", "scree", 1)])
+        self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 1)
+
+    def test_wetland_is_cut_around_water_intermittent(self):
+        """Пересыхающий водоём не должен прятаться под болотом."""
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "wetland.sqlite",
+                "wetland",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "water_intermittent_dissolved.sqlite",
+                "water_intermittent_dissolved",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            geometry = _read_geometries(
+                config.vector_dir / "wetland.sqlite"
+            )[0]
+        self.assertEqual(results, [("wetland", "water_intermittent", 1)])
+        self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(geometry), 1)
+
+    def test_landcover_pairs_are_configured(self):
+        """Пары, отобранные по охвату Исландии, остаются в списке."""
+        from qgis_xtopo.core.polygon_overlaps import DEFAULT_PAIRS
+
+        expected = {
+            ("water", "bare_rock"),
+            ("water", "beach"),
+            ("water", "shingle"),
+            ("wetland", "sand"),
+            ("wetland", "shingle"),
+            ("wetland", "scrub"),
+            ("wetland", "water_intermittent"),
+            ("grass", "beach"),
+            ("glacier", "scree"),
+            ("glacier", "bare_rock"),
+            ("farmland", "allotments"),
+            ("wood", "landuse_residential"),
+        }
+        missing = expected - set(DEFAULT_PAIRS)
+        self.assertFalse(missing, f"нет пар: {sorted(missing)}")
+
     def test_parallel_candidate_check_matches_serial(self):
         """Параллельный отсев кандидатов не меняет результат."""
         from unittest import mock
