@@ -4879,6 +4879,24 @@ class AreaFieldTest(unittest.TestCase):
             # Повторный вызов не переписывает готовый слой.
             self.assertFalse(add_geodesic_area_field(destination))
 
+    def test_water_dissolved_gets_geodesic_area(self):
+        from tests import qgis_app
+        qgis_app()
+        from qgis_xtopo.core.area_field import ensure_area_fields
+        from qgis_xtopo.core.pipeline import save_vector
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self._polygon(root / "polygon.geojson")
+            save_vector(
+                source, root / "water_dissolved.sqlite", "water_dissolved")
+            self.assertIn("water_dissolved", ensure_area_fields(root))
+            with sqlite3.connect(root / "water_dissolved.sqlite") as connection:
+                value = connection.execute(
+                    'SELECT "area_geodesic" FROM water_dissolved'
+                ).fetchone()[0]
+            self.assertGreater(value, 0)
+
     def test_missing_layers_are_skipped(self):
         from qgis_xtopo.core.area_field import ensure_area_fields
 

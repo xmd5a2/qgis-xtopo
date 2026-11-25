@@ -1541,6 +1541,148 @@ class WaterLabelAreaFieldTest(unittest.TestCase):
             active[0].get("filter"), f'"{LABEL_AREA_FIELD}" > 2000000')
 
 
+class WaterLodTest(unittest.TestCase):
+    """Мелкие озёра скрываются по геодезической площади.
+
+    Старые правила до 1:300 000 остаются как есть.  Для 1:400 000 и
+    мельче порог зависит от полосы масштаба и уровня детализации; LOD 6
+    показывает больше, но не всё.
+    """
+
+    THRESHOLDS = {
+        (400000, 1000000): {
+            2: 320000, 3: 224000, 4: 160000, 5: 96000, 6: 64000,
+        },
+        (1000000, 3000000): {
+            2: 2000000, 3: 1400000, 4: 1000000, 5: 600000, 6: 400000,
+        },
+        (3000000, None): {
+            2: 18000000, 3: 12600000, 4: 9000000,
+            5: 5400000, 6: 3600000,
+        },
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def _rules(self, name):
+        return self.layers[name].find("renderer-v2/rules").findall("rule")
+
+    def _rule(self, name, minimum, maximum):
+        for rule in self._rules(name):
+            if rule.get("scalemindenom") != str(minimum):
+                continue
+            if maximum is None:
+                if rule.get("scalemaxdenom") is None:
+                    return rule
+            elif rule.get("scalemaxdenom") == str(maximum):
+                return rule
+        self.fail(f"{name}: нет правила {minimum}–{maximum}")
+
+    @staticmethod
+    def _visible(rule, area, lod):
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext, QgsExpressionContextScope,
+            QgsFeature, QgsField, QgsFields,
+        )
+        from qgis.PyQt.QtCore import QVariant
+
+        fields = QgsFields()
+        fields.append(QgsField("area_geodesic", QVariant.Double))
+        fields.append(QgsField("area_m2", QVariant.Double))
+        feature = QgsFeature(fields)
+        feature.setAttribute("area_geodesic", area)
+        feature.setAttribute("area_m2", area)
+        context = QgsExpressionContext()
+        scope = QgsExpressionContextScope("water")
+        scope.setVariable("level_of_detail", lod)
+        scope.setVariable("map_scale", 3000000)
+        context.appendScope(scope)
+        context.setFeature(feature)
+        expression = QgsExpression(rule.get("filter") or "")
+        assert not expression.hasParserError(), expression.parserErrorString()
+        return bool(expression.evaluate(context))
+
+    def test_old_overview_rule_is_kept(self):
+        rule = self._rule("water", 300000, 400000)
+        self.assertIn("area_m2", rule.get("filter") or "")
+        self.assertTrue(self._visible(rule, 700, 4))
+        self.assertFalse(self._visible(rule, 600, 4))
+
+    def test_new_bands_start_at_400000(self):
+        for minimum, maximum in self.THRESHOLDS:
+            rule = self._rule("water", minimum, maximum)
+            self.assertIn("area_geodesic", rule.get("filter") or "")
+            self.assertNotIn("area_m2", rule.get("filter") or "")
+        self.assertFalse(
+            any(
+                rule.get("scalemindenom") in ("100000", "200000")
+                and "area_geodesic" in (rule.get("filter") or "")
+                for rule in self._rules("water")
+            )
+        )
+
+    def test_thresholds_follow_lod(self):
+        for band, thresholds in self.THRESHOLDS.items():
+            rule = self._rule("water", *band)
+            for lod, threshold in thresholds.items():
+                with self.subTest(band=band, lod=lod):
+                    self.assertFalse(
+                        self._visible(rule, threshold - 1, lod))
+                    self.assertTrue(
+                        self._visible(rule, threshold, lod))
+
+    def test_lod_six_has_a_floor(self):
+        for band, thresholds in self.THRESHOLDS.items():
+            rule = self._rule("water", *band)
+            with self.subTest(band=band):
+                self.assertGreater(thresholds[6], 0)
+                self.assertFalse(self._visible(rule, 0, 6))
+
+    def test_ocean_passes_every_band(self):
+        ocean = 349060668463.0
+        for band in self.THRESHOLDS:
+            rule = self._rule("water", *band)
+            with self.subTest(band=band):
+                self.assertTrue(self._visible(rule, ocean, 2))
+
+    def test_intermittent_gets_the_same_scale_bands(self):
+        self.assertIn("area_geodesic", self._rule(
+            "water intermittent", 400000, 1000000).get("filter") or "")
+        self.assertIn("area_geodesic", self._rule(
+            "water intermittent", 1000000, 3000000).get("filter") or "")
+        old = self._rule("water intermittent", 300000, 400000)
+        self.assertFalse(old.get("filter"))
+
+    def test_labels_follow_the_renderer(self):
+        rules = [
+            rule
+            for rule in self.layers["water names continental"].find(
+                "labeling/rules").findall("rule")
+            if rule.get("scalemindenom") == "300000"
+        ]
+        self.assertEqual(len(rules), 1)
+        text = rules[0].get("filter") or ""
+        self.assertIn("@map_scale < 3000000", text)
+        self.assertIn("area_geodesic", text)
+        self.assertIn("3600000", text)
+
+        intermittent = [
+            rule
+            for rule in self.layers["water intermittent"].find(
+                "labeling/rules").findall("rule")
+            if rule.get("scalemindenom") == "300000"
+        ]
+        self.assertEqual(len(intermittent), 1)
+        text = intermittent[0].get("filter") or ""
+        self.assertIn("@map_scale < 400000", text)
+        self.assertIn("area_geodesic", text)
+
+
 class WaterLabelCalloutTest(unittest.TestCase):
     """У подписей воды выноски выключены.
 

@@ -24,7 +24,8 @@
 (`area_field_filters.py`, `blocking_text.py`, `building_lod.py`,
 `isolines_label_limit.py`, `obstacle_icon_hide.py`, `oneway_arrows.py`,
 `place_icon_switch.py`, `point_clusters.py`, `road_multiline.py`,
-`suppression_to_data.py`, `track_length_filter.py`), удалены после
+`suppression_to_data.py`, `track_length_filter.py`, `water_lod.py`),
+удалены после
 применения: результат уже в шаблоне, автоматизация их не запускает.
 Их код остаётся в истории git.
 

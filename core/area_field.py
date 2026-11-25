@@ -12,7 +12,9 @@ QGIS-выражение `$area` считает площадь для каждо�
 Для подписей одного `area_m2` мало: на широте дельты Лены планарная
 площадь в градусах завышает её в несколько раз.  Поэтому `area_geodesic`
 считается по эллипсоиду WGS84 тем же `QgsDistanceArea`, что и `$area`
-в контексте подписей.
+в контексте подписей.  Тем же полем пользуется рендерер воды: пороги
+мелких озёр на обзорных масштабах должны быть одинаковыми в Исландии и
+в Италии.
 """
 
 from pathlib import Path
@@ -33,6 +35,12 @@ AREA_LAYERS = {
     "water": "water_dissolved",
     "wood": "wood",
 }
+
+# Слои, у которых фильтры рендерера используют геодезическую площадь.
+# Имя файла без расширения.  Для воды нужна именно она: планарная
+# `area_m2` в градусах завышает площадь на высоких широтах, и один и тот
+# же порог скрывал бы разные по размеру озёра в Исландии и в Италии.
+GEODESIC_AREA_LAYERS = frozenset({"water_dissolved"})
 
 # Слои, у которых правила подписей или размер текста используют площадь.
 # Имя слоя в проекте -> имя файла без расширения.
@@ -261,13 +269,14 @@ def ensure_area_fields(vector_dir):
     vector_dir = Path(vector_dir)
     renderer = set(AREA_LAYERS.values())
     labels = set(LABEL_AREA_LAYERS.values())
+    geodesic = labels | set(GEODESIC_AREA_LAYERS)
     changed = []
-    for name in sorted(renderer | labels):
+    for name in sorted(renderer | geodesic):
         path = vector_dir / f"{name}.sqlite"
         updated = False
         if name in renderer:
             updated = add_area_field(path) or updated
-        if name in labels:
+        if name in geodesic:
             updated = add_geodesic_area_field(path) or updated
         if updated:
             changed.append(name)
