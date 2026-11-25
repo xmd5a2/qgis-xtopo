@@ -428,6 +428,92 @@ class LandcoverLayerOrderTest(unittest.TestCase):
                     f"{forest} должен быть выше {open_land} (order 7 против 5)",
                 )
 
+    def test_mud_stays_above_wetland_and_water(self):
+        self.assertLess(self.order.index("mud"), self.order.index("wetland"))
+        self.assertLess(self.order.index("mud"), self.order.index("water"))
+
+
+class MudLayerTest(unittest.TestCase):
+    """natural=mud повторяет болото, но с фоном #E3CCB4."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _template_root()
+        cls.layer = next(
+            layer for layer in cls.root.iter("maplayer")
+            if layer.findtext("layername") == "mud"
+        )
+
+    def test_source_is_mud_and_geometry_is_multipolygon(self):
+        self.assertEqual(
+            self.layer.findtext("datasource"),
+            "./vector/mud.sqlite|layerid=0|geometrytype=MultiPolygon",
+        )
+        self.assertEqual(self.layer.get("wkbType"), "MultiPolygon")
+        entries = [
+            entry for entry in self.root.iter("layer-tree-layer")
+            if entry.get("name") == "mud"
+        ]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].get("id"), self.layer.findtext("id"))
+        self.assertEqual(
+            entries[0].get("source"),
+            "./vector/mud.sqlite|layerid=0|geometrytype=MultiPolygon",
+        )
+
+    def test_style_repeats_wetland_with_a_beige_fill(self):
+        renderer = self.layer.find("renderer-v2")
+        self.assertIsNotNone(renderer)
+        self.assertEqual(renderer.get("type"), "RuleRenderer")
+        rules = renderer.find("rules").findall("rule")
+        self.assertEqual(
+            [rule.get("label") for rule in rules],
+            ["0 - 50000", "50000 - 100000", "100000 - 300000", "300000 - 0"],
+        )
+        symbols = renderer.find("symbols").findall("symbol")
+        self.assertEqual(len(symbols), 4)
+        for symbol in symbols:
+            fill = next(
+                layer for layer in symbol.findall("layer")
+                if layer.get("class") == "SimpleFill"
+            )
+            color = next(
+                option for option in fill.findall("./Option/Option")
+                if option.get("name") == "color"
+            )
+            self.assertTrue(
+                color.get("value").startswith("227,204,180,"),
+                color.get("value"),
+            )
+            self.assertNotIn(
+                "fillColor",
+                [option.get("name") for option in fill.iter("Option")],
+            )
+            svg = next(
+                layer for layer in symbol.findall("layer")
+                if layer.get("class") == "SVGFill"
+            )
+            path = next(
+                option for option in svg.findall("./Option/Option")
+                if option.get("name") == "svgFile"
+            )
+            self.assertEqual(path.get("value"), "../icons/wetland.svg")
+
+    def test_wetland_keeps_its_fill(self):
+        wetland = next(
+            layer for layer in self.root.iter("maplayer")
+            if layer.findtext("layername") == "wetland"
+        )
+        fill = next(
+            layer for layer in wetland.find("renderer-v2/symbols/symbol")
+            .findall("layer") if layer.get("class") == "SimpleFill"
+        )
+        color = next(
+            option for option in fill.findall("./Option/Option")
+            if option.get("name") == "color"
+        )
+        self.assertTrue(color.get("value").startswith("158,229,219,"))
+
 
 class IsolinesHachureTest(unittest.TestCase):
     """Сдвиг фазы штрихов задан в шаблоне для всех изолиний."""

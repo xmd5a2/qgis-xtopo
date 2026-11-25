@@ -22,7 +22,7 @@ from qgis_xtopo.core import (
     field_subset, highway_integrity, oneway, road_packing, stream_drying,
 )
 from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
-from qgis_xtopo.core.resources import query_names
+from qgis_xtopo.core.resources import query_names, read_query
 
 
 class _FakeRunner:
@@ -3376,6 +3376,17 @@ class RouteHikingTest(unittest.TestCase):
         self.assertNotIn("route_hiking", query_names())
         self.assertNotIn("route_hiking", RECIPES)
         self.assertNotIn("route_hiking", default_queries())
+
+
+class MudQueryTest(unittest.TestCase):
+    def test_mud_is_prepared_and_fixed(self):
+        self.assertIn("mud", query_names())
+        self.assertIn("mud", default_queries())
+        self.assertIn('natural"="mud', read_query("mud"))
+        self.assertEqual(
+            [operation for operation, _params in recipe_for("mud").steps],
+            ["fix", "save"],
+        )
 
 
 class HighwayIntegrityTest(unittest.TestCase):

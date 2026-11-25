@@ -263,6 +263,9 @@ RECIPES = {
         fix(), save(), polygonstolines(), save("_lines"), load("wetland"),
         label_axis(), save("_names"),
     ]),
+    "mud": Recipe([
+        fix(), save(),
+    ]),
     "wood": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("wood"),
         label_axis(), save("_names"),
