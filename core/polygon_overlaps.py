@@ -74,6 +74,22 @@ METRES_PER_DEGREE = 111320.0
 PARALLEL_INTERSECTIONS_MIN = 64
 
 
+def _prepared(geometry):
+    """Подготовленная геометрия GEOS или None, если она недоступна."""
+    try:
+        return geometry.CreatePreparedGeometry()
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _prepared_intersects(prepared, geometry):
+    """Проверка пересечения без падения на некорректной геометрии."""
+    try:
+        return prepared.Intersects(geometry)
+    except Exception:
+        return True
+
+
 def _intersection_areas(geometry, candidates, cancel=None):
     """Площади пересечения кандидатов с геометрией, параллельно.
 
@@ -94,11 +110,17 @@ def _intersection_areas(geometry, candidates, cancel=None):
 
     def measure(chunk):
         upper = geometry.Clone()
+        prepared = _prepared(upper)
         areas = []
         for position, candidate in enumerate(chunk):
             if (cancel is not None and position % 64 == 0
                     and cancel.is_set()):
                 raise InterruptedError("Preparation cancelled")
+            if prepared is not None and not _prepared_intersects(
+                prepared, candidate
+            ):
+                areas.append(0.0)
+                continue
             intersection = _intersection(upper, candidate)
             areas.append(
                 0.0 if intersection is None or intersection.IsEmpty()
@@ -254,6 +276,11 @@ def _cut_layer(upper_path, lowers, cancel):
                 if geometry is None or geometry.IsEmpty():
                     continue
             original_area = geometry.Area()
+            # Подготовленная копия исходной геометрии — надмножество
+            # текущей, поэтому её можно использовать для отсева на всех
+            # проходах: лишние кандидаты отсеются точной разностью.
+            base_geometry = geometry
+            prepared = _prepared(base_geometry)
             for lower_name, lower_min_area, lower_layer in (
                 (name, area, layer) for name, area, _, layer in lower_layers
             ):
@@ -269,6 +296,10 @@ def _cut_layer(upper_path, lowers, cancel):
                     if lower_geometry is None:
                         continue
                     if lower_geometry.Area() >= original_area:
+                        continue
+                    if prepared is not None and not _prepared_intersects(
+                        prepared, lower_geometry
+                    ):
                         continue
                     candidates.append(lower_geometry.Clone())
                 lower_layer.SetSpatialFilter(None)
