@@ -2402,7 +2402,7 @@ class AutoMosaicTest(unittest.TestCase):
         def fake_layer(key, cells, bounds, width, height, destination, **_kw):
             calls.append(key)
             if key == "3dep":
-                raise terrain.SlowDownload("120 КБ/с < 200 КБ/с")
+                raise terrain.SlowDownload("80 КБ/с < 100 КБ/с")
             path = Path(destination) / f"layer_{key}.tif"
             path.write_bytes(b"tif")
             return path
@@ -2433,7 +2433,62 @@ class AutoMosaicTest(unittest.TestCase):
         self.assertIn("3DEP", text)
         self.assertIn("слишком медленно", text)
         self.assertIn("ALOS AW3D30", text)
-        self.assertIn("120 КБ/с", text)
+        self.assertIn("80 КБ/с", text)
+
+    def test_auto_slow_source_switches_only_once(self):
+        """После первого переключения сторож скорости больше не меняет набор."""
+        from unittest import mock
+
+        from qgis_xtopo.core import dem_sources, sonny, terrain
+
+        bbox = BBox(7.0, 46.0, 8.0, 47.0)
+        covered = frozenset({(46, 7)})
+        availability = {
+            key: dem_sources.Availability(
+                available=True, checked=True, covered_tiles=covered
+            )
+            for key in ("3dep", "alos", "cop30", "srtm")
+        }
+        calls = []
+        guards = []
+
+        def fake_layer(key, cells, bounds, width, height, destination, **kw):
+            calls.append(key)
+            guards.append(kw.get("speed_guard"))
+            if key == "3dep":
+                raise terrain.SlowDownload("80 КБ/с < 100 КБ/с")
+            path = Path(destination) / f"layer_{key}.tif"
+            path.write_bytes(b"tif")
+            return path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                dem_sources, "auto_plan", return_value={(46, 7): "3dep"}
+            ), mock.patch.object(
+                sonny, "load_catalogue", return_value={}
+            ), mock.patch.object(
+                sonny, "catalogue_tiles", return_value={}
+            ), mock.patch.object(
+                terrain, "_cog_layer", side_effect=fake_layer
+            ):
+                used = []
+                counts = {}
+                target = terrain.download_auto_dem(
+                    bbox, root / "out",
+                    availability=availability, used=used, counts=counts,
+                    required_tiles=frozenset({(46, 7)}),
+                )
+            self.assertTrue(target.exists())
+        self.assertEqual(calls, ["3dep", "alos"])
+        self.assertEqual(guards, [True, False])
+        self.assertEqual(used, ["alos"])
+        self.assertEqual(counts, {"alos": 1})
+
+    def test_slow_download_threshold_is_100_kb(self):
+        from qgis_xtopo.core import terrain
+
+        self.assertEqual(terrain.SLOW_DOWNLOAD_RATE, 100 * 1024)
 
     def test_slow_source_cells_follow_priority(self):
         """Тайлы медленного набора расходятся по следующим в списке."""

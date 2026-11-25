@@ -218,11 +218,13 @@ class _Speed:
             return True
 
 
-# Набор рельефа, который за минуту не отдал и 200 КБ/с, заменяется
+# Набор рельефа, который за минуту не отдал и 100 КБ/с, заменяется
 # следующим по приоритету: иначе одна медленная выдача задерживает
 # подготовку на десятки минут.  Порог умышленно низкий — у быстрых
-# зеркал скорость в разы выше, у перегруженных в разы ниже.
-SLOW_DOWNLOAD_RATE = 200 * 1024
+# зеркал скорость в разы выше, у перегруженных в разы ниже.  За одну
+# подготовку источник меняется не более одного раза: после первого
+# переключения сторож отключается, и новые наборы докачиваются как есть.
+SLOW_DOWNLOAD_RATE = 100 * 1024
 SLOW_DOWNLOAD_WINDOW = 60.0
 
 
@@ -1014,7 +1016,7 @@ def _fetch_cog_windows(gdal, sources, bounds, width, height, destination,
 
 
 def _cog_layer(source_key, cells, bounds, width, height, destination,
-               progress=None, cancel=None, status=None):
+               progress=None, cancel=None, status=None, speed_guard=True):
     """Слой мозаики из растрового набора (COG читается по HTTP Range)."""
     gdal, _, _ = _gdal()
     item = dem_sources.source(source_key)
@@ -1022,9 +1024,11 @@ def _cog_layer(source_key, cells, bounds, width, height, destination,
     sources = _cog_sources(source_key, window, progress=progress, cancel=cancel)
     if not sources:
         return None
-    guard = _SpeedGuard(
-        measure=lambda: _layer_bytes(destination, f"layer_{source_key}.tif")
-    )
+    guard = None
+    if speed_guard:
+        guard = _SpeedGuard(
+            measure=lambda: _layer_bytes(destination, f"layer_{source_key}.tif")
+        )
     return _write_layer(
         gdal, sources, bounds, width, height, destination,
         f"layer_{source_key}.tif", cancel, status, item.short,
@@ -1054,7 +1058,8 @@ def _srtm_layer(cells, bounds, width, height, destination, cache_dir=None,
 
 
 def _sonny_layers(cells, catalogue, tile_dir, bounds, width, height,
-                  destination, progress=None, cancel=None, status=None):
+                  destination, progress=None, cancel=None, status=None,
+                  speed_guard=True):
     """Слои мозаики из наборов Sonny DTM.
 
     Наборы разной подробности кладутся отдельными слоями: более
@@ -1072,10 +1077,11 @@ def _sonny_layers(cells, catalogue, tile_dir, bounds, width, height,
             continue
         # Сторож для каждого набора отдельно: локальная сборка слоя
         # между загрузками не должна выглядеть медленной сетью.
-        guard = _SpeedGuard()
+        guard = _SpeedGuard() if speed_guard else None
         paths = sonny.tile_paths(
             catalogue, tile_dir, dataset.key, dataset_cells,
-            progress=progress, cancel=cancel, on_bytes=guard.add,
+            progress=progress, cancel=cancel,
+            on_bytes=guard.add if guard else None,
         )
         files = [str(path) for _cell, path in paths]
         if not files:
@@ -1242,6 +1248,9 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
     layers = []
     served = {}
     failed_cells = set()
+    # Переключение из-за медленной выдачи разрешено один раз за сборку:
+    # иначе наборы могут передавать тайлы друг другу по кругу.
+    slow_switched = False
     coverage = {
         key: dem_sources.coverage(availability, key, sonny_cells)
         for key in order
@@ -1266,15 +1275,21 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
                     made = _sonny_layers(
                         cells, catalogue, sonny_tiles_dir, padded, width,
                         height, layers_dir, progress=progress, cancel=cancel,
-                        status=status,
+                        status=status, speed_guard=not slow_switched,
                     )
                 else:
                     layer = _cog_layer(
                         key, cells, padded, width, height, layers_dir,
                         progress=progress, cancel=cancel, status=status,
+                        speed_guard=not slow_switched,
                     )
                     made = [layer] if layer else []
             except SlowDownload as exc:
+                if slow_switched:
+                    # Второй раз набор не меняем: оставшиеся тайлы
+                    # доберёт SRTM в конце сборки.
+                    failed_cells |= cells
+                    continue
                 # Медленное зеркало не ждём: тайлы берут наборы ниже по
                 # списку приоритета, для новых ячеек собирается слой.
                 groups.pop(key, None)
@@ -1282,6 +1297,7 @@ def download_auto_dem(bbox, destination, progress=None, cancel=None,
                     key, cells, groups, coverage, order, pending,
                 )
                 failed_cells |= left
+                slow_switched = True
                 if progress:
                     progress(i18n.trf(
                         "WARNING: {} отдаёт слишком медленно ({}); "
