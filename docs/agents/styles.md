@@ -292,8 +292,13 @@
   рисовался поверх заливки нижнего и появлялась граница. На обзорных
   масштабах улицы по-прежнему не читаются: слой с ними скрыт целиком. Так
   же устроены служебные копии `[blocking] highway main` и
-  `[blocking] highway main overview`. Проверка —
-  `RoadLayerScaleSplitTest`.
+  `[blocking] highway main overview`. Стиль обзорного слоя вычищен от
+  недостижимых правил: остались только диапазоны от 1:200000, ветки
+  `residential`/`living_street`/`pedestrian`/`service` удалены (кроме
+  `unclassified`), а на 1:700000+ линии в 1.2 раза тоньше, чем в полосе
+  300000–700000. Проверки —
+  `RoadLayerScaleSplitTest.test_overview_renderer_has_only_reachable_scale_bands`
+  и `test_overview_coarse_band_is_thinner`.
   Это важно для скорости: на охвате
   100×100 км в Альпах 47 тыс. service и 29 тыс. residential давали 25,9 с
   кадра, после ограничения обзорных масштабов — 8,7 с. Слой `building` по

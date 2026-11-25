@@ -2217,6 +2217,74 @@ class RoadLayerScaleSplitTest(unittest.TestCase):
     def test_separate_minor_layer_is_gone(self):
         self.assertNotIn("highway main minor", self.layers)
 
+    def test_overview_renderer_has_only_reachable_scale_bands(self):
+        """В обзорном слое не должно быть веток вне его видимости."""
+        layer = self.layers["highway main overview"]
+        rules = layer.find("renderer-v2/rules")
+        leaves = [
+            rule for rule in rules.iter("rule")
+            if not rule.findall("rule")
+        ]
+        for rule in leaves:
+            minimum = int(rule.get("scalemindenom") or 0)
+            maximum = int(rule.get("scalemaxdenom") or 0)
+            self.assertGreaterEqual(
+                minimum, 200000, rule.get("label") or rule.get("filter")
+            )
+            self.assertTrue(
+                maximum == 0 or maximum > 200000,
+                rule.get("label") or rule.get("filter"),
+            )
+        filters = " ".join(
+            rule.get("filter") or "" for rule in rules.iter("rule")
+        )
+        for hidden in (
+            "residential", "living_street", "pedestrian", "service",
+        ):
+            self.assertNotIn(hidden, filters)
+
+    def test_overview_coarse_band_is_thinner(self):
+        """На 1:700000+ линии в 1.2 раза тоньше полосы 300000–700000."""
+        layer = self.layers["highway main overview"]
+        renderer = layer.find("renderer-v2")
+        symbols = {
+            symbol.get("name"): symbol
+            for symbol in renderer.find("symbols")
+        }
+        coarse = [
+            rule for rule in renderer.iter("rule")
+            if rule.get("scalemindenom") == "300000"
+            and rule.get("scalemaxdenom") == "700000"
+        ]
+        fine = [
+            rule for rule in renderer.iter("rule")
+            if rule.get("scalemindenom") == "700000"
+            and not rule.get("scalemaxdenom")
+        ]
+        self.assertTrue(coarse)
+        self.assertEqual(len(coarse), len(fine))
+        for rule in coarse:
+            old = rule.get("symbol")
+            new = "700_" + old
+            self.assertIn(new, symbols, old)
+            old_widths = [
+                float(option.get("value"))
+                for option in symbols[old].iter("Option")
+                if option.get("name") == "line_width"
+            ]
+            new_widths = [
+                float(option.get("value"))
+                for option in symbols[new].iter("Option")
+                if option.get("name") == "line_width"
+            ]
+            self.assertEqual(len(old_widths), len(new_widths), old)
+            for old_width, new_width in zip(old_widths, new_widths):
+                self.assertLess(new_width, old_width, old)
+                self.assertAlmostEqual(
+                    old_width / new_width, 1.2, delta=0.02,
+                    msg=f"{old} -> {new}",
+                )
+
     def test_blocking_layers_follow_the_split(self):
         close = self.layers.get("[blocking] highway main")
         overview = self.layers.get("[blocking] highway main overview")
