@@ -4737,6 +4737,63 @@ class BuildingLodTest(unittest.TestCase):
         self.assertNotIn("@level_of_detail", self.children["ruins"])
 
 
+class FarmyardScaleFilterTest(unittest.TestCase):
+    """Мелкие farmyard скрываются по площади, обводка — с 1:250000."""
+
+    @classmethod
+    def setUpClass(cls):
+        layer = next(
+            element for element in _template_root().iter("maplayer")
+            if element.findtext("layername") == "farmyard"
+        )
+        renderer = layer.find("renderer-v2")
+        cls.rules = renderer.find("rules").findall("rule")
+        cls.symbols = renderer.find("symbols").findall("symbol")
+
+    def _symbol_layers(self, rule):
+        symbol = self.symbols[int(rule.get("symbol"))]
+        return symbol.findall("layer")
+
+    def test_scale_and_area_bands(self):
+        expected = (
+            ("1", "149999", "", 2),
+            ("150000", "249999", "area_m2", 2),
+            ("250000", None, "area_m2", 1),
+        )
+        self.assertEqual(len(self.rules), len(expected))
+        for rule, (minimum, maximum, area, layers) in zip(
+            self.rules, expected
+        ):
+            self.assertEqual(rule.get("scalemindenom"), minimum)
+            self.assertEqual(rule.get("scalemaxdenom"), maximum)
+            filter_text = rule.get("filter") or ""
+            if area:
+                self.assertIn("area_m2", filter_text)
+            else:
+                self.assertNotIn("area_m2", filter_text)
+            self.assertEqual(len(self._symbol_layers(rule)), layers)
+
+    def test_small_farmyards_start_hiding_at_150000(self):
+        self.assertIn(">= 50000", self.rules[1].get("filter") or "")
+        self.assertIn(">= 50000", self.rules[2].get("filter") or "")
+
+    def test_outline_disappears_at_250000(self):
+        full = self._symbol_layers(self.rules[1])
+        fill_only = self._symbol_layers(self.rules[2])
+        self.assertEqual(len(full), 2)
+        self.assertEqual(len(fill_only), 1)
+        outline = next(
+            option for option in fill_only[0].findall("./Option/Option")
+            if option.get("name") == "outline_color"
+        )
+        self.assertTrue(outline.get("value").startswith("0,0,0,0"))
+        visible = next(
+            option for option in full[1].findall("./Option/Option")
+            if option.get("name") == "outline_color"
+        )
+        self.assertFalse(visible.get("value").startswith("0,0,0,0"))
+
+
 class AreaFieldFilterTest(unittest.TestCase):
     """Фильтры по площади должны уходить в SQL, а не считаться в кадре."""
 

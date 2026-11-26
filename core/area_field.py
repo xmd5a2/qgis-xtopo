@@ -25,6 +25,7 @@ AREA_LAYERS = {
     "allotments": "allotments",
     "building": "building",
     "cemetery": "cemetery",
+    "farmyard": "farmyard",
     "landfill": "landfill",
     "nature_reserve": "nature_reserve",
     "orchard": "orchard",

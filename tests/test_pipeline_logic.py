@@ -5787,6 +5787,20 @@ class AreaFieldTest(unittest.TestCase):
                 ).fetchone()[0]
             self.assertGreater(value, 0)
 
+    def test_farmyard_gets_planar_area(self):
+        from qgis_xtopo.core.area_field import ensure_area_fields
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self._polygon(root / "polygon.geojson")
+            destination = root / "farmyard.sqlite"
+            save_vector(source, destination, "farmyard")
+            self.assertIn("farmyard", ensure_area_fields(root))
+            with sqlite3.connect(destination) as connection:
+                value = connection.execute(
+                    'SELECT "area_m2" FROM farmyard').fetchone()[0]
+            self.assertGreater(value, 0)
+
     def test_missing_layers_are_skipped(self):
         from qgis_xtopo.core.area_field import ensure_area_fields
 
