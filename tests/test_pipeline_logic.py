@@ -1322,6 +1322,24 @@ class GeometryRepairRecipeTest(unittest.TestCase):
             self.assertEqual(steps[0], "fix", name)
             self.assertEqual(steps[1], "polygonstolines", name)
 
+    def test_admin_boundaries_keep_per_way_lines_before_dissolve(self):
+        """Имена границ берутся из lines: dissolve теряет @id линий."""
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        for name in ("admin_level_2", "admin_level_4"):
+            steps = recipe_for(name).steps
+            operations = [operation for operation, _ in steps]
+            save_lines = [
+                index for index, (operation, params) in enumerate(steps)
+                if operation == "save" and params.get("suffix") == "_lines"
+            ]
+            self.assertEqual(len(save_lines), 1, name)
+            index = save_lines[0]
+            self.assertLess(
+                operations.index("polygonstolines"), index, name
+            )
+            self.assertLess(index, operations.index("dissolve"), name)
+
     def test_admin_queries_skip_buildings(self):
         """Здания с admin_level не попадают в административные слои."""
         from qgis_xtopo.core.resources import read_query
@@ -1725,6 +1743,126 @@ class AdminNameFallbackTest(unittest.TestCase):
         self.assertEqual(feature.GetField("open_border"), "yes")
         self.assertLess(feature.GetDefnRef().GetFieldIndex("maritime"), 0)
 
+    def test_shared_border_creates_label_strips_for_both_sides(self):
+        """У общей границы каждая страна получает подпись на своей стороне."""
+        self._write_lines([
+            self._feature(
+                None, [[0, 0], [1, 0]],
+                **{
+                    "@id": "way/500",
+                    "left:country": "Turkmenistan",
+                    "right:country": "Uzbekistan",
+                },
+            ),
+        ])
+        turkmenistan = {
+            "admin_level": "2",
+            "name": "Türkmenistan",
+            "name:en": "Turkmenistan",
+        }
+        uzbekistan = {
+            "admin_level": "2",
+            "name": "Oʻzbekiston",
+            "name:en": "Uzbekistan",
+        }
+        names = {
+            "2": {
+                "ways": {500: turkmenistan},
+                "relations": {1: turkmenistan, 2: uzbekistan},
+                "way_relations": {
+                    500: [(1, turkmenistan), (2, uzbekistan)]
+                },
+                "fields": {"name", "name:en"},
+            },
+        }
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            self.target, "admin_level_2_relation",
+            names=names, level="2",
+        )
+        self.assertEqual(created, 2)
+        dataset = ogr.Open(str(self.target))
+        features = {
+            feature.GetField("name"): feature
+            for feature in dataset.GetLayer(0)
+        }
+        self.assertEqual(set(features), {"Türkmenistan", "Oʻzbekiston"})
+        for feature in features.values():
+            self.assertEqual(feature.GetField("open_border"), "yes")
+            self.assertEqual(
+                feature.GetGeometryRef().GetGeometryName(), "MULTIPOLYGON"
+            )
+        turkmenistan_y = (
+            features["Türkmenistan"].GetGeometryRef().Centroid().GetY()
+        )
+        uzbekistan_y = (
+            features["Oʻzbekiston"].GetGeometryRef().Centroid().GetY()
+        )
+        self.assertGreater(turkmenistan_y, 0.01)
+        self.assertLess(uzbekistan_y, -0.01)
+
+    def test_shared_region_border_uses_province_tags(self):
+        """Для регионов стороны берутся из left:province/right:province."""
+        self._write_lines([
+            self._feature(
+                None, [[0, 0], [1, 0]],
+                **{
+                    "@id": "way/600",
+                    "left:province": "Daşoguz",
+                    "right:province": "Balkan",
+                },
+            ),
+        ])
+        dashoguz = {
+            "admin_level": "4",
+            "name": "Daşoguz welaýaty",
+            "name:en": "Daşoguz Province",
+        }
+        balkan = {
+            "admin_level": "4",
+            "name": "Balkan welaýaty",
+            "name:en": "Balkan Province",
+        }
+        names = {
+            "4": {
+                "ways": {600: dashoguz},
+                "relations": {10: dashoguz, 11: balkan},
+                "way_relations": {
+                    600: [(10, dashoguz), (11, balkan)]
+                },
+                "fields": {"name", "name:en"},
+            },
+        }
+        target = self.config.vector_dir / "admin_level_4_relation.sqlite"
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            target, "admin_level_4_relation",
+            names=names, level="4",
+        )
+        self.assertEqual(created, 2)
+        dataset = ogr.Open(str(target))
+        features = {
+            feature.GetField("name"): feature
+            for feature in dataset.GetLayer(0)
+        }
+        self.assertEqual(
+            set(features), {"Daşoguz welaýaty", "Balkan welaýaty"}
+        )
+        self.assertGreater(
+            features["Daşoguz welaýaty"].GetGeometryRef().Centroid().GetY(),
+            0.01,
+        )
+        self.assertLess(
+            features["Balkan welaýaty"].GetGeometryRef().Centroid().GetY(),
+            -0.01,
+        )
+
     def test_relation_tags_are_parsed_from_opl(self):
         from qgis_xtopo.core.pipeline import _parse_admin_relation_tags
 
@@ -1740,6 +1878,24 @@ class AdminNameFallbackTest(unittest.TestCase):
         self.assertEqual(names["2"]["ways"][2]["name"], "Россия")
         self.assertEqual(names["4"]["ways"][5]["name"], "Регион")
         self.assertIn("name:en", names["2"]["fields"])
+        self.assertEqual(
+            names["2"]["way_relations"][97376702][0][0], 60189
+        )
+
+    def test_opl_escaped_names_are_decoded(self):
+        """OPL пишет пробел и процент как ``%XX%``, а не ``%XX``."""
+        from qgis_xtopo.core.pipeline import _parse_admin_relation_tags
+
+        names = _parse_admin_relation_tags(
+            "r7 v1 dV c0 t i0 u "
+            "Tadmin_level=4,name=Daşoguz%20%welaýaty,"
+            "name:en=Daşoguz%20%Province,percent=A%25%B "
+            "Mw5@outer"
+        )
+        tags = names["4"]["relations"][7]
+        self.assertEqual(tags["name"], "Daşoguz welaýaty")
+        self.assertEqual(tags["name:en"], "Daşoguz Province")
+        self.assertEqual(tags["percent"], "A%B")
 
     def test_relation_names_are_read_from_source_pbf(self):
         from unittest import mock

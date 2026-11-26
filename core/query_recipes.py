@@ -159,10 +159,12 @@ RECIPES = {
     "admin_level_2": Recipe([
         # Сырые границы из OSM бывают с самопересечениями, а
         # native:polygonstolines отказывается их обрабатывать.
-        fix(), polygonstolines(), dissolve(), singleparts(), save("_dissolved"),
+        fix(), polygonstolines(), save("_lines"),
+        dissolve(), singleparts(), save("_dissolved"),
     ]),
     "admin_level_4": Recipe([
-        fix(), polygonstolines(), difference("admin_level_2_dissolved"),
+        fix(), polygonstolines(), save("_lines"),
+        difference("admin_level_2_dissolved"),
         dissolve(), singleparts(), save("_proc"),
     ]),
     "railway_all": Recipe([

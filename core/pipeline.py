@@ -32,6 +32,9 @@ _PARALLEL_STAGES = ("источник OSM", "рельеф")
 
 # Полуширина полигона вдоль открытой границы для подписи, градусы.
 OPEN_BORDER_BUFFER_DEGREES = 0.0005
+# Смещение такой полосы в сторону страны, градусы. Подпись ставится
+# вдоль полосы, поэтому у общей границы две страны получают свои полосы.
+OPEN_BORDER_SIDE_DEGREES = 0.02
 
 # QGIS сообщает о невалидной геометрии по-разному: собственные строки
 # локализованы, а GEOS добавляет английские TopologyException и
@@ -915,19 +918,28 @@ class Pipeline:
 
         Открытую границу нельзя замкнуть в кольцо. Если теги отношения
         сохранились в исходном PBF, название берётся оттуда, а линия
-        превращается в тонкий полигон с признаком ``open_border``:
-        подпись идёт вдоль границы, как у обычного контура страны.
+        превращается в тонкую полосу с признаком ``open_border``. У общей
+        границы две страны, поэтому по ``left:country``/``right:country``
+        (или ``left:province``/``right:province``) строятся две полосы,
+        сдвинутые в стороны стран: подпись не достаётся соседу.
         """
         pending = []
-        for level, source_name in (
-            ("admin_level_2", "admin_level_2_dissolved"),
-            ("admin_level_4", "admin_level_4_proc"),
+        for level, source_names in (
+            ("admin_level_2", ("admin_level_2_lines",
+                               "admin_level_2_dissolved")),
+            ("admin_level_4", ("admin_level_4_lines",
+                               "admin_level_4_proc")),
         ):
             target = self.config.vector_dir / f"{level}_relation.sqlite"
             if target.exists() and _layer_has_features(target):
                 continue
-            source_path = self.config.vector_dir / f"{source_name}.sqlite"
-            if not source_path.exists() or not _layer_has_features(source_path):
+            source_path = None
+            for source_name in source_names:
+                candidate = self.config.vector_dir / f"{source_name}.sqlite"
+                if candidate.exists() and _layer_has_features(candidate):
+                    source_path = candidate
+                    break
+            if source_path is None:
                 continue
             pending.append((
                 level, target, source_path, level.rsplit("_", 1)[-1],
@@ -1011,6 +1023,9 @@ class Pipeline:
             layer.GetSpatialRef(), geometry_type=ogr.wkbMultiPolygon,
             cancel=self.cancel, extra_fields=sorted(extra_fields),
         )
+        # Полосы одной страны или региона сливаются в один объект: иначе
+        # подпись повторяется на каждом куске границы.
+        groups = {}
         written = 0
         try:
             for position, feature in enumerate(layer):
@@ -1021,17 +1036,58 @@ class Pipeline:
                 ):
                     raise InterruptedError("Preparation cancelled")
                 geometry = feature.GetGeometryRef()
-                values = _admin_feature_tags(feature, entry)
                 polygons = _closed_ring_multipolygon(geometry)
-                if polygons is None:
+                if polygons is not None:
+                    values = _admin_feature_tags(feature, entry)
+                    label = _label_name(feature) or f"feature:{position}"
+                    key = ("closed", label, _values_key(values))
+                    group = groups.setdefault(
+                        key, {
+                            "feature": feature, "polygons": [],
+                            "values": values,
+                        }
+                    )
+                    group["polygons"].append(polygons)
+                    continue
+                relations = _admin_feature_relations(feature, entry)
+                if not relations:
+                    continue
+                for relation_id, tags in relations:
+                    values = _admin_name_values(tags)
                     if not values:
                         continue
-                    polygons = _open_line_multipolygon(geometry)
+                    side = _admin_border_side(feature, tags)
+                    if side:
+                        polygons = _offset_line_multipolygon(
+                            geometry, side
+                        )
+                    elif len(relations) == 1:
+                        polygons = _open_line_multipolygon(geometry)
+                    else:
+                        # Общая граница без left/right: сторона неизвестна,
+                        # подпись не должна доставаться одной стране.
+                        polygons = None
                     if polygons is None:
                         continue
                     values = dict(values)
                     values["open_border"] = "yes"
-                writer.add(feature, polygons, values=values)
+                    key = (
+                        "open", relation_id, _values_key(values)
+                    )
+                    group = groups.setdefault(
+                        key, {
+                            "feature": feature, "polygons": [],
+                            "values": values,
+                        }
+                    )
+                    group["polygons"].append(polygons)
+            for group in groups.values():
+                polygons = _merge_polygons(group["polygons"])
+                if polygons is None:
+                    continue
+                writer.add(
+                    group["feature"], polygons, values=group["values"]
+                )
                 written += 1
             if written:
                 writer.close()
@@ -2267,13 +2323,187 @@ def _admin_feature_tags(feature, entry):
         return None
     key = "ways" if kind == "way" else "relations" if kind == "relation" else ""
     tags = entry.get(key, {}).get(int(identifier)) if key else None
-    if not tags:
-        return None
+    return _admin_name_values(tags)
+
+
+def _admin_name_values(tags):
+    """Поля name* из тегов отношения."""
     names = {
-        name: value for name, value in tags.items()
+        name: value for name, value in (tags or {}).items()
         if name == "name" or name.startswith("name:")
     }
     return names or None
+
+
+def _values_key(values):
+    """Ключ группировки по одинаковым значениям name*."""
+    return tuple(sorted((values or {}).items()))
+
+
+def _admin_feature_relations(feature, entry):
+    """Все отношения admin_level, в которые входит линия.
+
+    У общей границы две страны: ``@id`` одной линии принадлежит обоим
+    отношениям, поэтому одного первого имени недостаточно.
+    """
+    index = feature.GetFieldIndex("@id")
+    if index < 0:
+        return []
+    value = str(feature.GetField(index) or "")
+    kind, _, identifier = value.partition("/")
+    if not identifier.isdigit():
+        return []
+    identifier = int(identifier)
+    if kind == "way":
+        relations = entry.get("way_relations", {}).get(identifier)
+        if relations:
+            seen = set()
+            unique = []
+            for relation_id, tags in relations:
+                key = (relation_id, _values_key(
+                    {
+                        name: value for name, value in tags.items()
+                        if name == "name" or name.startswith("name:")
+                    }
+                ))
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append((relation_id, tags))
+            return unique
+        tags = entry.get("ways", {}).get(identifier)
+        return [(None, tags)] if tags else []
+    if kind == "relation":
+        tags = entry.get("relations", {}).get(identifier)
+        return [(identifier, tags)] if tags else []
+    return []
+
+
+def _normalized_name(value):
+    """Нормализованное имя для сравнения сторон границы."""
+    return re.sub(r"[^0-9a-z]+", " ", str(value).casefold()).strip()
+
+
+def _admin_name_matches(value, tags):
+    """Совпадает ли значение left/right с названием отношения."""
+    side = _normalized_name(value)
+    if not side:
+        return False
+    for key in (
+        "name:en", "int_name", "name", "name:ru", "name:tk", "name:kk",
+    ):
+        candidate = tags.get(key)
+        if not candidate:
+            continue
+        candidate = _normalized_name(candidate)
+        if not candidate:
+            continue
+        if side == candidate:
+            return True
+        if (
+            candidate.startswith(side + " ")
+            or side.startswith(candidate + " ")
+        ):
+            return True
+    return False
+
+
+def _admin_border_side(feature, tags):
+    """Сторона линии, принадлежащая отношению: 1 — левая, -1 — правая."""
+    for field, sign in (
+        ("left:country", 1), ("right:country", -1),
+        ("left:province", 1), ("right:province", -1),
+    ):
+        index = feature.GetFieldIndex(field)
+        if index < 0:
+            continue
+        value = feature.GetField(index)
+        if value and _admin_name_matches(value, tags):
+            return sign
+    return 0
+
+
+def _offset_line_multipolygon(geometry, side):
+    """Тонкая полоса вдоль линии, сдвинутая в сторону страны."""
+    from osgeo import ogr
+    from qgis.core import QgsGeometry
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        parts = [geometry]
+    elif name == "MULTILINESTRING":
+        parts = [
+            geometry.GetGeometryRef(index)
+            for index in range(geometry.GetGeometryCount())
+        ]
+    else:
+        return None
+    result = ogr.Geometry(ogr.wkbMultiPolygon)
+    for part in parts:
+        line = QgsGeometry.fromWkt(part.ExportToWkt())
+        if line.isEmpty():
+            continue
+        try:
+            offset = line.offsetCurve(
+                side * OPEN_BORDER_SIDE_DEGREES, 8,
+                QgsGeometry.JoinStyleRound, QgsGeometry.EndCapStyle.Flat,
+            )
+        except Exception:  # noqa: BLE001 - полоса не критична
+            continue
+        if offset is None or offset.isEmpty():
+            continue
+        buffered = offset.buffer(OPEN_BORDER_BUFFER_DEGREES, 8)
+        if buffered is None or buffered.isEmpty():
+            continue
+        polygon = ogr.CreateGeometryFromWkb(bytes(buffered.asWkb()))
+        if polygon is None:
+            continue
+        if polygon.GetGeometryName() == "POLYGON":
+            result.AddGeometry(polygon)
+        elif polygon.GetGeometryName() == "MULTIPOLYGON":
+            for index in range(polygon.GetGeometryCount()):
+                result.AddGeometry(
+                    polygon.GetGeometryRef(index).Clone()
+                )
+    return result if result.GetGeometryCount() else None
+
+
+def _merge_polygons(polygons):
+    """Собирает части в один MultiPolygon без GEOS-объединения."""
+    from osgeo import ogr
+
+    merged = ogr.Geometry(ogr.wkbMultiPolygon)
+    for polygon in polygons:
+        if polygon is None:
+            continue
+        name = polygon.GetGeometryName()
+        if name == "POLYGON":
+            merged.AddGeometry(polygon.Clone())
+        elif name == "MULTIPOLYGON":
+            for index in range(polygon.GetGeometryCount()):
+                merged.AddGeometry(
+                    polygon.GetGeometryRef(index).Clone()
+                )
+    return merged if merged.GetGeometryCount() else None
+
+
+_OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]{2})%")
+
+
+def _unescape_opl(value):
+    """Декодирует значение OPL.
+
+    osmium пишет пробелы, запятые, знак равенства и процент как
+    ``%XX%``, а обычный UTF-8 оставляет как есть.  ``unquote`` убирает
+    только ``%XX`` и оставляет хвостовой ``%``, из-за чего получалось
+    «Daşoguz %welaýaty».
+    """
+    text = _OPL_ESCAPE.sub(
+        lambda match: chr(int(match.group(1), 16)), value
+    )
+    return unquote(text)
 
 
 def _parse_admin_relation_tags(text):
@@ -2289,7 +2519,7 @@ def _parse_admin_relation_tags(text):
                 for item in token[1:].split(","):
                     key, separator, value = item.partition("=")
                     if separator and key:
-                        tags[unquote(key)] = unquote(value)
+                        tags[_unescape_opl(key)] = _unescape_opl(value)
             elif token.startswith("M"):
                 members.extend(
                     int(value) for value in re.findall(r"w(\d+)@", token)
@@ -2298,13 +2528,19 @@ def _parse_admin_relation_tags(text):
         if level not in ("2", "4"):
             continue
         entry = names.setdefault(
-            level, {"ways": {}, "relations": {}, "fields": set()}
+            level, {
+                "ways": {}, "relations": {}, "way_relations": {},
+                "fields": set(),
+            }
         )
         relation_id = _osm_id(line)
         if relation_id is not None:
             entry["relations"][relation_id] = tags
         for member in members:
             entry["ways"].setdefault(member, tags)
+            entry["way_relations"].setdefault(member, []).append(
+                (relation_id, tags)
+            )
         for key in tags:
             if key == "name" or key.startswith("name:"):
                 entry["fields"].add(key)
@@ -2321,11 +2557,18 @@ def _merge_admin_relation_tags(target, source):
     """Дополняет теги отношений при чтении нескольких PBF."""
     for level, entry in (source or {}).items():
         current = target.setdefault(
-            level, {"ways": {}, "relations": {}, "fields": set()}
+            level, {
+                "ways": {}, "relations": {}, "way_relations": {},
+                "fields": set(),
+            }
         )
         for key in ("ways", "relations"):
             for identifier, tags in entry.get(key, {}).items():
                 current[key].setdefault(identifier, tags)
+        for identifier, relations in entry.get("way_relations", {}).items():
+            current["way_relations"].setdefault(identifier, []).extend(
+                relations
+            )
         current["fields"].update(entry.get("fields", ()))
 
 
