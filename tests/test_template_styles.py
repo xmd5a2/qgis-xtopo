@@ -4737,6 +4737,47 @@ class BuildingLodTest(unittest.TestCase):
         self.assertNotIn("@level_of_detail", self.children["ruins"])
 
 
+class RegionBoundaryLabelTest(unittest.TestCase):
+    """Названия регионов ставятся вдоль контура, а не поперёк него."""
+
+    @classmethod
+    def setUpClass(cls):
+        layer = next(
+            element for element in _template_root().iter("maplayer")
+            if element.findtext("layername")
+            == "admin level 4 (region names)"
+        )
+        cls.rules = layer.find("labeling/rules").findall("rule")
+
+    def test_polygon_rules_use_boundary_line(self):
+        polygon_rules = [
+            rule for rule in self.rules
+            if rule.get("scalemindenom") is not None
+            and "attribute('open_border') = 'yes'"
+            not in (rule.get("filter") or "")
+            and "attribute('maritime') = 'yes'"
+            not in (rule.get("filter") or "")
+        ]
+        self.assertEqual(len(polygon_rules), 4)
+        for rule in polygon_rules:
+            placement = rule.find("settings/placement")
+            self.assertIsNotNone(placement)
+            self.assertEqual(placement.get("placement"), "2")
+            self.assertEqual(placement.get("placementFlags"), "2")
+            self.assertEqual(placement.get("fitInPolygonOnly"), "0")
+            self.assertEqual(placement.get("geometryGeneratorEnabled"), "1")
+            self.assertEqual(
+                placement.get("geometryGenerator"), "boundary($geometry)"
+            )
+            self.assertEqual(
+                placement.get("geometryGeneratorType"), "LineGeometry"
+            )
+            self.assertEqual(placement.get("layerType"), "LineGeometry")
+            self.assertEqual(placement.get("priority"), "8")
+            self.assertEqual(placement.get("maxCurvedCharAngleIn"), "60")
+            self.assertEqual(placement.get("maxCurvedCharAngleOut"), "-60")
+
+
 class FarmyardScaleFilterTest(unittest.TestCase):
     """Мелкие farmyard скрываются по площади, обводка — с 1:250000."""
 
