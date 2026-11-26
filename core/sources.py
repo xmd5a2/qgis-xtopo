@@ -35,17 +35,6 @@ OVERPASS_PROCESS_TIMEOUT = 3600
 # работает сторож скорости и автоматическая замена источника.
 DOWNLOAD_MODES = ("geofabrik", "extracts", "slice")
 
-# Замена источника из-за медленной загрузки разрешена один раз за
-# сессию: после неё сторож отключается, чтобы источники не передавали
-# загрузку друг другу по кругу.
-_slow_switch_used = False
-
-
-def reset_slow_switch():
-    """Забыть переключение источника (тесты, новая сессия)."""
-    global _slow_switch_used
-    _slow_switch_used = False
-
 
 class SourceError(RuntimeError):
     pass
@@ -675,12 +664,11 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
     """Подготовить источник OSM, заменив слишком медленный источник.
 
     Сторож считает только принятые байты PBF: ожидание сборки выреза
-    SliceOSM и ответы индексов в окно скорости не входят.  После первой
-    замены за сессию сторож больше не создаётся.
+    SliceOSM и ответы индексов в окно скорости не входят.  За одну
+    подготовку источник заменяется не более одного раза.
     """
-    global _slow_switch_used
     guard = None
-    if config.source_mode in DOWNLOAD_MODES and not _slow_switch_used:
+    if config.source_mode in DOWNLOAD_MODES:
         guard = SpeedGuard(
             window=SLOW_DOWNLOAD_WINDOW, threshold=SLOW_DOWNLOAD_RATE,
         )
@@ -690,9 +678,8 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
             percent=percent, guard=guard,
         )
     except SlowDownload as exc:
-        if guard is None:
-            # Второй раз источник не меняем: сторож уже отключён.
-            raise
+        # Сторож один на подготовку: запасной источник скачивается без
+        # него, поэтому второй замены не будет.
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Preparation cancelled") from exc
         target = _fallback_mode(config, bbox, cancel=cancel)
@@ -707,7 +694,6 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
                 config, bbox, query_names, cancel=cancel, progress=progress,
                 percent=percent, guard=None,
             )
-        _slow_switch_used = True
         title = _source_title(target)
         if progress:
             progress(i18n.trf(

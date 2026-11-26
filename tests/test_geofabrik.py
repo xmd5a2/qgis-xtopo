@@ -518,10 +518,6 @@ class GeofabrikSizeLimitTest(unittest.TestCase):
 
 class GeofabrikSourcesTest(unittest.TestCase):
     def setUp(self):
-        from qgis_xtopo.core import sources
-
-        sources.reset_slow_switch()
-        self.addCleanup(sources.reset_slow_switch)
         self.directory = tempfile.TemporaryDirectory()
         self.config = Config(
             qgis_projects_dir=self.directory.name,
@@ -692,9 +688,9 @@ class GeofabrikSourcesTest(unittest.TestCase):
                 result.warnings,
             )
             calls.clear()
+            # Новая подготовка снова начинает со сторожа скорости.
             sources.prepare_sources(self.config, BBox(1, 2, 3, 4), ["water"])
-        # После первого переключения сторож больше не создаётся.
-        self.assertEqual(calls, [("geofabrik", False)])
+        self.assertEqual(calls, [("geofabrik", True)])
 
     def test_slow_extracts_prefers_geofabrik(self):
         from qgis_xtopo.core import sources
@@ -760,7 +756,6 @@ class GeofabrikSourcesTest(unittest.TestCase):
         ):
             sources.prepare_sources(config, BBox(1, 2, 3, 4), ["water"])
         self.assertEqual(calls, [("slice", True), ("slice", False)])
-        self.assertFalse(sources._slow_switch_used)
 
 
 class GeofabrikConfigTest(unittest.TestCase):
