@@ -2178,6 +2178,182 @@ class AdminMemberBorderTest(unittest.TestCase):
                     if "lines" in path.name else "LINESTRING",
                 )
 
+    def _layer_with_line(self, config, name, identifier, coordinates):
+        source = config.temp_dir / f"{name}.geojson"
+        source.write_text(json.dumps({
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {"@id": identifier},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coordinates,
+                },
+            }],
+        }), encoding="utf-8")
+        path = config.vector_dir / f"{name}.sqlite"
+        save_vector(source, path, name)
+        return path
+
+    def test_member_with_same_way_id_is_not_appended(self):
+        """``@id`` линии и член отношения сравниваются как ``way/123``."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="logic"
+            )
+            config.ensure_directories()
+            lines_path = self._layer_with_line(
+                config, "admin_level_2_lines", "way/2", [[0, 0], [1, 1]]
+            )
+            pipeline = Pipeline(
+                config, BBox(0, 0, 3, 2), _FakeRunner(None)
+            )
+            names = {"2": {"ways": {2: {"name": "Кыргызстан"}}}}
+            with mock.patch(
+                "qgis_xtopo.core.pipeline.osmium_tool.find_osmium",
+                return_value="osmium",
+            ), mock.patch.object(
+                pipeline, "_member_way_geometries"
+            ) as geometries:
+                pipeline._admin_border_members(
+                    SimpleNamespace(dataset=SimpleNamespace(
+                        source_paths=["fake.pbf"]
+                    )),
+                    names,
+                )
+            geometries.assert_not_called()
+            dataset = ogr.Open(str(lines_path))
+            self.assertEqual(dataset.GetLayer(0).GetFeatureCount(), 1)
+            dataset = None
+
+    def test_member_covered_by_relation_outline_is_not_appended(self):
+        """Контур отношения в ``_lines`` уже содержит те же участки."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="logic"
+            )
+            config.ensure_directories()
+            lines_path = self._layer_with_line(
+                config, "admin_level_2_lines", "relation/10",
+                [[0, 0], [2, 0]],
+            )
+            pipeline = Pipeline(
+                config, BBox(0, 0, 3, 2), _FakeRunner(None)
+            )
+            member = ogr.Geometry(ogr.wkbLineString)
+            member.AddPoint_2D(1, 0)
+            member.AddPoint_2D(2, 0)
+            pipeline._member_way_geometries = lambda *args: {2: member}
+            names = {"2": {"ways": {2: {"name": "Страна"}}}}
+            with mock.patch(
+                "qgis_xtopo.core.pipeline.osmium_tool.find_osmium",
+                return_value="osmium",
+            ):
+                pipeline._admin_border_members(
+                    SimpleNamespace(dataset=SimpleNamespace(
+                        source_paths=["fake.pbf"]
+                    )),
+                    names,
+                )
+            dataset = ogr.Open(str(lines_path))
+            ids = [feature["@id"] for feature in dataset.GetLayer(0)]
+            self.assertEqual(ids, ["relation/10"])
+            dataset = None
+
+    def test_level_4_member_on_country_border_is_not_appended(self):
+        """Участок государственной границы не возвращается в слой регионов."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="logic"
+            )
+            config.ensure_directories()
+            lines_path = self._layer_with_line(
+                config, "admin_level_4_lines", "way/1", [[0, 0], [1, 1]]
+            )
+            self._layer_with_line(
+                config, "admin_level_2_dissolved", "way/2",
+                [[0, 0], [2, 0]],
+            )
+            pipeline = Pipeline(
+                config, BBox(0, 0, 3, 2), _FakeRunner(None)
+            )
+            member = ogr.Geometry(ogr.wkbLineString)
+            member.AddPoint_2D(0, 0)
+            member.AddPoint_2D(2, 0)
+            pipeline._member_way_geometries = lambda *args: {2: member}
+            names = {"4": {"ways": {2: {"name": "Область"}}}}
+            with mock.patch(
+                "qgis_xtopo.core.pipeline.osmium_tool.find_osmium",
+                return_value="osmium",
+            ):
+                pipeline._admin_border_members(
+                    SimpleNamespace(dataset=SimpleNamespace(
+                        source_paths=["fake.pbf"]
+                    )),
+                    names,
+                )
+            dataset = ogr.Open(str(lines_path))
+            ids = [feature["@id"] for feature in dataset.GetLayer(0)]
+            self.assertEqual(ids, ["way/1"])
+            dataset = None
+
+    def test_member_is_trimmed_to_missing_part(self):
+        """Из дописываемого участка вычитается уже имеющаяся граница."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="logic"
+            )
+            config.ensure_directories()
+            lines_path = self._layer_with_line(
+                config, "admin_level_4_lines", "way/1", [[0, 0], [1, 0]]
+            )
+            self._layer_with_line(
+                config, "admin_level_2_dissolved", "way/2",
+                [[0, 0], [1, 0]],
+            )
+            pipeline = Pipeline(
+                config, BBox(0, 0, 3, 2), _FakeRunner(None)
+            )
+            member = ogr.Geometry(ogr.wkbLineString)
+            member.AddPoint_2D(0, 0)
+            member.AddPoint_2D(2, 0)
+            pipeline._member_way_geometries = lambda *args: {2: member}
+            names = {"4": {"ways": {2: {"name": "Область"}}}}
+            with mock.patch(
+                "qgis_xtopo.core.pipeline.osmium_tool.find_osmium",
+                return_value="osmium",
+            ):
+                pipeline._admin_border_members(
+                    SimpleNamespace(dataset=SimpleNamespace(
+                        source_paths=["fake.pbf"]
+                    )),
+                    names,
+                )
+            dataset = ogr.Open(str(lines_path))
+            feature = next(
+                item for item in dataset.GetLayer(0)
+                if item["@id"] == "way/2"
+            )
+            part = feature.GetGeometryRef()
+            if part.GetGeometryName() == "MULTILINESTRING":
+                part = part.GetGeometryRef(0)
+            self.assertEqual(
+                sorted([
+                    round(part.GetPoint(0)[0], 7),
+                    round(part.GetPoint(1)[0], 7),
+                ]),
+                [1.0, 2.0],
+            )
+            dataset = None
+
 
 class SinglePartsFallbackTest(unittest.TestCase):
     """Пустой singleparts у admin-границ не должен терять весь слой."""

@@ -1052,9 +1052,27 @@ class Pipeline:
             if not member_ids:
                 continue
             existing = _line_feature_ids(lines_path)
-            missing = sorted(member_ids - existing)
+            existing_ways = {
+                way_id for way_id in (
+                    _way_id_from_value(value) for value in existing
+                ) if way_id is not None
+            }
+            missing = sorted(member_ids - existing_ways)
             if not missing:
                 continue
+            # Член отношения может совпадать с уже записанной линией не по
+            # ``@id``, а геометрически: контур отношения в ``_lines`` — это
+            # те же самые way, и участок государственной границы входит в
+            # отношение региона.  Поэтому дописываем только те части, которых
+            # в слое ещё нет.  Для регионов вычитается и граница страны.
+            mask_paths = [lines_path]
+            if level == "4":
+                country_path = (
+                    self.config.vector_dir / "admin_level_2_dissolved.sqlite"
+                )
+                if country_path.exists():
+                    mask_paths.append(country_path)
+            mask = _line_geometry_union(mask_paths)
             geometries = self._member_way_geometries(
                 executable, paths, missing
             )
@@ -1076,6 +1094,15 @@ class Pipeline:
                 )
                 if geometry is None:
                     continue
+                if mask is not None:
+                    try:
+                        trimmed = geometry.Difference(mask)
+                    except Exception:  # noqa: BLE001 - границы не критичны
+                        trimmed = None
+                    if trimmed is not None:
+                        if trimmed.IsEmpty():
+                            continue
+                        geometry = trimmed
                 values["@id"] = f"way/{way_id}"
                 values["@type"] = "way"
                 values["admin_level"] = level
@@ -2774,6 +2801,32 @@ def _line_feature_ids(path):
             result.add(str(value))
     dataset = None
     return result
+
+
+def _line_geometry_union(paths):
+    """Объединение линий нескольких слоёв без повторяющихся участков."""
+    from osgeo import ogr
+    from qgis.core import QgsGeometry
+
+    geometries = []
+    for path in paths:
+        dataset = ogr.Open(str(path))
+        if dataset is None:
+            continue
+        layer = dataset.GetLayer(0)
+        for feature in layer:
+            for part in _line_parts(feature.GetGeometryRef()):
+                geometries.append(QgsGeometry.fromWkt(part.ExportToWkt()))
+        dataset = None
+    if not geometries:
+        return None
+    merged = (
+        geometries[0] if len(geometries) == 1
+        else QgsGeometry.unaryUnion(geometries)
+    )
+    if merged is None or merged.isEmpty():
+        return None
+    return ogr.CreateGeometryFromWkb(bytes(merged.asWkb()))
 
 
 def _line_endpoint_entries(path):
