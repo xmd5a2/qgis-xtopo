@@ -274,6 +274,12 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   входит и `admin_level_2_dissolved`, иначе государственная граница
   возвращается в слой регионов. Подробности —
   `docs/agents/admin-boundaries.md`.
+- **Подписи admin-границ идут вдоль кривых.** У `admin level 2 (country
+  names)` открытые границы (`label_line`) и у `admin level 4 (region
+  names)` линейные правила (`boundary($geometry)` и `label_line`) используют
+  `placement="3"` (Curved); площадные названия стран — `placement="7"`
+  (PerimeterCurved). Проверки — `OpenBorderAdminLabelTest`,
+  `RegionBoundaryLabelTest`. Подробности — `docs/agents/labels.md`.
 - **Рельеф в pipeline — три стадии.** `prepare_terrain_raster` (скачивание
   тайлов и сборка сырого DEM) не зависит от слоёв и в `run_project`
   работает в потоке `xtopo-terrain` параллельно `Pipeline.run` (стартует
