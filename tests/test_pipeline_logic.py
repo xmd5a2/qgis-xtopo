@@ -20,7 +20,8 @@ from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
 )
 from qgis_xtopo.core import (
-    field_subset, highway_integrity, oneway, road_packing, stream_drying,
+    field_subset, highway_integrity, oneway, riverbank_names, road_packing,
+    stream_drying,
 )
 from qgis_xtopo.core.query_recipes import RECIPES, recipe_for
 from qgis_xtopo.core.resources import query_names, read_query
@@ -4269,6 +4270,16 @@ class FieldSubsetTest(unittest.TestCase):
         for field in ("addr:city", "phone", "website", "building"):
             self.assertNotIn(field, selected)
 
+    def test_water_preset_keeps_riverbank_tag(self):
+        # По waterway=riverbank шаг riverbank_names отличает устаревший
+        # речной полигон от обычного natural=water.
+        selected = field_subset.select(
+            "water",
+            ["natural", "water", "waterway", "intermittent", "name:ru"],
+        )
+        self.assertIn("waterway", selected)
+        self.assertIn("water", selected)
+
     def test_select_keeps_settlement_priority_fields(self):
         selected = field_subset.select(
             "places_main",
@@ -5866,6 +5877,181 @@ class StreamDryingTest(unittest.TestCase):
             ])
             stream_drying.ensure_visible(directory)
             self.assertEqual(dict(self._ranks(directory))["short"], 2)
+
+
+class RiverbankNameTest(unittest.TestCase):
+    """Имя речного полигона не дублирует подпись линии реки."""
+
+    WATER_FIELDS = (
+        ("name", ogr.OFTString),
+        ("name:ru", ogr.OFTString),
+        ("name:en", ogr.OFTString),
+        ("alt_name", ogr.OFTString),
+        ("water", ogr.OFTString),
+        ("waterway", ogr.OFTString),
+        ("natural", ogr.OFTString),
+    )
+    RIVER_FIELDS = (
+        ("name", ogr.OFTString),
+        ("name:ru", ogr.OFTString),
+        ("name:en", ogr.OFTString),
+        ("alt_name", ogr.OFTString),
+        ("waterway", ogr.OFTString),
+    )
+    POLYGON = "POLYGON ((0 0, 0 0.01, 0.01 0.01, 0.01 0, 0 0))"
+    LINE = "LINESTRING (-0.005 0.005, 0.015 0.005)"
+
+    @staticmethod
+    def _layer(directory, name, fields, geometry_type, rows):
+        path = Path(directory) / f"{name}.sqlite"
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(name, srs, geometry_type)
+        for field_name, field_type in fields:
+            layer.CreateField(ogr.FieldDefn(field_name, field_type))
+        for row in rows:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for field_name, _field_type in fields:
+                value = row.get(field_name)
+                if value is not None:
+                    feature.SetField(field_name, value)
+            feature.SetGeometry(ogr.CreateGeometryFromWkt(row["wkt"]))
+            layer.CreateFeature(feature)
+        dataset = None
+
+    def _water(self, directory, values):
+        row = {"wkt": self.POLYGON, "natural": "water"}
+        row.update(values)
+        self._layer(
+            directory, "water", self.WATER_FIELDS, ogr.wkbPolygon, [row],
+        )
+
+    def _river(self, directory, values, name="river"):
+        row = {"wkt": self.LINE, "waterway": "river"}
+        row.update(values)
+        self._layer(
+            directory, name, self.RIVER_FIELDS, ogr.wkbLineString, [row],
+        )
+
+    @staticmethod
+    def _rows(directory, name):
+        dataset = ogr.Open(str(Path(directory) / f"{name}.sqlite"))
+        layer = dataset.GetLayer(0)
+        definition = layer.GetLayerDefn()
+        fields = [
+            definition.GetFieldDefn(position).GetName()
+            for position in range(definition.GetFieldCount())
+        ]
+        rows = [
+            {field: feature.GetField(field) for field in fields}
+            for feature in layer
+        ]
+        dataset = None
+        return rows
+
+    def test_clears_matching_riverbank_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._water(directory, {
+                "name": "Сырдарья",
+                "name:ru": "Сырдарья",
+                "name:en": "Syr Darya",
+                "alt_name": "Сыр-Дарья",
+                "water": "river",
+            })
+            self._river(directory, {
+                "name": "Sirdaryo",
+                "name:ru": "Сырдарья",
+            })
+            stats = riverbank_names.apply(directory)
+            self.assertEqual(stats["cleared"], 1)
+            row = self._rows(directory, "water")[0]
+            for field in ("name", "name:ru", "name:en", "alt_name"):
+                self.assertFalse(row[field], field)
+            self.assertEqual(row["water"], "river")
+
+    def test_keeps_other_riverbank_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._water(directory, {
+                "name": "Старица",
+                "water": "river",
+            })
+            self._river(directory, {"name": "Сырдарья"})
+            stats = riverbank_names.apply(directory)
+            self.assertEqual(stats["cleared"], 0)
+            self.assertEqual(
+                self._rows(directory, "water")[0]["name"], "Старица"
+            )
+
+    def test_keeps_plain_water_name(self):
+        # У natural=water без речного тега линия вырезается из river,
+        # поэтому подпись полигона остаётся единственной.
+        with tempfile.TemporaryDirectory() as directory:
+            self._water(directory, {"name": "Сырдарья"})
+            self._river(directory, {"name": "Сырдарья"})
+            stats = riverbank_names.apply(directory)
+            self.assertEqual(stats["cleared"], 0)
+            self.assertEqual(
+                self._rows(directory, "water")[0]["name"], "Сырдарья"
+            )
+
+    def test_clears_legacy_riverbank_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._water(directory, {
+                "name": "Сырдарья",
+                "waterway": "riverbank",
+            })
+            self._river(directory, {"name": "Сырдарья"})
+            stats = riverbank_names.apply(directory)
+            self.assertEqual(stats["cleared"], 1)
+            self.assertFalse(self._rows(directory, "water")[0]["name"])
+
+    def test_ignores_far_river(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._water(directory, {
+                "name": "Волга",
+                "water": "river",
+            })
+            self._river(directory, {
+                "name": "Волга",
+                "wkt": "LINESTRING (10 10, 11 10)",
+            })
+            stats = riverbank_names.apply(directory)
+            self.assertEqual(stats["cleared"], 0)
+            self.assertEqual(
+                self._rows(directory, "water")[0]["name"], "Волга"
+            )
+
+    def test_matches_intermittent_river(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._water(directory, {
+                "name": "Сырдарья",
+                "water": "river",
+            })
+            self._river(
+                directory, {"name": "Сырдарья"},
+                name="river_intermittent",
+            )
+            stats = riverbank_names.apply(directory)
+            self.assertEqual(stats["cleared"], 1)
+
+    def test_enabled_requires_water_and_river(self):
+        self.assertTrue(riverbank_names.enabled(SimpleNamespace(
+            array_queries=["water", "river"],
+        )))
+        self.assertFalse(riverbank_names.enabled(SimpleNamespace(
+            array_queries=["water"],
+        )))
+        self.assertFalse(riverbank_names.enabled(SimpleNamespace(
+            array_queries=["river"],
+        )))
+
+    def test_missing_layers_are_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                riverbank_names.apply(directory),
+                {"checked": 0, "cleared": 0},
+            )
 
 
 class AreaFieldTest(unittest.TestCase):

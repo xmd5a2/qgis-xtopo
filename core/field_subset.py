@@ -49,7 +49,7 @@ PATH = (
     "highway", "embankment", "ice_road", "winter_road", "ref",
     "surface", "smoothness", "tracktype",
 )
-WATER = ("natural", "water", "intermittent", "ref")
+WATER = ("natural", "water", "waterway", "intermittent", "ref")
 TRACK = (
     "highway", "highway_integrity", "embankment", "ice_road",
     "winter_road", "ref", "surface", "smoothness", "tracktype",

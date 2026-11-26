@@ -11,7 +11,8 @@ from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
     osmium_tool, peak_filter, poi_icons, polygon_overlaps, project,
-    road_packing, sources, stream_drying, terrain, underwater,
+    riverbank_names, road_packing, sources, stream_drying, terrain,
+    underwater,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -202,6 +203,8 @@ def progress_stages(config):
     if config.array_queries:
         stages.append(("Подготовка источника OSM", 30))
     stages.append(("Обработка слоёв", 45))
+    if riverbank_names.enabled(config):
+        stages.append(("Имена речных полигонов", 1))
     # Порядок стадий совпадает с ходом run_project: сначала догоняется
     # рельеф, потом береговая линия, пики и очистка.
     if config.generate_terrain:
@@ -3809,6 +3812,31 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         # какие слои собраны не полностью.
         for warning in warnings or ():
             report(f"WARNING: {warning}")
+        if riverbank_names.enabled(config):
+            report("Имена речных полигонов")
+            started = time.monotonic()
+            gdal_log.LOG.install()
+            try:
+                stats = riverbank_names.apply(
+                    config.vector_dir, cancel=cancel,
+                )
+                if stats.get("cleared"):
+                    report(i18n.trf(
+                        "Имена речных полигонов: убрано {}",
+                        stats["cleared"],
+                    ))
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - карта не должна страдать
+                report(i18n.trf(
+                    "WARNING: имена речных полигонов: {}; шаг пропущен",
+                    exc,
+                ))
+            finally:
+                gdal_log.LOG.restore()
+            timings.add_stage(
+                "имена речных полигонов", time.monotonic() - started,
+            )
         if "coastline" in config.array_queries:
             report("Обработка береговой линии")
             started = time.monotonic()
