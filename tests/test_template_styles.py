@@ -354,13 +354,15 @@ class AdminBoundaryOrderTest(unittest.TestCase):
 
 
 class OpenBorderAdminLabelTest(unittest.TestCase):
-    """Названия на открытых границах ставятся отдельным правилом.
+    """Названия на открытых границах ставятся вдоль линии границы.
 
-    Открытая граница превращается в тонкий полигон, в который обычная
-    подпись с `fitInPolygonOnly=1` не помещается. Правило для открытых
-    границ разрешает вынести её наружу. Поля `maritime` и `open_border`
-    могут отсутствовать в слое, поэтому фильтры читают их через
-    `attribute()`: прямое имя поля даёт ошибку и скрывает все подписи.
+    Открытая граница превращается в тонкую полосу, в которую обычная
+    подпись с `fitInPolygonOnly=1` не помещается. Отдельная ориентированная
+    линия `label_line` позволяет поставить текст вдоль границы с нужной
+    стороны: линия направлена так, чтобы страна или регион были слева.
+    Поля `maritime` и `open_border` могут отсутствовать в слое, поэтому
+    фильтры читают их через `attribute()`: прямое имя поля даёт ошибку и
+    скрывает все подписи.
     """
 
     LAYERS = (
@@ -379,7 +381,7 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
             for name in cls.LAYERS
         }
 
-    def test_open_border_label_rule_allows_outside_placement(self):
+    def test_open_border_label_uses_line_placement(self):
         for name, rules in self.rules.items():
             open_rules = [
                 rule for rule in rules
@@ -388,7 +390,7 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
             ]
             self.assertEqual(len(open_rules), 1, name)
             rule = open_rules[0]
-            self.assertIn(
+            self.assertNotIn(
                 "attribute('maritime') = 'yes'", rule.get("filter") or "", name
             )
             self.assertIsNone(rule.get("scalemindenom"), name)
@@ -396,8 +398,27 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
             placement = rule.find("settings/placement")
             self.assertIsNotNone(placement, name)
             self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
+            self.assertEqual(placement.get("placement"), "2", name)
+            self.assertEqual(placement.get("placementFlags"), "2", name)
+            self.assertEqual(
+                placement.get("geometryGeneratorEnabled"), "1", name
+            )
+            self.assertIn(
+                "label_line",
+                placement.get("geometryGenerator") or "", name,
+            )
+            self.assertEqual(
+                placement.get("geometryGeneratorType"),
+                "LineGeometry", name,
+            )
+            self.assertEqual(placement.get("layerType"), "LineGeometry", name)
+            maritime_rule = next(
+                other for other in rules
+                if "attribute('maritime') = 'yes'"
+                in (other.get("filter") or "")
+            )
             for other in rules:
-                if other is rule:
+                if other is rule or other is maritime_rule:
                     continue
                 self.assertIn(
                     "coalesce(attribute('maritime'), '') != 'yes'",
@@ -407,6 +428,25 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                     "coalesce(attribute('open_border'), '') != 'yes'",
                     other.get("filter") or "", name,
                 )
+
+    def test_maritime_label_rule_keeps_polygon_placement(self):
+        for name, rules in self.rules.items():
+            maritime_rules = [
+                rule for rule in rules
+                if "attribute('maritime') = 'yes'"
+                in (rule.get("filter") or "")
+            ]
+            self.assertEqual(len(maritime_rules), 1, name)
+            rule = maritime_rules[0]
+            self.assertIsNone(rule.get("scalemindenom"), name)
+            self.assertIsNone(rule.get("scalemaxdenom"), name)
+            placement = rule.find("settings/placement")
+            self.assertIsNotNone(placement, name)
+            self.assertEqual(placement.get("placement"), "7", name)
+            self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
+            self.assertEqual(
+                placement.get("geometryGeneratorEnabled"), "0", name
+            )
 
     @staticmethod
     def _matches(layer, filter_text, **values):
@@ -457,18 +497,26 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                 if "attribute('open_border') = 'yes'"
                 in (rule.get("filter") or "")
             )
+            maritime_rule = next(
+                rule for rule in rules
+                if "attribute('maritime') = 'yes'"
+                in (rule.get("filter") or "")
+            )
             normal = next(
-                rule for rule in rules if rule is not open_rule
+                rule for rule in rules
+                if rule is not open_rule and rule is not maritime_rule
             )
             normal_filter = normal.get("filter")
             open_filter = open_rule.get("filter")
+            maritime_filter = maritime_rule.get("filter")
 
             match, error = self._matches(layer, normal_filter)
             self.assertTrue(match, name)
             self.assertEqual(error, "", name)
-            match, error = self._matches(layer, open_filter)
-            self.assertFalse(match, name)
-            self.assertEqual(error, "", name)
+            for label_filter in (open_filter, maritime_filter):
+                match, error = self._matches(layer, label_filter)
+                self.assertFalse(match, name)
+                self.assertEqual(error, "", name)
 
             match, error = self._matches(
                 layer, normal_filter, open_border="yes"
@@ -479,20 +527,32 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                 self._matches(layer, open_filter, open_border="yes")[0],
                 name,
             )
+            self.assertFalse(
+                self._matches(layer, maritime_filter, open_border="yes")[0],
+                name,
+            )
 
             match, error = self._matches(
                 layer, normal_filter, maritime="yes"
             )
             self.assertFalse(match, name)
             self.assertEqual(error, "", name)
-            self.assertTrue(
+            self.assertFalse(
                 self._matches(layer, open_filter, maritime="yes")[0],
+                name,
+            )
+            self.assertTrue(
+                self._matches(layer, maritime_filter, maritime="yes")[0],
                 name,
             )
 
             match, error = self._matches(bare, normal_filter)
             self.assertTrue(match, name)
             self.assertEqual(error, "", name)
+            for label_filter in (open_filter, maritime_filter):
+                match, error = self._matches(bare, label_filter)
+                self.assertFalse(match, name)
+                self.assertEqual(error, "", name)
 
 
 class LandcoverLayerOrderTest(unittest.TestCase):

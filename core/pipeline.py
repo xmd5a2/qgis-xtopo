@@ -30,11 +30,14 @@ _LAYER_STAGE = "обработка слоёв"
 # складываются в общее время подготовки.
 _PARALLEL_STAGES = ("источник OSM", "рельеф")
 
-# Полуширина полигона вдоль открытой границы для подписи, градусы.
+# Полуширина полигона вдоль открытой границы, градусы. Сам полигон нужен
+# только как площадная геометрия слоя названий: подпись ставится вдоль
+# отдельной линии, поэтому полоса должна прилегать к границе, а не висеть
+# в стороне на километры.
 OPEN_BORDER_BUFFER_DEGREES = 0.0005
-# Смещение такой полосы в сторону страны, градусы. Подпись ставится
-# вдоль полосы, поэтому у общей границы две страны получают свои полосы.
-OPEN_BORDER_SIDE_DEGREES = 0.02
+# Смещение такой полосы в сторону страны, градусы. Оно равно полуширине:
+# полоса начинается у самой границы и целиком лежит на стороне страны.
+OPEN_BORDER_SIDE_DEGREES = 0.0005
 
 # QGIS сообщает о невалидной геометрии по-разному: собственные строки
 # локализованы, а GEOS добавляет английские TopologyException и
@@ -921,7 +924,10 @@ class Pipeline:
         превращается в тонкую полосу с признаком ``open_border``. У общей
         границы две страны, поэтому по ``left:country``/``right:country``
         (или ``left:province``/``right:province``) строятся две полосы,
-        сдвинутые в стороны стран: подпись не достаётся соседу.
+        прилегающие к границе со стороны каждой страны. Рядом с полосой
+        сохраняется ориентированная линия ``label_line``: она направлена
+        так, чтобы страна была слева, и шаблон ставит подпись вдоль неё с
+        нужной стороны.
         """
         pending = []
         for level, source_names in (
@@ -1013,9 +1019,11 @@ class Pipeline:
             return 0
         entry = (names or {}).get(level or "", {})
         extra_fields = set(entry.get("fields", ()))
-        # Признак тонкой полосы вдоль открытой границы: подпись такого
-        # объекта ставится снаружи, иначе в полосу она не помещается.
-        extra_fields.add("open_border")
+        # Признак тонкой полосы вдоль открытой границы. Подпись такого
+        # объекта ставится не по контуру полосы, а вдоль отдельной линии
+        # ``label_line``: на общей границе соседние страны получают текст
+        # со своей стороны.
+        extra_fields.update(("open_border", "label_line"))
         temporary = self._temp_path(layer_name, "names", "gpkg")
         temporary.unlink(missing_ok=True)
         writer = _GpkgWriter(
@@ -1044,7 +1052,7 @@ class Pipeline:
                     group = groups.setdefault(
                         key, {
                             "feature": feature, "polygons": [],
-                            "values": values,
+                            "lines": [], "values": values,
                         }
                     )
                     group["polygons"].append(polygons)
@@ -1061,12 +1069,20 @@ class Pipeline:
                         polygons = _offset_line_multipolygon(
                             geometry, side
                         )
+                        # Направление линии выбирается так, чтобы страна
+                        # всегда оставалась слева: тогда одно правило
+                        # ``AboveLine`` ставит подпись с её стороны.
+                        label_line = _oriented_line_geometry(
+                            geometry, side
+                        )
                     elif len(relations) == 1:
                         polygons = _open_line_multipolygon(geometry)
+                        label_line = _oriented_line_geometry(geometry, 1)
                     else:
                         # Общая граница без left/right: сторона неизвестна,
                         # подпись не должна доставаться одной стране.
                         polygons = None
+                        label_line = None
                     if polygons is None:
                         continue
                     values = dict(values)
@@ -1077,16 +1093,23 @@ class Pipeline:
                     group = groups.setdefault(
                         key, {
                             "feature": feature, "polygons": [],
-                            "values": values,
+                            "lines": [], "values": values,
                         }
                     )
                     group["polygons"].append(polygons)
+                    if label_line is not None:
+                        group["lines"].append(label_line)
             for group in groups.values():
                 polygons = _merge_polygons(group["polygons"])
                 if polygons is None:
                     continue
+                values = dict(group["values"] or {})
+                if group.get("lines"):
+                    lines = _merge_lines(group["lines"])
+                    if lines is not None:
+                        values["label_line"] = lines.ExportToWkt()
                 writer.add(
-                    group["feature"], polygons, values=group["values"]
+                    group["feature"], polygons, values=values
                 )
                 written += 1
             if written:
@@ -2468,6 +2491,65 @@ def _offset_line_multipolygon(geometry, side):
                     polygon.GetGeometryRef(index).Clone()
                 )
     return result if result.GetGeometryCount() else None
+
+
+def _oriented_line_geometry(geometry, side):
+    """Линия границы, направленная так, чтобы страна была слева.
+
+    ``side`` — результат :func:`_admin_border_side`: 1 — страна слева от
+    исходного направления, -1 — справа.  Для -1 части разворачиваются:
+    правило шаблона с ``AboveLine`` ставит подпись слева от линии, то есть
+    на стороне страны.
+    """
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        parts = [geometry]
+    elif name == "MULTILINESTRING":
+        parts = [
+            geometry.GetGeometryRef(index)
+            for index in range(geometry.GetGeometryCount())
+        ]
+    else:
+        return None
+    result = ogr.Geometry(ogr.wkbMultiLineString)
+    for part in parts:
+        count = part.GetPointCount()
+        if count < 2:
+            continue
+        line = ogr.Geometry(ogr.wkbLineString)
+        indexes = range(count - 1, -1, -1) if side < 0 else range(count)
+        for index in indexes:
+            x, y = part.GetPoint(index)[:2]
+            line.AddPoint_2D(x, y)
+        result.AddGeometry(line)
+    return result if result.GetGeometryCount() else None
+
+
+def _merge_lines(lines):
+    """Собирает части в один MultiLineString без GEOS-объединения.
+
+    ``unaryUnion`` здесь нельзя: он может развернуть части, и тогда
+    страна окажется уже не слева от линии.
+    """
+    from osgeo import ogr
+
+    merged = ogr.Geometry(ogr.wkbMultiLineString)
+    for line in lines:
+        if line is None:
+            continue
+        name = line.GetGeometryName()
+        if name == "LINESTRING":
+            merged.AddGeometry(line.Clone())
+        elif name == "MULTILINESTRING":
+            for index in range(line.GetGeometryCount()):
+                merged.AddGeometry(
+                    line.GetGeometryRef(index).Clone()
+                )
+    return merged if merged.GetGeometryCount() else None
 
 
 def _merge_polygons(polygons):

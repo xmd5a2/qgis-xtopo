@@ -1715,6 +1715,10 @@ class AdminNameFallbackTest(unittest.TestCase):
         geometry = feature.GetGeometryRef()
         self.assertEqual(geometry.GetGeometryName(), "MULTIPOLYGON")
         self.assertGreater(geometry.Area(), 0)
+        label_line = ogr.CreateGeometryFromWkt(
+            feature.GetField("label_line")
+        )
+        self.assertEqual(label_line.GetGeometryName(), "MULTILINESTRING")
 
     def test_open_land_border_gets_outside_label_marker(self):
         """Открытая сухопутная граница тоже помечается для подписи снаружи."""
@@ -1801,8 +1805,31 @@ class AdminNameFallbackTest(unittest.TestCase):
         uzbekistan_y = (
             features["Oʻzbekiston"].GetGeometryRef().Centroid().GetY()
         )
-        self.assertGreater(turkmenistan_y, 0.01)
-        self.assertLess(uzbekistan_y, -0.01)
+        self.assertGreater(turkmenistan_y, 0.0001)
+        self.assertLess(uzbekistan_y, -0.0001)
+        # Линия подписи направлена так, чтобы страна была слева: у
+        # Туркменистана (север) направление исходное, у Узбекистана
+        # (юг) — развёрнутое.
+        turkmenistan_geometry = ogr.CreateGeometryFromWkt(
+            features["Türkmenistan"].GetField("label_line")
+        )
+        uzbekistan_geometry = ogr.CreateGeometryFromWkt(
+            features["Oʻzbekiston"].GetField("label_line")
+        )
+        turkmenistan_line = turkmenistan_geometry.GetGeometryRef(0)
+        uzbekistan_line = uzbekistan_geometry.GetGeometryRef(0)
+        self.assertLess(
+            turkmenistan_line.GetPoint(0)[0],
+            turkmenistan_line.GetPoint(
+                turkmenistan_line.GetPointCount() - 1
+            )[0],
+        )
+        self.assertGreater(
+            uzbekistan_line.GetPoint(0)[0],
+            uzbekistan_line.GetPoint(
+                uzbekistan_line.GetPointCount() - 1
+            )[0],
+        )
 
     def test_shared_region_border_uses_province_tags(self):
         """Для регионов стороны берутся из left:province/right:province."""
@@ -1856,11 +1883,29 @@ class AdminNameFallbackTest(unittest.TestCase):
         )
         self.assertGreater(
             features["Daşoguz welaýaty"].GetGeometryRef().Centroid().GetY(),
-            0.01,
+            0.0001,
         )
         self.assertLess(
             features["Balkan welaýaty"].GetGeometryRef().Centroid().GetY(),
-            -0.01,
+            -0.0001,
+        )
+        dashoguz_geometry = ogr.CreateGeometryFromWkt(
+            features["Daşoguz welaýaty"].GetField("label_line")
+        )
+        balkan_geometry = ogr.CreateGeometryFromWkt(
+            features["Balkan welaýaty"].GetField("label_line")
+        )
+        for geometry in (dashoguz_geometry, balkan_geometry):
+            self.assertEqual(geometry.GetGeometryName(), "MULTILINESTRING")
+        dashoguz_line = dashoguz_geometry.GetGeometryRef(0)
+        balkan_line = balkan_geometry.GetGeometryRef(0)
+        self.assertLess(
+            dashoguz_line.GetPoint(0)[0],
+            dashoguz_line.GetPoint(dashoguz_line.GetPointCount() - 1)[0],
+        )
+        self.assertGreater(
+            balkan_line.GetPoint(0)[0],
+            balkan_line.GetPoint(balkan_line.GetPointCount() - 1)[0],
         )
 
     def test_relation_tags_are_parsed_from_opl(self):
