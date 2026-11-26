@@ -294,6 +294,7 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 | Что правите | Файл |
 |---|---|
 | Порядок слоёв, варианты slope/hillshade, правила по масштабу, изолинии, скорость рендеринга | `docs/agents/styles.md` |
+| Сборка океана из coastline: продление оборванного берега, плотность голосов, проверка по тайлам OSM | `docs/agents/coastline.md` |
 | Язык карты, подписи, сокращения, вытеснение значков POI | `docs/agents/labels.md` |
 | Правка `automap.qgz` без GUI: добавить или разделить слой, порядок в дереве | скилл `qgis-qgz-editing` |
 | Макеты печати, шкала атласа, overlay на холсте, перетаскиваемые рамки | скилл `qgis-canvas-layout` |

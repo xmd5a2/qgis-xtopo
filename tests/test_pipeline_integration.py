@@ -1,5 +1,6 @@
 import html
 import importlib.util
+import json
 import os
 import re
 import tempfile
@@ -10,6 +11,11 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 HAS_QGIS = importlib.util.find_spec("qgis") is not None
+
+try:
+    from osgeo import ogr, osr
+except ImportError:
+    ogr = osr = None
 
 
 @unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
@@ -4647,6 +4653,180 @@ class PipelineIntegrationTest(unittest.TestCase):
             # bring back layers that were pruned on an earlier run.
             project_module.prepare_project(config)
             self.assertIn(sentinel, read_project(path))
+
+
+@unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
+class CoastlineGeometryTest(unittest.TestCase):
+    """Сборка океана на маленьких, сильно упрощённых геометриях.
+
+    Каждый случай повторяет ситуацию, найденную на мировых охватах:
+    оборванный берег внутри рамки, шум на конце way, редкие точки на
+    крупной суше и островное кольцо без открытого берега.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    @staticmethod
+    def _write_layer(path, name, geometry_type, wkts, driver="SQLite"):
+        from osgeo import ogr, osr
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName(driver).CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(name, srs, geometry_type)
+        for wkt in wkts:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+            layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _config(directory, bbox):
+        from qgis_xtopo.core.config import Config
+
+        config = Config(
+            qgis_projects_dir=directory,
+            project_name="coastline",
+            bbox=bbox.as_csv(),
+        )
+        config.ensure_directories()
+        with open(config.crop_path, "w", encoding="utf-8") as handle:
+            json.dump(bbox.polygon_geojson(), handle)
+        return config
+
+    @staticmethod
+    def _water_geometries(path):
+        from osgeo import ogr
+
+        dataset = ogr.Open(str(path))
+        geometries = []
+        for feature in dataset.GetLayer(0):
+            geometry = feature.GetGeometryRef()
+            if geometry is not None:
+                geometries.append(geometry.Clone())
+        dataset = None
+        return geometries
+
+    @staticmethod
+    def _contains(geometries, x, y):
+        from osgeo import ogr
+
+        point = ogr.CreateGeometryFromWkt(f"POINT ({x} {y})")
+        return any(geometry.Contains(point) for geometry in geometries)
+
+    def test_open_coastline_inside_crop_is_extended(self):
+        """Берег, оборванный внутри охвата, делит его на море и сушу."""
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import prepare_coastline
+
+        bbox = BBox(0, 0, 4, 4)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory, bbox)
+            self._write_layer(
+                config.vector_dir / "coastline.sqlite", "coastline",
+                ogr.wkbLineString, [
+                    # Направление на север: вода справа, то есть восточнее.
+                    # На концах — дрожание вдоль искусственной границы.
+                    "LINESTRING (2.0 1.0, 2.005 1.0, 2.0 1.02, 2.0 1.5, "
+                    "2.0 2.5, 2.0 2.98, 2.0 3.0, 2.005 3.0)",
+                ],
+            )
+            self.assertTrue(prepare_coastline(config, bbox))
+            water = self._water_geometries(
+                config.vector_dir / "water_dissolved.sqlite"
+            )
+            self.assertTrue(self._contains(water, 3, 2))
+            self.assertFalse(self._contains(water, 1, 2))
+
+    def test_tail_noise_does_not_cut_off_sea(self):
+        """Продление по последнему сегменту уводило берег в море."""
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import prepare_coastline
+
+        bbox = BBox(0, 0, 4, 4)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory, bbox)
+            self._write_layer(
+                config.vector_dir / "coastline.sqlite", "coastline",
+                ogr.wkbLineString, [
+                    # Последние две вершины уходят на северо-восток, хотя
+                    # берег идёт на север.  Продление по ним отрезало бы
+                    # северо-западный угол моря.
+                    "LINESTRING (2.0 0.0, 2.0 1.0, 2.0 2.0, 2.0 2.4, "
+                    "2.0 2.495, 2.005 2.5)",
+                ],
+            )
+            self.assertTrue(prepare_coastline(config, bbox))
+            water = self._water_geometries(
+                config.vector_dir / "water_dissolved.sqlite"
+            )
+            self.assertTrue(self._contains(water, 2.5, 3.5))
+            self.assertTrue(self._contains(water, 3, 1))
+            self.assertFalse(self._contains(water, 1, 2))
+
+    def test_sparse_land_votes_are_rejected(self):
+        """Крупная суша с редкими точками не становится океаном."""
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import _side_ocean
+        from qgis_xtopo.core.pipeline import ProcessingRunner
+
+        bbox = BBox(0, 0, 10, 10)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory, bbox)
+            split = Path(directory) / "split.gpkg"
+            self._write_layer(
+                split, "split", ogr.wkbPolygon, [
+                    "POLYGON ((0 0, 5 0, 5 10, 0 10, 0 0))",
+                    "POLYGON ((5 0, 10 0, 10 10, 5 10, 5 0))",
+                ], driver="GPKG",
+            )
+            lines = Path(directory) / "lines.gpkg"
+            self._write_layer(
+                lines, "lines", ogr.wkbLineString, [
+                    # Берег: вода справа, восточная часть.
+                    "LINESTRING (5 0, 5 10)",
+                    # Короткая обратная way на суше: её точки попадают в
+                    # западную часть, но их плотность в разы ниже.
+                    "LINESTRING (2 4.2, 2 4)",
+                ], driver="GPKG",
+            )
+            runner = ProcessingRunner()
+            try:
+                ocean = _side_ocean(runner, config, str(split), str(lines), 1)
+            finally:
+                runner.release()
+            self.assertIsNotNone(ocean)
+            water = self._water_geometries(ocean)
+            self.assertTrue(self._contains(water, 7.5, 5))
+            self.assertFalse(self._contains(water, 2.5, 5))
+
+    def test_closed_ring_is_cut_out_of_ocean(self):
+        """Замкнутое кольцо острова вычитается, а не заливается водой."""
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import prepare_coastline
+
+        bbox = BBox(0, 0, 4, 4)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory, bbox)
+            self._write_layer(
+                config.vector_dir / "coastline.sqlite", "coastline",
+                ogr.wkbLineString, [
+                    "LINESTRING (1.5 1.5, 2.5 1.5, 2.5 2.5, 1.5 2.5, "
+                    "1.5 1.5)",
+                ],
+            )
+            self.assertTrue(prepare_coastline(config, bbox))
+            water = self._water_geometries(
+                config.vector_dir / "water_dissolved.sqlite"
+            )
+            self.assertTrue(self._contains(water, 0.5, 0.5))
+            self.assertFalse(self._contains(water, 2, 2))
 
 
 if __name__ == "__main__":

@@ -1874,6 +1874,9 @@ class CoastlineIntermediateTest(unittest.TestCase):
                 def run(self, algorithm, parameters):
                     recorded[algorithm] = parameters
                     calls.append((algorithm, parameters))
+                    output = parameters.get("OUTPUT")
+                    if output:
+                        return {"OUTPUT": f"memory:/{Path(output).name}"}
                     return {"OUTPUT": f"memory:{algorithm}"}
 
             def write_lines(source, destination, open_only=False):
@@ -1898,10 +1901,24 @@ class CoastlineIntermediateTest(unittest.TestCase):
                         side_effect=write_selected,
                     ), \
                     mock.patch.object(
+                        coastline, "_extend_open_lines",
+                        side_effect=lambda source, destination, distance:
+                        destination,
+                    ), \
+                    mock.patch.object(
                         coastline, "_largest_polygon", side_effect=largest,
                     ), \
                     mock.patch.object(
                         coastline, "_line_length", return_value=10.0,
+                    ), \
+                    mock.patch.object(
+                        coastline, "_counted_faces",
+                        return_value=([(10, 1.0)], 10, 1.0),
+                    ), \
+                    mock.patch.object(
+                        coastline, "_faces_by_votes",
+                        side_effect=lambda source, destination, threshold,
+                        min_density=0.0: destination,
                     ), \
                     mock.patch.object(
                         coastline, "_write_polygons",
@@ -1959,9 +1976,49 @@ class CoastlineIntermediateTest(unittest.TestCase):
             Path(item).name
             for item in recorded["native:mergevectorlayers"]["LAYERS"]
         ]
-        self.assertIn("open_parts.geojson", layers)
+        self.assertIn("coastline_open_clipped.gpkg", layers)
         self.assertIn("native:dissolve", recorded)
         self.assertIn("native:polygonize", recorded)
+
+    def test_open_parts_are_extended_to_the_crop_edge(self):
+        """Берег, оборванный внутри охвата, должен дойти до его края."""
+        _recorded, calls = self._recorded()
+        clip = next(
+            index
+            for index, (algorithm, parameters) in enumerate(calls)
+            if algorithm == "native:clip"
+            and "coastline_open_clipped" in str(parameters["OUTPUT"])
+        )
+        self.assertEqual(
+            Path(calls[clip][1]["INPUT"]).name,
+            "coastline_open_extended.gpkg",
+        )
+        merge = next(
+            index
+            for index, (algorithm, parameters) in enumerate(calls)
+            if algorithm == "native:mergevectorlayers"
+            and any(
+                "coastline_open_clipped" in str(layer)
+                for layer in parameters["LAYERS"]
+            )
+        )
+        self.assertLess(clip, merge)
+
+    def test_extension_follows_the_line_tail(self):
+        """У границы выгрузки последний сегмент идёт вдоль неё, не по берегу."""
+        from osgeo import ogr
+
+        from qgis_xtopo.core.coastline import _extended_end
+
+        line = ogr.Geometry(ogr.wkbLineString)
+        for x, y in (
+            (0.30, 0.20), (0.20, 0.10), (0.12, 0.02),
+            (0.10, 0.0), (0.0998, 0.0001), (0.1001, 0.0002),
+        ):
+            line.AddPoint_2D(x, y)
+        x, y = _extended_end(line, False, 1.0, 0.01)
+        self.assertLess(x, 0.0)
+        self.assertLess(y, 0.0)
 
     def test_inland_water_is_not_dissolved_into_ocean(self):
         """Озеро у берега не должно сливаться с океаном.
@@ -2048,6 +2105,125 @@ class CoastlineIntermediateTest(unittest.TestCase):
         inputs = [Path(item["INPUT"]).name for item in dissolves]
         self.assertIn("lines.geojson", inputs)
         self.assertNotIn("open_lines.geojson", inputs)
+
+    @staticmethod
+    def _faces_layer(directory, faces):
+        from osgeo import ogr, osr
+
+        path = Path(directory) / "faces.gpkg"
+        dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer("faces", srs, ogr.wkbPolygon)
+        layer.CreateField(ogr.FieldDefn("vcount", ogr.OFTInteger))
+        for (x0, y0, x1, y1), votes in faces:
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)):
+                ring.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("vcount", votes)
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+        dataset = None
+        return path
+
+    def test_counted_faces_sums_votes_and_area(self):
+        from qgis_xtopo.core.coastline import _counted_faces
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._faces_layer(directory, [
+                ((0, 0, 0.5, 0.2), 100),
+                ((0.5, 0, 1.5, 1.0), 10),
+            ])
+            faces, total, area = _counted_faces(source)
+            self.assertEqual(len(faces), 2)
+            self.assertEqual(total, 110)
+            self.assertAlmostEqual(area, 1.1)
+
+    def test_faces_by_votes_rejects_sparse_land(self):
+        """Крупная суша с редкими точками не попадает в океан."""
+        from qgis_xtopo.core.coastline import _faces_by_votes
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._faces_layer(directory, [
+                ((0, 0, 0.5, 0.2), 1000),   # море: 10000 голосов на градус²
+                ((0.5, 0, 1.5, 1.0), 10),   # суша: 10 голосов на градус²
+                ((1.5, 0, 1.6, 0.1), 1),    # случайная точка ниже порога
+            ])
+            destination = Path(directory) / "ocean.gpkg"
+            result = _faces_by_votes(
+                source, destination, threshold=10, min_density=100,
+            )
+            self.assertEqual(result, destination)
+            from osgeo import ogr
+
+            dataset = ogr.Open(str(destination))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(layer.GetFeatureCount(), 1)
+            feature = layer.GetNextFeature()
+            self.assertAlmostEqual(
+                feature.GetGeometryRef().GetArea(), 0.1
+            )
+            dataset = None
+
+    def test_faces_by_votes_returns_none_without_candidates(self):
+        from qgis_xtopo.core.coastline import _faces_by_votes
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._faces_layer(directory, [
+                ((0, 0, 1.0, 0.5), 2),
+            ])
+            destination = Path(directory) / "ocean.gpkg"
+            self.assertIsNone(
+                _faces_by_votes(source, destination, threshold=10)
+            )
+            self.assertFalse(destination.exists())
+
+
+class LandlockedCoastlineTest(unittest.TestCase):
+    """Полностью сухопутный охват не должен получать океан."""
+
+    def test_empty_coastline_keeps_inland_water(self):
+        from qgis_xtopo.core.coastline import prepare_coastline
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="landlocked",
+            )
+            config.ensure_directories()
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(config.vector_dir / "coastline.sqlite")
+            )
+            dataset.CreateLayer("coastline", srs, ogr.wkbLineString)
+            dataset = None
+            water = config.vector_dir / "water_dissolved.sqlite"
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
+                ring.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(water))
+            layer = dataset.CreateLayer("water_dissolved", srs, ogr.wkbPolygon)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+            dataset = None
+            before = water.read_bytes()
+
+            messages = []
+            self.assertFalse(
+                prepare_coastline(
+                    config, BBox(0, 0, 1, 1), progress=messages.append
+                )
+            )
+            self.assertEqual(water.read_bytes(), before)
+            self.assertTrue(
+                any("нет данных" in message for message in messages), messages
+            )
 
 
 class EmptySourceOutputsTest(unittest.TestCase):

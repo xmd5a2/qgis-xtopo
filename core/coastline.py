@@ -7,6 +7,7 @@ the ocean with inland water so the project keeps a single
 ``water_dissolved`` layer.
 """
 
+import math
 from pathlib import Path
 
 
@@ -49,6 +50,17 @@ ISLAND_ID_FILTER_MIN_FEATURES = 5000
 # их число пропорционально длине берега: длинный фьорд, обведённый одной
 # way, больше не теряется.
 OCEAN_POINT_SHARE = 0.01
+
+# Крупная суша может набрать больше 1% точек из-за обратных way.  У воды
+# точки стоят вдоль всего берега, поэтому их плотность на единицу площади
+# заметно выше средней по охвату.  Части с плотностью ниже 10% средней
+# считаем сушей; малые водоёмы не страдают — у них плотность высокая.
+OCEAN_MIN_DENSITY_SHARE = 0.1
+
+# Хвост линии (в градусах), по которому считается направление продления.
+# Последний сегмент у границы выгрузки может дрожать вдоль неё, и
+# продление по одному сегменту уводит берег в море или в сушу.
+OCEAN_EXTENSION_TAIL = 0.01
 
 
 def _line_geometries(geometry):
@@ -161,6 +173,95 @@ def _write_selected_lines(source, destination, closed):
         lambda geometry: not _is_closed_ring(geometry)
     )
     return _write_line_features(source, destination, keep=keep)
+
+
+def _extended_end(line, start, distance, tail):
+    """Координата продолжения конца линии по направлению её хвоста."""
+    count = line.GetPointCount()
+    if count < 2:
+        return None
+    index = 0 if start else count - 1
+    end_x, end_y = line.GetX(index), line.GetY(index)
+    step = 1 if start else -1
+    far_x, far_y = end_x, end_y
+    walked = 0.0
+    while 0 <= index + step < count:
+        next_x, next_y = line.GetX(index + step), line.GetY(index + step)
+        walked += math.hypot(next_x - far_x, next_y - far_y)
+        far_x, far_y = next_x, next_y
+        index += step
+        if walked >= tail:
+            break
+    dx, dy = end_x - far_x, end_y - far_y
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return None
+    return (
+        end_x + dx / length * distance,
+        end_y + dy / length * distance,
+    )
+
+
+def _extend_open_lines(source, destination, distance):
+    """Продолжает оба конца каждой незамкнутой линии за пределы охвата.
+
+    Берег, оборванный границей выгрузки внутри охвата, не делит его на
+    море и сушу.  Направление берётся по хвосту линии длиной
+    ``OCEAN_EXTENSION_TAIL``: у границы выгрузки последние вершины часто
+    идут вдоль неё, а не вдоль берега.
+    """
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(source))
+    if dataset is None:
+        raise CoastlineError(f"Cannot open {source}")
+    driver = ogr.GetDriverByName(_driver_name(destination))
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(str(destination))
+    if output is None:
+        dataset = None
+        raise CoastlineError(f"Cannot create {destination}")
+    written = 0
+    try:
+        source_layer = dataset.GetLayer(0)
+        if source_layer is None:
+            return None
+        layer = output.CreateLayer(
+            "coastline", source_layer.GetSpatialRef(), geom_type=ogr.wkbLineString
+        )
+        for feature in source_layer:
+            for part in _line_geometries(feature.GetGeometryRef()):
+                if _is_closed_ring(part):
+                    continue
+                points = [part.GetPoint(index)[:2]
+                          for index in range(part.GetPointCount())]
+                start = _extended_end(
+                    part, True, distance, OCEAN_EXTENSION_TAIL
+                )
+                end = _extended_end(
+                    part, False, distance, OCEAN_EXTENSION_TAIL
+                )
+                if start is None and end is None:
+                    continue
+                if start is not None:
+                    points.insert(0, start)
+                if end is not None:
+                    points.append(end)
+                line = ogr.Geometry(ogr.wkbLineString)
+                for x, y in points:
+                    line.AddPoint_2D(x, y)
+                item = ogr.Feature(layer.GetLayerDefn())
+                item.SetGeometry(line)
+                layer.CreateFeature(item)
+                written += 1
+    finally:
+        output = None
+        dataset = None
+    if not written:
+        destination.unlink(missing_ok=True)
+        return None
+    return destination
 
 
 def _write_island_overlay(island, coastline, destination):
@@ -602,6 +703,116 @@ def _ocean_point_spacing(length):
     )
 
 
+def _counted_faces(source):
+    """Голоса и площади частей охвата из слоя с полем ``vcount``.
+
+    Возвращает ``(faces, total_votes, total_area)``; ``faces`` — список
+    пар «голоса, площадь».  Площадь считается планарно в единицах слоя:
+    важна не абсолютная величина, а отношение плотности частей.
+    """
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(source))
+    if dataset is None:
+        raise CoastlineError(f"Cannot open {source}")
+    try:
+        layer = dataset.GetLayer(0)
+        if layer is None:
+            return [], 0, 0.0
+        index = layer.GetLayerDefn().GetFieldIndex("vcount")
+        if index < 0:
+            raise CoastlineError(f"{source} has no vcount field")
+        faces = []
+        for feature in layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty():
+                continue
+            if geometry.GetDimension() != 2:
+                continue
+            faces.append((
+                feature.GetField(index) or 0,
+                _geometry_area(geometry),
+            ))
+    finally:
+        dataset = None
+    return (
+        faces,
+        sum(votes for votes, _area in faces),
+        sum(area for _votes, area in faces),
+    )
+
+
+def _faces_by_votes(source, destination, threshold, min_density=0.0):
+    """Записать части охвата, набравшие достаточно голосов.
+
+    Голос — береговая точка на водной стороне берега.  Порог по числу
+    голосов отсекает случайные попадания, а порог по плотности — крупную
+    сушу: единичные точки от обратных way и от смещения поперёк узких
+    проток теряются на её площади, тогда как у воды точки стоят вдоль
+    всего берега.
+    """
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(source))
+    if dataset is None:
+        raise CoastlineError(f"Cannot open {source}")
+    driver = ogr.GetDriverByName(_driver_name(destination))
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(str(destination))
+    if output is None:
+        dataset = None
+        raise CoastlineError(f"Cannot create {destination}")
+    written = 0
+    try:
+        source_layer = dataset.GetLayer(0)
+        if source_layer is None:
+            return None
+        source_definition = source_layer.GetLayerDefn()
+        index = source_definition.GetFieldIndex("vcount")
+        if index < 0:
+            raise CoastlineError(f"{source} has no vcount field")
+        layer = output.CreateLayer(
+            "ocean", source_layer.GetSpatialRef(), geom_type=ogr.wkbMultiPolygon
+        )
+        definition = layer.GetLayerDefn()
+        fields = [
+            (position, source_definition.GetFieldDefn(position).GetName())
+            for position in range(source_definition.GetFieldCount())
+        ]
+        for feature in source_layer:
+            geometry = feature.GetGeometryRef()
+            if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
+                continue
+            votes = feature.GetField(index) or 0
+            if votes < threshold:
+                continue
+            area = _geometry_area(geometry)
+            if area <= MIN_POLYGON_AREA:
+                continue
+            if min_density > 0 and votes / area < min_density:
+                continue
+            if geometry.GetGeometryName() == "POLYGON":
+                geometry = ogr.ForceToMultiPolygon(geometry)
+            item = ogr.Feature(definition)
+            item.SetGeometry(geometry)
+            for source_position, name in fields:
+                target_position = definition.GetFieldIndex(name)
+                if target_position >= 0:
+                    item.SetField(
+                        target_position, feature.GetField(source_position)
+                    )
+            layer.CreateFeature(item)
+            written += 1
+    finally:
+        output = None
+        dataset = None
+    if not written:
+        destination.unlink(missing_ok=True)
+        return None
+    return destination
+
+
 def _side_ocean(runner, config, split, open_source, side):
     """Части охвата, лежащие по указанную сторону берега.
 
@@ -655,13 +866,22 @@ def _side_ocean(runner, config, split, open_source, side):
         "FIELD": "vcount",
         "OUTPUT": _temp(config, f"coastline_side_{tag}_count.gpkg"),
     })
-    total = _count_features(points)
+    faces, total, area = _counted_faces(counted)
+    if not faces or total <= 0:
+        return None
     threshold = max(1, int(total * OCEAN_POINT_SHARE))
-    return _run(runner, "native:extractbyexpression", {
-        "INPUT": str(counted),
-        "EXPRESSION": f'"vcount" >= {threshold}',
-        "OUTPUT": _temp(config, f"coastline_ocean_{tag}.gpkg"),
-    })
+    # Плотность голосов на единицу площади: у воды она близка к средней
+    # по охвату, у крупной суши — в разы ниже.  Сравнение с собственной
+    # средней делает порог независимым от длины берега и размера области.
+    min_density = (
+        total / area * OCEAN_MIN_DENSITY_SHARE if area > 0 else 0.0
+    )
+    return _faces_by_votes(
+        counted,
+        _temp(config, f"coastline_ocean_{tag}.gpkg"),
+        threshold,
+        min_density,
+    )
 
 
 def prepare_coastline(config, bbox, progress=None, cancel=None):
@@ -705,6 +925,32 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
             config.temp_dir / "coastline_open_parts.gpkg",
             closed=False,
         )
+        if open_parts is not None:
+            # Берег может закончиться внутри охвата: страны/выгрузки
+            # обрывают coastline на границе, и такая линия не делит
+            # прямоугольник на море и сушу.  Продлеваем концы по
+            # направлению хвоста линии и обрезаем по рамке, чтобы
+            # каждый открытый берег дошёл до её края.
+            if bbox is not None:
+                extension = max(
+                    bbox.lon_max - bbox.lon_min,
+                    bbox.lat_max - bbox.lat_min,
+                ) * 2
+            else:
+                extension = 2.0
+            open_parts = _extend_open_lines(
+                open_parts,
+                config.temp_dir / "coastline_open_extended.gpkg",
+                extension,
+            )
+            if open_parts is not None:
+                open_parts = _run(runner, "native:clip", {
+                    "INPUT": str(open_parts),
+                    "OVERLAY": str(crop),
+                    "OUTPUT": _temp(config, "coastline_open_clipped.gpkg"),
+                })
+            if open_parts is None or not _has_features(open_parts):
+                open_parts = None
         rings = _write_selected_lines(
             simplified, config.temp_dir / "coastline_rings.gpkg", closed=True
         )
