@@ -278,8 +278,10 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   names)` открытые границы (`label_line`) и у `admin level 4 (region
   names)` линейные правила (`boundary($geometry)` и `label_line`) используют
   `placement="3"` (Curved); площадные названия стран — `placement="7"`
-  (PerimeterCurved). Проверки — `OpenBorderAdminLabelTest`,
-  `RegionBoundaryLabelTest`. Подробности — `docs/agents/labels.md`.
+  (PerimeterCurved). Повтор подписей: 160/320 мм у открытых границ
+  стран/регионов на мелких масштабах, 400/800 мм у площадных названий.
+  Проверки — `OpenBorderAdminLabelTest`, `RegionBoundaryLabelTest`.
+  Подробности — `docs/agents/labels.md`.
 - **Рельеф в pipeline — три стадии.** `prepare_terrain_raster` (скачивание
   тайлов и сборка сырого DEM) не зависит от слоёв и в `run_project`
   работает в потоке `xtopo-terrain` параллельно `Pipeline.run` (стартует

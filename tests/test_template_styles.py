@@ -373,8 +373,12 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
         "admin level 4 (region names)",
     )
     LABEL_OPTIONS = {
-        "admin level 2 (country names)": ("10", "80"),
-        "admin level 4 (region names)": ("8", "160"),
+        "admin level 2 (country names)": ("10", "160"),
+        "admin level 4 (region names)": ("8", "320"),
+    }
+    AREA_REPEAT = {
+        "admin level 2 (country names)": "400",
+        "admin level 4 (region names)": "800",
     }
 
     @classmethod
@@ -449,6 +453,26 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                 low.find("settings/placement").get("repeatDistance"),
                 repeat, name,
             )
+            for rule in rules:
+                placement = rule.find("settings/placement")
+                self.assertIsNotNone(placement, name)
+                if rule.get("description") == "open border":
+                    self.assertEqual(
+                        placement.get("repeatDistance"), "0", name
+                    )
+                    continue
+                expected = (
+                    repeat
+                    if rule.get("description") == "open border low zoom"
+                    else self.AREA_REPEAT[name]
+                )
+                self.assertEqual(
+                    placement.get("repeatDistance"), expected,
+                    f"{name}: {rule.get('description')}",
+                )
+                self.assertEqual(
+                    placement.get("repeatDistanceUnits"), "MM", name
+                )
             maritime_rule = next(
                 other for other in rules
                 if "attribute('maritime') = 'yes'"
