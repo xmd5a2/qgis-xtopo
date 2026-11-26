@@ -502,6 +502,24 @@ class DownloadTest(unittest.TestCase):
                         "http://example.org/map.osm.pbf", self.destination
                     )
 
+    def test_slow_download_guard_aborts_transfer(self):
+        """Сторож считает только принятые байты и не публикует файл."""
+        from qgis_xtopo.core.download_speed import SlowDownload, SpeedGuard
+
+        payload = self._pbf(40000)
+        guard = SpeedGuard(window=0.0, threshold=1024 ** 4)
+        with mock.patch.object(
+            extracts, "_urlopen", return_value=_FakeResponse(payload)
+        ), mock.patch.object(
+            extracts, "head_size", return_value=(True, len(payload), "")
+        ):
+            with self.assertRaises(SlowDownload):
+                extracts.download_file(
+                    "http://example.org/map.osm.pbf", self.destination,
+                    guard=guard,
+                )
+        self.assertFalse(self.destination.exists())
+
     def test_allows_json_when_pbf_check_disabled(self):
         payload = b'{"type": "FeatureCollection", "features": []}'
         with mock.patch.object(

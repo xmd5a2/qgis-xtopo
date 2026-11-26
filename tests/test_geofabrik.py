@@ -324,6 +324,23 @@ class GeofabrikDownloadTest(unittest.TestCase):
                 )
         self.assertFalse(geofabrik.local_path(self.config, self.first).exists())
 
+    def test_slow_download_raises_slow_download(self):
+        """Сторож скорости прерывает загрузку до публикации файла."""
+        from qgis_xtopo.core.download_speed import SlowDownload, SpeedGuard
+
+        body = _pbf_bytes()
+        response = _Response(200, body, {"Content-Length": str(len(body))})
+        status = geofabrik.MapStatus(map=self.first, available=True, size=len(body))
+        transfer = geofabrik._Transfer(len(body), 1)
+        guard = SpeedGuard(window=0.0, threshold=1024 ** 4)
+        with mock.patch.object(geofabrik, "_urlopen", return_value=response):
+            with self.assertRaises(SlowDownload):
+                geofabrik._download_one(
+                    self.config, self.first, status, transfer, None, None,
+                    guard=guard,
+                )
+        self.assertFalse(geofabrik.local_path(self.config, self.first).exists())
+
     def test_pbf_without_data_block_is_rejected(self):
         """Только заголовка мало: это оборванная загрузка."""
         path = Path(self.directory.name) / "broken.osm.pbf"
@@ -501,6 +518,10 @@ class GeofabrikSizeLimitTest(unittest.TestCase):
 
 class GeofabrikSourcesTest(unittest.TestCase):
     def setUp(self):
+        from qgis_xtopo.core import sources
+
+        sources.reset_slow_switch()
+        self.addCleanup(sources.reset_slow_switch)
         self.directory = tempfile.TemporaryDirectory()
         self.config = Config(
             qgis_projects_dir=self.directory.name,
@@ -639,6 +660,107 @@ class GeofabrikSourcesTest(unittest.TestCase):
         with self.assertRaises(sources.SourceError) as context:
             sources._selected_maps(index, config, BBox(0.5, 0.5, 1.0, 1.0))
         self.assertIn("atlantis", str(context.exception))
+
+    def test_slow_geofabrik_switches_to_slice_once(self):
+        """Медленный Geofabrik заменяется на SliceOSM только один раз."""
+        from qgis_xtopo.core import sources
+
+        calls = []
+        slow = [True]
+
+        def once(config, bbox, names, **kwargs):
+            calls.append((config.source_mode, kwargs.get("guard") is not None))
+            if slow[0]:
+                slow[0] = False
+                raise sources.SlowDownload("10 КБ/с < 100 КБ/с")
+            return sources.SourceResult()
+
+        with mock.patch.object(
+            sources, "_prepare_sources_once", side_effect=once
+        ):
+            result = sources.prepare_sources(
+                self.config, BBox(1, 2, 3, 4), ["water"],
+            )
+            self.assertEqual(
+                [call[0] for call in calls], ["geofabrik", "slice"]
+            )
+            self.assertEqual(
+                [call[1] for call in calls], [True, False]
+            )
+            self.assertTrue(
+                any("SliceOSM" in warning for warning in result.warnings),
+                result.warnings,
+            )
+            calls.clear()
+            sources.prepare_sources(self.config, BBox(1, 2, 3, 4), ["water"])
+        # После первого переключения сторож больше не создаётся.
+        self.assertEqual(calls, [("geofabrik", False)])
+
+    def test_slow_extracts_prefers_geofabrik(self):
+        from qgis_xtopo.core import sources
+
+        config = Config(
+            qgis_projects_dir=self.directory.name,
+            project_name="demo",
+            bbox="1,2,3,4",
+            array_queries=["water"],
+            source_mode="extracts",
+        )
+        with mock.patch.object(
+            sources.geofabrik, "fetch_index", return_value=self._state()
+        ):
+            self.assertEqual(
+                sources._fallback_mode(config, BBox(1, 2, 3, 4)), "geofabrik"
+            )
+
+    def test_slow_extracts_uses_slice_without_geofabrik_maps(self):
+        from qgis_xtopo.core import sources
+
+        config = Config(
+            qgis_projects_dir=self.directory.name,
+            project_name="demo",
+            bbox="1,2,3,4",
+            array_queries=["water"],
+            source_mode="extracts",
+        )
+        state = self._state()
+        state.index.required.return_value = []
+        with mock.patch.object(
+            sources.geofabrik, "fetch_index", return_value=state
+        ):
+            self.assertEqual(
+                sources._fallback_mode(config, BBox(1, 2, 3, 4)), "slice"
+            )
+
+    def test_slow_slice_without_geofabrik_retries_without_guard(self):
+        """Заменять вырез не на что: та же вырезка продолжается без сторожа."""
+        from qgis_xtopo.core import sources
+
+        config = Config(
+            qgis_projects_dir=self.directory.name,
+            project_name="demo",
+            bbox="1,2,3,4",
+            array_queries=["water"],
+            source_mode="slice",
+        )
+        state = self._state()
+        state.index.required.return_value = []
+        calls = []
+
+        def once(config, bbox, names, **kwargs):
+            calls.append((config.source_mode, kwargs.get("guard") is not None))
+            if len(calls) == 1:
+                raise sources.SlowDownload("10 КБ/с < 100 КБ/с")
+            return sources.SourceResult()
+
+        with mock.patch.object(
+            sources.geofabrik, "fetch_index", return_value=state
+        ), mock.patch.object(
+            sources, "_prepare_sources_once", side_effect=once
+        ):
+            sources.prepare_sources(config, BBox(1, 2, 3, 4), ["water"])
+        self.assertEqual(calls, [("slice", True), ("slice", False)])
+        self.assertFalse(sources._slow_switch_used)
 
 
 class GeofabrikConfigTest(unittest.TestCase):

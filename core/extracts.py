@@ -27,6 +27,7 @@ from pathlib import Path
 from qgis.core import QgsGeometry, QgsPointXY, QgsRectangle
 
 from . import disk_space, geofabrik, i18n
+from .download_speed import SlowDownload
 
 
 USER_AGENT = "QGIS-xtopo/0.7 (+https://github.com/xmd5a2/qgis-xtopo)"
@@ -156,7 +157,7 @@ def head_size(url):
 
 
 def download_file(url, destination, progress=None, cancel=None, expected_size=0,
-                  label="", check_pbf=True):
+                  label="", check_pbf=True, guard=None):
     """Скачать файл по частям.
 
     Часть хостов отдаёт ответ не целиком: присылает несколько килобайт и
@@ -260,12 +261,16 @@ def download_file(url, destination, progress=None, cancel=None, expected_size=0,
                         handle.write(chunk)
                         body_read += len(chunk)
                         received += len(chunk)
+                        if guard is not None:
+                            guard.add(len(chunk))
                         if progress and received - reported >= progress_step:
                             reported = received
                             progress(
                                 f"{label or url}: скачано "
                                 f"{disk_space.format_decimal(received / 1048576)} МБ"
                             )
+        except SlowDownload:
+            raise
         except urllib.error.HTTPError as exc:
             if exc.code == 416 and received:
                 if total and received >= total:
@@ -1298,9 +1303,9 @@ class SliceOsm:
         )
 
     def download(self, uuid, destination, progress=None, cancel=None,
-                 expected_size=0):
+                 expected_size=0, guard=None):
         url = f"{self.FILES}{uuid}.osm.pbf"
         return download_file(
             url, destination, progress=progress, cancel=cancel,
-            label="SliceOSM", expected_size=expected_size,
+            label="SliceOSM", expected_size=expected_size, guard=guard,
         )

@@ -516,6 +516,41 @@ class TerrainTest(unittest.TestCase):
             guard.add(0)
         self.assertTrue(guard.slow)
 
+    def test_speed_guard_ignores_wait_before_first_byte(self):
+        """Ожидание сборки выреза не считается медленной загрузкой."""
+        from unittest import mock
+
+        from qgis_xtopo.core import download_speed
+
+        clock = [0.0]
+        guard = download_speed.SpeedGuard(window=60.0, threshold=1024)
+        with mock.patch.object(
+            download_speed.time, "monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            clock[0] = 120.0
+            guard.add(16 * 1024)
+        self.assertFalse(guard.slow)
+
+    def test_speed_guard_trips_after_a_minute_of_slow_transfer(self):
+        from unittest import mock
+
+        from qgis_xtopo.core import download_speed
+
+        clock = [0.0]
+        guard = download_speed.SpeedGuard(
+            window=60.0, threshold=100 * 1024
+        )
+        with mock.patch.object(
+            download_speed.time, "monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            guard.add(1024)
+            clock[0] = 61.0
+            with self.assertRaises(download_speed.SlowDownload):
+                guard.add(1024)
+        self.assertTrue(guard.slow)
+
     def test_glacier_isolines_are_clipped_by_glaciers(self):
         from osgeo import ogr, osr
 

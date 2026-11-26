@@ -15,6 +15,7 @@ from pathlib import Path
 from qgis.core import QgsGeometry, QgsRectangle
 
 from . import disk_space, i18n, net
+from .download_speed import SlowDownload
 
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
@@ -694,7 +695,8 @@ def _expected_size(headers, code, status):
     return status.size if status is not None else 0
 
 
-def _download_one(config, item, status, transfer, progress, cancel):
+def _download_one(config, item, status, transfer, progress, cancel,
+                  guard=None):
     destination = local_path(config, item)
     temporary = destination.with_suffix(destination.suffix + ".part")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -726,6 +728,8 @@ def _download_one(config, item, status, transfer, progress, cancel):
                     break
                 handle.write(chunk)
                 transfer.add(len(chunk))
+                if guard is not None:
+                    guard.add(len(chunk))
     received = temporary.stat().st_size
     if expected and received != expected:
         # Файл неполный: публиковать его нельзя, иначе карта будет
@@ -750,7 +754,7 @@ def _download_one(config, item, status, transfer, progress, cancel):
 
 
 def ensure_maps(config, maps, statuses=None, progress=None, percent=None,
-                cancel=None):
+                cancel=None, guard=None):
     if not maps:
         raise GeofabrikError("Для выбранного охвата карты Geofabrik не найдены")
     if statuses is None:
@@ -819,13 +823,14 @@ def ensure_maps(config, maps, statuses=None, progress=None, percent=None,
                     transfer,
                     progress,
                     cancel,
+                    guard,
                 ): item
                 for item, status in pending
             }
             for future in as_completed(futures):
                 try:
                     future.result()
-                except InterruptedError:
+                except (InterruptedError, SlowDownload):
                     raise
                 except Exception as exc:
                     errors.append(str(exc))

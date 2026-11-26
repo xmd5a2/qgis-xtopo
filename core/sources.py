@@ -6,12 +6,15 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import (
-    disk_space, extracts, geofabrik, overpass_batch, osmium_tool, pbf_source,
-    slice_estimate,
+    disk_space, extracts, geofabrik, i18n, overpass_batch, osmium_tool,
+    pbf_source, slice_estimate,
+)
+from .download_speed import (
+    SLOW_DOWNLOAD_RATE, SLOW_DOWNLOAD_WINDOW, SlowDownload, SpeedGuard,
 )
 from .overpass_client import OverpassClient, build_query, valid_osm
 from .resources import read_query
@@ -27,6 +30,21 @@ OVERPASS_BATCH_SIZE = 20
 
 # Сколько ждать локальный Overpass и ssh-туннель, секунды.
 OVERPASS_PROCESS_TIMEOUT = 3600
+
+# Режимы, где PBF действительно скачивается по сети.  Только для них
+# работает сторож скорости и автоматическая замена источника.
+DOWNLOAD_MODES = ("geofabrik", "extracts", "slice")
+
+# Замена источника из-за медленной загрузки разрешена один раз за
+# сессию: после неё сторож отключается, чтобы источники не передавали
+# загрузку друг другу по кругу.
+_slow_switch_used = False
+
+
+def reset_slow_switch():
+    """Забыть переключение источника (тесты, новая сессия)."""
+    global _slow_switch_used
+    _slow_switch_used = False
 
 
 class SourceError(RuntimeError):
@@ -237,7 +255,7 @@ def _extracted_paths(config, paths):
 
 
 def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
-                        percent, cancel):
+                        percent, cancel, guard=None):
     """Скачать выбранные выгрузки и подготовить по ним слои.
 
     Общий путь для файловых источников: Geofabrik и другие провайдеры
@@ -253,7 +271,7 @@ def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
             with timer.measure():
                 geofabrik.ensure_maps(
                     config, maps, progress=progress, percent=percent,
-                    cancel=cancel,
+                    cancel=cancel, guard=guard,
                 )
         if osmium_ready:
             paths = geofabrik.source_paths(
@@ -303,8 +321,8 @@ def _prepare_file_maps(config, bbox, query_names, maps, timer, progress,
     return dataset, warnings
 
 
-def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
-                    percent=None):
+def _prepare_sources_once(config, bbox, query_names, cancel=None, progress=None,
+                          percent=None, guard=None):
     if config.source_mode == "geofabrik":
         timer = _DownloadTimer()
         with timer.measure():
@@ -314,6 +332,7 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
             raise SourceError("Для выбранного охвата карты Geofabrik не найдены")
         dataset, warnings = _prepare_file_maps(
             config, bbox, query_names, maps, timer, progress, percent, cancel,
+            guard=guard,
         )
         warnings.extend(dataset.warnings)
         if state.warning:
@@ -347,6 +366,7 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
             )
         dataset, warnings = _prepare_file_maps(
             config, bbox, query_names, maps, timer, progress, percent, cancel,
+            guard=guard,
         )
         warnings.extend(dataset.warnings)
         if catalogue.warning:
@@ -398,7 +418,7 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
                         progress("SliceOSM: скачивание выреза")
                     client.download(
                         uuid, destination, progress=progress, cancel=cancel,
-                        expected_size=size,
+                        expected_size=size, guard=guard,
                     )
             except extracts.ExtractError as exc:
                 raise SourceError(str(exc)) from exc
@@ -621,3 +641,87 @@ def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
         return SourceResult(files=files, download_seconds=timer.total)
 
     raise SourceError(f"Unsupported source mode: {config.source_mode}")
+
+
+def _fallback_mode(config, bbox, cancel=None):
+    """Куда переключиться при медленной загрузке PBF.
+
+    Geofabrik предпочтительнее: готовые выгрузки часто уже лежат в кэше,
+    а если охват ими не покрыт, вырез собирает SliceOSM.  Из Geofabrik
+    переключаться некуда, кроме SliceOSM.
+    """
+    if config.source_mode == "geofabrik":
+        return "slice"
+    try:
+        state = geofabrik.fetch_index(config, cancel=cancel)
+        maps = state.index.required(bbox)
+    except InterruptedError:
+        raise
+    except Exception:  # noqa: BLE001 - нет индекса, значит нет и выгрузок
+        maps = []
+    if maps:
+        return "geofabrik"
+    if config.source_mode != "slice":
+        return "slice"
+    return None
+
+
+def _source_title(mode):
+    return "Geofabrik" if mode == "geofabrik" else "SliceOSM"
+
+
+def prepare_sources(config, bbox, query_names, cancel=None, progress=None,
+                    percent=None):
+    """Подготовить источник OSM, заменив слишком медленный источник.
+
+    Сторож считает только принятые байты PBF: ожидание сборки выреза
+    SliceOSM и ответы индексов в окно скорости не входят.  После первой
+    замены за сессию сторож больше не создаётся.
+    """
+    global _slow_switch_used
+    guard = None
+    if config.source_mode in DOWNLOAD_MODES and not _slow_switch_used:
+        guard = SpeedGuard(
+            window=SLOW_DOWNLOAD_WINDOW, threshold=SLOW_DOWNLOAD_RATE,
+        )
+    try:
+        return _prepare_sources_once(
+            config, bbox, query_names, cancel=cancel, progress=progress,
+            percent=percent, guard=guard,
+        )
+    except SlowDownload as exc:
+        if guard is None:
+            # Второй раз источник не меняем: сторож уже отключён.
+            raise
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Preparation cancelled") from exc
+        target = _fallback_mode(config, bbox, cancel=cancel)
+        if not target:
+            if progress:
+                progress(i18n.trf(
+                    "WARNING: PBF скачивается слишком медленно ({}); "
+                    "продолжаю без ограничения скорости",
+                    exc,
+                ))
+            return _prepare_sources_once(
+                config, bbox, query_names, cancel=cancel, progress=progress,
+                percent=percent, guard=None,
+            )
+        _slow_switch_used = True
+        title = _source_title(target)
+        if progress:
+            progress(i18n.trf(
+                "WARNING: PBF скачивается слишком медленно ({}); "
+                "переключаюсь на {}",
+                exc, title,
+            ))
+        fallback = replace(config, source_mode=target, geofabrik_maps=[])
+        result = _prepare_sources_once(
+            fallback, bbox, query_names, cancel=cancel, progress=progress,
+            percent=percent, guard=None,
+        )
+        result.warnings.append(i18n.trf(
+            "Источник заменён на {}: PBF скачивался слишком медленно ({})",
+            title, exc,
+        ))
+        return result
