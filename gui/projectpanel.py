@@ -63,6 +63,7 @@ from ..core.resources import plugin_version, template_path
 from .atlas import (
     SheetEditMapTool, SheetMapTool, SheetMarker, SheetSizeLabels,
 )
+from .canvasscalebar import CanvasScaleBar
 from .exportpreview import ExportPreviewDialog
 from .layoutgrid import LayoutCoordinateGridItem
 from .layoutscalebar import (
@@ -573,6 +574,8 @@ class ProjectPanel(QWidget):
         self._pan_tool = None
         self._canvas_object = None
         self._canvas_filter_widgets = ()
+        self._canvas_scale_bar = None
+        self._canvas_scale_bar_canvas = None
         self._measure_dialogs_connected = False
         self._measure_dialog_timer = QTimer(self)
         self._measure_dialog_timer.setSingleShot(True)
@@ -606,6 +609,9 @@ class ProjectPanel(QWidget):
         self._build_ui()
         self._connect_root()
         self._connect_measure_dialogs()
+        self.destroyed.connect(
+            lambda *_args: self._dispose_canvas_scale_bar()
+        )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3070,10 +3076,34 @@ class ProjectPanel(QWidget):
     def _update_tool_actions(self, own):
         canvas = self._canvas() if own else None
         self._connect_canvas(canvas)
+        self._sync_canvas_scale_bar(canvas)
         self.fit_action.setEnabled(canvas is not None)
         self.pan_action.setEnabled(canvas is not None)
         if canvas is None and self.pan_action.isChecked():
             self.pan_action.setChecked(False)
+
+    def _sync_canvas_scale_bar(self, canvas):
+        """Показывает шкалу масштаба только у проекта плагина."""
+        if canvas is self._canvas_scale_bar_canvas:
+            return
+        self._dispose_canvas_scale_bar()
+        if canvas is None:
+            return
+        self._canvas_scale_bar = CanvasScaleBar(canvas)
+        self._canvas_scale_bar_canvas = canvas
+
+    def _dispose_canvas_scale_bar(self):
+        bar = self._canvas_scale_bar
+        self._canvas_scale_bar = None
+        self._canvas_scale_bar_canvas = None
+        if bar is None:
+            return
+        try:
+            bar.hide()
+            bar.setParent(None)
+            bar.deleteLater()
+        except RuntimeError:
+            pass
 
     def _connect_canvas(self, canvas):
         if canvas is self._canvas_object:

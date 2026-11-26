@@ -7,18 +7,14 @@
 """
 
 from qgis.core import (
-    QgsDistanceArea,
     QgsLayoutItem,
     QgsLayoutMeasurement,
-    QgsPointXY,
-    QgsProject,
-    QgsUnitTypes,
     Qgis,
 )
 from qgis.PyQt.QtCore import QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QPainter, QPainterPath, QPen
 
-from ..core.measure import mercator_ground_factor, scale_bar
+from ..core.measure import ground_width, scale_bar
 
 SCALE_BAR_MAX_MM = 45.0
 BAR_HEIGHT_MM = 1.5
@@ -62,33 +58,9 @@ class LayoutScaleBarItem(QgsLayoutItem):
         if units_per_mm <= 0:
             return 0.0
         map_width_mm = self.map_item.rect().width() / units_per_mm
-        extent = self.map_item.extent()
-        if map_width_mm <= 0 or extent.width() <= 0:
+        if map_width_mm <= 0:
             return 0.0
-        crs = self.map_item.crs()
-        if crs.isGeographic():
-            distance = QgsDistanceArea()
-            distance.setSourceCrs(
-                crs, QgsProject.instance().transformContext()
-            )
-            distance.setEllipsoid("WGS84")
-            middle = extent.center().y()
-            width_m = distance.measureLine(
-                QgsPointXY(extent.xMinimum(), middle),
-                QgsPointXY(extent.xMaximum(), middle),
-            )
-        else:
-            try:
-                factor = QgsUnitTypes.fromUnitToUnitFactor(
-                    crs.mapUnits(), Qgis.DistanceUnit.Meters
-                )
-            except Exception:
-                factor = 1.0
-            width_m = extent.width() * factor
-            if crs.authid() == "EPSG:3857":
-                # В Web Mercator метры растянуты с широтой: на 62°
-                # расстояние на местности вдвое меньше.
-                width_m *= mercator_ground_factor(extent.center().y())
+        width_m = ground_width(self.map_item.extent(), self.map_item.crs())
         return width_m / map_width_mm
 
     def draw(self, context):

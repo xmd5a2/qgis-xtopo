@@ -568,6 +568,76 @@ class PipelineIntegrationTest(unittest.TestCase):
         finally:
             project.clear()
 
+    def test_canvas_scale_bar_shows_ground_meters(self):
+        """Шкала на холсте считает земные метры и следует за охватом."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.canvasscalebar import MARGIN, CanvasScaleBar
+
+        canvas = QgsMapCanvas()
+        canvas.resize(640, 480)
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        canvas.setExtent(QgsRectangle(0, 8_700_000, 100_000, 8_800_000))
+        bar = CanvasScaleBar(canvas)
+        try:
+            self.assertEqual(bar.current_scale()[1], "10 км")
+            geometry = bar.geometry()
+            self.assertEqual(geometry.left(), MARGIN)
+            self.assertEqual(
+                geometry.y() + geometry.height() + MARGIN,
+                canvas.viewport().height(),
+            )
+            # Перетаскивание двигает сцену, а шкала остаётся на месте.
+            canvas.setSceneRect(
+                -50, -30,
+                canvas.viewport().width(), canvas.viewport().height(),
+            )
+            self.assertEqual(bar.geometry(), geometry)
+            # Приближение пересчитывает «круглое» расстояние.
+            canvas.setSceneRect(
+                0, 0,
+                canvas.viewport().width(), canvas.viewport().height(),
+            )
+            canvas.setExtent(
+                QgsRectangle(0, 8_700_000, 20_000, 8_720_000)
+            )
+            self.assertEqual(bar.current_scale()[1], "2 км")
+        finally:
+            bar.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
+    def test_canvas_scale_bar_belongs_to_plugin_project(self):
+        """Шкала появляется только у проекта плагина и снимается с него."""
+        from qgis.core import QgsCoordinateReferenceSystem
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.gui.projectpanel import ProjectPanel
+
+        class Iface:
+            def __init__(self, canvas):
+                self.canvas = canvas
+
+            def mapCanvas(self):
+                return self.canvas
+
+        canvas = QgsMapCanvas()
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        panel = ProjectPanel(Iface(canvas))
+        try:
+            panel._update_tool_actions(True)
+            self.assertIsNotNone(panel._canvas_scale_bar)
+            self.assertIs(panel._canvas_scale_bar_canvas, canvas)
+            panel._update_tool_actions(False)
+            self.assertIsNone(panel._canvas_scale_bar)
+        finally:
+            panel.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
     def test_coordinate_grid_step_and_labels(self):
         """Шаг сетки круглый, подписи DMS со стороной света впереди."""
         from qgis_xtopo.gui.layoutgrid import (

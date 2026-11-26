@@ -11,6 +11,8 @@ from qgis.core import (
     QgsDistanceArea,
     QgsPointXY,
     QgsProject,
+    QgsUnitTypes,
+    Qgis,
 )
 
 
@@ -27,6 +29,43 @@ def mercator_ground_factor(y):
         math.exp(float(y) / WEB_MERCATOR_RADIUS)
     ) - math.pi / 2.0
     return math.cos(latitude)
+
+
+def ground_width(extent, crs):
+    """Ширина охвата в метрах на местности.
+
+    В EPSG:3857 метры проекции растянуты с широтой: на 62° один метр
+    карты соответствует примерно 0,48 метра на земле.  Для географических
+    СК ширина считается по эллипсоиду WGS84.
+    """
+    if extent is None or crs is None or not crs.isValid():
+        return 0.0
+    if extent.width() <= 0:
+        return 0.0
+    if crs.isGeographic():
+        try:
+            distance = QgsDistanceArea()
+            distance.setSourceCrs(
+                crs, QgsProject.instance().transformContext()
+            )
+            distance.setEllipsoid("WGS84")
+            middle = extent.center().y()
+            return distance.measureLine(
+                QgsPointXY(extent.xMinimum(), middle),
+                QgsPointXY(extent.xMaximum(), middle),
+            )
+        except Exception:
+            return 0.0
+    try:
+        factor = QgsUnitTypes.fromUnitToUnitFactor(
+            crs.mapUnits(), Qgis.DistanceUnit.Meters
+        )
+    except Exception:
+        factor = 1.0
+    width = extent.width() * factor
+    if crs.authid() == "EPSG:3857":
+        width *= mercator_ground_factor(extent.center().y())
+    return width
 
 
 def scale_bar(meters_per_pixel, max_length=140.0):
