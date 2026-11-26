@@ -913,10 +913,10 @@ class Pipeline:
         названий, и подписи стран не рисуются. Замкнутые линии границы
         дают те же площадные контуры, по которым ставится подпись.
 
-        Открытую морскую границу нельзя замкнуть в кольцо. Если теги
-        отношения сохранились в исходном PBF, название берётся оттуда,
-        а линия превращается в тонкий полигон: подпись идёт вдоль
-        границы, как у обычного контура страны.
+        Открытую границу нельзя замкнуть в кольцо. Если теги отношения
+        сохранились в исходном PBF, название берётся оттуда, а линия
+        превращается в тонкий полигон с признаком ``open_border``:
+        подпись идёт вдоль границы, как у обычного контура страны.
         """
         pending = []
         for level, source_name in (
@@ -1001,6 +1001,9 @@ class Pipeline:
             return 0
         entry = (names or {}).get(level or "", {})
         extra_fields = set(entry.get("fields", ()))
+        # Признак тонкой полосы вдоль открытой границы: подпись такого
+        # объекта ставится снаружи, иначе в полосу она не помещается.
+        extra_fields.add("open_border")
         temporary = self._temp_path(layer_name, "names", "gpkg")
         temporary.unlink(missing_ok=True)
         writer = _GpkgWriter(
@@ -1026,6 +1029,8 @@ class Pipeline:
                     polygons = _open_line_multipolygon(geometry)
                     if polygons is None:
                         continue
+                    values = dict(values)
+                    values["open_border"] = "yes"
                 writer.add(feature, polygons, values=values)
                 written += 1
             if written:

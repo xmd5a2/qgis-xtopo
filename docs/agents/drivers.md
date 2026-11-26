@@ -192,21 +192,25 @@
   `admin_level_2_relation.sqlite` из `admin_level_2_dissolved.sqlite`, а
   `admin_level_4_relation.sqlite` из `admin_level_4_proc.sqlite`: каждое
   замкнутое кольцо становится полигоном.
-- **Открытая морская граница получает название из отношения.** Драйвер
-  GDAL выбрасывает отношение admin_level, если в вырез попала только
-  часть его членов, поэтому `_admin_relation_names` читает теги
+- **Открытая граница получает название из отношения.** Драйвер GDAL
+  выбрасывает отношение admin_level, если в вырез попала только часть его
+  членов, поэтому `_admin_relation_names` читает теги
   `r/admin_level=2,4` из исходных PBF через `osmium tags-filter -R -f
   opl`. Открытая линия с известным `@id` превращается в тонкий полигон
-  (`OPEN_BORDER_BUFFER_DEGREES`), а поля `name*` переносятся из
-  отношения. В шаблоне у слоёв `admin level 2 (country names)` и
-  `admin level 4 (region names)` есть правило `maritime` с
-  `fitInPolygonOnly="0"`: обычные правила требуют, чтобы подпись
-  помещалась внутри полигона, а в тонкую полосу вдоль границы она не
-  влезает. Без osmium остаются только замкнутые кольца и имена самих
-  линий. Если `native:multiparttosingleparts` для admin-слоя вернул
-  пустой слой, шаг оставляет мультитип — иначе граница исчезает из
-  проекта целиком. Проверки — `tests/test_pipeline_logic.py` и
-  `MaritimeAdminLabelTest` в `tests/test_template_styles.py`.
+  (`OPEN_BORDER_BUFFER_DEGREES`), поля `name*` переносятся из отношения,
+  а объект получает `open_border='yes'`. В шаблоне у слоёв
+  `admin level 2 (country names)` и `admin level 4 (region names)` есть
+  правило с `fitInPolygonOnly="0"`: обычные правила требуют, чтобы
+  подпись помещалась внутри полигона, а в тонкую полосу вдоль границы она
+  не влезает. Это правило берёт объекты с `open_border='yes'` и настоящие
+  морские границы с `maritime='yes'`. Признаки читаются через
+  `attribute()`: поля может не быть, а прямое имя поля в фильтре даёт
+  ошибку и скрывает все подписи слоя. Без osmium остаются только
+  замкнутые кольца и имена самих линий. Если
+  `native:multiparttosingleparts` для admin-слоя вернул пустой слой, шаг
+  оставляет мультитип — иначе граница исчезает из проекта целиком.
+  Проверки — `tests/test_pipeline_logic.py` и
+  `OpenBorderAdminLabelTest` в `tests/test_template_styles.py`.
 - **Замкнутые coastline-way внутри мультиполигона драйвер отдельно не
   отдаёт**: у группы островов остаётся только relation. Поэтому
   `resources/queries/island.txt` включает не только острова и архипелаги,

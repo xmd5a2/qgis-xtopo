@@ -353,12 +353,14 @@ class AdminBoundaryOrderTest(unittest.TestCase):
                 )
 
 
-class MaritimeAdminLabelTest(unittest.TestCase):
-    """Названия на морских границах ставятся отдельным правилом.
+class OpenBorderAdminLabelTest(unittest.TestCase):
+    """Названия на открытых границах ставятся отдельным правилом.
 
     Открытая граница превращается в тонкий полигон, в который обычная
-    подпись с `fitInPolygonOnly=1` не помещается. Правило `maritime`
-    разрешает вынести её наружу.
+    подпись с `fitInPolygonOnly=1` не помещается. Правило для открытых
+    границ разрешает вынести её наружу. Поля `maritime` и `open_border`
+    могут отсутствовать в слое, поэтому фильтры читают их через
+    `attribute()`: прямое имя поля даёт ошибку и скрывает все подписи.
     """
 
     LAYERS = (
@@ -366,19 +368,29 @@ class MaritimeAdminLabelTest(unittest.TestCase):
         "admin level 4 (region names)",
     )
 
-    def test_maritime_label_rule_allows_outside_placement(self):
+    @classmethod
+    def setUpClass(cls):
         layers = {
             layer.findtext("layername"): layer
             for layer in _template_root().iter("maplayer")
         }
-        for name in self.LAYERS:
-            rules = layers[name].find("labeling/rules").findall("rule")
-            maritime = [
+        cls.rules = {
+            name: layers[name].find("labeling/rules").findall("rule")
+            for name in cls.LAYERS
+        }
+
+    def test_open_border_label_rule_allows_outside_placement(self):
+        for name, rules in self.rules.items():
+            open_rules = [
                 rule for rule in rules
-                if "maritime = 'yes'" in (rule.get("filter") or "")
+                if "attribute('open_border') = 'yes'"
+                in (rule.get("filter") or "")
             ]
-            self.assertEqual(len(maritime), 1, name)
-            rule = maritime[0]
+            self.assertEqual(len(open_rules), 1, name)
+            rule = open_rules[0]
+            self.assertIn(
+                "attribute('maritime') = 'yes'", rule.get("filter") or "", name
+            )
             self.assertIsNone(rule.get("scalemindenom"), name)
             self.assertIsNone(rule.get("scalemaxdenom"), name)
             placement = rule.find("settings/placement")
@@ -388,8 +400,99 @@ class MaritimeAdminLabelTest(unittest.TestCase):
                 if other is rule:
                     continue
                 self.assertIn(
-                    "maritime", other.get("filter") or "", name
+                    "coalesce(attribute('maritime'), '') != 'yes'",
+                    other.get("filter") or "", name,
                 )
+                self.assertIn(
+                    "coalesce(attribute('open_border'), '') != 'yes'",
+                    other.get("filter") or "", name,
+                )
+
+    @staticmethod
+    def _matches(layer, filter_text, **values):
+        """Результат фильтра правила на объекте и ошибка выражения."""
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext,
+            QgsExpressionContextUtils, QgsFeature,
+        )
+
+        feature = QgsFeature(layer.fields())
+        for name, value in values.items():
+            feature.setAttribute(name, value)
+        context = QgsExpressionContext()
+        context.appendScopes(
+            QgsExpressionContextUtils.globalProjectLayerScopes(layer)
+        )
+        context.setFeature(feature)
+        expression = QgsExpression(filter_text)
+        return bool(expression.evaluate(context)), expression.evalErrorString()
+
+    def test_label_filters_handle_open_border_and_missing_fields(self):
+        """Открытые границы уходят в правило снаружи, обычные — внутрь.
+
+        Отсутствие полей `maritime`/`open_border` не должно давать ошибку
+        выражения: иначе QGIS скрывает все подписи слоя.
+        """
+        from tests import qgis_app
+        from qgis.core import QgsField, QgsVectorLayer
+        from PyQt5.QtCore import QVariant
+
+        qgis_app()
+        layer = QgsVectorLayer("Point?crs=EPSG:4326", "labels", "memory")
+        layer.dataProvider().addAttributes([
+            QgsField("name", QVariant.String),
+            QgsField("maritime", QVariant.String),
+            QgsField("open_border", QVariant.String),
+        ])
+        layer.updateFields()
+        bare = QgsVectorLayer("Point?crs=EPSG:4326", "bare", "memory")
+        bare.dataProvider().addAttributes([
+            QgsField("name", QVariant.String),
+        ])
+        bare.updateFields()
+
+        for name, rules in self.rules.items():
+            open_rule = next(
+                rule for rule in rules
+                if "attribute('open_border') = 'yes'"
+                in (rule.get("filter") or "")
+            )
+            normal = next(
+                rule for rule in rules if rule is not open_rule
+            )
+            normal_filter = normal.get("filter")
+            open_filter = open_rule.get("filter")
+
+            match, error = self._matches(layer, normal_filter)
+            self.assertTrue(match, name)
+            self.assertEqual(error, "", name)
+            match, error = self._matches(layer, open_filter)
+            self.assertFalse(match, name)
+            self.assertEqual(error, "", name)
+
+            match, error = self._matches(
+                layer, normal_filter, open_border="yes"
+            )
+            self.assertFalse(match, name)
+            self.assertEqual(error, "", name)
+            self.assertTrue(
+                self._matches(layer, open_filter, open_border="yes")[0],
+                name,
+            )
+
+            match, error = self._matches(
+                layer, normal_filter, maritime="yes"
+            )
+            self.assertFalse(match, name)
+            self.assertEqual(error, "", name)
+            self.assertTrue(
+                self._matches(layer, open_filter, maritime="yes")[0],
+                name,
+            )
+
+            match, error = self._matches(bare, normal_filter)
+            self.assertTrue(match, name)
+            self.assertEqual(error, "", name)
 
 
 class LandcoverLayerOrderTest(unittest.TestCase):

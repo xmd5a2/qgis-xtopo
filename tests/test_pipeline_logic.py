@@ -1624,6 +1624,7 @@ class AdminNameFallbackTest(unittest.TestCase):
         features = list(layer)
         self.assertEqual(len(features), 1)
         self.assertEqual(features[0].GetField("name"), "Closed")
+        self.assertIsNone(features[0].GetField("open_border"))
         self.assertEqual(
             features[0].GetGeometryRef().GetGeometryName(), "MULTIPOLYGON"
         )
@@ -1692,9 +1693,37 @@ class AdminNameFallbackTest(unittest.TestCase):
         self.assertEqual(feature.GetField("name"), "Морская")
         self.assertEqual(feature.GetField("name:en"), "Maritime")
         self.assertEqual(feature.GetField("maritime"), "yes")
+        self.assertEqual(feature.GetField("open_border"), "yes")
         geometry = feature.GetGeometryRef()
         self.assertEqual(geometry.GetGeometryName(), "MULTIPOLYGON")
         self.assertGreater(geometry.Area(), 0)
+
+    def test_open_land_border_gets_outside_label_marker(self):
+        """Открытая сухопутная граница тоже помечается для подписи снаружи."""
+        self._write_lines([
+            self._feature(None, [[0, 0], [0, 1]], **{"@id": "way/321"}),
+        ])
+        names = {
+            "2": {
+                "ways": {321: {"name": "Страна"}},
+                "relations": {},
+                "fields": {"name"},
+            },
+        }
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            self.target, "admin_level_2_relation",
+            names=names, level="2",
+        )
+        self.assertEqual(created, 1)
+        dataset = ogr.Open(str(self.target))
+        feature = next(iter(dataset.GetLayer(0)))
+        self.assertEqual(feature.GetField("name"), "Страна")
+        self.assertEqual(feature.GetField("open_border"), "yes")
+        self.assertLess(feature.GetDefnRef().GetFieldIndex("maritime"), 0)
 
     def test_relation_tags_are_parsed_from_opl(self):
         from qgis_xtopo.core.pipeline import _parse_admin_relation_tags
