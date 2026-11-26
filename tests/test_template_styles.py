@@ -388,7 +388,7 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
             for name in cls.LAYERS
         }
 
-    def test_open_border_label_uses_line_placement(self):
+    def test_open_border_label_uses_curved_line_placement(self):
         for name, rules in self.rules.items():
             open_rules = [
                 rule for rule in rules
@@ -413,7 +413,7 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                 placement = rule.find("settings/placement")
                 self.assertIsNotNone(placement, name)
                 self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
-                self.assertEqual(placement.get("placement"), "2", name)
+                self.assertEqual(placement.get("placement"), "3", name)
                 self.assertEqual(placement.get("placementFlags"), "2", name)
                 self.assertEqual(
                     placement.get("geometryGeneratorEnabled"), "1", name
@@ -4738,7 +4738,7 @@ class BuildingLodTest(unittest.TestCase):
 
 
 class RegionBoundaryLabelTest(unittest.TestCase):
-    """Названия регионов ставятся вдоль контура, а не поперёк него."""
+    """Названия регионов ставятся вдоль кривых контура, а не поперёк него."""
 
     @classmethod
     def setUpClass(cls):
@@ -4749,7 +4749,7 @@ class RegionBoundaryLabelTest(unittest.TestCase):
         )
         cls.rules = layer.find("labeling/rules").findall("rule")
 
-    def test_polygon_rules_use_boundary_line(self):
+    def test_polygon_rules_use_curved_boundary_line(self):
         polygon_rules = [
             rule for rule in self.rules
             if rule.get("scalemindenom") is not None
@@ -4762,7 +4762,7 @@ class RegionBoundaryLabelTest(unittest.TestCase):
         for rule in polygon_rules:
             placement = rule.find("settings/placement")
             self.assertIsNotNone(placement)
-            self.assertEqual(placement.get("placement"), "2")
+            self.assertEqual(placement.get("placement"), "3")
             self.assertEqual(placement.get("placementFlags"), "2")
             self.assertEqual(placement.get("fitInPolygonOnly"), "0")
             self.assertEqual(placement.get("geometryGeneratorEnabled"), "1")

@@ -28,11 +28,11 @@
   `unaryUnion`, который может развернуть части. Обычные правила слоёв
   `admin level 2 (country names)` и `admin level 4 (region names)`
   требуют `fitInPolygonOnly="1"` и подписывают площадные контуры.
-  Правило `open border` использует `placement="2"` (обычное линейное
-  размещение), `placementFlags="2"` (`AboveLine` без `MapOrientation`),
+  Правило `open border` использует `placement="3"` (размещение вдоль
+  кривых), `placementFlags="2"` (`AboveLine` без `MapOrientation`),
   `dist="1"` и geometry generator
   `geom_from_wkt(attribute('label_line'))`; поэтому текст стоит вдоль
-  самой границы с нужной стороны, а не висит в стороне на километры.
+  самой границы с нужной стороны, повторяя её изгибы.
   Правило разделено по масштабу: до 1:100 000 включён
   `labelPerPart="1"` (в `<rendering>`, не в `<placement>`) — подпись
   получает каждая часть, включая короткие участки и реки; на более
@@ -41,18 +41,21 @@
   Приоритет открытых границ 10 (у регионов 8): иначе в заселённых
   местах название страны проигрывает коллизию подписям POI и дорог.
   Обычные площадные правила слоя `admin level 4 (region names)` тоже
-  переведены на линейное размещение: geometry generator
-  `boundary($geometry)`, `placement="2"`, `placementFlags="2"`,
+  переведены на размещение вдоль кривых: geometry generator
+  `boundary($geometry)`, `placement="3"`, `placementFlags="2"`,
   `maxCurvedCharAngleIn="60"`, `maxCurvedCharAngleOut="-60"`; текст идёт
   по контуру региона и огибает изгибы, а не ставится поперёк или в
-  стороне. Морские границы с `maritime='yes'` остались отдельным правилом
-  с прежним размещением по контуру полигона. Члены отношений без тегов
+  стороне. Площадные названия стран в `admin level 2 (country names)`
+  остаются с `placement="7"` (`PerimeterCurved`), морские границы с
+  `maritime='yes'` — отдельным правилом с прежним размещением по контуру
+  полигона. Члены отношений без тегов
   `admin_level` (например, река по границе) добавляет
   `Pipeline._admin_border_members`, см. `drivers.md`. Поля `maritime`,
   `open_border` и `label_line` могут отсутствовать в слое, поэтому
   фильтры читают их через `attribute()`: прямое имя отсутствующего поля
   даёт ошибку выражения и скрывает все подписи слоя. Проверки —
-  `OpenBorderAdminLabelTest` в `tests/test_template_styles.py` и
+  `OpenBorderAdminLabelTest` и `RegionBoundaryLabelTest` в
+  `tests/test_template_styles.py`, а также
   `AdminNameFallbackTest`/`AdminMemberBorderTest` в
   `tests/test_pipeline_logic.py`.
 
