@@ -13,7 +13,8 @@ from qgis_xtopo.core.bbox import BBox
 from qgis_xtopo.core.config import Config, default_queries
 from qgis_xtopo.core.pipeline import (
     Pipeline, PipelineError, _ProgressTracker, _promote_geometry,
-    _report_terrain_stage, clear_zero_elevation, progress_stages, save_vector,
+    _report_terrain_stage, clear_zero_elevation, _member_border_values,
+    _opl_line_geometries, progress_stages, save_vector,
 )
 from qgis_xtopo.core.project import (
     begin_staging, commit_staging, discard_staging,
@@ -2015,6 +2016,169 @@ class AdminNameFallbackTest(unittest.TestCase):
         self.assertEqual(features[0].GetField("name"), "France")
 
 
+class AdminMemberBorderTest(unittest.TestCase):
+    """Недостающие члены отношений добавляются в линии границы."""
+
+    def test_opl_member_geometry_is_rebuilt_from_nodes(self):
+        text = (
+            "n1 v1 dV c0 t i0 u T x10.0 y20.0\n"
+            "n2 v1 dV c0 t i0 u T x11.0 y21.0\n"
+            "w7 v1 dV c0 t i0 u T Nn1,n2\n"
+        )
+        geometries = _opl_line_geometries(text)
+        self.assertIn(7, geometries)
+        line = geometries[7]
+        self.assertEqual(line.GetGeometryName(), "LINESTRING")
+        self.assertEqual(line.GetPointCount(), 2)
+        self.assertEqual(tuple(line.GetPoint(0)[:2]), (10.0, 20.0))
+
+    def _entries(self):
+        return [{
+            "start": (0.0, 0.0),
+            "end": (1.0, 1.0),
+            "way_id": 1,
+            "values": {
+                "@id": "way/1",
+                "left:country": "Uzbekistan",
+                "right:country": "Kyrgyzstan",
+            },
+        }]
+
+    def _entry(self):
+        return {
+            "ways": {2: {"name": "Border Kyrgyzstan - Uzbekistan"}},
+            "way_relations": {
+                1: [(10, {"name": "Кыргызстан"})],
+                2: [(10, {"name": "Кыргызстан"})],
+            },
+        }
+
+    def test_member_continues_neighbour_and_copies_sides(self):
+        line = ogr.Geometry(ogr.wkbLineString)
+        line.AddPoint_2D(1.0, 1.0)
+        line.AddPoint_2D(2.0, 0.0)
+        geometry, values = _member_border_values(
+            line, 2, "2", self._entry(), self._entries()
+        )
+        self.assertEqual(values["left:country"], "Uzbekistan")
+        self.assertEqual(values["right:country"], "Kyrgyzstan")
+        self.assertEqual(tuple(geometry.GetPoint(0)[:2]), (1.0, 1.0))
+        self.assertEqual(tuple(geometry.GetPoint(1)[:2]), (2.0, 0.0))
+
+    def test_member_is_reversed_to_continue_neighbour(self):
+        line = ogr.Geometry(ogr.wkbLineString)
+        line.AddPoint_2D(2.0, 0.0)
+        line.AddPoint_2D(1.0, 1.0)
+        geometry, values = _member_border_values(
+            line, 2, "2", self._entry(), self._entries()
+        )
+        self.assertEqual(values["left:country"], "Uzbekistan")
+        self.assertEqual(tuple(geometry.GetPoint(0)[:2]), (1.0, 1.0))
+        self.assertEqual(tuple(geometry.GetPoint(1)[:2]), (2.0, 0.0))
+
+    def test_member_without_neighbour_keeps_relation_name(self):
+        line = ogr.Geometry(ogr.wkbLineString)
+        line.AddPoint_2D(5.0, 5.0)
+        line.AddPoint_2D(6.0, 6.0)
+        geometry, values = _member_border_values(
+            line, 2, "2", self._entry(), []
+        )
+        self.assertEqual(values["name"], "Border Kyrgyzstan - Uzbekistan")
+
+    def test_missing_member_is_appended_to_border_layers(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="logic"
+            )
+            config.ensure_directories()
+            source = config.temp_dir / "lines.geojson"
+            source.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {
+                        "@id": "way/1",
+                        "name": "Border Kyrgyzstan - Uzbekistan",
+                        "left:country": "Uzbekistan",
+                        "right:country": "Kyrgyzstan",
+                    },
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0, 0], [1, 1]],
+                    },
+                }],
+            }), encoding="utf-8")
+            lines_source = config.temp_dir / "lines_multi.geojson"
+            lines_source.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {
+                        "@id": "way/1",
+                        "name": "Border Kyrgyzstan - Uzbekistan",
+                        "left:country": "Uzbekistan",
+                        "right:country": "Kyrgyzstan",
+                    },
+                    "geometry": {
+                        "type": "MultiLineString",
+                        "coordinates": [[[0, 0], [1, 1]]],
+                    },
+                }],
+            }), encoding="utf-8")
+            lines_path = config.vector_dir / "admin_level_2_lines.sqlite"
+            display_path = (
+                config.vector_dir / "admin_level_2_dissolved.sqlite"
+            )
+            save_vector(lines_source, lines_path, "admin_level_2_lines")
+            save_vector(source, display_path, "admin_level_2_dissolved")
+
+            pipeline = Pipeline(
+                config, BBox(0, 0, 3, 2), _FakeRunner(None)
+            )
+            member = ogr.Geometry(ogr.wkbLineString)
+            member.AddPoint_2D(2, 0)
+            member.AddPoint_2D(1, 1)
+            pipeline._member_way_geometries = lambda *args: {2: member}
+            names = {"2": {
+                "ways": {2: {"name": "Кыргызстан"}},
+                "way_relations": {
+                    1: [(10, {"name": "Кыргызстан"})],
+                    2: [(10, {"name": "Кыргызстан"})],
+                },
+            }}
+            with mock.patch(
+                "qgis_xtopo.core.pipeline.osmium_tool.find_osmium",
+                return_value="osmium",
+            ):
+                pipeline._admin_border_members(
+                    SimpleNamespace(dataset=SimpleNamespace(
+                        source_paths=["fake.pbf"]
+                    )),
+                    names,
+                )
+
+            for path in (lines_path, display_path):
+                dataset = ogr.Open(str(path))
+                layer = dataset.GetLayer(0)
+                ids = {
+                    feature["@id"] for feature in layer
+                }
+                self.assertIn("way/2", ids, path.name)
+                layer.ResetReading()
+                feature = next(
+                    item for item in layer if item["@id"] == "way/2"
+                )
+                self.assertEqual(feature["left:country"], "Uzbekistan")
+                self.assertEqual(feature["right:country"], "Kyrgyzstan")
+                self.assertEqual(
+                    feature.GetGeometryRef().GetGeometryName(),
+                    "MULTILINESTRING"
+                    if "lines" in path.name else "LINESTRING",
+                )
+
+
 class SinglePartsFallbackTest(unittest.TestCase):
     """Пустой singleparts у admin-границ не должен терять весь слой."""
 
@@ -3917,6 +4081,18 @@ class FieldSubsetTest(unittest.TestCase):
             self.assertIn(field, selected)
         self.assertNotIn("maxspeed", selected)
 
+    def test_industrial_preset_keeps_only_style_and_names(self):
+        selected = field_subset.select(
+            "industrial",
+            ["landuse", "name", "name:en", "alt_name", "ref", "@id",
+             "@type", "addr:city", "phone", "website", "building"],
+        )
+        for field in ("landuse", "name", "name:en", "alt_name", "ref",
+                      "@id"):
+            self.assertIn(field, selected)
+        for field in ("addr:city", "phone", "website", "building"):
+            self.assertNotIn(field, selected)
+
     def test_select_keeps_settlement_priority_fields(self):
         selected = field_subset.select(
             "places_main",
@@ -3934,11 +4110,79 @@ class FieldSubsetTest(unittest.TestCase):
             self.assertIn(field, selected)
         self.assertNotIn("maxspeed", selected)
 
+    def test_template_selection_drops_unused_fields(self):
+        selected = field_subset.select_for_path(
+            "/tmp/vector/industrial.sqlite",
+            ["landuse", "name", "name:en", "ref", "@id", "@type",
+             "addr:city", "phone", "website"],
+        )
+        self.assertIn("name", selected)
+        self.assertIn("@id", selected)
+        for field in ("addr:city", "phone", "website"):
+            self.assertNotIn(field, selected)
+        self.assertIsNone(field_subset.select_for_path(
+            "/tmp/vector/not_in_template.sqlite", ["name", "phone"]
+        ))
+
+    def test_template_selection_keeps_common_style_fields(self):
+        selected = field_subset.select_for_path(
+            "/tmp/vector/barrier.sqlite",
+            ["name", "barrier", "layer", "addr:city", "phone"],
+            include_common=True,
+        )
+        self.assertIn("barrier", selected)
+        self.assertIn("layer", selected)
+        self.assertNotIn("addr:city", selected)
+        self.assertNotIn("phone", selected)
+
+    def test_save_vector_prunes_industrial_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "industrial.geojson"
+            source.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {
+                        "landuse": "industrial",
+                        "name": "ТЭЦ",
+                        "addr:city": "Farg'ona",
+                        "phone": "123",
+                        "ref": "1",
+                        "@id": "way/1",
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[0, 0], [0, 1], [1, 1],
+                                         [1, 0], [0, 0]]],
+                    },
+                }],
+            }), encoding="utf-8")
+            destination = (
+                Path(directory) / "vector" / "industrial.sqlite"
+            )
+            save_vector(
+                source, destination, "industrial", fields="industrial"
+            )
+            dataset = ogr.Open(str(destination))
+            layer = dataset.GetLayer(0)
+            definition = layer.GetLayerDefn()
+            names = {
+                definition.GetFieldDefn(index).GetName()
+                for index in range(definition.GetFieldCount())
+            }
+            self.assertIn("landuse", names)
+            self.assertIn("name", names)
+            self.assertIn("ref", names)
+            self.assertNotIn("addr:city", names)
+            self.assertNotIn("phone", names)
+
     def test_recipes_request_subsets(self):
         steps = dict(recipe_for("building").steps)
         self.assertEqual(steps["save"]["fields"], "building")
         steps = dict(recipe_for("highway_main").steps)
         self.assertEqual(steps["split_layer"]["fields"], "highway_main")
+        steps = dict(recipe_for("industrial").steps)
+        self.assertEqual(steps["save"]["fields"], "industrial")
         for name in ("places_main", "path", "track"):
             steps = dict(recipe_for(name).steps)
             self.assertEqual(steps["save"]["fields"], name, name)

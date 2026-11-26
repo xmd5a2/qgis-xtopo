@@ -360,7 +360,10 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
     подпись с `fitInPolygonOnly=1` не помещается. Отдельная ориентированная
     линия `label_line` позволяет поставить текст вдоль границы с нужной
     стороны: линия направлена так, чтобы страна или регион были слева.
-    Поля `maritime` и `open_border` могут отсутствовать в слое, поэтому
+    Подпись повторяется вдоль линии, иначе одна подпись теряется за
+    пределами вида. Приоритет выше, чем у подписей POI и дорог: иначе
+    название страны проигрывает коллизию в заселённых местах. Поля
+    `maritime` и `open_border` могут отсутствовать в слое, поэтому
     фильтры читают их через `attribute()`: прямое имя поля даёт ошибку и
     скрывает все подписи.
     """
@@ -369,6 +372,10 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
         "admin level 2 (country names)",
         "admin level 4 (region names)",
     )
+    LABEL_OPTIONS = {
+        "admin level 2 (country names)": ("10", "80"),
+        "admin level 4 (region names)": ("8", "160"),
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -388,37 +395,69 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                 if "attribute('open_border') = 'yes'"
                 in (rule.get("filter") or "")
             ]
-            self.assertEqual(len(open_rules), 1, name)
-            rule = open_rules[0]
-            self.assertNotIn(
-                "attribute('maritime') = 'yes'", rule.get("filter") or "", name
+            self.assertEqual(len(open_rules), 2, name)
+            priority, repeat = self.LABEL_OPTIONS[name]
+            by_scale = sorted(
+                open_rules, key=lambda rule: int(rule.get("scalemaxdenom"))
             )
-            self.assertIsNone(rule.get("scalemindenom"), name)
-            self.assertIsNone(rule.get("scalemaxdenom"), name)
-            placement = rule.find("settings/placement")
-            self.assertIsNotNone(placement, name)
-            self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
-            self.assertEqual(placement.get("placement"), "2", name)
-            self.assertEqual(placement.get("placementFlags"), "2", name)
+            low, large = by_scale
+            self.assertEqual(large.get("scalemindenom"), "1", name)
+            self.assertEqual(large.get("scalemaxdenom"), "100000", name)
+            self.assertEqual(low.get("scalemindenom"), "100000", name)
+            self.assertEqual(low.get("scalemaxdenom"), "0", name)
+            for rule in open_rules:
+                self.assertNotIn(
+                    "attribute('maritime') = 'yes'",
+                    rule.get("filter") or "", name,
+                )
+                placement = rule.find("settings/placement")
+                self.assertIsNotNone(placement, name)
+                self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
+                self.assertEqual(placement.get("placement"), "2", name)
+                self.assertEqual(placement.get("placementFlags"), "2", name)
+                self.assertEqual(
+                    placement.get("geometryGeneratorEnabled"), "1", name
+                )
+                self.assertIn(
+                    "label_line",
+                    placement.get("geometryGenerator") or "", name,
+                )
+                self.assertEqual(
+                    placement.get("geometryGeneratorType"),
+                    "LineGeometry", name,
+                )
+                self.assertEqual(
+                    placement.get("layerType"), "LineGeometry", name
+                )
+                self.assertEqual(placement.get("priority"), priority, name)
+                self.assertEqual(
+                    placement.get("repeatDistanceUnits"), "MM", name
+                )
+            large_rendering = large.find("settings/rendering")
             self.assertEqual(
-                placement.get("geometryGeneratorEnabled"), "1", name
-            )
-            self.assertIn(
-                "label_line",
-                placement.get("geometryGenerator") or "", name,
+                large_rendering.get("labelPerPart"), "1", name
             )
             self.assertEqual(
-                placement.get("geometryGeneratorType"),
-                "LineGeometry", name,
+                large.find("settings/placement").get("repeatDistance"),
+                "0", name,
             )
-            self.assertEqual(placement.get("layerType"), "LineGeometry", name)
+            low_rendering = low.find("settings/rendering")
+            self.assertEqual(
+                low_rendering.get("labelPerPart"), "0", name
+            )
+            self.assertEqual(
+                low.find("settings/placement").get("repeatDistance"),
+                repeat, name,
+            )
             maritime_rule = next(
                 other for other in rules
                 if "attribute('maritime') = 'yes'"
                 in (other.get("filter") or "")
             )
             for other in rules:
-                if other is rule or other is maritime_rule:
+                if other is maritime_rule or any(
+                    other is rule for rule in open_rules
+                ):
                     continue
                 self.assertIn(
                     "coalesce(attribute('maritime'), '') != 'yes'",
@@ -427,6 +466,28 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
                 self.assertIn(
                     "coalesce(attribute('open_border'), '') != 'yes'",
                     other.get("filter") or "", name,
+                )
+
+    def test_admin_labels_keep_priority_above_poi_labels(self):
+        """Названия стран и открытых границ не скрываются подписями POI.
+
+        У регионов обычные площадные правила оставлены с прежним
+        приоритетом: они подписывают контуры внутри области, и повышение
+        приоритета делает их навязчивыми. Для открытых и морских границ
+        приоритет выше, чем у POI и дорог.
+        """
+        for name, rules in self.rules.items():
+            priority, _ = self.LABEL_OPTIONS[name]
+            for rule in rules:
+                if (
+                    name == "admin level 4 (region names)"
+                    and rule.get("description") not in ("open border", "maritime")
+                ):
+                    continue
+                placement = rule.find("settings/placement")
+                self.assertIsNotNone(placement, name)
+                self.assertEqual(
+                    placement.get("priority"), priority, name
                 )
 
     def test_maritime_label_rule_keeps_polygon_placement(self):
@@ -492,11 +553,13 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
         bare.updateFields()
 
         for name, rules in self.rules.items():
-            open_rule = next(
+            open_rules = [
                 rule for rule in rules
                 if "attribute('open_border') = 'yes'"
                 in (rule.get("filter") or "")
-            )
+            ]
+            self.assertEqual(len(open_rules), 2, name)
+            open_rule = open_rules[0]
             maritime_rule = next(
                 rule for rule in rules
                 if "attribute('maritime') = 'yes'"
@@ -504,7 +567,9 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
             )
             normal = next(
                 rule for rule in rules
-                if rule is not open_rule and rule is not maritime_rule
+                if rule is not maritime_rule and not any(
+                    rule is item for item in open_rules
+                )
             )
             normal_filter = normal.get("filter")
             open_filter = open_rule.get("filter")

@@ -115,6 +115,7 @@ RECIPES = {
     "water_intermittent": Recipe([
         fix(), save(), dissolve(), singleparts(), fix(), save("_dissolved"),
     ]),
+    "industrial": Recipe([save(fields="industrial")]),
     "bare_rock": Recipe([
         # В OSM встречаются самопересекающиеся мультиполигоны.
         fix(), save(),

@@ -212,6 +212,22 @@ class SourceFieldsTest(unittest.TestCase):
         self.assertIsNone(query_recipes.source_fields("barrier"))
         self.assertIsNone(query_recipes.source_fields("railway_all"))
 
+    def test_industrial_keeps_landuse_and_names(self):
+        from qgis_xtopo.core import query_recipes
+
+        from qgis_xtopo.core.pbf_source import _source_properties
+
+        allowed = query_recipes.source_fields("industrial")
+        self.assertIsNotNone(allowed)
+        filtered = _source_properties({
+            "landuse": "industrial", "name": "ТЭЦ",
+            "name:en": "Power plant", "phone": "123",
+        }, allowed)
+        self.assertIn("landuse", filtered)
+        self.assertIn("name", filtered)
+        self.assertIn("name:en", filtered)
+        self.assertNotIn("phone", filtered)
+
 
 class CleanGeometryTest(unittest.TestCase):
     """Пустые части составной геометрии не должны попадать в слой."""

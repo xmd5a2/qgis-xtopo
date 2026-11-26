@@ -907,10 +907,22 @@ class Pipeline:
         else:
             self._run_parallel(source, query_names, workers)
         if {"admin_level_2", "admin_level_4"} & set(query_names):
-            self._admin_name_fallback(source)
+            if self._admin_fallback_needed():
+                names = self._admin_relation_names(source)
+                self._admin_border_members(source, names)
+                self._admin_name_fallback(source, names=names)
         return self.warnings
 
-    def _admin_name_fallback(self, source=None):
+    def _admin_fallback_needed(self):
+        """Есть ли уровень, для которого нужно собирать названия из линий."""
+        for level in ("admin_level_2", "admin_level_4"):
+            target = self.config.vector_dir / f"{level}_relation.sqlite"
+            if target.exists() and _layer_has_features(target):
+                continue
+            return True
+        return False
+
+    def _admin_name_fallback(self, source=None, names=None):
         """Собирает слой названий из линий границы.
 
         В вырезе PBF может не быть отношения страны: его члены
@@ -952,7 +964,8 @@ class Pipeline:
             ))
         if not pending:
             return
-        names = self._admin_relation_names(source)
+        if names is None:
+            names = self._admin_relation_names(source)
         for level, target, source_path, level_number in pending:
             created = self._name_polygons_from_lines(
                 source_path, target, f"{level}_relation",
@@ -1004,6 +1017,119 @@ class Pipeline:
                 names, _parse_admin_relation_tags(text)
             )
         return names
+
+    def _admin_border_members(self, source, names):
+        """Дописывает в линии границы членов отношений без admin_level.
+
+        GDAL выбрасывает неполное отношение целиком, поэтому участки, у
+        которых нет собственных тегов ``admin_level`` (например, река по
+        границе), не попадают в ``admin_level_*_lines``.  osmium достаёт
+        такие члены по id отношения; сторону (``left:country`` и т.п.)
+        берём у соседнего размеченного участка.
+        """
+        from osgeo import ogr
+
+        paths = list(
+            getattr(getattr(source, "dataset", None), "source_paths", ())
+            or ()
+        )
+        if not paths or not names:
+            return
+        executable = osmium_tool.find_osmium(self.config.temp_dir)
+        if not executable:
+            return
+        bbox_geometry = _bbox_geometry(self.bbox)
+        for level, (lines_name, display_name) in (
+            ("2", ("admin_level_2_lines", "admin_level_2_dissolved")),
+            ("4", ("admin_level_4_lines", "admin_level_4_proc")),
+        ):
+            lines_path = self.config.vector_dir / f"{lines_name}.sqlite"
+            display_path = self.config.vector_dir / f"{display_name}.sqlite"
+            if not lines_path.exists():
+                continue
+            entry = names.get(level) or {}
+            member_ids = set(entry.get("ways", ()))
+            if not member_ids:
+                continue
+            existing = _line_feature_ids(lines_path)
+            missing = sorted(member_ids - existing)
+            if not missing:
+                continue
+            geometries = self._member_way_geometries(
+                executable, paths, missing
+            )
+            if not geometries:
+                continue
+            entries = _line_endpoint_entries(lines_path)
+            display_ids = (
+                _line_feature_ids(display_path)
+                if display_path.exists() else set()
+            )
+            appended = 0
+            for way_id, geometry in geometries.items():
+                if geometry is None or geometry.IsEmpty():
+                    continue
+                if not geometry.Intersects(bbox_geometry):
+                    continue
+                geometry, values = _member_border_values(
+                    geometry, way_id, level, entry, entries
+                )
+                if geometry is None:
+                    continue
+                values["@id"] = f"way/{way_id}"
+                values["@type"] = "way"
+                values["admin_level"] = level
+                values["boundary"] = "administrative"
+                _append_border_feature(
+                    lines_path, geometry, values, multiline=True
+                )
+                identifier = f"way/{way_id}"
+                if display_path.exists() and identifier not in display_ids:
+                    _append_border_feature(
+                        display_path, geometry, values, multiline=False
+                    )
+                    display_ids.add(identifier)
+                appended += 1
+            if appended:
+                self.progress(
+                    f"admin_level_{level}: добавлены участки границы "
+                    f"без тегов admin_level, объектов {appended}"
+                )
+
+    def _member_way_geometries(self, executable, paths, way_ids):
+        """Геометрии членов отношений из PBF через ``osmium getid -r``."""
+        result = {}
+        for path in paths:
+            for start in range(0, len(way_ids), 200):
+                chunk = way_ids[start:start + 200]
+                command = [
+                    str(executable), "getid", "-r", "--no-progress",
+                    "-f", "opl", str(path),
+                ] + [f"w{way_id}" for way_id in chunk]
+                try:
+                    code, stdout, stderr = osmium_tool.run_process(
+                        command, cancel=self.cancel
+                    )
+                except InterruptedError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - границы не критичны
+                    self.warnings.append(
+                        f"admin_level: члены отношений не прочитаны: {exc}"
+                    )
+                    continue
+                # Код 1 — не все ссылки нашлись в вырезе; геометрия
+                # найденных участков при этом корректна.
+                if code not in (0, 1) or not stdout:
+                    message = stderr.decode("utf-8", "replace").strip()
+                    if message:
+                        self.warnings.append(
+                            f"admin_level: osmium getid: {message}"
+                        )
+                    continue
+                result.update(
+                    _opl_line_geometries(stdout.decode("utf-8", "replace"))
+                )
+        return result
 
     def _name_polygons_from_lines(self, source, target, layer_name,
                                   names=None, level=None):
@@ -2588,6 +2714,284 @@ def _unescape_opl(value):
     return unquote(text)
 
 
+def _bbox_geometry(bbox):
+    """Геометрия охвата для проверки членов отношений."""
+    from osgeo import ogr
+
+    return ogr.CreateGeometryFromWkt(
+        "POLYGON (("
+        f"{bbox.lon_min} {bbox.lat_min},"
+        f"{bbox.lon_max} {bbox.lat_min},"
+        f"{bbox.lon_max} {bbox.lat_max},"
+        f"{bbox.lon_min} {bbox.lat_max},"
+        f"{bbox.lon_min} {bbox.lat_min}"
+        "))"
+    )
+
+
+def _line_parts(geometry):
+    """Части линии или мультилинии."""
+    if geometry is None or geometry.IsEmpty():
+        return []
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        return [geometry]
+    if name == "MULTILINESTRING":
+        return [
+            geometry.GetGeometryRef(index)
+            for index in range(geometry.GetGeometryCount())
+        ]
+    return []
+
+
+def _endpoint_key(point):
+    return (round(point[0], 7), round(point[1], 7))
+
+
+def _way_id_from_value(value):
+    kind, _, identifier = str(value or "").partition("/")
+    if kind == "way" and identifier.isdigit():
+        return int(identifier)
+    return None
+
+
+def _line_feature_ids(path):
+    """Идентификаторы ``@id`` уже записанных линий."""
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(path))
+    if dataset is None:
+        return set()
+    layer = dataset.GetLayer(0)
+    index = layer.GetLayerDefn().GetFieldIndex("@id")
+    if index < 0:
+        dataset = None
+        return set()
+    result = set()
+    for feature in layer:
+        value = feature.GetField(index)
+        if value:
+            result.add(str(value))
+    dataset = None
+    return result
+
+
+def _line_endpoint_entries(path):
+    """Начала и концы размеченных линий вместе с их полями."""
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(path))
+    if dataset is None:
+        return []
+    layer = dataset.GetLayer(0)
+    definition = layer.GetLayerDefn()
+    field_names = [
+        definition.GetFieldDefn(index).GetName()
+        for index in range(definition.GetFieldCount())
+    ]
+    entries = []
+    for feature in layer:
+        values = {
+            name: feature.GetField(name) for name in field_names
+        }
+        for part in _line_parts(feature.GetGeometryRef()):
+            count = part.GetPointCount()
+            if count < 2:
+                continue
+            entries.append({
+                "start": _endpoint_key(part.GetPoint(0)),
+                "end": _endpoint_key(part.GetPoint(count - 1)),
+                "values": values,
+                "way_id": _way_id_from_value(values.get("@id")),
+            })
+    dataset = None
+    return entries
+
+
+def _opl_line_geometries(text):
+    """Линии из вывода ``osmium getid -r -f opl``."""
+    from osgeo import ogr
+
+    nodes = {}
+    ways = {}
+    for line in (text or "").splitlines():
+        if line.startswith("n"):
+            match = re.match(r"n(\d+)", line)
+            point = re.search(r" x([-0-9.]+) y([-0-9.]+)", line)
+            if match and point:
+                nodes[int(match.group(1))] = (
+                    float(point.group(1)), float(point.group(2))
+                )
+        elif line.startswith("w"):
+            match = re.match(r"w(\d+)", line)
+            refs = re.search(r" N([^ ]+)", line)
+            if match and refs:
+                ways[int(match.group(1))] = [
+                    int(item[1:]) for item in refs.group(1).split(",")
+                    if item.startswith("n") and item[1:].isdigit()
+                ]
+    result = {}
+    for way_id, refs in ways.items():
+        points = [nodes[ref] for ref in refs if ref in nodes]
+        if len(points) < 2:
+            continue
+        geometry = ogr.Geometry(ogr.wkbLineString)
+        for x, y in points:
+            geometry.AddPoint_2D(x, y)
+        result[way_id] = geometry
+    return result
+
+
+def _reverse_line(geometry):
+    """Разворачивает линию или все части мультилинии."""
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    name = geometry.GetGeometryName()
+    if name == "LINESTRING":
+        points = [
+            geometry.GetPoint(index)[:2]
+            for index in range(geometry.GetPointCount() - 1, -1, -1)
+        ]
+        result = ogr.Geometry(ogr.wkbLineString)
+        for x, y in points:
+            result.AddPoint_2D(x, y)
+        return result
+    if name == "MULTILINESTRING":
+        result = ogr.Geometry(ogr.wkbMultiLineString)
+        for part in _line_parts(geometry):
+            reversed_part = _reverse_line(part)
+            if reversed_part is not None:
+                result.AddGeometry(reversed_part)
+        return result
+    return None
+
+
+def _way_relation_ids(entry, way_id):
+    return {
+        relation_id
+        for relation_id, _ in entry.get("way_relations", {}).get(way_id, ())
+        if relation_id is not None
+    }
+
+
+def _member_border_values(geometry, way_id, level, entry, entries):
+    """Ориентирует участок по соседу и копирует его стороны."""
+    if geometry is None or geometry.IsEmpty():
+        return None, {}
+    parts = _line_parts(geometry)
+    if not parts:
+        return None, {}
+    start = _endpoint_key(parts[0].GetPoint(0))
+    end = _endpoint_key(parts[-1].GetPoint(
+        parts[-1].GetPointCount() - 1
+    ))
+    relation_ids = _way_relation_ids(entry, way_id)
+    best = None
+    best_score = -1
+    best_reverse = False
+    for neighbour in entries:
+        if neighbour.get("way_id") == way_id:
+            continue
+        n_start = neighbour["start"]
+        n_end = neighbour["end"]
+        if start == n_end or end == n_start:
+            reverse = False
+        elif start == n_start or end == n_end:
+            reverse = True
+        else:
+            continue
+        values = neighbour["values"]
+        score = 0
+        if values.get("left:country") or values.get("right:country"):
+            score += 4
+        if (
+            values.get("left:province")
+            or values.get("right:province")
+        ):
+            score += 2
+        if relation_ids & _way_relation_ids(entry, neighbour.get("way_id")):
+            score += 3
+        if score > best_score:
+            best = neighbour
+            best_score = score
+            best_reverse = reverse
+    if best is None:
+        tags = entry.get("ways", {}).get(way_id) or {}
+        values = {}
+        if tags.get("name"):
+            values["name"] = tags["name"]
+        return geometry, values
+    if best_reverse:
+        geometry = _reverse_line(geometry)
+    return geometry, dict(best["values"])
+
+
+def _append_border_feature(path, geometry, values, multiline):
+    """Дописывает линию в слой границы, не меняя его схему."""
+    from osgeo import ogr
+
+    dataset = ogr.Open(str(path), 1)
+    if dataset is None:
+        return
+    layer = dataset.GetLayer(0)
+    definition = layer.GetLayerDefn()
+    field_indexes = {
+        definition.GetFieldDefn(index).GetName(): index
+        for index in range(definition.GetFieldCount())
+    }
+    target_type = layer.GetGeomType()
+    single_target = target_type in (
+        ogr.wkbLineString, ogr.wkbLineString25D,
+    )
+    multi_target = target_type in (
+        ogr.wkbMultiLineString, ogr.wkbMultiLineString25D,
+    )
+    if multiline and not single_target:
+        if geometry.GetGeometryName() == "LINESTRING":
+            multi = ogr.Geometry(ogr.wkbMultiLineString)
+            multi.AddGeometry(geometry.Clone())
+            geometries = [multi]
+        else:
+            geometries = [geometry]
+    elif geometry.GetGeometryName() == "MULTILINESTRING":
+        geometries = [
+            part.Clone() for part in _line_parts(geometry)
+        ]
+    else:
+        geometries = [geometry]
+    if multi_target and not multiline:
+        wrapped = []
+        for item in geometries:
+            if item.GetGeometryName() == "LINESTRING":
+                multi = ogr.Geometry(ogr.wkbMultiLineString)
+                multi.AddGeometry(item.Clone())
+                wrapped.append(multi)
+            else:
+                wrapped.append(item)
+        geometries = wrapped
+    layer.StartTransaction()
+    try:
+        for item in geometries:
+            feature = ogr.Feature(definition)
+            for name, value in values.items():
+                index = field_indexes.get(name)
+                if index is None or value in (None, ""):
+                    continue
+                feature.SetField(index, value)
+            feature.SetGeometry(item)
+            layer.CreateFeature(feature)
+        layer.CommitTransaction()
+    except Exception:
+        try:
+            layer.RollbackTransaction()
+        except Exception:  # noqa: BLE001 - транзакция уже закрыта
+            pass
+        raise
+    dataset = None
+
+
 def _parse_admin_relation_tags(text):
     """Теги и члены отношений admin_level из вывода osmium в OPL."""
     names = {}
@@ -3103,8 +3507,17 @@ def save_vector(source, destination, layer_name, target_crs=None,
         "-unsetFid",
     ]
     names = _source_fields(source)
+    template_keep = field_subset.select_for_path(
+        destination, names, include_common=not fields
+    )
     if fields:
         keep = field_subset.select(fields, names)
+        if template_keep is not None:
+            keep = field_subset.merge_selection(
+                keep, template_keep, names
+            )
+    elif template_keep is not None:
+        keep = template_keep
     else:
         keep = [
             name for name in names
