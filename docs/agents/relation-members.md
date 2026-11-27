@@ -1,6 +1,7 @@
 # Way-члены отношений, потерянные драйвером GDAL
 
-Состояние на 27.11.2026: **реализовано и проверено, но не закоммичено**.
+Состояние на 27.11.2026: **реализовано, проверено и закоммичено**
+(`c3c084e`; сообщение журнала добавлено в каталог переводов).
 Продолжение — с раздела «Что осталось».
 
 ## Симптом
@@ -35,8 +36,9 @@
 
 ## Что сделано
 
-Изменения в рабочем дереве (не закоммичены): `core/pbf_source.py`,
-`tests/test_pbf_source.py`.
+Изменения в коммите `c3c084e`: `core/pbf_source.py`,
+`tests/test_pbf_source.py`; сообщение журнала добавлено в
+`resources/lang/en.json`.
 
 В `core/pbf_source.py`:
 
@@ -73,34 +75,40 @@
 
 ## Проверки
 
-- `./tools/run_tests.sh tests.test_pbf_source` — OK, 42 теста.
+- `./tools/run_tests.sh tests.test_pbf_source` — OK, 42 теста;
+  `./tools/run_tests.sh` — OK, 28 модулей (после добавления сообщения в
+  `resources/lang/en.json`).
 - Полная подготовка без рельефа на вырезе
-  `slice_efb7a506f01a.osm.pbf`, bbox `70.3409,39.765,70.8365,40.5105`:
-  52.9 с, пик RSS 1687 МБ.
-  - `vector/water.sqlite` — 33 объекта, среди них `way/24989382`
+  `slice_9d4b4691e9a8.osm.pbf`, bbox `70.55,39.90,70.85,40.10`:
+  36.4 с, пик RSS 1631 МБ; в журнале
+  `PBF: восстановлены way-члены отношений: объектов 1`.
+  - `vector/water.sqlite` — 3 объекта, среди них `way/24989382`
     (`water=reservoir`);
   - `water_intermittent_dissolved.sqlite` по-прежнему содержит кольцо
     отношения (это правильно);
   - рендер участка: центр резервуара залит синим, по краям осталась
     штриховка intermittent. PNG:
-    `/mnt/data/temp/xtopo-debug/bench_zoom.png`.
+    `/mnt/data/temp/xtopo-fixcheck/after.png`; сравнение «до/после» —
+    `/mnt/data/temp/xtopo-fixcheck/confirm.png`.
 - Важно: в `water_dissolved.sqlite` `@id` теряется на `dissolve`, поэтому
   проверять наличие way нужно в `water.sqlite` или по рендеру.
 
 Артефакты на этой машине (не в репозитории):
 
-- вырез: `~/qgis_projects/qgisxtopo-cache/geofabrik/slice_efb7a506f01a.osm.pbf`;
-- стенд: `/mnt/data/temp/xtopo-debug/bench/projects/fixcheck/`;
-- скрипт проверки NDJSON: `/mnt/data/temp/xtopo-debug/repro.py`;
-- рендер: `/mnt/data/temp/xtopo-debug/bench_zoom.png`.
+- вырез: `~/qgis_projects/qgisxtopo-cache/geofabrik/slice_9d4b4691e9a8.osm.pbf`;
+- стенд: `/mnt/data/temp/xtopo-fixcheck/projects/fixcheck/`;
+- рендер «после»: `/mnt/data/temp/xtopo-fixcheck/after.png`;
+- рендер «до» (старый `automap_test`): `/mnt/data/temp/xtopo-fixcheck/before.png`;
+- сравнение с подписями: `/mnt/data/temp/xtopo-fixcheck/confirm.png`.
 
 ## Что осталось
 
-1. Прогнать **все** тесты: `./tools/run_tests.sh` (~1.5 мин).
-2. Проверить установку и инсталлятор:
-   `python3 tools/build_plugin.py --install`,
-   `WINEPREFIX=~/.cache/wineprefix-inno ./installer/build-installer.sh`.
-3. Закоммитить изменения. Заголовок — на английском, `gen by AI` — в теле.
+1. ~~Прогнать все тесты~~ — выполнено 27.11.2026, 28 из 28 модулей.
+2. ~~Проверить установку и инсталлятор~~ — выполнено 27.11.2026:
+   `build_plugin.py --install` поставил 0.18.0, инсталлятор собран в
+   `dist/qgis-xtopo-setup-0.18.0.exe`.
+3. ~~Закоммитить изменения~~ — коммит `c3c084e`; сообщение журнала
+   добавлено в каталог переводов отдельным коммитом.
 4. При желании расширить `RELATION_MEMBER_LAYERS`, если такие же потери
    найдутся в других площадных слоях. Сейчас восстановление ограничено
    водой.
@@ -114,28 +122,27 @@
 
 ```sh
 # 1. Вырез и охват
-PBF=~/qgis_projects/qgisxtopo-cache/geofabrik/slice_efb7a506f01a.osm.pbf
-BBOX=70.3409,39.765,70.8365,40.5105
+PBF=~/qgis_projects/qgisxtopo-cache/geofabrik/slice_9d4b4691e9a8.osm.pbf
+BBOX=70.55,39.90,70.85,40.10
 
 # 2. Подготовка без рельефа
 QT_QPA_PLATFORM=offscreen python3 \
   ~/.config/opencode/skills/qgis-xtopo-bench/bench_run.py \
   --root /home/xmd5a/git/qgis-xtopo --label fixcheck --bbox "$BBOX" \
-  --pbf "$PBF" --work /mnt/data/temp/xtopo-debug/bench \
-  --out /mnt/data/temp/xtopo-debug/bench.json --no-terrain \
+  --pbf "$PBF" --work /mnt/data/temp/xtopo-fixcheck \
+  --out /mnt/data/temp/xtopo-fixcheck/bench.json --no-terrain \
   --project-name fixcheck
 
 # 3. Проверка данных
-ogrinfo -q -sql "SELECT \"@id\", water FROM water" \
-  /mnt/data/temp/xtopo-debug/bench/projects/fixcheck/vector/water.sqlite \
-  | grep -A2 24989382
+sqlite3 /mnt/data/temp/xtopo-fixcheck/projects/fixcheck/vector/water.sqlite \
+  'select "@id", water from water where "@id" = "way/24989382";'
 
 # 4. Рендер центра резервуара (EPSG:3857)
 QT_QPA_PLATFORM=offscreen python3 \
   ~/.config/opencode/skills/qgis-xtopo-bench/render_project.py \
-  --project /mnt/data/temp/xtopo-debug/bench/projects/fixcheck/fixcheck.qgz \
-  --output /mnt/data/temp/xtopo-debug/bench_zoom.png \
-  --extent 7866000,4860000,7873500,4866500 \
+  --project /mnt/data/temp/xtopo-fixcheck/projects/fixcheck/fixcheck.qgz \
+  --output /mnt/data/temp/xtopo-fixcheck/after.png \
+  --extent 7866200,4863200,7874200,4867000 \
   --width 1600 --no-basemap --timeout 100
 
 # 5. Тесты
