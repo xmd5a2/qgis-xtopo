@@ -1302,6 +1302,29 @@ class LabelHaloTest(unittest.TestCase):
                 )
 
 
+class RoadShieldLabelBufferTest(unittest.TestCase):
+    """У road shields нет обводки подписи.
+
+    Белая кайма текста рисуется поверх чёрной рамки щита и делает её
+    неравномерной.  Фон щита (белый прямоугольник с рамкой) остаётся.
+    """
+
+    def test_shields_have_no_text_buffer(self):
+        found = 0
+        for layer in _template_root().iter("maplayer"):
+            name = layer.findtext("layername")
+            for rule in layer.iter("rule"):
+                if rule.get("description") != "shields":
+                    continue
+                for buffer in rule.iter("text-buffer"):
+                    found += 1
+                    self.assertEqual(
+                        buffer.get("bufferDraw"), "0",
+                        f"у road shield слоя {name} осталась обводка текста",
+                    )
+        self.assertTrue(found, "в шаблоне нет правил road shields")
+
+
 class BlockingRoadLabelsTest(unittest.TestCase):
     """Подписи слоёв-блокировщиков дорог на карте не видны.
 
