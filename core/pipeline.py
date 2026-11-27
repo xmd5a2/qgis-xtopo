@@ -3651,6 +3651,24 @@ def _use_project_temp(config):
     gdal.SetConfigOption("CPL_TMPDIR", str(directory))
 
 
+def _warm_template_data():
+    """Разбирает шаблон проекта заранее, в фоновом потоке.
+
+    Разбор 74-МБ проекта занимает секунды и держит GIL.  Если он идёт
+    одновременно со слоями, то не удлиняет подготовку: слои в это время
+    заняты чтением PBF и записью файлов, а ссылки на поля нужны только
+    на шаге сохранения.  Без прогрева первый же поток слоёв разбирал бы
+    шаблон сам, а служебные слои значков — ещё раз в конце.
+    """
+    try:
+        field_subset.template_references()
+        poi_icons.read_template_poi()
+        poi_icons.read_template_obstacles()
+        poi_icons.template_variables()
+    except Exception:  # noqa: BLE001 - прогрев не обязателен
+        pass
+
+
 def run_project(config, progress=None, cancel=None, percent=None, status=None):
     notify = progress or (lambda message: None)
     tracker = _ProgressTracker(
@@ -3805,6 +3823,15 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             config, bbox, runner, progress=report, cancel=cancel,
             fraction=tracker.fraction, timings=timings,
         )
+        # Разбор шаблона запускается после создания обработчика: его
+        # инициализация (импорт Processing, прогрев стиля) сама держит
+        # GIL, и фоновый поток только отнял бы у неё время.  Слоям
+        # ссылки на поля нужны уже при первом сохранении, значкам — в
+        # конце подготовки.
+        template_thread = threading.Thread(
+            target=_warm_template_data, name="xtopo-template", daemon=True,
+        )
+        template_thread.start()
         started = time.monotonic()
         warnings = pipeline.run(prepared, config.array_queries)
         timings.add_stage(_LAYER_STAGE, time.monotonic() - started)
@@ -3941,6 +3968,9 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("пересечения полигонов", time.monotonic() - started)
+        # Данные шаблона нужны служебным слоям значков; к этому моменту
+        # фоновый разбор давно готов.
+        template_thread.join()
         report("Размещение значков POI")
         started = time.monotonic()
         try:

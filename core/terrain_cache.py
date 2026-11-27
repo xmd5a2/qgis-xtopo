@@ -59,7 +59,8 @@ HILLSHADE_STYLE_VERSION = 6
 # 8 — подробные изолинии без упрощения, обзорные — отдельной копией.
 # 9 — обзорная копия упрощается на 10 м и считается за один проход.
 # 10 — DEM маскируется по воде, морское дно в контуры не попадает.
-ISOLINES_VERSION = 10
+# 11 — в кэше сохраняются и общие слои isolines_full.
+ISOLINES_VERSION = 11
 
 # Версия маскирования DEM по полигонам воды.  Меняется правило маски —
 # поднимаем число, иначе кэш вернёт отмывку, посчитанную по морскому дну.
@@ -70,6 +71,8 @@ WATER_MASK_VERSION = 1
 # собранный по другому набору тайлов.
 TILE_FILTER_VERSION = 1
 ISOLINES_FILES = (
+    "isolines_full.sqlite",
+    "isolines_full_overview.sqlite",
     "isolines_regular.sqlite",
     "isolines_glacier.sqlite",
     "isolines_regular_overview.sqlite",
@@ -218,9 +221,15 @@ WATER_LAYER_NAMES = (
 
 
 def _water_digest(config):
-    """Отпечаток слоёв, по которым DEM маскируется."""
+    """Отпечаток слоёв, по которым DEM маскируется.
+
+    Считается по содержимому, а не по времени изменения: файлы слоёв
+    перезаписываются при каждой подготовке, и mtime не даёт кэшу
+    переиспользовать готовый рельеф даже при тех же данных.  Слои воды
+    небольшие, полный обход занимает доли секунды.
+    """
     return _digest([
-        _file_stat(config.vector_dir / name) for name in WATER_LAYER_NAMES
+        _layer_digest(config.vector_dir / name) for name in WATER_LAYER_NAMES
     ])
 
 
@@ -366,13 +375,14 @@ def isolines_signature(config, bbox, dem_key):
         config.isolines_step,
         config.smooth_isolines,
         bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
-        # Слои, по которым режутся изолинии: отпечаток файла вместо
-        # полного обхода геометрии и атрибутов.
-        _file_stat(config.vector_dir / "water_dissolved.sqlite"),
-        _file_stat(config.vector_dir / "water.sqlite"),
-        _file_stat(config.vector_dir / "water_intermittent_dissolved.sqlite"),
-        _file_stat(config.vector_dir / "water_intermittent.sqlite"),
-        _file_stat(config.vector_dir / "glacier.sqlite"),
+        # Слои, по которым режутся изолинии: отпечаток содержимого вместо
+        # времени изменения — файлы перезаписываются при каждой сборке,
+        # а данные при том же охвате не меняются.
+        _layer_digest(config.vector_dir / "water_dissolved.sqlite"),
+        _layer_digest(config.vector_dir / "water.sqlite"),
+        _layer_digest(config.vector_dir / "water_intermittent_dissolved.sqlite"),
+        _layer_digest(config.vector_dir / "water_intermittent.sqlite"),
+        _layer_digest(config.vector_dir / "glacier.sqlite"),
         # Нарезка DEM на тайлы изменилась: старые изолинии считались
         # одним проходом и переиспользовать их нельзя.
         ISOLINES_VERSION,

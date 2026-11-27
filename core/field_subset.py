@@ -13,6 +13,7 @@
 
 import html
 import re
+import threading
 import zipfile
 from functools import lru_cache
 from pathlib import Path
@@ -129,6 +130,7 @@ def _maplayer_blocks(text):
         position = end
 
 
+@lru_cache(maxsize=4096)
 def _fields_in_expression(expression):
     """Имена, которые могут быть полями в выражении QGIS."""
     expression = html.unescape(expression or "")
@@ -138,9 +140,60 @@ def _fields_in_expression(expression):
     return fields
 
 
-@lru_cache(maxsize=1)
+# В шаблоне десятки мегабайт, и одно и то же выражение повторяется в
+# правилах десятки раз.  Поиск подстроки в C вчетверо быстрее регулярного
+# выражения с длинной альтернативой, а результат по тексту выражения
+# кэшируется: уникальных выражений сотни, а вхождений — тысячи.
+EXPRESSION_ATTRIBUTES = (
+    "fieldName", "filter", "expr", "expression", "geometryGenerator",
+    "constraintExpression", "formula", "attr", "displayExpression",
+    "subsetString",
+)
+
+
+def _expression_values(block):
+    """Значения атрибутов-выражений в блоке ``maplayer``."""
+    for name in EXPRESSION_ATTRIBUTES:
+        needle = f'{name}="'
+        start = 0
+        while True:
+            position = block.find(needle, start)
+            if position < 0:
+                break
+            if position and (
+                block[position - 1].isalnum() or block[position - 1] == "_"
+            ):
+                start = position + 1
+                continue
+            end = block.find('"', position + len(needle))
+            if end < 0:
+                break
+            yield block[position + len(needle):end]
+            start = end + 1
+
+
+# Разбор шаблона занимает больше секунды и держит GIL.  ``lru_cache`` не
+# годится: при одновременном первом вызове из нескольких потоков он
+# запускает функцию в каждом, и восемь слоёв по очереди разбирают один и
+# тот же проект.  Блокировка с повторной проверкой разбирает шаблон один
+# раз, остальные ждут готовый результат.
+_TEMPLATE_REFERENCES = None
+_TEMPLATE_REFERENCES_LOCK = threading.Lock()
+
+
 def template_references():
     """Поля, на которые ссылаются слои шаблона, по имени файла данных."""
+    global _TEMPLATE_REFERENCES
+    references = _TEMPLATE_REFERENCES
+    if references is not None:
+        return references
+    with _TEMPLATE_REFERENCES_LOCK:
+        if _TEMPLATE_REFERENCES is None:
+            _TEMPLATE_REFERENCES = _read_template_references()
+        return _TEMPLATE_REFERENCES
+
+
+def _read_template_references():
     path = Path(template_path())
     if not path.exists():
         return {}
@@ -153,11 +206,6 @@ def template_references():
     except (OSError, KeyError, StopIteration, zipfile.BadZipFile):
         return {}
     result = {}
-    expression_attributes = re.compile(
-        r'\b(?:fieldName|filter|expr|expression|geometryGenerator|'
-        r'constraintExpression|formula|attr|displayExpression|'
-        r'subsetString)="([^"]*)"'
-    )
     property_field = re.compile(
         r'<property\b[^>]*\bfield="([^"]+)"'
     )
@@ -172,8 +220,8 @@ def template_references():
                 continue
             stem = layer.group(1)
         references = result.setdefault(stem, set())
-        for match in expression_attributes.finditer(block):
-            references.update(_fields_in_expression(match.group(1)))
+        for expression in _expression_values(block):
+            references.update(_fields_in_expression(expression))
         for match in property_field.finditer(block):
             references.add(html.unescape(match.group(1)))
         for match in re.finditer(

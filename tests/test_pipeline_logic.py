@@ -4322,6 +4322,46 @@ class FieldSubsetTest(unittest.TestCase):
         self.assertNotIn("addr:city", selected)
         self.assertNotIn("phone", selected)
 
+    def test_template_references_are_parsed_once_from_threads(self):
+        """Одновременный первый разбор шаблона не повторяется в потоках.
+
+        ``lru_cache`` допускает несколько вычислений при промахе: восемь
+        слоёв по очереди разбирали один и тот же проект и держали GIL.
+        """
+        import time
+        from unittest import mock
+
+        calls = []
+        results = []
+        barrier = threading.Barrier(8)
+
+        def slow_read():
+            calls.append(threading.get_ident())
+            time.sleep(0.05)
+            return {"layer": {"field"}}
+
+        def worker():
+            barrier.wait(timeout=5)
+            results.append(field_subset.template_references())
+
+        field_subset._TEMPLATE_REFERENCES = None
+        try:
+            with mock.patch.object(
+                field_subset, "_read_template_references",
+                side_effect=slow_read,
+            ):
+                threads = [threading.Thread(target=worker) for _ in range(8)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(5)
+        finally:
+            field_subset._TEMPLATE_REFERENCES = None
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(results), 8)
+        for result in results:
+            self.assertEqual(result, {"layer": {"field"}})
+
     def test_save_vector_prunes_industrial_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "industrial.geojson"
