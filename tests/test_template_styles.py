@@ -679,6 +679,15 @@ class LandcoverLayerOrderTest(unittest.TestCase):
             "кладбище не должно закрывать здания",
         )
 
+    def test_cemetery_icons_stay_above_map(self):
+        """Значок кладбища не перекрывают полигоны и линии."""
+        icons = self.order.index("cemetery icons")
+        for name in ("route_hiking kilometer markers", "atlas template",
+                     "mountain area", "camp site polygon", "embankment",
+                     "power line", "highway main", "building", "water"):
+            self.assertLess(icons, self.order.index(name), name)
+        self.assertLess(icons, self.order.index("places main major"))
+
     def test_wood_and_scrub_are_above_open_land(self):
         for forest in ("wood", "scrub"):
             for open_land in self.OPEN_LAND:
@@ -4217,7 +4226,7 @@ class PoiObstacleTest(unittest.TestCase):
             for layer in poi_icons.read_template_poi()
         }
         for name in ("highway main bridge", "path bridge",
-                     "railway bridge", "track bridge", "cemetery"):
+                     "railway bridge", "track bridge", "cemetery icons"):
             self.assertIn(name, by_name)
             layer = by_name[name]
             # Ранг — место слоя в дереве проекта, а не «выше любого POI».
@@ -4225,10 +4234,25 @@ class PoiObstacleTest(unittest.TestCase):
             self.assertGreater(layer.rank, poi_ranks["places main"])
             self.assertGreater(layer.icon_size, 0.0)
             self.assertEqual(layer.crs, "EPSG:4326")
-        self.assertEqual(by_name["cemetery"].geometry, "Polygon")
+        self.assertEqual(by_name["cemetery icons"].geometry, "Polygon")
         self.assertEqual(by_name["path bridge"].geometry, "Line")
         self.assertEqual(
             len({layer.rank for layer in obstacles}), len(obstacles),
+        )
+
+    def test_cemetery_icon_keeps_polygon_rank(self):
+        """В вытеснении значок кладбища остаётся на месте площадки."""
+        order = [
+            item.get("name")
+            for item in _template_root().iter("layer-tree-layer")
+        ]
+        icon = next(
+            layer for layer in poi_icons.read_template_obstacles()
+            if layer.name == "cemetery icons"
+        )
+        self.assertEqual(icon.rank, order.index("cemetery") + 1)
+        self.assertLess(
+            order.index("cemetery icons"), order.index("places main major"),
         )
 
     def test_packed_multipoint_is_skipped(self):
@@ -4647,7 +4671,7 @@ class BridgeIconHideTest(unittest.TestCase):
     @staticmethod
     def _cemetery(lon, lat, fid=1, size=2.0):
         return poi_icons._Point(
-            rank=0.02, lon=lon, lat=lat, name="cemetery", fid=fid,
+            rank=0.02, lon=lon, lat=lat, name="cemetery icons", fid=fid,
             geometry="Polygon", bands={0: 4}, sizes={0: size},
         )
 
@@ -4658,7 +4682,7 @@ class BridgeIconHideTest(unittest.TestCase):
         hidden = poi_icons._hidden_icon_bands(
             [cemetery, place], [(100000.0, 130000.0)],
         )
-        self.assertIn(("cemetery", 1), hidden)
+        self.assertIn(("cemetery icons", 1), hidden)
 
     def test_higher_priority_icon_suppresses_cemetery_icon(self):
         """Любой значок выше кладбища в дереве скрывает его значок."""
@@ -4670,7 +4694,7 @@ class BridgeIconHideTest(unittest.TestCase):
         hidden = poi_icons._hidden_icon_bands(
             [cemetery, monument], [(100000.0, 130000.0)],
         )
-        self.assertIn(("cemetery", 1), hidden)
+        self.assertIn(("cemetery icons", 1), hidden)
 
     def test_lower_priority_icon_keeps_cemetery_icon(self):
         """Значок ниже кладбища в дереве ему не мешает."""
@@ -4749,18 +4773,18 @@ class BridgeIconHideTest(unittest.TestCase):
     def test_cemetery_icon_is_suppressed_too(self):
         """Значок кладбища вытесняется соседним кладбищем."""
         west = poi_icons._Point(
-            rank=0.02, lon=6.9000, lat=46.05, name="cemetery", fid=1,
+            rank=0.02, lon=6.9000, lat=46.05, name="cemetery icons", fid=1,
             geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
         )
         east = poi_icons._Point(
-            rank=0.02, lon=6.9006, lat=46.05, name="cemetery", fid=2,
+            rank=0.02, lon=6.9006, lat=46.05, name="cemetery icons", fid=2,
             geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
         )
         hidden = poi_icons._hidden_icon_bands(
             [west, east], [(100000.0, 130000.0)],
         )
-        self.assertNotIn(("cemetery", 1), hidden)
-        self.assertIn(("cemetery", 2), hidden)
+        self.assertNotIn(("cemetery icons", 1), hidden)
+        self.assertIn(("cemetery icons", 2), hidden)
 
     def test_expression_for_several_bands(self):
         """Значок на несколько диапазонов: скрыт, если скрыт в любом."""
@@ -4781,13 +4805,15 @@ class CemeteryIconSuppressionTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.layer = next(
-            layer for layer in _template_root().iter("maplayer")
-            if layer.findtext("layername") == "cemetery"
-        )
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        cls.layer = layers["cemetery icons"]
+        cls.fill_layer = layers["cemetery"]
         cls.obstacle = next(
             layer for layer in poi_icons.read_template_obstacles()
-            if layer.name == "cemetery"
+            if layer.name == "cemetery icons"
         )
 
     def test_icon_symbol_has_enabled_property(self):
@@ -4830,14 +4856,14 @@ class CemeteryIconSuppressionTest(unittest.TestCase):
 
     def test_icon_is_used_only_for_small_polygons(self):
         """На крупном масштабе рисуется штриховка, значок — только мелкий."""
-        symbols = {
+        icon_symbols = {
             symbol.get("name"): symbol
             for symbol in self.layer.findall("renderer-v2/symbols/symbol")
         }
-        groups = self.layer.findall("renderer-v2/rules/rule")
-        self.assertEqual(len(groups), 4)
-        for group in groups:
-            icon_rule, fill_rule = group.findall("rule")
+        icon_groups = self.layer.findall("renderer-v2/rules/rule")
+        self.assertEqual(len(icon_groups), 4)
+        for group in icon_groups:
+            (icon_rule,) = group.findall("rule")
             # Значок выбирается по площади на экране, а не по площади
             # объекта: на обзорном масштабе тот же полигон мельче значка.
             self.assertIn("area_m2", icon_rule.get("filter"))
@@ -4845,12 +4871,33 @@ class CemeteryIconSuppressionTest(unittest.TestCase):
             self.assertNotEqual(icon_rule.get("checkstate"), "0")
             icon_layers = [
                 layer.get("class")
-                for layer in symbols[icon_rule.get("symbol")].findall("layer")
+                for layer in icon_symbols[
+                    icon_rule.get("symbol")
+                ].findall("layer")
             ]
             self.assertIn("CentroidFill", icon_layers)
+
+        fill_symbols = {
+            symbol.get("name"): symbol
+            for symbol in self.fill_layer.findall(
+                "renderer-v2/symbols/symbol"
+            )
+        }
+        fill_groups = self.fill_layer.findall("renderer-v2/rules/rule")
+        self.assertEqual(len(fill_groups), 4)
+        for group in fill_groups:
+            icon_rule, fill_rule = group.findall("rule")
+            self.assertIn("area_m2", icon_rule.get("filter"))
+            # Для мелкого полигона базовая заливка не рисуется: значок
+            # вынесен в отдельный слой выше карты.
+            self.assertFalse(
+                fill_symbols[icon_rule.get("symbol")].findall("layer")
+            )
             fill_layers = [
                 layer.get("class")
-                for layer in symbols[fill_rule.get("symbol")].findall("layer")
+                for layer in fill_symbols[
+                    fill_rule.get("symbol")
+                ].findall("layer")
             ]
             self.assertIn("SVGFill", fill_layers)
             self.assertNotIn("CentroidFill", fill_layers)

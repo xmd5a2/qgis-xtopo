@@ -44,9 +44,10 @@ QGIS не разводит значки разных слоёв: кластер�
 Фильтр правила скрыл бы весь объект вместе со значком, поэтому такие
 значки участвуют как препятствия, а их видимость решает поле
 ``icon_hide``.  Их ранг — место слоя в дереве проекта, как у точечных
-POI; значок кладбища дополнительно уступает любому значку выше него.
-На объект нужна одна точка — центр линии или площадки, так что ни
-подготовка, ни отрисовка не замедляются.
+POI; у значка кладбища слой стоит выше карты, поэтому его ранг
+привязан к площадке (``RANK_ANCHORS``), и он дополнительно уступает
+любому значку выше него.  На объект нужна одна точка — центр линии или
+площадки, так что ни подготовка, ни отрисовка не замедляются.
 """
 
 import heapq
@@ -99,7 +100,7 @@ NEVER_RANK = 99999
 # центре площадки).
 SELF_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
-    "cemetery",
+    "cemetery icons",
 )
 # Слои мостов: их значок уступает и населённому пункту, а не только
 # соседнему мосту.  Линия моста при этом остаётся.
@@ -108,7 +109,10 @@ BRIDGE_ICON_LAYERS = (
 )
 # Слои, значок которых уступает любому значку выше в дереве: кладбище
 # не должно перекрывать более важные объекты — храм, памятник, родник.
-YIELDING_ICON_LAYERS = ("cemetery",)
+YIELDING_ICON_LAYERS = ("cemetery icons",)
+# Слой подписи и заливки кладбища задаёт приоритет его значка: сам значок
+# стоит высоко в дереве, чтобы его не закрывали полигоны и линии.
+RANK_ANCHORS = {"cemetery icons": "cemetery"}
 # Поле с индексами диапазонов, где значок моста скрыт.
 ICON_HIDE_FIELD = "icon_hide"
 
@@ -505,12 +509,19 @@ def _template_data(path=None):
     }
     layers.sort(key=lambda item: positions.get(item.name, 10**6))
     obstacles.sort(key=lambda item: positions.get(item.name, 10**6))
+
+    def rank_of(name, fallback):
+        # Значок кладбища нарисован отдельным слоем выше карты, но
+        # в вытеснении сохраняет место площадки: RANK_ANCHORS.
+        anchor = RANK_ANCHORS.get(name, name)
+        return positions.get(anchor, fallback)
+
     for index, item in enumerate(layers, start=1):
         # Ранг — место слоя в дереве проекта: приоритет задаёт порядок
         # слоёв, а не отдельная нумерация только среди POI.
-        item.rank = positions.get(item.name, 10**6 + index)
+        item.rank = rank_of(item.name, 10**6 + index)
     for index, layer in enumerate(obstacles, start=1):
-        layer.rank = positions.get(layer.name, 10**6 + index)
+        layer.rank = rank_of(layer.name, 10**6 + index)
     data = {
         "poi": layers,
         "obstacles": obstacles,

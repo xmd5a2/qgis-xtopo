@@ -721,6 +721,22 @@ class ProjectBasemapTest(unittest.TestCase):
         )
         self.assertIn("mt1.google.com", layer.source())
 
+    def test_cemetery_icons_keep_symbol_with_basemap(self):
+        """Слой значка кладбища не скрывается как обычный полигон."""
+        from qgis.core import (
+            QgsFillSymbol, QgsSingleSymbolRenderer, QgsVectorLayer,
+        )
+
+        layer = QgsVectorLayer(
+            "Polygon?crs=EPSG:3857", "cemetery icons", "memory"
+        )
+        layer.setRenderer(QgsSingleSymbolRenderer(
+            QgsFillSymbol.createSimple({"color": "0,0,0"})
+        ))
+        self.project.addMapLayer(layer)
+        self.basemap.apply("google", self.project)
+        self.assertEqual(layer.renderer().type(), "singleSymbol")
+
     def test_switch_source_keeps_single_basemap(self):
         self.basemap.apply("google", self.project)
         layer = self.basemap.apply("bing", self.project)

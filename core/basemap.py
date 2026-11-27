@@ -65,7 +65,9 @@ SLOPE_PROPERTY = "qgis_xtopo/basemap_slope"
 FULL_STYLE = "qgis_xtopo_full"
 LABELS_STYLE = "qgis_xtopo_labels"
 OSM_LAYER_NAME = "OpenStreetMap"
-EXCLUDED_LAYERS = (OSM_LAYER_NAME, "BBOX")
+# `cemetery icons` — полигональный слой только по данным: он рисует
+# значок, который нужен и на снимке.
+EXCLUDED_LAYERS = (OSM_LAYER_NAME, "BBOX", "cemetery icons")
 # Административные границы и их подписи сохраняют свои цвета на снимке:
 # инверсия их не трогает.
 ADMIN_LAYER_PREFIX = "admin level "
