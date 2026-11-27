@@ -5,7 +5,6 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from urllib.parse import unquote
 
 from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
@@ -3023,21 +3022,24 @@ def _merge_polygons(polygons):
     return merged if merged.GetGeometryCount() else None
 
 
-_OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]{2})%")
+_OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]+)%")
 
 
 def _unescape_opl(value):
     """Декодирует значение OPL.
 
-    osmium пишет пробелы, запятые, знак равенства и процент как
-    ``%XX%``, а обычный UTF-8 оставляет как есть.  ``unquote`` убирает
-    только ``%XX`` и оставляет хвостовой ``%``, из-за чего получалось
-    «Daşoguz %welaýaty».
+    osmium кодирует спецсимволы и любые не-ASCII символы как
+    ``%<hex>%``: пробел — ``%20%``, «日» — ``%65e5%``. Код символа
+    шестнадцатеричный и может занимать больше двух цифр, поэтому
+    двухзначный шаблон портил не-ASCII имена.
     """
-    text = _OPL_ESCAPE.sub(
-        lambda match: chr(int(match.group(1), 16)), value
-    )
-    return unquote(text)
+    def decode(match):
+        try:
+            return chr(int(match.group(1), 16))
+        except (ValueError, OverflowError):
+            return match.group(0)
+
+    return _OPL_ESCAPE.sub(decode, value)
 
 
 def _bbox_geometry(bbox):

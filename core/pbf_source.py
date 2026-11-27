@@ -7,7 +7,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import unquote
 
 from . import osmium_prefilter, osmium_tool
 from .osm_convert import AREA_MAN_MADE, FieldNames
@@ -29,7 +28,7 @@ INTERNAL_FIELDS = {
     "osm_id", "osm_way_id", "z_order", "land_area", "all_tags", "other_tags",
 }
 HSTORE_PATTERN = re.compile(r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"')
-OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]{2})%")
+OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]+)%")
 
 # Слои, где восстанавливаются way-члены отношений.  Драйвер GDAL не
 # отдаёт отдельным объектом замкнутый внешний член мультиполигона: он
@@ -514,11 +513,14 @@ def _write_matches(handles, feature_files, field_names, pbf_dir, matched,
 
 
 def _unescape_opl(value):
-    """Декодирует значение OPL (``%20%`` и обычный ``%XX``)."""
-    text = OPL_ESCAPE.sub(
-        lambda match: chr(int(match.group(1), 16)), value
-    )
-    return unquote(text)
+    """Декодирует значение OPL (``%<hex>%``, включая не-ASCII)."""
+    def decode(match):
+        try:
+            return chr(int(match.group(1), 16))
+        except (ValueError, OverflowError):
+            return match.group(0)
+
+    return OPL_ESCAPE.sub(decode, value)
 
 
 def _opl_tags(token):

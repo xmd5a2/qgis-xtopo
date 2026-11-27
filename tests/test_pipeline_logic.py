@@ -2158,19 +2158,25 @@ class AdminNameFallbackTest(unittest.TestCase):
         self.assertEqual(names["2"]["ways"][8]["name"], "Country")
 
     def test_opl_escaped_names_are_decoded(self):
-        """OPL пишет пробел и процент как ``%XX%``, а не ``%XX``."""
+        """OPL кодирует спецсимволы и не-ASCII как ``%<hex>%``."""
         from qgis_xtopo.core.pipeline import _parse_admin_relation_tags
 
         names = _parse_admin_relation_tags(
             "r7 v1 dV c0 t i0 u "
             "Tadmin_level=4,name=Daşoguz%20%welaýaty,"
             "name:en=Daşoguz%20%Province,percent=A%25%B "
-            "Mw5@outer"
+            "Mw5@outer\n"
+            "r8 v1 dV c0 t i0 u "
+            "Tadmin_level=2,name=%65e5%%672c%,"
+            "name:ko=%b300%%d55c%%bbfc%%ad6d% Mw6@outer"
         )
         tags = names["4"]["relations"][7]
         self.assertEqual(tags["name"], "Daşoguz welaýaty")
         self.assertEqual(tags["name:en"], "Daşoguz Province")
         self.assertEqual(tags["percent"], "A%B")
+        japanese = names["2"]["relations"][8]
+        self.assertEqual(japanese["name"], "日本")
+        self.assertEqual(japanese["name:ko"], "대한민국")
 
     def test_relation_names_are_read_from_source_pbf(self):
         from unittest import mock

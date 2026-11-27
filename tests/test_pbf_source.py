@@ -878,6 +878,16 @@ class RelationMemberWaysTest(unittest.TestCase):
         self.assertEqual(members, [("w", 1, "outer"), ("w", 2, "outer")])
         self.assertEqual(tags["intermittent"], "yes")
 
+    def test_opl_non_ascii_tags_are_decoded(self):
+        """OPL кодирует не-ASCII кодом символа, а не двумя hex-цифрами."""
+        from qgis_xtopo.core.pbf_source import _unescape_opl
+
+        self.assertEqual(_unescape_opl("%65e5%%672c%"), "日本")
+        self.assertEqual(
+            _unescape_opl("%b300%%d55c%%bbfc%%ad6d%"), "대한민국"
+        )
+        self.assertEqual(_unescape_opl("a%20%b%2c%c"), "a b,c")
+
     def test_relation_filters_skip_negative_conditions(self):
         from qgis_xtopo.core.pbf_source import _relation_member_filters
 
