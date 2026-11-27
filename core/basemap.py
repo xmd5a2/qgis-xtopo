@@ -115,7 +115,7 @@ DEFAULT_SOURCE = "google"
 
 @dataclass(frozen=True)
 class BasemapSource:
-    """Описание спутниковой подложки."""
+    """Описание растровой подложки."""
 
     key: str
     name: str
@@ -157,6 +157,14 @@ SOURCES = (
         19,
         '© <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar '
         "Geographics, and the GIS User Community",
+    ),
+    BasemapSource(
+        "osm",
+        "OSM",
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        19,
+        '© <a href="https://www.openstreetmap.org/copyright">'
+        "OpenStreetMap</a> contributors",
     ),
 )
 

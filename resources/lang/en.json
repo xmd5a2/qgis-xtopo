@@ -395,7 +395,7 @@
   "Размер текста": "Text size",
   "Размер текста: множитель размера всех подписей на карте": "Text size: multiplier for all map labels",
   "Растровая подложка": "Raster basemap",
-  "Растровая подложка: спутниковый снимок под картой; площадные слои показывают только названия": "Raster basemap: satellite imagery under the map; area layers show only names",
+  "Растровая подложка: снимок или карта OSM под картой; площадные слои показывают только названия": "Raster basemap: imagery or OSM map under the map; area layers show only names",
   "Не удалось включить растровую подложку": "Could not enable the raster basemap",
   "3 — главное": "3 — main",
   "4 — обычный": "4 — normal",

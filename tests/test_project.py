@@ -631,15 +631,36 @@ class ProjectBasemapTest(unittest.TestCase):
         node = self.project.layerTreeRoot().findLayer(layer.id())
         return bool(node is not None and node.itemVisibilityChecked())
 
-    def test_sources_are_satellite_xyz(self):
+    def test_sources_are_xyz_tiles(self):
         self.assertEqual(
             [item.key for item in self.basemap.SOURCES],
-            ["google", "bing", "arcgis"],
+            ["google", "bing", "arcgis", "osm"],
         )
         for item in self.basemap.SOURCES:
             self.assertIn("type=xyz", item.uri)
             self.assertIn("zmax=", item.uri)
         self.assertIn("{q}", self.basemap.source("bing").uri)
+        self.assertIn(
+            "tile.openstreetmap.org", self.basemap.source("osm").uri
+        )
+
+    def test_osm_source_adds_tile_layer(self):
+        layer = self.basemap.apply("osm", self.project)
+        self.assertIsNotNone(layer)
+        self.assertEqual(
+            self.basemap.active_source(self.project).key, "osm"
+        )
+        self.assertIn("tile.openstreetmap.org", layer.source())
+        self.assertEqual(
+            self.project.layerTreeRoot().children()[-1].layer().id(),
+            layer.id(),
+        )
+        # Старая подложка OpenStreetMap скрывается, как и для снимков.
+        self.assertFalse(self._visible(self.osm))
+        self.assertTrue(self._visible(layer))
+        self.assertEqual(self.polygon.renderer().type(), "nullSymbol")
+        self.assertTrue(self.basemap.remove(self.project))
+        self.assertTrue(self._visible(self.osm))
 
     def test_apply_adds_layer_at_bottom_and_hides_polygons(self):
         before_line = self.line.renderer().type()

@@ -32,8 +32,8 @@
   `LandcoverLayerOrderTest.test_cemetery_stays_below_building`.
 ## Растровая подложка
 
-- **Подложка проекта** (`core/basemap.py`) — слой XYZ Google sat, Bing sat
-  или ArcGIS sat в самом низу дерева. Она не участвует в подготовке
+- **Подложка проекта** (`core/basemap.py`) — слой XYZ Google sat, Bing sat,
+  ArcGIS sat или OSM в самом низу дерева. Она не участвует в подготовке
   данных и не связана с подложкой окна выбора охвата.
 - Пока подложка включена, площадные слои (`Qgis.GeometryType.Polygon`,
   кроме `BBOX` и `OpenStreetMap`) переключаются на стиль

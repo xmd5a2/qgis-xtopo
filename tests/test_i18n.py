@@ -1142,7 +1142,7 @@ class DockLanguageTest(unittest.TestCase):
         self.assertEqual(panel.text_size_label.text(), "Text size")
         self.assertIn("multiplier", panel.text_size_combo.toolTip())
 
-    def test_basemap_combo_offers_satellites(self):
+    def test_basemap_combo_offers_sources(self):
         dock = self._dock()
         panel = dock.project_panel
         layout = panel.layout()
@@ -1153,12 +1153,12 @@ class DockLanguageTest(unittest.TestCase):
         self.assertEqual(
             [panel.basemap_combo.itemText(i)
              for i in range(panel.basemap_combo.count())],
-            ["Google sat", "Bing sat", "ArcGIS sat"],
+            ["Google sat", "Bing sat", "ArcGIS sat", "OSM"],
         )
         self.assertEqual(
             [panel.basemap_combo.itemData(i)
              for i in range(panel.basemap_combo.count())],
-            ["google", "bing", "arcgis"],
+            ["google", "bing", "arcgis", "osm"],
         )
         self.assertFalse(panel.basemap_check.isChecked())
         self.assertFalse(panel.basemap_combo.isEnabled())
@@ -1455,7 +1455,7 @@ class DockLanguageTest(unittest.TestCase):
         self.assertEqual(
             panel.basemap_invert_check.text(), "Inversion"
         )
-        self.assertIn("satellite", panel.basemap_combo.toolTip())
+        self.assertIn("imagery", panel.basemap_combo.toolTip())
         self.assertIn("light", panel.basemap_invert_check.toolTip())
 
     def test_inversion_checkbox_fits_panel_width(self):
