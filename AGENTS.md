@@ -346,6 +346,7 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 | Устройство правил подписей QGIS и их отладка (копии настроек, диапазоны масштаба, `QColor.lighter`, headless-рендер) | скилл `qgis-label-rules` |
 | Источники рельефа, мозаика, COG, Sonny, кэш DEM/изолиний | `docs/agents/terrain.md` |
 | GDAL, драйвер OSM, osmium, потери данных | `docs/agents/drivers.md` |
+| Way-члены отношений, потерянные GDAL, восстановление через osmium | `docs/agents/relation-members.md` |
 | Дубли линий границ admin_level, заполнение дырок, подписи стран | `docs/agents/admin-boundaries.md` |
 | Правило проверки пиков, инструмент, кэш вердиктов | `docs/agents/peaks.md` |
 | Панель, QThread, прокси, сеть, окно охвата, измерения и шкалы, экспорт атласа | `docs/agents/ui.md` |

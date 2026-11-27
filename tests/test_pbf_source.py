@@ -672,6 +672,9 @@ class MultiFileDatasetTest(unittest.TestCase):
             ), mock.patch(
                 "qgis_xtopo.core.osmium_prefilter.prefilter_sources",
                 return_value=(files, [], covering),
+            ), mock.patch(
+                "qgis_xtopo.core.pbf_source.osmium_tool.find_osmium",
+                return_value=None,
             ):
                 dataset = prepare_dataset(
                     config, self.BBOX, list(queries),
@@ -756,3 +759,156 @@ class MultiFileDatasetTest(unittest.TestCase):
         self.assertFalse(
             any("relation-member" in warning for warning in dataset.warnings)
         )
+
+
+class RelationMemberWaysTest(unittest.TestCase):
+    """Way-члены отношений, которых драйвер GDAL не отдаёт отдельно.
+
+    Внешние кольца мультиполигона входят в геометрию отношения, поэтому
+    собственные теги way теряются.  Восстановление должно вернуть такой
+    объект в его слой, но не дублировать слой, который уже покрывает
+    отношение.
+    """
+
+    OPL = "\n".join([
+        "n1 v1 dV c0 t i0 u T x0 y0",
+        "n2 v1 dV c0 t i0 u T x1 y0",
+        "n3 v1 dV c0 t i0 u T x1 y1",
+        "n4 v1 dV c0 t i0 u T x0 y1",
+        "n5 v1 dV c0 t i0 u T x0.2 y0.2",
+        "n6 v1 dV c0 t i0 u T x0.8 y0.2",
+        "n7 v1 dV c0 t i0 u T x0.8 y0.8",
+        "n8 v1 dV c0 t i0 u T x0.2 y0.8",
+        "w1 v1 dV c0 t i0 u Nn1,n2,n3,n4,n1",
+        (
+            "w2 v1 dV c0 t i0 u Tnatural=water,water=reservoir "
+            "Nn5,n6,n7,n8,n5"
+        ),
+        (
+            "r1 v1 dV c0 t i0 u "
+            "Tnatural=water,water=reservoir,intermittent=yes,"
+            "type=multipolygon Mw1@outer,w2@outer"
+        ),
+    ])
+
+    def _geometry(self):
+        from osgeo import ogr
+
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for x, y in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
+            ring.AddPoint_2D(x, y)
+        polygon = ogr.Geometry(ogr.wkbPolygon)
+        polygon.AddGeometry(ring)
+        return polygon
+
+    def _states(self):
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.config import Config
+        from qgis_xtopo.core.osm_convert import FieldNames
+        from qgis_xtopo.core.pbf_source import QueryIndex
+        from qgis_xtopo.core.query_recipes import source_fields
+        from qgis_xtopo.core.resources import read_query
+
+        names = ["water", "water_intermittent"]
+        index = QueryIndex({name: read_query(name) for name in names})
+        return names, index, {
+            name: source_fields(name) for name in names
+        }, {name: FieldNames() for name in names}
+
+    def _run(self, opl, names, index, field_sets, field_names):
+        from qgis_xtopo.core.config import Config
+        from qgis_xtopo.core.pbf_source import _recover_relation_member_ways
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="pbf",
+                bbox="0,0,1,1",
+            )
+            config.ensure_directories()
+            pbf_dir = config.temp_dir / "pbf"
+            pbf_dir.mkdir(parents=True, exist_ok=True)
+            handles = {}
+            feature_files = {}
+            seen = set()
+            warnings = []
+
+            def fake_run(command, cancel=None):
+                target = Path(command[command.index("-o") + 1])
+                target.write_text(opl, encoding="utf-8")
+                return 0, b"", b""
+
+            with mock.patch(
+                "qgis_xtopo.core.pbf_source.osmium_tool.find_osmium",
+                return_value="/usr/bin/osmium",
+            ), mock.patch(
+                "qgis_xtopo.core.pbf_source.osmium_tool.run_process",
+                side_effect=fake_run,
+            ):
+                written = _recover_relation_member_ways(
+                    config, index, handles, feature_files, field_names,
+                    pbf_dir, field_sets, seen, ["fake.osm.pbf"],
+                    self._geometry(), None, None, warnings,
+                )
+                again = _recover_relation_member_ways(
+                    config, index, handles, feature_files, field_names,
+                    pbf_dir, field_sets, seen, ["fake.osm.pbf"],
+                    self._geometry(), None, None, warnings,
+                )
+            for handle in handles.values():
+                handle.close()
+            content = {}
+            for name, path in feature_files.items():
+                content[name] = [
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                ]
+            return written, again, content, warnings
+
+    def test_parse_opl_members_and_tags(self):
+        from qgis_xtopo.core.pbf_source import _parse_opl_objects
+
+        nodes, ways, relations = _parse_opl_objects(self.OPL)
+        self.assertEqual(nodes[1], (0.0, 0.0))
+        self.assertEqual(ways[2][0], [5, 6, 7, 8, 5])
+        self.assertEqual(
+            ways[2][1], {"natural": "water", "water": "reservoir"}
+        )
+        members, tags = relations[1]
+        self.assertEqual(members, [("w", 1, "outer"), ("w", 2, "outer")])
+        self.assertEqual(tags["intermittent"], "yes")
+
+    def test_relation_filters_skip_negative_conditions(self):
+        from qgis_xtopo.core.pbf_source import _relation_member_filters
+
+        _names, index, _field_sets, _field_names = self._states()
+        expressions = _relation_member_filters(index, [
+            "water", "water_intermittent",
+        ])
+        self.assertIn("r/natural=water", expressions)
+        self.assertTrue(all(item.startswith("r/") for item in expressions))
+        self.assertFalse(any("!=" in item for item in expressions))
+
+    def test_member_way_goes_to_its_own_layer(self):
+        names, index, field_sets, field_names = self._states()
+        written, again, content, warnings = self._run(
+            self.OPL, names, index, field_sets, field_names
+        )
+        self.assertEqual(written, 1)
+        self.assertEqual(again, 0)
+        self.assertEqual(warnings, [])
+        self.assertEqual(set(content), {"water"})
+        self.assertEqual(len(content["water"]), 1)
+        feature = content["water"][0]
+        self.assertEqual(feature["properties"]["@id"], "way/2")
+        self.assertEqual(feature["geometry"]["type"], "Polygon")
+        self.assertEqual(len(feature["geometry"]["coordinates"][0]), 5)
+
+    def test_member_way_does_not_duplicate_relation_layer(self):
+        names, index, field_sets, field_names = self._states()
+        opl = self.OPL.replace(",intermittent=yes", "")
+        written, _again, content, _warnings = self._run(
+            opl, names, index, field_sets, field_names
+        )
+        self.assertEqual(written, 0)
+        self.assertEqual(content, {})

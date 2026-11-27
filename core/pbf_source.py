@@ -7,8 +7,9 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
-from . import osmium_prefilter
+from . import osmium_prefilter, osmium_tool
 from .osm_convert import AREA_MAN_MADE, FieldNames
 
 
@@ -28,6 +29,16 @@ INTERNAL_FIELDS = {
     "osm_id", "osm_way_id", "z_order", "land_area", "all_tags", "other_tags",
 }
 HSTORE_PATTERN = re.compile(r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"')
+OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]{2})%")
+
+# Слои, где восстанавливаются way-члены отношений.  Драйвер GDAL не
+# отдаёт отдельным объектом замкнутый внешний член мультиполигона: он
+# входит в геометрию отношения.  Если у самого way есть площадные теги
+# (постоянная вода внутри пересыхающего водохранилища), эти теги теряются
+# и объект пропадает из слоя.  osmium достаёт такие члены по тегам
+# отношений; совпадающие по слою с отношением не добавляются, чтобы не
+# плодить дубликаты.
+RELATION_MEMBER_LAYERS = ("water", "water_intermittent")
 
 
 class PbfError(RuntimeError):
@@ -502,6 +513,258 @@ def _write_matches(handles, feature_files, field_names, pbf_dir, matched,
         )
 
 
+def _unescape_opl(value):
+    """Декодирует значение OPL (``%20%`` и обычный ``%XX``)."""
+    text = OPL_ESCAPE.sub(
+        lambda match: chr(int(match.group(1), 16)), value
+    )
+    return unquote(text)
+
+
+def _opl_tags(token):
+    """Теги из поля OPL, начинающегося с ``T``."""
+    tags = {}
+    for item in token[1:].split(","):
+        key, separator, value = item.partition("=")
+        if separator and key:
+            tags[_unescape_opl(key)] = _unescape_opl(value)
+    return tags
+
+
+def _parse_opl_objects(text):
+    """Узлы, way и отношения из вывода ``osmium ... -f opl``.
+
+    Принимает строку или итерируемое из строк: файл может быть большим,
+    а разбор потоковый.  Возвращает три словаря: координаты узлов,
+    контуры и теги way, участников и теги отношений.
+    """
+    if isinstance(text, str):
+        text = text.splitlines()
+    nodes = {}
+    ways = {}
+    relations = {}
+    for line in text:
+        line = line.rstrip("\r\n")
+        if line.startswith("n"):
+            match = re.match(r"n(\d+)", line)
+            if not match:
+                continue
+            lon = lat = None
+            for token in line.split(" ")[1:]:
+                if token.startswith("x"):
+                    try:
+                        lon = float(token[1:])
+                    except ValueError:
+                        lon = None
+                elif token.startswith("y"):
+                    try:
+                        lat = float(token[1:])
+                    except ValueError:
+                        lat = None
+            if lon is not None and lat is not None:
+                nodes[int(match.group(1))] = (lon, lat)
+        elif line.startswith("w"):
+            match = re.match(r"w(\d+)", line)
+            if not match:
+                continue
+            refs = []
+            tags = {}
+            for token in line.split(" ")[1:]:
+                if token.startswith("N"):
+                    refs = [
+                        int(item[1:]) for item in token[1:].split(",")
+                        if item.startswith("n") and item[1:].isdigit()
+                    ]
+                elif token.startswith("T"):
+                    tags = _opl_tags(token)
+            ways[int(match.group(1))] = (refs, tags)
+        elif line.startswith("r"):
+            match = re.match(r"r(\d+)", line)
+            if not match:
+                continue
+            members = []
+            tags = {}
+            for token in line.split(" ")[1:]:
+                if token.startswith("M"):
+                    for item in token[1:].split(","):
+                        member = re.match(
+                            r"^([nwr])(\d+)(?:@(\S*))?$", item
+                        )
+                        if member:
+                            members.append((
+                                member.group(1),
+                                int(member.group(2)),
+                                member.group(3) or "",
+                            ))
+                elif token.startswith("T"):
+                    tags = _opl_tags(token)
+            relations[int(match.group(1))] = (members, tags)
+    return nodes, ways, relations
+
+
+def _relation_member_filters(index, names):
+    """Фильтры osmium для отношений, у которых нужны члены.
+
+    Берутся только положительные условия ``[key="value"]``: они дают
+    надмножество отношений запроса, а точное совпадение (включая
+    ``intermittent``) проверяется тем же ``QueryIndex``, что и при
+    обычном чтении PBF.
+    """
+    specs = {spec.name: spec for spec in index.specs}
+    expressions = []
+    for name in names:
+        spec = specs.get(name)
+        if spec is None:
+            continue
+        for query_filter in spec.filters:
+            if query_filter.kind != "relation":
+                continue
+            parts = []
+            for key, operator, value, _regex_operator, _regex in (
+                query_filter.conditions
+            ):
+                if operator != "=" or not value:
+                    continue
+                if any(item in key or item in value for item in (",", "=")):
+                    continue
+                parts.append(f"{key}={value}")
+            expression = "r/" + ",".join(parts)
+            if parts and expression not in expressions:
+                expressions.append(expression)
+    return expressions
+
+
+def _ring_geometry(points):
+    """Полигон из замкнутого кольца координат; None, если он вырожден."""
+    from osgeo import ogr
+
+    if len(points) < 4 or points[0] != points[-1]:
+        return None
+    ring = ogr.Geometry(ogr.wkbLinearRing)
+    for lon, lat in points:
+        ring.AddPoint_2D(lon, lat)
+    polygon = ogr.Geometry(ogr.wkbPolygon)
+    polygon.AddGeometry(ring)
+    if polygon.IsEmpty() or polygon.GetArea() <= 0:
+        return None
+    return polygon
+
+
+def _recover_relation_member_ways(config, index, handles, feature_files,
+                                  field_names, pbf_dir, field_sets, seen,
+                                  paths, bbox_geometry, cancel, progress,
+                                  warnings):
+    """Дописывает way-члены отношений, которых не отдал драйвер GDAL.
+
+    Драйвер строит мультиполигон из членов отношения и не возвращает
+    внешние way отдельными объектами.  Если у way есть собственные
+    площадные теги, он пропадает из своего слоя: например, постоянная
+    вода внутри пересыхающего водохранилища остаётся дыркой в отношении.
+    osmium достаёт отношения по тем же тегам, а члены — вместе с ними.
+
+    Объект добавляется только в те слои, которые не покрывает отношение:
+    иначе те же полигоны дублировались бы.  Работает без osmium молча:
+    основной путь чтения PBF от этого не зависит.
+    """
+    names = [name for name in RELATION_MEMBER_LAYERS if name in field_sets]
+    if not names:
+        return 0
+    expressions = _relation_member_filters(index, names)
+    if not expressions:
+        return 0
+    executable = osmium_tool.find_osmium(config.temp_dir)
+    if not executable:
+        return 0
+    nodes = {}
+    ways = {}
+    relations = {}
+    for position, source in enumerate(paths, 1):
+        # OPL пишется в файл: у большой выгрузки вывод в память занял бы
+        # сотни мегабайт, хотя разбор всё равно потоковый.
+        dump = pbf_dir / f"member_ways_{position}.opl"
+        command = [
+            str(executable), "tags-filter", "--no-progress", "-f", "opl",
+            "-o", str(dump), str(source), *expressions,
+        ]
+        try:
+            code, _stdout, stderr = osmium_tool.run_process(
+                command, cancel=cancel
+            )
+            if code != 0:
+                message = stderr.decode("utf-8", "replace").strip()
+                if message:
+                    warnings.append(f"PBF: osmium tags-filter: {message}")
+                continue
+            with dump.open("r", encoding="utf-8", errors="replace") as reader:
+                part_nodes, part_ways, part_relations = _parse_opl_objects(
+                    reader
+                )
+        except InterruptedError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - восстановление не критично
+            warnings.append(
+                f"PBF: way-члены отношений не прочитаны: {exc}"
+            )
+            continue
+        finally:
+            dump.unlink(missing_ok=True)
+        nodes.update(part_nodes)
+        ways.update(part_ways)
+        relations.update(part_relations)
+    if not relations:
+        return 0
+
+    # Слои, которые уже покрывают отношения-владельцы way: их повторно
+    # добавлять не нужно.
+    relation_layers = {}
+    for members, tags in relations.values():
+        properties = dict(tags)
+        properties["@type"] = "relation"
+        layers = set(index.matching_names("relation", properties))
+        for kind, ref, role in members:
+            if kind == "w" and role.lower() == "outer":
+                relation_layers.setdefault(ref, set()).update(layers)
+
+    written = 0
+    for way_id, covered in relation_layers.items():
+        refs, tags = ways.get(way_id, ([], {}))
+        if not tags or len(refs) < 4 or refs[0] != refs[-1]:
+            continue
+        points = [nodes.get(ref) for ref in refs]
+        if any(point is None for point in points):
+            continue
+        properties = dict(tags)
+        properties["@type"] = "way"
+        properties["@id"] = f"way/{way_id}"
+        matched = set(index.matching_names("way", properties)) & set(names)
+        matched -= covered
+        matched = {
+            name for name in matched if (name, properties["@id"]) not in seen
+        }
+        if not matched:
+            continue
+        polygon = _ring_geometry(points)
+        if polygon is None:
+            continue
+        if bbox_geometry is not None and not polygon.Intersects(bbox_geometry):
+            continue
+        geometry = _feature_geometry_json(polygon)
+        if geometry is None:
+            continue
+        _write_matches(
+            handles, feature_files, field_names, pbf_dir, matched,
+            properties, geometry, field_sets,
+        )
+        for name in matched:
+            seen.add((name, properties["@id"]))
+        written += 1
+    if written and progress:
+        progress(
+            f"PBF: восстановлены way-члены отношений: объектов {written}"
+        )
+    return written
+
+
 def _field_entries(definition, cache=None):
     """Поля слоя без служебных, с кэшем на время чтения файла.
 
@@ -972,6 +1235,8 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
     features_written = 0
     features_seen = 0
     seen = set()
+    warnings = []
+    read_paths = []
     total_files = len(paths)
     # Файлы, которые читаются целиком: геометрия объектов в них лежит за
     # пределами области, и фильтр драйвера отбросил бы их целиком.
@@ -989,6 +1254,7 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
             source, temporary = _decompress(
                 original, config.temp_dir, stem=f"source_{position}", cancel=cancel
             )
+            read_paths.append(source)
             temp_files.extend(temporary)
             if progress:
                 progress(
@@ -1153,6 +1419,12 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                 dataset = None
             if progress and total_files > 1:
                 progress(f"PBF: file {position}/{total_files} processed")
+
+        features_written += _recover_relation_member_ways(
+            config, index, handles, feature_files, field_names, pbf_dir,
+            field_sets, seen, read_paths, bbox_geometry, cancel, progress,
+            warnings,
+        )
     finally:
         for handle in handles.values():
             handle.close()
@@ -1162,7 +1434,6 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
             path.unlink(missing_ok=True)
             del feature_files[name]
 
-    warnings = []
     notes = [
         "PBF: чтение идёт с грубым фильтром по области, "
         "остальные объекты файла пропускаются."
