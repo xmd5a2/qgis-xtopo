@@ -2848,6 +2848,37 @@ class ContourTilingTest(unittest.TestCase):
             self.assertEqual(levels, reference_levels)
             self.assertAlmostEqual(length, reference_length, places=6)
 
+    def test_smooth_tile_contours_native_dem(self):
+        """Сглаживание работает по окну тайла и не создаёт DEM ×2."""
+        from osgeo import gdal
+
+        from qgis_xtopo.core import terrain
+
+        raster = gdal.Open(str(self.source))
+        tiles = terrain._contour_tiles(raster, 2, terrain.CONTOUR_HALO)
+        raster = None
+        levels = set()
+        length = 0.0
+        for tile in tiles:
+            dataset, _count = terrain._contour_tile(
+                (str(self.source), tile, 50), smooth=True
+            )
+            layer = dataset.GetLayer(0)
+            for feature in layer:
+                levels.add(round(feature.GetField("ELEV"), 6))
+                length += feature.GetGeometryRef().Length()
+        reference_levels, _reference_length = self._reference()
+        # Сглаживание может убрать самый верхний контур у острой
+        # вершины: фильтр чуть опускает одиночный пик.  Остальные уровни
+        # обязаны сохраниться.
+        self.assertTrue(levels)
+        self.assertLessEqual(levels, reference_levels)
+        self.assertGreaterEqual(len(levels), len(reference_levels) - 1)
+        self.assertGreater(length, 0.0)
+        self.assertFalse(
+            (Path(self.directory) / "isolines_dem_x2.tif").exists()
+        )
+
     def test_generate_isolines_merges_parallel_tiles(self):
         """Полный проход с нарезкой склеивает слои тайлов, а не числа."""
         from unittest import mock

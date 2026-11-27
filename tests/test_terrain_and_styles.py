@@ -1892,3 +1892,247 @@ class SlopeVariantChoiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsolineDensityTest(unittest.TestCase):
+    """Режимы плотности изолиний и их пороги."""
+
+    def test_presets_are_monotonic(self):
+        from qgis_xtopo.core import isoline_density
+
+        factors = [isoline_density.factor(name)
+                   for name in isoline_density.DENSITIES]
+        self.assertEqual(factors, [0.5, 1.0, 2.0, 4.0, 8.0])
+        self.assertEqual(isoline_density.DEFAULT, isoline_density.NORMAL)
+
+    def test_scaled_thresholds(self):
+        from qgis_xtopo.core import isoline_density
+
+        self.assertEqual(isoline_density.scaled(25_000, "sparse"), 12_500)
+        self.assertEqual(isoline_density.scaled(25_000, "normal"), 25_000)
+        self.assertEqual(isoline_density.scaled(25_000, "dense"), 50_000)
+        self.assertEqual(
+            isoline_density.scaled(25_000, "very_dense"), 100_000
+        )
+        self.assertEqual(isoline_density.scaled(25_000, "maximum"), 200_000)
+        self.assertEqual(isoline_density.scaled(0, "maximum"), 0)
+
+    def test_relief_mapping(self):
+        from qgis_xtopo.core import isoline_density, slope_style
+
+        self.assertEqual(
+            isoline_density.choose_density(slope_style.MOUNTAINS),
+            isoline_density.SPARSE,
+        )
+        self.assertEqual(
+            isoline_density.choose_density(slope_style.FOOTHILLS),
+            isoline_density.NORMAL,
+        )
+        self.assertEqual(
+            isoline_density.choose_density(slope_style.PLAINS),
+            isoline_density.VERY_DENSE,
+        )
+        self.assertIsNone(isoline_density.choose_density(None))
+
+    def test_density_from_scales(self):
+        from qgis_xtopo.core import isoline_density
+
+        scales = {
+            level: isoline_density.scaled(base, "dense")
+            for level, base in isoline_density.RENDER_SCALE.items()
+        }
+        self.assertEqual(
+            isoline_density.density_from_scales(scales), "dense"
+        )
+        scales[5] = 1
+        self.assertIsNone(isoline_density.density_from_scales(scales))
+
+
+class ReliefAutoIsolinesTest(unittest.TestCase):
+    """Равнина включает 5 м и сглаживание до расчёта изолиний."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def _slope(self, value):
+        from osgeo import gdal
+        import numpy as np
+
+        path = self.root / "slope.tif"
+        dataset = gdal.GetDriverByName("GTiff").Create(
+            str(path), 20, 20, 1, gdal.GDT_Byte
+        )
+        dataset.SetGeoTransform((0, 1, 0, 20, 0, -1))
+        dataset.GetRasterBand(1).WriteArray(
+            np.full((20, 20), value, dtype="uint8")
+        )
+        dataset = None
+        return path
+
+    def _config(self, p90):
+        from qgis_xtopo.core.config import Config
+
+        self._slope(p90)
+        config = Config(
+            qgis_projects_dir=str(self.root),
+            project_name="auto",
+            generate_terrain=True,
+            generate_terrain_isolines=True,
+            isolines_step=25,
+            smooth_isolines=False,
+            auto_isolines=True,
+        )
+        config.ensure_directories()
+        # slope.tif нужен в raster_dir, а не в корне.
+        (self.root / "slope.tif").replace(config.raster_dir / "slope.tif")
+        return config
+
+    def test_plain_selects_five_and_smoothing(self):
+        from qgis_xtopo.core import terrain
+
+        config = self._config(3)
+        terrain.apply_relief_isolines_defaults(config)
+        self.assertEqual(config.isolines_step, 5)
+        self.assertTrue(config.smooth_isolines)
+
+    def test_mountain_keeps_default(self):
+        from qgis_xtopo.core import terrain
+
+        config = self._config(45)
+        terrain.apply_relief_isolines_defaults(config)
+        self.assertEqual(config.isolines_step, 10)
+        self.assertFalse(config.smooth_isolines)
+
+    def test_auto_off_keeps_manual(self):
+        from qgis_xtopo.core import terrain
+
+        config = self._config(3)
+        config.auto_isolines = False
+        terrain.apply_relief_isolines_defaults(config)
+        self.assertEqual(config.isolines_step, 25)
+        self.assertFalse(config.smooth_isolines)
+
+    def test_no_slope_keeps_manual(self):
+        from qgis_xtopo.core import terrain
+
+        config = self._config(3)
+        (config.raster_dir / "slope.tif").unlink()
+        terrain.apply_relief_isolines_defaults(config)
+        self.assertEqual(config.isolines_step, 25)
+        self.assertFalse(config.smooth_isolines)
+
+    def test_smoothing_keeps_nodata_and_constant(self):
+        import numpy as np
+        from qgis_xtopo.core import terrain
+
+        constant = np.full((6, 6), 42.0, dtype="float32")
+        smoothed = terrain._smooth_dem_values(constant)
+        self.assertTrue(np.allclose(smoothed, constant))
+
+        with_hole = constant.copy()
+        with_hole[3, 3] = -9999
+        smoothed = terrain._smooth_dem_values(with_hole, -9999)
+        self.assertEqual(smoothed[3, 3], -9999)
+        mask = np.ones_like(smoothed, dtype=bool)
+        mask[3, 3] = False
+        self.assertTrue(np.allclose(smoothed[mask], 42.0))
+
+
+@unittest.skipUnless(HAS_QGIS, "QGIS Python bindings are not available")
+class IsolineDensityPanelTest(unittest.TestCase):
+    """Панель меняет пороги правил и не трогает кратности."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    def setUp(self):
+        from qgis.core import QgsProject, QgsVectorLayer
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.project = QgsProject.instance()
+        self.project.clear()
+        self.layers = []
+        for name in pp.ALL_ISOLINE_LAYERS:
+            objects = pp._template_layer_objects(name)
+            if objects is None:
+                continue
+            renderer, labeling = objects
+            layer = QgsVectorLayer(
+                "LineString?crs=EPSG:4326", name, "memory"
+            )
+            layer.setRenderer(renderer)
+            layer.setLabeling(labeling)
+            self.project.addMapLayer(layer)
+            self.layers.append(layer)
+        self.panel = pp.ProjectPanel(None)
+        self.panel._rebuild_rules()
+
+    def tearDown(self):
+        self.panel.deleteLater()
+        self.project.clear()
+
+    def test_apply_density_to_all_layers(self):
+        from qgis.core import QgsRuleBasedRenderer
+        from qgis_xtopo.core import isoline_density
+        from qgis_xtopo.gui import projectpanel as pp
+
+        self.panel._apply_isoline_density("very_dense")
+        self.assertEqual(
+            isoline_density.project_density(), "very_dense"
+        )
+        for layer in self.layers:
+            renderer = layer.renderer()
+            self.assertIsInstance(renderer, QgsRuleBasedRenderer)
+            rules = {
+                int(rule.label()): rule
+                for rule in renderer.rootRule().children()
+            }
+            self.assertEqual(rules[5].minimumScale(), 100_000)
+            self.assertEqual(rules[10].minimumScale(), 200_000)
+            self.assertEqual(rules[25].minimumScale(), 400_000)
+            self.assertEqual(rules[50].minimumScale(), 1_200_000)
+            self.assertEqual(rules[100].minimumScale(), 2_400_000)
+            # 200 и 1000 остаются без ограничения.
+            self.assertEqual(rules[200].minimumScale(), 0)
+            self.assertEqual(rules[1000].minimumScale(), 0)
+        # Возврат к «Обычно» восстанавливает шаблонные пороги.
+        self.panel._apply_isoline_density("normal")
+        self.assertTrue(self.panel._isolines_at_template_scales())
+        layer = self.panel._layer(pp.ISOLINES_LAYER)
+        rules = {
+            int(rule.label()): rule
+            for rule in layer.renderer().rootRule().children()
+        }
+        self.assertEqual(rules[10].minimumScale(), 50_000)
+
+    def test_density_keeps_rule_states(self):
+        from qgis_xtopo.gui import projectpanel as pp
+
+        layer = self.panel._layer(pp.ISOLINES_LAYER)
+        rule = next(
+            item for item in layer.renderer().rootRule().children()
+            if item.label() == "10"
+        )
+        rule.setActive(False)
+        self.panel._apply_isoline_density("dense")
+        self.assertFalse(rule.active())
+        self.assertEqual(rule.minimumScale(), 100_000)
+
+    def test_auto_density_applies_once(self):
+        from qgis_xtopo.core import isoline_density, slope_style
+
+        self.panel._auto_isoline_density(slope_style.PLAINS)
+        self.assertEqual(
+            isoline_density.project_density(), "very_dense"
+        )
+        # Ручной выбор не перетирается повторным автоопределением.
+        self.panel._apply_isoline_density("sparse")
+        self.panel._auto_isoline_density(slope_style.PLAINS)
+        self.assertEqual(
+            isoline_density.project_density(), "sparse"
+        )

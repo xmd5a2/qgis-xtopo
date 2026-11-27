@@ -918,16 +918,10 @@ class IsolinesSchemeTest(unittest.TestCase):
     OVERVIEW = {ISOLINES_REGULAR_OVERVIEW, ISOLINES_GLACIER_OVERVIEW}
 
     def _expected_render(self, name):
-        values = set(self.RENDER_MAX)
-        if name in self.OVERVIEW:
-            values -= {5, 10}
-        return {str(value) for value in values}
+        return {str(value) for value in self.RENDER_MAX}
 
     def _expected_labels(self, name):
-        values = set(self.LABEL_MAX) | set(self.LABEL_OFF)
-        if name in self.OVERVIEW:
-            values.discard(10)
-        return {str(value) for value in values}
+        return {str(value) for value in set(self.LABEL_MAX) | set(self.LABEL_OFF)}
 
     @classmethod
     def setUpClass(cls):
@@ -2708,6 +2702,13 @@ class DeadScaleRuleTest(unittest.TestCase):
         return dead
 
     def test_no_rule_lies_outside_layer_visibility(self):
+        # 5/10 м в обзорных слоях намеренно «спят» при базовой плотности:
+        # обзорный слой начинается с 1:50 001, а их пороги меньше.  При
+        # плотных режимах панель поднимает пороги, и правила оживают.
+        dormant_layers = {
+            ISOLINES_REGULAR_OVERVIEW, ISOLINES_GLACIER_OVERVIEW,
+        }
+        dormant_levels = {"5", "10"}
         for name, layer in self.layers.items():
             lower, upper = self._layer_bounds(layer)
             for tag in ("renderer-v2", "labeling"):
@@ -2716,6 +2717,14 @@ class DeadScaleRuleTest(unittest.TestCase):
                     if rules is None:
                         continue
                     dead = self._dead_rules(rules, lower, upper)
+                    if name in dormant_layers:
+                        dead = [
+                            item for item in dead
+                            if not (
+                                item[0]
+                                and item[0][0] in dormant_levels
+                            )
+                        ]
                     self.assertFalse(
                         dead, f"{name} / {tag}: {dead[:3]}"
                     )

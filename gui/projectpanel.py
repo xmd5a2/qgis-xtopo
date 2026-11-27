@@ -26,6 +26,7 @@ from qgis.core import (
     QgsRasterLayer,
     QgsReadWriteContext,
     QgsRectangle,
+    QgsRuleBasedLabeling,
     QgsRuleBasedRenderer,
     Qgis,
     QgsUnitTypes,
@@ -56,8 +57,8 @@ except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
 from ..core import (
-    basemap, i18n, label_style, map_language, map_units, slope_style,
-    text_size,
+    basemap, i18n, isoline_density, label_style, map_language, map_units,
+    slope_style, text_size,
 )
 from ..core.project import fit_project_extent
 from ..core.resources import plugin_version, template_path
@@ -892,6 +893,32 @@ class ProjectPanel(QWidget):
         isolines_color_layout.addWidget(self.isolines_color_button)
         isolines_color_layout.addWidget(self.isolines_color_reset)
         layout.addWidget(self.isolines_color_row)
+        self.isolines_density_row = QWidget(self)
+        isolines_density_layout = QHBoxLayout(self.isolines_density_row)
+        isolines_density_layout.setContentsMargins(20, 0, 8, 0)
+        isolines_density_layout.setSpacing(6)
+        self.isolines_density_label = QLabel(
+            "Плотность:", self.isolines_density_row
+        )
+        self.isolines_density_combo = QComboBox(
+            self.isolines_density_row
+        )
+        self.isolines_density_combo.setToolTip(
+            i18n.tr(
+                "Плотность изолиний: как долго подробные горизонтали "
+                "остаются на карте при уменьшении масштаба. На равнинах "
+                "выбирается автоматически по крутизне склонов; выбор "
+                "можно изменить"
+            )
+        )
+        self.isolines_density_combo.currentIndexChanged.connect(
+            self._isoline_density_changed
+        )
+        isolines_density_layout.addWidget(self.isolines_density_label)
+        isolines_density_layout.addWidget(self.isolines_density_combo)
+        isolines_density_layout.addStretch(1)
+        layout.addWidget(self.isolines_density_row)
+        self._fill_isoline_density_combo()
         self.rules_title = QLabel("Кратность:", self)
         self.rules_title.setStyleSheet("padding-left: 20px;")
         self.rules_title.setVisible(False)
@@ -2494,6 +2521,7 @@ class ProjectPanel(QWidget):
         self._fill_detail_combo()
         self._fill_text_size_combo()
         self._fill_basemap_combo()
+        self._fill_isoline_density_combo()
         # Название варианта в кнопке и в меню зависит от языка.
         self._update_steep_variants(force=True)
         self._update_hillshade_variants(force=True)
@@ -3084,7 +3112,11 @@ class ProjectPanel(QWidget):
             # Раскраску уклонов ставим по типу рельефа нового проекта;
             # ручной выбор пользователя в этом же проекте не трогаем.
             self._steep_variant_name = None
-            self._auto_steep_variant(file_name)
+            variant = slope_style.choose_variant(
+                slope_style.project_raster(file_name)
+            )
+            self._auto_steep_variant(variant)
+            self._auto_isoline_density(variant)
             self._capture_hillshade_baseline()
         self._connect_style_layer()
         self._rebuild_rules()
@@ -3629,6 +3661,7 @@ class ProjectPanel(QWidget):
                 self._layer(name) is not None for name in ISOLINE_LAYERS
             ))
             self._sync_isoline_rules()
+            self._sync_isoline_density()
             self._update_isoline_controls()
             # Подложка запрещает отмывку и раскраску уклонов: галки нельзя
             # включить, пока подложка стоит.
@@ -3646,6 +3679,181 @@ class ProjectPanel(QWidget):
             )
             if label in active:
                 box.setChecked(active[label])
+
+    def _fill_isoline_density_combo(self):
+        """Заполняет список плотности, сохраняя текущий режим."""
+        combo = self.isolines_density_combo
+        current = combo.currentData() or isoline_density.DEFAULT
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for name in isoline_density.DENSITIES:
+                combo.addItem(i18n.tr(isoline_density.LABELS[name]), name)
+            index = combo.findData(current)
+            combo.setCurrentIndex(max(0, index))
+        finally:
+            combo.blockSignals(False)
+        combo.setToolTip(
+            i18n.tr(
+                "Плотность изолиний: как долго подробные горизонтали "
+                "остаются на карте при уменьшении масштаба. На равнинах "
+                "выбирается автоматически по крутизне склонов; выбор "
+                "можно изменить"
+            )
+        )
+        metrics = combo.fontMetrics()
+        width = max(
+            (metrics.horizontalAdvance(combo.itemText(i))
+             for i in range(combo.count())),
+            default=0,
+        )
+        combo.setFixedWidth(max(90, width + 34))
+        combo.setFixedHeight(22)
+
+    def _isoline_density_scales(self):
+        """Текущие верхние пороги уровней из основного слоя изолиний."""
+        layer = self._isoline_source_layer()
+        renderer = layer.renderer() if layer is not None else None
+        if not isinstance(renderer, QgsRuleBasedRenderer):
+            return {}
+        scales = {}
+        for rule in renderer.rootRule().children():
+            try:
+                level = int(rule.label().strip())
+            except ValueError:
+                continue
+            if level in isoline_density.RENDER_SCALE:
+                scales[level] = rule.minimumScale()
+        return scales
+
+    def _sync_isoline_density(self):
+        """Показывает сохранённый или вычисленный режим плотности."""
+        value = isoline_density.project_density()
+        if value is None:
+            value = isoline_density.density_from_scales(
+                self._isoline_density_scales()
+            )
+        value = value or isoline_density.DEFAULT
+        combo = self.isolines_density_combo
+        if combo.currentData() != value:
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(max(0, combo.findData(value)))
+            finally:
+                combo.blockSignals(False)
+
+    def _isolines_at_template_scales(self):
+        """Правила ещё совпадают с шаблоном, а не настроены вручную."""
+        layers = [
+            self._layer(name) for name in ALL_ISOLINE_LAYERS
+        ]
+        layers = [layer for layer in layers if layer is not None]
+        if not layers:
+            return False
+        for layer in layers:
+            renderer = layer.renderer()
+            if not isinstance(renderer, QgsRuleBasedRenderer):
+                return False
+            for rule in renderer.rootRule().children():
+                try:
+                    level = int(rule.label().strip())
+                except ValueError:
+                    continue
+                base = isoline_density.RENDER_SCALE.get(level)
+                if base and int(round(rule.minimumScale())) != base:
+                    return False
+            labeling = layer.labeling()
+            if isinstance(labeling, QgsRuleBasedLabeling):
+                for rule in labeling.rootRule().children():
+                    try:
+                        level = int(rule.description().strip())
+                    except ValueError:
+                        continue
+                    base = isoline_density.LABEL_SCALE.get(level)
+                    if base and int(round(rule.minimumScale())) != base:
+                        return False
+        return True
+
+    def _apply_isoline_density(self, value, persist=True):
+        """Меняет верхние масштабные пороги правил всех слоёв изолиний."""
+        name = isoline_density.normalize(value) or isoline_density.DEFAULT
+        changed_layers = []
+        for layer_name in ALL_ISOLINE_LAYERS:
+            layer = self._layer(layer_name)
+            if layer is None:
+                continue
+            changed = False
+            renderer = layer.renderer()
+            if isinstance(renderer, QgsRuleBasedRenderer):
+                for rule in renderer.rootRule().children():
+                    try:
+                        level = int(rule.label().strip())
+                    except ValueError:
+                        continue
+                    base = isoline_density.RENDER_SCALE.get(level)
+                    if not base:
+                        continue
+                    target = isoline_density.scaled(base, name)
+                    if int(round(rule.minimumScale())) != target:
+                        rule.setMinimumScale(float(target))
+                        changed = True
+            labeling = layer.labeling()
+            if isinstance(labeling, QgsRuleBasedLabeling):
+                for rule in labeling.rootRule().children():
+                    try:
+                        level = int(rule.description().strip())
+                    except ValueError:
+                        continue
+                    base = isoline_density.LABEL_SCALE.get(level)
+                    if not base:
+                        continue
+                    target = isoline_density.scaled(base, name)
+                    if int(round(rule.minimumScale())) != target:
+                        rule.setMinimumScale(float(target))
+                        changed = True
+            if changed:
+                changed_layers.append(layer)
+        if persist:
+            isoline_density.set_project_density(name)
+        combo = self.isolines_density_combo
+        if combo.currentData() != name:
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(max(0, combo.findData(name)))
+            finally:
+                combo.blockSignals(False)
+        for layer in changed_layers:
+            _repaint_layer(layer)
+        return bool(changed_layers)
+
+    def _isoline_density_changed(self, _index=None):
+        if self._syncing:
+            return
+        value = self.isolines_density_combo.currentData()
+        if not value:
+            return
+        self._syncing = True
+        try:
+            self._apply_isoline_density(value)
+            self._sync_isoline_density()
+            self._update_isoline_controls()
+        finally:
+            self._syncing = False
+
+    def _auto_isoline_density(self, variant):
+        """Один раз при открытии проекта выбирает плотность по рельефу."""
+        if variant is None:
+            return
+        if isoline_density.project_density() is not None:
+            return
+        if not self._isolines_at_template_scales():
+            return
+        value = isoline_density.choose_density(variant)
+        if value is None:
+            return
+        self._keep_project_clean(
+            lambda: self._apply_isoline_density(value)
+        )
 
     def _rule_states(self):
         layer = self._isoline_source_layer()
@@ -3689,7 +3897,9 @@ class ProjectPanel(QWidget):
         if not isinstance(renderer, QgsRuleBasedRenderer):
             self.rules_container.setVisible(False)
             self.rules_title.setVisible(False)
+            self.isolines_density_row.setVisible(False)
             return
+        self.isolines_density_row.setVisible(True)
         rules = []
         for rule in renderer.rootRule().children():
             label = rule.label().strip()
@@ -3701,6 +3911,7 @@ class ProjectPanel(QWidget):
         if not rules:
             self.rules_container.setVisible(False)
             self.rules_title.setVisible(False)
+            self.isolines_density_row.setVisible(False)
             return
         rules.sort()
         self._rule_available = self._available_rule_labels(layer, rules)
@@ -3976,15 +4187,12 @@ class ProjectPanel(QWidget):
             return self._steep_variant_name
         return names[0]
 
-    def _auto_steep_variant(self, project_file):
+    def _auto_steep_variant(self, variant):
         """Ставит вариант уклонов по типу рельефа, не меняя саму опцию.
 
         Видимость слоёв не трогаем: в подготовленном проекте все варианты
         скрыты, а выбор применяется, когда пользователь включает раскраску.
         """
-        variant = slope_style.choose_variant(
-            slope_style.project_raster(project_file)
-        )
         if variant is None:
             return
         name = STEEP_VARIANTS[variant - 1][0]
@@ -4587,6 +4795,8 @@ class ProjectPanel(QWidget):
         layer = self._isoline_source_layer()
         enabled = layer is not None and self.isolines_check.isChecked()
         doubled = isolines_width_doubled()
+        self.isolines_density_combo.setEnabled(enabled)
+        self.isolines_density_label.setEnabled(enabled)
         self.isolines_width_button.setEnabled(enabled)
         self.isolines_width_button.blockSignals(True)
         self.isolines_width_button.setChecked(doubled)

@@ -1436,7 +1436,25 @@ class XtopoDockWidget(QDockWidget):
             self.isolines_steps_widget
         )
         self.smooth_isolines = QCheckBox("Сглаживать контуры")
-        terrain_form.addRow(self.smooth_isolines)
+        self.isolines_auto = QCheckBox("Авто по рельефу")
+        self.isolines_auto.setToolTip(
+            "Для равнин автоматически выбрать кратность 5 м (5 и 25) "
+            "и включить сглаживание контуров; для остальных типов "
+            "рельефа — обычную кратность без сглаживания"
+        )
+        self.isolines_auto.toggled.connect(
+            lambda _checked: self._terrain_changed(
+                self.generate_terrain.isChecked()
+            )
+        )
+        smooth_row = QWidget()
+        smooth_layout = QHBoxLayout(smooth_row)
+        smooth_layout.setContentsMargins(0, 0, 0, 0)
+        smooth_layout.setSpacing(10)
+        smooth_layout.addWidget(self.smooth_isolines)
+        smooth_layout.addWidget(self.isolines_auto)
+        smooth_layout.addStretch(1)
+        terrain_form.addRow(smooth_row)
         terrain_layout.addWidget(terrain_group)
         terrain_layout.addStretch(1)
         self._fill_terrain_units_combo()
@@ -2695,6 +2713,7 @@ class XtopoDockWidget(QDockWidget):
             isolines_step=self._current_isolines_step(),
             isolines_units=self._current_isolines_units(),
             smooth_isolines=self.smooth_isolines.isChecked(),
+            auto_isolines=self.isolines_auto.isChecked(),
         )
 
     def _terrain_estimate_seconds(self, cpu=None, bbox=None):
@@ -3212,9 +3231,13 @@ class XtopoDockWidget(QDockWidget):
         manual = self.dem_source.currentData() == dem_sources.MANUAL_SOURCE
         for widget in (
             self.dem_source, self.hillshade_slope, self.isolines,
-            self.smooth_isolines, self.dem_info, self.dem_warning,
+            self.isolines_auto, self.dem_info, self.dem_warning,
         ):
             widget.setEnabled(enabled)
+        self.smooth_isolines.setEnabled(
+            enabled and self.isolines.isChecked()
+            and not self.isolines_auto.isChecked()
+        )
         for label in (
             self.dem_source_label, self.isolines_steps_label,
         ):
@@ -3228,10 +3251,11 @@ class XtopoDockWidget(QDockWidget):
         self.dem_dir_row.setVisible(enabled and manual)
         if self.dem_dir_label is not None:
             self.dem_dir_label.setVisible(enabled and manual)
-        steps_enabled = enabled and self.isolines.isChecked()
-        self.terrain_units_combo.setEnabled(steps_enabled)
+        units_enabled = enabled and self.isolines.isChecked()
+        steps_enabled = units_enabled and not self.isolines_auto.isChecked()
+        self.terrain_units_combo.setEnabled(units_enabled)
         if self.terrain_units_label is not None:
-            self.terrain_units_label.setEnabled(steps_enabled)
+            self.terrain_units_label.setEnabled(units_enabled)
         for box in self.isolines_steps.values():
             box.setEnabled(steps_enabled)
         self._update_dem_info()
@@ -3734,6 +3758,12 @@ class XtopoDockWidget(QDockWidget):
         self.generate_terrain.setChecked(
             self.settings.value("generate_terrain", "true") == "true"
         )
+        self.smooth_isolines.setChecked(
+            self.settings.value("smooth_isolines", "false") == "true"
+        )
+        self.isolines_auto.setChecked(
+            self.settings.value("isolines_auto", "true") == "true"
+        )
         self._terrain_changed(self.generate_terrain.isChecked())
         hidden = self.settings.value("hidden_panels", [])
         if isinstance(hidden, str):
@@ -3761,6 +3791,12 @@ class XtopoDockWidget(QDockWidget):
             self.dem_source.currentData() or dem_sources.DEFAULT_SOURCE,
         )
         self.settings.setValue("generate_terrain", str(self.generate_terrain.isChecked()).lower())
+        self.settings.setValue(
+            "smooth_isolines", str(self.smooth_isolines.isChecked()).lower()
+        )
+        self.settings.setValue(
+            "isolines_auto", str(self.isolines_auto.isChecked()).lower()
+        )
         units = self._current_isolines_units()
         self.settings.setValue(map_units.PREP_SETTINGS_KEY, units)
         step_key = "isolines_step" if units == "m" else "isolines_step_ft"
@@ -4163,6 +4199,7 @@ class XtopoDockWidget(QDockWidget):
             isolines_step=self._current_isolines_step(),
             isolines_units=self._current_isolines_units(),
             smooth_isolines=self.smooth_isolines.isChecked(),
+            auto_isolines=self.isolines_auto.isChecked(),
         )
         parse_bbox(config.bbox)
         config.validate()
@@ -4284,6 +4321,26 @@ class XtopoDockWidget(QDockWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self._set_running(False)
+        config = getattr(worker, "config", None)
+        if config is not None and getattr(
+            config, "generate_terrain_isolines", False
+        ):
+            # Авто-режим мог выбрать другую кратность и сглаживание:
+            # показываем фактическое состояние, чтобы вкладка «Рельеф»
+            # не расходилась с подготовленными данными.
+            self._set_isolines_step(int(config.isolines_step))
+            if self.smooth_isolines.isChecked() != bool(
+                config.smooth_isolines
+            ):
+                self.smooth_isolines.blockSignals(True)
+                try:
+                    self.smooth_isolines.setChecked(
+                        bool(config.smooth_isolines)
+                    )
+                finally:
+                    self.smooth_isolines.blockSignals(False)
+            self._terrain_changed(self.generate_terrain.isChecked())
+            self._save_settings()
         # Общее время подготовки — в последней строке журнала.
         self._append_log(
             i18n.trf("Готово: {} (за {} с)", path, f"{elapsed:.1f}")

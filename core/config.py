@@ -204,6 +204,8 @@ class Config:
     # не смешиваются.
     isolines_units: str = "m"
     smooth_isolines: bool = False
+    # Подбирать кратность и сглаживание изолиний по типу рельефа.
+    auto_isolines: bool = True
     manual_coastline_processing: bool = False
 
     # Вырезание меньших полигонов из больших: в OsmAnd при равном order
@@ -389,6 +391,9 @@ class Config:
             isolines_step=_as_int(values.get("isolines_step"), 10),
             isolines_units=_as_units(values.get("isolines_units")),
             smooth_isolines=_as_bool(values.get("smooth_isolines")),
+            auto_isolines=_as_bool(
+                values.get("auto_isolines"), True
+            ),
             manual_coastline_processing=_as_bool(values.get("manual_coastline_processing")),
             resolve_polygon_overlaps=_as_bool(
                 values.get("resolve_polygon_overlaps"), True
@@ -439,6 +444,7 @@ generate_terrain_isolines={str(self.generate_terrain_isolines).lower()}
 isolines_step={self.isolines_step}
 isolines_units={self.isolines_units}
 smooth_isolines={str(self.smooth_isolines).lower()}
+auto_isolines={str(self.auto_isolines).lower()}
 manual_coastline_processing={str(self.manual_coastline_processing).lower()}
 resolve_polygon_overlaps={str(self.resolve_polygon_overlaps).lower()}
 polygon_overlap_min_area={self.polygon_overlap_min_area}

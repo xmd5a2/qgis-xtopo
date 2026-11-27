@@ -228,8 +228,9 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(dock.tabs.tabText(dock.project_tab_index), "Проект")
         self.assertFalse(dock.tabs.isTabEnabled(dock.project_tab_index))
         self.assertEqual(dock.tabs.currentIndex(), 0)
-        # Подблок «Атлас» с заголовком добавляет высоту рамки.
-        self.assertLessEqual(dock.minimumSizeHint().height(), 680)
+        # Подблок «Атлас» с заголовком добавляет высоту рамки, а авто-режим
+        # изолиний — ещё одну строку настроек рельефа.
+        self.assertLessEqual(dock.minimumSizeHint().height(), 700)
         self.assertFalse(dock.log_toggle.isChecked())
         self.assertEqual(dock.overpass_server.count(), 4)
         self.assertEqual(
@@ -1026,6 +1027,8 @@ class PipelineIntegrationTest(unittest.TestCase):
                 dock.dem_source.findData("srtm")
             )
             dock.dem_dir.clear()
+            # Ручные кратности доступны только при снятом «Авто по рельефу».
+            dock.isolines_auto.setChecked(False)
             dock._set_isolines_step(10)
             self.assertEqual(dock._current_isolines_step(), 10)
             self.assertFalse(dock.isolines_steps[5].isChecked())

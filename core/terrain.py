@@ -13,7 +13,8 @@ from pathlib import Path
 
 from .bbox import BBox
 from . import (
-    dem_sources, disk_space, i18n, net, sonny, spatialite, terrain_cache,
+    dem_sources, disk_space, i18n, net, slope_style, sonny, spatialite,
+    terrain_cache,
 )
 from .download_speed import (
     SLOW_DOWNLOAD_RATE, SLOW_DOWNLOAD_WINDOW, SlowDownload,
@@ -68,6 +69,17 @@ CONTOUR_TILE_PIXELS = 4_000_000
 # Сколько пикселей должно приходиться на один тайл: окно держится в
 # памяти, а нахлёст тайла съедает часть выигрыша от параллельности.
 CONTOUR_TILE_MAX_PIXELS = 6_000_000
+
+# Сглаживание контуров теперь считается на нативном DEM: фильтр
+# применяется к окну тайла.  Это убирает глобальный DEM, укрупнённый
+# вдвое, и четырёхкратный объём контуров.  Один проход 3×3 биномиальным
+# ядром 1-2-1 убирает ступеньки, но почти не сглаживает узкие формы;
+# запас тайла CONTOUR_HALO с большим избытком покрывает радиус.
+SMOOTH_KERNEL = (1.0, 2.0, 1.0)
+
+# Автоматическая кратность изолиний для равнин и обычный шаг.
+AUTO_STEP_PLAIN = {"m": 5, "ft": 20}
+AUTO_STEP_DEFAULT = {"m": 10, "ft": 40}
 
 # Сколько метров в одном градусе: столько метров в шаге растра
 # географической СК.  Для проекционной СК масштаб берётся из неё самой.
@@ -2246,7 +2258,86 @@ def _contour_step_meters(config):
     return step
 
 
-def _contour_tile(task, simplify=0.0, feet=False):
+def _window_geotransform(transform, xoff, yoff):
+    """Геотрансформация окна растра."""
+    return (
+        transform[0] + xoff * transform[1] + yoff * transform[2],
+        transform[1],
+        transform[2],
+        transform[3] + xoff * transform[4] + yoff * transform[5],
+        transform[4],
+        transform[5],
+    )
+
+
+def _blur_axis(array, weights):
+    """Свёртка по последней оси с нулевым дополнением."""
+    numpy = _numpy()
+    radius = len(weights) // 2
+    padded = numpy.pad(array, ((0, 0), (radius, radius)), mode="constant")
+    width = array.shape[1]
+    result = numpy.zeros_like(array)
+    for offset, weight in enumerate(weights):
+        result += weight * padded[:, offset:offset + width]
+    return result
+
+
+def _smooth_dem_values(values, nodata=None):
+    """Сглаживает высоты окна, не смешивая сушу с nodata.
+
+    Используется нормализованная свёртка: сумма валидных высот делится
+    на сумму валидных весов.  Пиксели nodata остаются nodata, поэтому
+    море и озёра не получают контуров, а берег не «затягивается» в воду.
+    """
+    numpy = _numpy()
+    array = numpy.asarray(values, dtype="float32")
+    if array.size == 0:
+        return array
+    if nodata is None:
+        valid = numpy.isfinite(array)
+    else:
+        valid = numpy.isfinite(array) & (array != nodata)
+    if not valid.any():
+        return array
+    weights = numpy.asarray(SMOOTH_KERNEL, dtype="float32")
+    weights /= weights.sum()
+    heights = numpy.where(valid, array, 0.0).astype("float32")
+    mask = valid.astype("float32")
+    # Раздельная свёртка: сначала по x, затем по y.  Для маски считается
+    # та же сумма весов, что и для высот.
+    heights = _blur_axis(heights, weights)
+    heights = _blur_axis(heights.T, weights).T
+    mask = _blur_axis(mask, weights)
+    mask = _blur_axis(mask.T, weights).T
+    smoothed = numpy.zeros_like(array)
+    numpy.divide(heights, mask, out=smoothed, where=mask > 1e-6)
+    if nodata is None:
+        smoothed[~valid] = array[~valid]
+    else:
+        smoothed[~valid] = nodata
+    return smoothed
+
+
+def _smoothed_memory_raster(raster, values, nodata, window):
+    """MEM-растр с отфильтрованным окном DEM."""
+    gdal, _, _ = _gdal()
+    xoff, yoff, xsize, ysize = window
+    filtered = _smooth_dem_values(values, nodata)
+    memory = gdal.GetDriverByName("MEM").Create(
+        "", xsize, ysize, 1, gdal.GDT_Float32
+    )
+    memory.SetGeoTransform(
+        _window_geotransform(raster.GetGeoTransform(), xoff, yoff)
+    )
+    memory.SetProjection(raster.GetProjection())
+    band = memory.GetRasterBand(1)
+    if nodata is not None:
+        band.SetNoDataValue(nodata)
+    band.WriteArray(filtered)
+    return memory, band
+
+
+def _contour_tile(task, simplify=0.0, feet=False, smooth=False):
     """Контуры одного тайла: только то, что попадает в его ядро.
 
     Тайл считается по окну с запасом, а в результат попадает только
@@ -2257,6 +2348,11 @@ def _contour_tile(task, simplify=0.0, feet=False):
     один раз; рядом с подробным слоем сразу пишется упрощённая копия
     для обзорных масштабов.  Второй проход по DEM стоил бы столько же,
     сколько первый, а упрощение в потоке тайла почти ничего не добавляет.
+
+    ``smooth`` — сглаживать высоты окна на нативном разрешении.  Раньше
+    для этого строился глобальный DEM вдвое подробнее; теперь фильтр
+    применяется к окну тайла, и контуры считаются по обычному числу
+    пикселей.
 
     ``feet`` — шаг задан в футах, а DEM в метрах: уровни уже переведены
     в метры вызывающим кодом, здесь поле ``ELEV`` пересчитывается в футы.
@@ -2277,17 +2373,23 @@ def _contour_tile(task, simplify=0.0, feet=False):
     band = raster.GetRasterBand(1)
     transform = raster.GetGeoTransform()
     xoff, yoff, xsize, ysize = tile["window"]
-    # Окно читается прямо в память: копия массива в памяти обошлась бы
-    # вдвое дороже по месту.
-    memory = gdal.Translate(
-        "", source_path, format="MEM",
-        srcWin=[xoff, yoff, xsize, ysize],
-    )
-    memory_band = memory.GetRasterBand(1)
     nodata = band.GetNoDataValue()
     if nodata is None:
         nodata = -32768.0
-    memory_band.SetNoDataValue(nodata)
+    if smooth:
+        values = band.ReadAsArray(xoff, yoff, xsize, ysize)
+        memory, memory_band = _smoothed_memory_raster(
+            raster, values, nodata, (xoff, yoff, xsize, ysize)
+        )
+    else:
+        # Окно читается прямо в память: копия массива в памяти обошлась
+        # бы вдвое дороже по месту.
+        memory = gdal.Translate(
+            "", source_path, format="MEM",
+            srcWin=[xoff, yoff, xsize, ysize],
+        )
+        memory_band = memory.GetRasterBand(1)
+        memory_band.SetNoDataValue(nodata)
     spatial_ref = osr.SpatialReference()
     spatial_ref.ImportFromWkt(raster.GetProjection())
 
@@ -2423,44 +2525,6 @@ def _contour_simplify_tolerance(spatial_ref, step):
     return meters
 
 
-def _smoothed_isolines_dem(config, progress=None):
-    """Двукратный DEM для «Сглаживать контуры»; None — сглаживание выключено.
-
-    Уклон и отмывка считаются по нативному DEM, но сглаживание контуров
-    по-прежнему берёт более подробную сетку.  Файл временный: он нужен
-    только на время расчёта контуров и удаляется вызывающим кодом.
-    """
-    if not config.smooth_isolines:
-        return None
-    gdal, _, _ = _gdal()
-    merged = config.raster_dir / "merged_dem.tif"
-    dataset = gdal.Open(str(merged))
-    if dataset is None:
-        return None
-    width, height = dataset.RasterXSize, dataset.RasterYSize
-    dataset = None
-    destination = config.temp_dir / "isolines_dem_x2.tif"
-    destination.unlink(missing_ok=True)
-    disk_space.require_space(
-        destination,
-        width * height * 4 * disk_space.FILE_FLOAT_PIXEL,
-        "Недостаточно места для растра {}: нужно ≈{}, свободно {}.",
-        "укруплённый DEM",
-    )
-    options = gdal.WarpOptions(
-        width=width * 2,
-        height=height * 2,
-        resampleAlg=config.terrain_resample_method,
-        outputType=gdal.GDT_Float32,
-        creationOptions=_relief_creation_options(),
-    )
-    result = gdal.Warp(str(destination), str(merged), options=options)
-    if result is None:
-        raise RuntimeError("Failed to upscale DEM for isolines")
-    result = None
-    return destination
-
-
 ISOLINES_OVERVIEW_SUFFIX = "_overview"
 
 
@@ -2469,22 +2533,19 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
 
     Контуры считаются один раз.  Подробный слой получает все вершины,
     обзорный — упрощённую копию с допуском ``OVERVIEW_SIMPLIFY_METERS``;
-    обе пишутся из одного прохода по DEM.
+    обе пишутся из одного прохода по DEM.  Сглаживание (``smooth_isolines``)
+    применяется к окнам тайлов на нативном разрешении, поэтому отдельный
+    DEM вдвое подробнее больше не создаётся.
     """
-    smooth_source = _smoothed_isolines_dem(config, progress)
-    source = smooth_source or (config.raster_dir / "merged_dem.tif")
+    source = config.raster_dir / "merged_dem.tif"
     if not source.exists():
         raise RuntimeError("DEM raster is missing")
-    try:
-        destination = _generate_isolines_processes(
-            config, source, progress, cancel,
-        )
-        if destination is not None:
-            return destination
-        shapes = _contour_shapefiles(config, source, progress, cancel)
-    finally:
-        if smooth_source is not None:
-            smooth_source.unlink(missing_ok=True)
+    destination = _generate_isolines_processes(
+        config, source, progress, cancel,
+    )
+    if destination is not None:
+        return destination
+    shapes = _contour_shapefiles(config, source, progress, cancel)
     destination = None
     touched = set()
     for shape_path, suffix in shapes:
@@ -2528,11 +2589,25 @@ def _write_contour_feature(layer, geometry, elevation, identifier,
 def _contour_untiled(config, source, spatial_ref, simplify, outputs):
     """Контуры мелкого DEM: один расчёт, две записи."""
     gdal, ogr, _ = _gdal()
-    memory = gdal.Translate("", str(source), format="MEM")
+    raster = gdal.Open(str(source))
+    if raster is None:
+        raise RuntimeError(f"Cannot open DEM: {source}")
+    band = raster.GetRasterBand(1)
+    nodata = band.GetNoDataValue()
+    if config.smooth_isolines:
+        values = band.ReadAsArray()
+        memory, memory_band = _smoothed_memory_raster(
+            raster, values, nodata,
+            (0, 0, raster.RasterXSize, raster.RasterYSize),
+        )
+    else:
+        memory = gdal.Translate("", str(source), format="MEM")
+        memory_band = memory.GetRasterBand(1)
+        if nodata is not None:
+            memory_band.SetNoDataValue(nodata)
+    raster = None
     contours = ogr.GetDriverByName("Memory").CreateDataSource("contours")
     contour_layer = _new_contour_layer(contours, spatial_ref)
-    memory_band = memory.GetRasterBand(1)
-    nodata = memory_band.GetNoDataValue()
     step = _contour_step_meters(config)
     feet = _isolines_units(config) == "ft"
     if nodata is not None:
@@ -2595,7 +2670,10 @@ def _contour_tiled(config, source, raster, side, simplify, outputs,
     counters = [0] * len(targets)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_contour_tile, task, simplify, feet): index
+            pool.submit(
+                _contour_tile, task, simplify, feet,
+                bool(config.smooth_isolines),
+            ): index
             for index, task in enumerate(tasks)
         }
         done = 0
@@ -2858,6 +2936,7 @@ def _clean_isolines_tiles(config):
         "isolines_full_overview.shx",
         "isolines_full_overview.dbf",
         "isolines_full_overview.prj",
+        "isolines_dem_x2.tif",
     ):
         for path in config.temp_dir.glob(pattern):
             path.unlink(missing_ok=True)
@@ -3242,6 +3321,7 @@ def _generate_isolines_processes(config, source, progress, cancel):
             "tile": tile,
             "step": step,
             "feet": feet,
+            "smooth": bool(config.smooth_isolines),
             "simplify": simplify,
             "temp_dir": str(config.temp_dir),
             "vector_dir": str(config.vector_dir),
@@ -3860,6 +3940,49 @@ def prepare_terrain_relief(config, bbox, dem_key, progress=None,
     terrain_cache.store_relief(config, signature)
 
 
+def apply_relief_isolines_defaults(config, progress=None):
+    """Подбирает кратность и сглаживание изолиний по типу рельефа.
+
+    Равнины получают 5 м и сглаживание: при малом перепаде высот
+    десятиметровые контуры на обзорных масштабах почти не видны, а
+    25-метровые в данных с шагом 10 м вообще отсутствуют.  Остальным
+    типам рельефа соответствует обычная кратность 10 м без сглаживания.
+
+    Функция вызывается после расчёта уклона и до ключа кэша изолиний,
+    поэтому выбранные значения попадают и в данные, и в подпись кэша.
+    """
+    if not getattr(config, "auto_isolines", False):
+        return
+    path = config.raster_dir / "slope.tif"
+    p90 = slope_style.slope_percentile(path, 90)
+    if p90 is None:
+        return
+    units = _isolines_units(config)
+    if p90 < slope_style.FOOTHILL_P90:
+        step = AUTO_STEP_PLAIN[units]
+        smooth = True
+        levels = "5 и 25 м" if units == "m" else "20 и 100 ф"
+        message = (
+            "Рельеф равнинный: кратность изолиний "
+            f"{step} {units} ({levels}), сглаживание контуров включено"
+        )
+    else:
+        step = AUTO_STEP_DEFAULT[units]
+        smooth = False
+        message = (
+            "Рельеф не равнинный: обычная кратность изолиний "
+            f"{step} {units}, без сглаживания"
+        )
+    changed = (
+        config.isolines_step != step
+        or bool(config.smooth_isolines) != smooth
+    )
+    config.isolines_step = step
+    config.smooth_isolines = smooth
+    if progress and changed:
+        progress(message)
+
+
 def prepare_terrain_isolines(config, bbox, dem_key, progress=None,
                              cancel=None):
     """Изолинии по готовому растру.
@@ -3871,6 +3994,7 @@ def prepare_terrain_isolines(config, bbox, dem_key, progress=None,
         return
     if dem_key is None:
         return
+    apply_relief_isolines_defaults(config, progress=progress)
     isolines_key = terrain_cache.isolines_signature(config, bbox, dem_key)
     if terrain_cache.restore_isolines(config, isolines_key):
         if progress:
