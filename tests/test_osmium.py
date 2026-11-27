@@ -237,6 +237,32 @@ class OsmiumPrefilterTest(unittest.TestCase):
                 self.assertTrue(Path(path).stat().st_size > 0)
 
     @unittest.skipUnless(OSMIUM, "osmium недоступен")
+    def test_prefilter_reuses_extracted_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._make_pbf(directory)
+            bbox = BBox(42.9, 41.9, 43.1, 42.1)
+            config = _config(directory)
+            first, _temporary, _covering = osmium_prefilter.prefilter_sources(
+                [str(source)], bbox, config
+            )
+            with mock.patch.object(
+                osmium_prefilter.osmium_tool, "run",
+            ) as run:
+                second, temporary, covering = (
+                    osmium_prefilter.prefilter_sources(
+                        [str(source)], bbox, config
+                    )
+                )
+            run.assert_not_called()
+            self.assertEqual(first, second)
+            self.assertEqual(len(covering), 1)
+            for path in second:
+                self.assertTrue(Path(path).exists())
+                self.assertTrue(Path(path).stat().st_size > 0)
+            for path in temporary:
+                self.assertTrue(Path(path).exists())
+
+    @unittest.skipUnless(OSMIUM, "osmium недоступен")
     def test_prefilter_falls_back_without_osmium(self):
         with tempfile.TemporaryDirectory() as directory:
             source = self._make_pbf(directory)

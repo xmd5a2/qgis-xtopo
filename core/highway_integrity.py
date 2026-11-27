@@ -12,6 +12,8 @@
 import sqlite3
 from pathlib import Path
 
+from . import sqlite_fields
+
 MAX_INTEGRITY = 30
 
 # Слои, чьи данные читают поле. Для highway_main записываются ещё
@@ -142,16 +144,6 @@ def _geometry_table(connection):
     return names[0] if len(names) == 1 else None
 
 
-def _key_column(connection, table, columns):
-    for row in connection.execute(f"PRAGMA table_info({_quote(table)})"):
-        if row[5]:
-            return row[1]
-    for candidate in ("ogc_fid", "fid", "objectid"):
-        if candidate in columns:
-            return candidate
-    return "rowid"
-
-
 def _file_names(name):
     if name == "highway_main":
         return (name, f"{name}_layer_1", f"{name}_layer_-1")
@@ -159,7 +151,7 @@ def _file_names(name):
 
 
 def _add_to_file(path):
-    connection = sqlite3.connect(str(path))
+    connection = sqlite_fields.connect(path)
     try:
         table = _geometry_table(connection)
         if not table:
@@ -174,26 +166,22 @@ def _add_to_file(path):
             f'ALTER TABLE {_quote(table)} '
             f'ADD COLUMN "highway_integrity" INTEGER'
         )
-        key = _key_column(connection, table, columns)
         source = [
             _quote(field) if field in columns else "NULL"
             for field in ("highway", "surface", "smoothness", "tracktype")
         ]
-        key_expression = "rowid" if key == "rowid" else _quote(key)
-        rows = [
-            (calculate(*values[1:]), values[0])
-            for values in connection.execute(
-                f"SELECT {key_expression}, {', '.join(source)} "
-                f"FROM {_quote(table)}"
-            )
-        ]
-        connection.executemany(
-            f'UPDATE {_quote(table)} SET "highway_integrity"=? '
-            f"WHERE {key_expression}=?",
-            rows,
+        # Одна SQL-команда вызывает calculate для каждой строки: выборка
+        # всех строк в Python и отдельный UPDATE на строку заметно дороже.
+        connection.create_function(
+            "xtopo_integrity", 4, calculate, deterministic=True,
         )
+        connection.execute(
+            f'UPDATE {_quote(table)} SET "highway_integrity" = '
+            f"xtopo_integrity({', '.join(source)})"
+        )
+        count = connection.execute("SELECT changes()").fetchone()[0]
         connection.commit()
-        return len(rows)
+        return count
     except sqlite3.Error:
         connection.rollback()
         return 0

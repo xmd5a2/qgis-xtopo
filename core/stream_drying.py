@@ -21,7 +21,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from . import sqlite_fields
+from . import spatialite, sqlite_fields
 
 FIELD = "dry_rank"
 LAYERS = ("stream", "stream_intermittent")
@@ -1178,7 +1178,7 @@ def _write_layer(path, fields, srs, branches, ranks, output_transform=None,
     temporary.unlink(missing_ok=True)
     driver = ogr.GetDriverByName("SQLite")
     dataset = driver.CreateDataSource(
-        str(temporary), options=["SPATIALITE=YES"]
+        str(temporary), options=list(spatialite.CREATION_OPTIONS)
     )
     if dataset is None:
         raise OSError(f"Cannot create {temporary}")

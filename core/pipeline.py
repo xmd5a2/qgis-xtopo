@@ -11,8 +11,8 @@ from . import (
     area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
     highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
     osmium_tool, peak_filter, poi_icons, polygon_overlaps, project,
-    riverbank_names, road_packing, sources, stream_drying, terrain,
-    underwater,
+    riverbank_names, road_packing, sources, spatialite, stream_drying,
+    terrain, underwater,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -3586,7 +3586,7 @@ def save_vector(source, destination, layer_name, target_crs=None,
         # COMPRESS_GEOM=YES вместе с SPATIALITE=YES меняет топологию:
         # в воде появляются самопересечения, и difference пропускает
         # объект. Экономия от сжатия около 3%, поэтому не сжимаем.
-        options.extend(["-dsco", "SPATIALITE=YES"])
+        options.extend(spatialite.gdal_options())
     if target_crs:
         options.extend(["-t_srs", target_crs])
     if where:
@@ -3716,6 +3716,10 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
     terrain_keys = {}
     terrain_used = []
     terrain_seconds = [0.0]
+    isolines_thread = None
+    isolines_error = []
+    isolines_seconds = [0.0]
+    project_prepare_seconds = 0.0
     # Слои пишутся во временном каталоге, а готовый проект заменяется
     # только после успешной сборки.  Ждать fsync на каждой транзакции
     # не нужно: восемь потоков упираются в диск, а содержимое файлов
@@ -3757,8 +3761,8 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             )
             source_thread.start()
         started = time.monotonic()
-        project_path = project.prepare_project(config)
-        timings.add_stage("создание проекта", time.monotonic() - started)
+        project_path = project.prepare_project(config, write_archive=False)
+        project_prepare_seconds = time.monotonic() - started
         if source_thread is not None:
             source_thread.join()
             if cancel is not None and cancel.is_set():
@@ -3921,16 +3925,34 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                 "маска воды и отмывка", time.monotonic() - started,
             )
             report("Изолинии рельефа")
-            started = time.monotonic()
-            gdal_log.LOG.install()
-            try:
-                terrain.prepare_terrain_isolines(
-                    config, bbox, terrain_keys.get("dem"),
-                    progress=report, cancel=cancel,
-                )
-            finally:
-                gdal_log.LOG.restore()
-            timings.add_stage("изолинии", time.monotonic() - started)
+
+            def _isolines_worker():
+                started_isolines = time.monotonic()
+                try:
+                    gdal_log.LOG.install()
+                    try:
+                        terrain.prepare_terrain_isolines(
+                            config, bbox, terrain_keys.get("dem"),
+                            progress=report, cancel=cancel,
+                        )
+                    finally:
+                        gdal_log.LOG.restore()
+                except InterruptedError:
+                    pass  # отмену проверяет основной поток
+                except Exception as exc:  # noqa: BLE001 - всплывёт после join
+                    isolines_error.append(exc)
+                finally:
+                    isolines_seconds[0] = (
+                        time.monotonic() - started_isolines
+                    )
+
+            # Контуры читают воду и ледники, поэтому стартуют после
+            # пересечений полигонов, но не ждут значков POI: их файлы не
+            # пересекаются, а упаковка слоёв начинается после join.
+            isolines_thread = threading.Thread(
+                target=_isolines_worker, name="xtopo-isolines", daemon=True,
+            )
+            isolines_thread.start()
         if "peak" in config.array_queries:
             report("Проверка пиков")
             started = time.monotonic()
@@ -3984,6 +4006,13 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # значки видимыми, поэтому ошибка не отменяет сборку карты.
             report(f"WARNING: POI: {exc}; подавление наложений пропущено")
         timings.add_stage("значки POI", time.monotonic() - started)
+        if isolines_thread is not None:
+            isolines_thread.join()
+            timings.add_stage("изолинии", isolines_seconds[0])
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            if isolines_error:
+                raise isolines_error[0]
         report("Углы поворота значков")
         started = time.monotonic()
         try:
@@ -4044,8 +4073,21 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         attribution = ""
         if terrain_used:
             attribution = dem_sources.attribution_for_keys(terrain_used)
-        project.clean_project_layers(project_path, dem_attribution=attribution)
-        timings.add_stage("очистка проекта", time.monotonic() - started)
+        if not attribution and config.generate_terrain:
+            # Архив пишется один раз в конце, поэтому общая атрибуция
+            # режима нужна здесь же, а не в prepare_project.
+            attribution = dem_sources.attribution_for(
+                config.resolved_terrain_source()
+            )
+        project_path = project.finish_project(
+            config, dem_attribution=attribution
+        )
+        # Подготовка каталога и запись архива — одна стадия: архив теперь
+        # собирается в конце, уже без пустых слоёв.
+        timings.add_stage(
+            "создание проекта",
+            project_prepare_seconds + time.monotonic() - started,
+        )
         for line in timings.summary():
             report(line)
         steps = timings.top_steps()
@@ -4074,6 +4116,8 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # Отмена или ошибка до join: поток рельефа дорабатывает
             # (функции рельефа сами реагируют на cancel).
             _join_thread(terrain_thread, 300)
+        if isolines_thread is not None and isolines_thread.is_alive():
+            _join_thread(isolines_thread, 300)
         if prepared is not None and prepared.dataset is not None:
             prepared.dataset.close()
         _clean_temp(config)

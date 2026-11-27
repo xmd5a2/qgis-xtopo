@@ -33,6 +33,8 @@ import math
 import os
 from pathlib import Path
 
+from . import spatialite
+
 ROAD_LAYERS = ("highway_main", "path", "track", "railway_all")
 SIMPLE_LINE_LAYERS = (
     "stream", "stream_intermittent", "tree_row", "power_minor_line",
@@ -657,7 +659,7 @@ def _write(path, field_definitions, spatial_ref, groups, cancel=None):
     temporary.unlink(missing_ok=True)
     driver = ogr.GetDriverByName("SQLite")
     dataset = driver.CreateDataSource(
-        str(temporary), options=["SPATIALITE=YES"]
+        str(temporary), options=list(spatialite.CREATION_OPTIONS)
     )
     if dataset is None:
         raise OSError(f"Cannot create {temporary}")
@@ -877,7 +879,7 @@ def _write_points(path, field_definitions, spatial_ref, groups,
     temporary.unlink(missing_ok=True)
     driver = ogr.GetDriverByName("SQLite")
     dataset = driver.CreateDataSource(
-        str(temporary), options=["SPATIALITE=YES"]
+        str(temporary), options=list(spatialite.CREATION_OPTIONS)
     )
     if dataset is None:
         raise OSError(f"Cannot create {temporary}")
@@ -1091,7 +1093,7 @@ def _write_polygons(path, field_definitions, spatial_ref, groups,
     temporary.unlink(missing_ok=True)
     driver = ogr.GetDriverByName("SQLite")
     dataset = driver.CreateDataSource(
-        str(temporary), options=["SPATIALITE=YES"]
+        str(temporary), options=list(spatialite.CREATION_OPTIONS)
     )
     if dataset is None:
         raise OSError(f"Cannot create {temporary}")

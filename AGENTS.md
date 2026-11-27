@@ -313,6 +313,8 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   воду и идёт после слоёв и береговой линии. `prepare_terrain_isolines`
   ждёт ключ кэша DEM и идёт после рельефа — контуры режутся по воде и
   ледникам (`_water_mask_paths`, `_glacier_polygons` читают `vector_dir`).
+  В `run_project` изолинии работают в потоке `xtopo-isolines`
+  параллельно значкам POI, а упаковка слоёв стартует после их join.
   `prepare_terrain` остался как последовательная обёртка всех трёх стадий.
   Подготовка источника OSM идёт в потоке `xtopo-sources` параллельно
   созданию проекта: эти стадии друг от друга не зависят, и очередь из них

@@ -17,6 +17,9 @@ GDAL работает с маленьким файлом.
 такое отношение теряет («Relation ... has missing ways»).
 """
 
+import hashlib
+import os
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -49,6 +52,9 @@ COVERING_EXPRESSIONS = (
 )
 
 PBF_SUFFIXES = (".pbf", ".osm.pbf")
+
+# Версия кэша вырезок: меняйте, если изменился способ вырезки.
+CACHE_VERSION = 1
 
 
 def padded_bbox(bbox):
@@ -101,6 +107,47 @@ def _merge_files(executable, paths, destination, cancel=None, progress=None):
     )
 
 
+def _cache_key(source, bbox, executable):
+    """Ключ вырезки: исходник, область и версия osmium."""
+    try:
+        stat = Path(source).stat()
+    except OSError:
+        return None
+    try:
+        tool = Path(executable).stat()
+        tool_key = f"{tool.st_size}:{tool.st_mtime_ns}"
+    except OSError:
+        tool_key = ""
+    payload = "|".join((
+        str(CACHE_VERSION), str(Path(source).resolve()), str(stat.st_size),
+        str(stat.st_mtime_ns), _bbox_argument(bbox), tool_key,
+    ))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _cache_paths(source, bbox, executable, cache_dir):
+    key = _cache_key(source, bbox, executable)
+    if key is None or cache_dir is None:
+        return None
+    return (
+        cache_dir / f"{key}_extract.osm.pbf",
+        cache_dir / f"{key}_covering.osm.pbf",
+    )
+
+
+def _store_cache(path, cache_path):
+    """Кладёт готовый файл в кэш атомарно."""
+    if cache_path is None:
+        return
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.part")
+    try:
+        shutil.copy2(path, temporary)
+        os.replace(temporary, cache_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
     """Готовит уменьшенные копии исходных выгрузок.
 
@@ -140,10 +187,13 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
             )
         return original, [], []
     directory = _temporary_dir(config)
+    cache_dir = Path(config.osmium_cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     temporary = []
     covering = []
     result = []
     extracted = []
+    outputs = {}
     tasks = []
     try:
         for position, source in enumerate(original, 1):
@@ -155,8 +205,20 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
             stem = Path(source).stem.replace(".", "_")
             extracted_path = directory / f"{stem}_{position}_extract.osm.pbf"
             covering_path = directory / f"{stem}_{position}_covering.osm.pbf"
-            tasks.append((position, source, extracted_path, covering_path))
             temporary.extend((extracted_path, covering_path))
+            outputs[position] = (extracted_path, covering_path)
+            cached = _cache_paths(source, bbox, executable, cache_dir)
+            if (
+                cached is not None
+                and all(
+                    path.exists() and path.stat().st_size for path in cached
+                )
+            ):
+                shutil.copy2(cached[0], extracted_path)
+                shutil.copy2(cached[1], covering_path)
+                continue
+            tasks.append((position, source, extracted_path, covering_path,
+                          cached))
 
         if tasks:
             # Вырезка области и поиск горных массивов читают исходную
@@ -181,7 +243,7 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                         progress(message)
 
             def extract(task):
-                position, source, extracted_path, _covering_path = task
+                position, source, extracted_path, _covering_path, cached = task
                 say(
                     f"osmium: вырезка области из {Path(source).name} "
                     f"({position}/{len(original)})…"
@@ -200,9 +262,13 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                         ],
                         cancel=cancel,
                     )
+                try:
+                    _store_cache(extracted_path, cached[0] if cached else None)
+                except OSError:
+                    pass  # кэш не обязателен: вырезка уже готова
 
             def find_covering(task):
-                position, source, _extracted_path, covering_path = task
+                position, source, _extracted_path, covering_path, cached = task
                 say(
                     f"osmium: поиск горных массивов в {Path(source).name} "
                     f"({position}/{len(original)})…"
@@ -219,6 +285,10 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                         ],
                         cancel=cancel,
                     )
+                try:
+                    _store_cache(covering_path, cached[1] if cached else None)
+                except OSError:
+                    pass  # кэш не обязателен: вырезка уже готова
 
             failures = []
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -241,12 +311,12 @@ def prefilter_sources(paths, bbox, config, progress=None, cancel=None):
                 raise failures[0]
 
         extracted = [
-            str(task[2]) for task in sorted(tasks)
-            if Path(task[2]).exists()
+            str(outputs[position][0]) for position in sorted(outputs)
+            if outputs[position][0].exists()
         ]
         covering = [
-            str(task[3]) for task in sorted(tasks)
-            if Path(task[3]).exists()
+            str(outputs[position][1]) for position in sorted(outputs)
+            if outputs[position][1].exists()
         ]
         # Области нескольких карт склеиваются: отношение, разорванное
         # границей стран, в одной выгрузке не собрать, и драйвер его теряет.

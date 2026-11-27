@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -191,7 +192,7 @@ def commit_staging(config):
     return project_file(config)
 
 
-def prepare_project(config):
+def prepare_project(config, write_archive=True):
     config.ensure_directories()
     # Иконки нужны проекту (шаблон ссылается на них относительным путём),
     # но обновлять их при каждой подготовке незачем: копируются только
@@ -205,21 +206,44 @@ def prepare_project(config):
     # Always start from the pristine template: empty-layer cleanup removes
     # layers from the project file, and a reused file could never get them
     # back after a later run produced data for the same layers.
-    rewrite_project_archive(
-        template_path(),
-        path,
-        config.project_name,
-        dem_attribution=(
-            dem_sources.attribution_for(config.resolved_terrain_source())
-            if config.generate_terrain else ""
-        ),
-        units=config.isolines_units,
-    )
+    #
+    # ``write_archive=False`` откладывает запись до конца подготовки:
+    # тогда пустые слои вырезаются до сжатия, а 70-МБ qgs не сжимается
+    # дважды.  Файл проекта нужен только после сборки слоёв.
+    if write_archive:
+        rewrite_project_archive(
+            template_path(),
+            path,
+            config.project_name,
+            dem_attribution=(
+                dem_sources.attribution_for(config.resolved_terrain_source())
+                if config.generate_terrain else ""
+            ),
+            units=config.isolines_units,
+        )
     # config.ini читает только tools/check_pbf_coverage.py, поэтому
     # пользовательская правка не должна затираться каждой подготовкой.
     settings = config.config_dir / "config.ini"
     if not settings.exists():
         config.to_file(settings)
+    return path
+
+
+def finish_project(config, dem_attribution=""):
+    """Собирает готовый архив проекта из шаблона одним проходом.
+
+    Вызывается после подготовки слоёв: пустые слои вырезаются до сжатия,
+    поэтому qgs сжимается один раз и уже в сокращённом виде.
+    """
+    path = project_file(config)
+    rewrite_project_archive(
+        template_path(),
+        path,
+        config.project_name,
+        dem_attribution=dem_attribution,
+        units=config.isolines_units,
+        layers_base=config.layers_dir,
+    )
     return path
 
 
@@ -299,7 +323,38 @@ def _element(block, tag):
     return match.group(1).strip()
 
 
+def _sqlite_has_features(path, datasource):
+    """Быстрая проверка Spatialite без открытия драйвера OGR.
+
+    ``None`` — файл не подходит для быстрого пути, нужен общий способ.
+    """
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
+            match = re.search(r"(?:^|\|)layername=([^|]+)", datasource)
+            if match:
+                table = match.group(1)
+            else:
+                rows = database.execute(
+                    "SELECT f_table_name FROM geometry_columns"
+                ).fetchall()
+                if len(rows) != 1:
+                    return None
+                table = rows[0][0]
+            if not table:
+                return None
+            row = database.execute(
+                f'SELECT 1 FROM "{table}" LIMIT 1'
+            ).fetchone()
+            return row is not None
+    except (sqlite3.Error, OSError):
+        return None
+
+
 def _datasource_has_features(path, datasource):
+    if path.suffix.lower() == ".sqlite":
+        fast = _sqlite_has_features(path, datasource)
+        if fast is not None:
+            return fast
     try:
         from osgeo import ogr
     except ImportError:
@@ -818,7 +873,13 @@ def _project_text_edits(text, project_name, dem_attribution, units="m"):
 
 
 def rewrite_project_archive(source, destination, project_name, dem_attribution="",
-                            units="m"):
+                            units="m", layers_base=None):
+    """Переписывает шаблон в архив проекта.
+
+    ``layers_base`` — каталог готовых слоёв: если задан, из qgs сразу
+    вырезаются слои с пустым или отсутствующим источником.  Так архив
+    пишется один раз и сжимает уже сокращённый проект.
+    """
     source = Path(source)
     destination = Path(destination)
     if not source.exists():
@@ -839,6 +900,12 @@ def rewrite_project_archive(source, destination, project_name, dem_attribution="
                 name = item.filename
                 if name.endswith(".qgs"):
                     text = data.decode("utf-8")
+                    # Сначала вырезаем пустые слои: правки по маркерам
+                    # дешевле на сокращённом тексте, а результат тот же.
+                    if layers_base is not None:
+                        text, _removed = _remove_empty_layers(
+                            text, Path(layers_base)
+                        )
                     edits = _project_text_edits(
                         text, project_name, dem_attribution, units
                     )

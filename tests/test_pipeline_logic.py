@@ -176,6 +176,48 @@ class SaveVectorTest(unittest.TestCase):
                 save_vector(source, config.vector_dir / "water.sqlite", "water")
         self.assertNotIn("-skipfailures", recorded["options"])
 
+    def test_spatialite_write_skips_full_epsg_table(self):
+        """Полная таблица EPSG стоит около 6,7 МБ в каждом файле слоя."""
+        from unittest import mock
+
+        from osgeo import gdal, ogr
+
+        from qgis_xtopo.core.pipeline import save_vector
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = _feature_collection(config.temp_dir / "source.geojson")
+            recorded = {}
+
+            def fake_translate(destination, src, options=None):
+                recorded["options"] = list(options or [])
+                Path(destination).write_bytes(b"")
+                return object()
+
+            with mock.patch.object(gdal, "VectorTranslate", fake_translate):
+                save_vector(source, config.vector_dir / "water.sqlite", "water")
+        self.assertIn("INIT_WITH_EPSG=NO", recorded["options"])
+
+    def test_spatialite_output_keeps_one_srs_and_spatial_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = _feature_collection(config.temp_dir / "source.geojson")
+            destination = config.vector_dir / "water.sqlite"
+            save_vector(source, destination, "water")
+            with sqlite3.connect(f"file:{destination}?mode=ro", uri=True) as db:
+                srs_rows = db.execute(
+                    "SELECT COUNT(*) FROM spatial_ref_sys"
+                ).fetchone()[0]
+                index = db.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE name = 'idx_water_GEOMETRY'"
+                ).fetchone()[0]
+        self.assertLessEqual(srs_rows, 2)
+        self.assertEqual(index, 1)
+
     def test_spatialite_write_does_not_compress_geometry(self):
         """COMPRESS_GEOM вместе с SPATIALITE меняет топологию полигонов."""
         from unittest import mock

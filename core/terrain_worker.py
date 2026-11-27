@@ -58,10 +58,16 @@ def _write_layer(path, layer, fields):
     """
     from osgeo import ogr
 
+    # Скрипт запускается обычным Python, поэтому пакет импортируется
+    # только после _load_terrain().
+    from qgis_xtopo.core import spatialite
+
     spatial_ref = layer.GetSpatialRef()
     driver = ogr.GetDriverByName("SQLite")
     path.unlink(missing_ok=True)
-    dataset = driver.CreateDataSource(str(path), options=["SPATIALITE=YES"])
+    dataset = driver.CreateDataSource(
+        str(path), options=list(spatialite.CREATION_OPTIONS)
+    )
     target = dataset.CreateLayer(
         "isolines", spatial_ref, ogr.wkbLineString,
         options=["SPATIAL_INDEX=NO"],

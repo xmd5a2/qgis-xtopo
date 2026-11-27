@@ -288,6 +288,11 @@ class Config:
         return self.projects_dir / "qgisxtopo-cache" / "extracts"
 
     @property
+    def osmium_cache_dir(self):
+        """Готовые вырезки osmium: повторная подготовка не режет PBF."""
+        return self.projects_dir / "qgisxtopo-cache" / "osmium"
+
+    @property
     def terrain_cache_dir(self):
         return self.projects_dir / "qgisxtopo-cache" / "srtm"
 

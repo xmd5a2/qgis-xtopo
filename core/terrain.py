@@ -12,7 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .bbox import BBox
-from . import dem_sources, disk_space, i18n, net, sonny, terrain_cache
+from . import (
+    dem_sources, disk_space, i18n, net, sonny, spatialite, terrain_cache,
+)
 from .download_speed import (
     SLOW_DOWNLOAD_RATE, SLOW_DOWNLOAD_WINDOW, SlowDownload,
     Speed as _Speed, SpeedGuard as _SpeedGuard,
@@ -2825,7 +2827,7 @@ def _write_full_layer(source, destination):
         options=[
             "-f", "SQLite",
             "-nln", "isolines",
-            "-dsco", "SPATIALITE=YES",
+            *spatialite.gdal_options(),
             "-lco", "FORMAT=SPATIALITE",
             "-lco", "GEOMETRY_NAME=GEOMETRY",
             "-lco", "LAUNDER=NO",
@@ -3357,7 +3359,7 @@ def _finish_isoline_set(config, shape_path, suffix, progress,
 
     options = [
         "-nln", "isolines",
-        "-dsco", "SPATIALITE=YES",
+        *spatialite.gdal_options(),
         "-lco", "COMPRESS_GEOM=YES",
     ]
     destination = config.vector_dir / f"isolines_full{suffix}.sqlite"

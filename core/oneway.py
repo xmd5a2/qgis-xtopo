@@ -15,6 +15,8 @@
 import sqlite3
 from pathlib import Path
 
+from . import sqlite_fields
+
 ONEWAY_LAYERS = ("highway_main", "highway_main_tunnel")
 
 # Начиная с какого масштаба (знаменателя) показывать стрелки.  Значения
@@ -115,7 +117,7 @@ def _file_names(name):
 
 
 def _add_to_file(path):
-    connection = sqlite3.connect(str(path))
+    connection = sqlite_fields.connect(path)
     try:
         table = _geometry_table(connection)
         if not table:
