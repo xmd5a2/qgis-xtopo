@@ -2880,7 +2880,7 @@ class CoastlineIntermediateTest(unittest.TestCase):
                     mock.patch.object(
                         coastline, "_faces_by_votes",
                         side_effect=lambda source, destination, threshold,
-                        min_density=0.0: destination,
+                        min_density=0.0, **kwargs: destination,
                     ), \
                     mock.patch.object(
                         coastline, "_write_polygons",
@@ -3206,6 +3206,34 @@ class CoastlineIntermediateTest(unittest.TestCase):
             self.assertAlmostEqual(
                 feature.GetGeometryRef().GetArea(), 0.1
             )
+            dataset = None
+
+    def test_faces_by_votes_accepts_small_dense_water(self):
+        """Небольшая бухта ниже общего порога голосов остаётся водой."""
+        from qgis_xtopo.core.coastline import _faces_by_votes
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._faces_layer(directory, [
+                ((0, 0, 1, 1), 1000),        # море: 1000 голосов на градус²
+                ((1, 0, 1.1, 0.1), 42),      # бухта: 4200 голосов на градус²
+                ((1.1, 0, 2, 0.1), 10),      # суша: 111 голосов на градус²
+            ])
+            destination = Path(directory) / "ocean.gpkg"
+            result = _faces_by_votes(
+                source, destination, threshold=100, min_density=10,
+                small_votes=5, small_density=500,
+            )
+            self.assertEqual(result, destination)
+            from osgeo import ogr
+
+            dataset = ogr.Open(str(destination))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(layer.GetFeatureCount(), 2)
+            areas = sorted(
+                feature.GetGeometryRef().GetArea() for feature in layer
+            )
+            self.assertAlmostEqual(areas[0], 0.01)
+            self.assertAlmostEqual(areas[1], 1.0)
             dataset = None
 
     def test_faces_by_votes_returns_none_without_candidates(self):

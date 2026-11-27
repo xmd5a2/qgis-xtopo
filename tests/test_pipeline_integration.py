@@ -5016,6 +5016,34 @@ class CoastlineGeometryTest(unittest.TestCase):
             self.assertTrue(self._contains(water, 7.5, 5))
             self.assertFalse(self._contains(water, 2.5, 5))
 
+    def test_small_bay_below_global_vote_share_is_water(self):
+        """Бухта у края охвата не теряется из-за доли от всех голосов."""
+        from osgeo import ogr
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import prepare_coastline
+
+        bbox = BBox(0, 0, 10, 10)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory, bbox)
+            self._write_layer(
+                config.vector_dir / "coastline.sqlite", "coastline",
+                ogr.wkbLineString, [
+                    # Длинный берег даёт тысячи голосов; вода справа,
+                    # то есть восточнее.
+                    "LINESTRING (5 0, 5 10)",
+                    # Бухта у западного края: её голосов меньше 1 % от
+                    # всех, но плотность в сотни раз выше средней.
+                    "LINESTRING (0 3.00, 0.01 2.99, 0 2.98)",
+                ],
+            )
+            self.assertTrue(prepare_coastline(config, bbox))
+            water = self._water_geometries(
+                config.vector_dir / "water_dissolved.sqlite"
+            )
+            self.assertTrue(self._contains(water, 7.5, 5))
+            self.assertTrue(self._contains(water, 0.002, 2.99))
+            self.assertFalse(self._contains(water, 2.5, 5))
+
     def test_closed_ring_is_cut_out_of_ocean(self):
         """Замкнутое кольцо острова вычитается, а не заливается водой."""
         from qgis_xtopo.core.bbox import BBox

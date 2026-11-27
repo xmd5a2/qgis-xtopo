@@ -51,6 +51,15 @@ ISLAND_ID_FILTER_MIN_FEATURES = 5000
 # way, больше не теряется.
 OCEAN_POINT_SHARE = 0.01
 
+# Исключение для небольших водоёмов: у бухты в сотни метров берега
+# голосов десятки, а у охвата с длинной береговой линией их тысячи, и доля
+# 1 % бухта не набирает.  Плотность голосов у неё при этом в разы выше
+# средней, потому что точки стоят вдоль всего её короткого берега.
+# Поэтому часть с ``votes >= OCEAN_SMALL_VOTES`` и плотностью не ниже
+# ``OCEAN_SMALL_DENSITY`` средней принимается и ниже общего порога.
+OCEAN_SMALL_VOTES = 5
+OCEAN_SMALL_DENSITY = 0.5
+
 # Крупная суша может набрать больше 1% точек из-за обратных way.  У воды
 # точки стоят вдоль всего берега, поэтому их плотность на единицу площади
 # заметно выше средней по охвату.  Части с плотностью ниже 10% средней
@@ -901,7 +910,8 @@ def _counted_faces(source):
     )
 
 
-def _faces_by_votes(source, destination, threshold, min_density=0.0):
+def _faces_by_votes(source, destination, threshold, min_density=0.0,
+                    small_votes=0, small_density=0.0):
     """Записать части охвата, набравшие достаточно голосов.
 
     Голос — береговая точка на водной стороне берега.  Порог по числу
@@ -909,6 +919,12 @@ def _faces_by_votes(source, destination, threshold, min_density=0.0):
     сушу: единичные точки от обратных way и от смещения поперёк узких
     проток теряются на её площади, тогда как у воды точки стоят вдоль
     всего берега.
+
+    Небольшой водоём может не добрать общий порог по числу голосов: у
+    бухты короткий берег, а у охвата с длинной береговой линией голосов
+    тысячи.  Такая часть принимается по ``small_votes`` и высокой
+    ``small_density``: у воды точки стоят вдоль всего берега, у суши —
+    только от случайных обратных way.
     """
     from osgeo import ogr
 
@@ -944,12 +960,18 @@ def _faces_by_votes(source, destination, threshold, min_density=0.0):
             if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
                 continue
             votes = feature.GetField(index) or 0
-            if votes < threshold:
-                continue
             area = _geometry_area(geometry)
             if area <= MIN_POLYGON_AREA:
                 continue
-            if min_density > 0 and votes / area < min_density:
+            density = votes / area if area > 0 else 0.0
+            accepted = (
+                votes >= threshold
+                and (min_density <= 0 or density >= min_density)
+            )
+            if (not accepted and small_votes > 0 and votes >= small_votes
+                    and (small_density <= 0 or density >= small_density)):
+                accepted = True
+            if not accepted:
                 continue
             if geometry.GetGeometryName() == "POLYGON":
                 geometry = ogr.ForceToMultiPolygon(geometry)
@@ -1032,14 +1054,14 @@ def _side_ocean(runner, config, split, open_source, side):
     # Плотность голосов на единицу площади: у воды она близка к средней
     # по охвату, у крупной суши — в разы ниже.  Сравнение с собственной
     # средней делает порог независимым от длины берега и размера области.
-    min_density = (
-        total / area * OCEAN_MIN_DENSITY_SHARE if area > 0 else 0.0
-    )
+    average_density = total / area if area > 0 else 0.0
     return _faces_by_votes(
         counted,
         _temp(config, f"coastline_ocean_{tag}.gpkg"),
         threshold,
-        min_density,
+        average_density * OCEAN_MIN_DENSITY_SHARE,
+        small_votes=OCEAN_SMALL_VOTES,
+        small_density=average_density * OCEAN_SMALL_DENSITY,
     )
 
 
