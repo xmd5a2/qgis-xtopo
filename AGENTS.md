@@ -40,6 +40,8 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 - После изменения поведения: тесты зелёные → `build_plugin.py --install` →
   `installer/build-installer.sh`. Инсталлятор собирается всегда, даже если
   правка не про Windows: он содержит ту же копию плагина.
+- Сборка Windows-инсталлятора под Wine занимает около 75 минут (замерено
+  4441 с). Ставьте таймаут не меньше 90 минут.
 - При смене версии правьте `metadata.txt` **и** `#define MyAppVersion`
   в `installer/qgis-xtopo.iss`.
 - Тесты — `unittest`. `tools/run_tests.py` запускает каждый модуль отдельным
