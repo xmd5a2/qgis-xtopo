@@ -4644,15 +4644,43 @@ class BridgeIconHideTest(unittest.TestCase):
         )
         self.assertFalse(hidden)
 
-    def test_settlement_keeps_cemetery_icon(self):
-        """Кладбище у населённого пункта не прячется."""
-        cemetery = poi_icons._Point(
-            rank=0.02, lon=6.9000, lat=46.05, name="cemetery", fid=1,
-            geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
+    @staticmethod
+    def _cemetery(lon, lat, fid=1, size=2.0):
+        return poi_icons._Point(
+            rank=0.02, lon=lon, lat=lat, name="cemetery", fid=fid,
+            geometry="Polygon", bands={0: 4}, sizes={0: size},
         )
+
+    def test_settlement_suppresses_cemetery_icon(self):
+        """Населённый пункт важнее кладбища: значок кладбища уступает."""
+        cemetery = self._cemetery(6.9000, 46.05)
         place = self._settlement(6.9006, 46.05)
         hidden = poi_icons._hidden_icon_bands(
             [cemetery, place], [(100000.0, 130000.0)],
+        )
+        self.assertIn(("cemetery", 1), hidden)
+
+    def test_higher_priority_icon_suppresses_cemetery_icon(self):
+        """Любой значок выше кладбища в дереве скрывает его значок."""
+        cemetery = self._cemetery(6.9000, 46.05)
+        monument = poi_icons._Point(
+            rank=0.01, lon=6.9006, lat=46.05, name="monument", fid=2,
+            geometry="Point", bands={0: 4}, sizes={0: 2.0},
+        )
+        hidden = poi_icons._hidden_icon_bands(
+            [cemetery, monument], [(100000.0, 130000.0)],
+        )
+        self.assertIn(("cemetery", 1), hidden)
+
+    def test_lower_priority_icon_keeps_cemetery_icon(self):
+        """Значок ниже кладбища в дереве ему не мешает."""
+        cemetery = self._cemetery(6.9000, 46.05)
+        tree = poi_icons._Point(
+            rank=0.03, lon=6.9006, lat=46.05, name="tree", fid=2,
+            geometry="Point", bands={0: 4}, sizes={0: 2.0},
+        )
+        hidden = poi_icons._hidden_icon_bands(
+            [cemetery, tree], [(100000.0, 130000.0)],
         )
         self.assertFalse(hidden)
 

@@ -42,10 +42,11 @@ QGIS не разводит значки разных слоёв: кластер�
 В служебный слой попадают и значки, нарисованные на объектах линий и
 полигонов: MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).
 Фильтр правила скрыл бы весь объект вместе со значком, поэтому такие
-значки не вытесняются сами, а участвуют как препятствия.  Их ранг —
-место слоя в дереве проекта, как у точечных POI.  На объект нужна одна
-точка — центр линии или площадки, так что ни подготовка, ни отрисовка
-не замедляются.
+значки участвуют как препятствия, а их видимость решает поле
+``icon_hide``.  Их ранг — место слоя в дереве проекта, как у точечных
+POI; значок кладбища дополнительно уступает любому значку выше него.
+На объект нужна одна точка — центр линии или площадки, так что ни
+подготовка, ни отрисовка не замедляются.
 """
 
 import heapq
@@ -105,6 +106,9 @@ SELF_ICON_LAYERS = (
 BRIDGE_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
 )
+# Слои, значок которых уступает любому значку выше в дереве: кладбище
+# не должно перекрывать более важные объекты — храм, памятник, родник.
+YIELDING_ICON_LAYERS = ("cemetery",)
 # Поле с индексами диапазонов, где значок моста скрыт.
 ICON_HIDE_FIELD = "icon_hide"
 
@@ -1666,8 +1670,8 @@ def _hidden_icon_bands(points, bands):
     Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
     Внутри слоя побеждает объект с меньшими координатами, как у точечных
     POI; значок моста уступает ещё и населённому пункту, стоящему выше
-    в дереве.  Соседи ищутся по сетке, чтобы не перебирать все пары на
-    больших выгрузках.
+    в дереве, а значок кладбища — любому значку выше него.  Соседи
+    ищутся по сетке, чтобы не перебирать все пары на больших выгрузках.
     """
     result = {}
     for index, band in enumerate(bands):
@@ -1687,6 +1691,16 @@ def _hidden_icon_bands(points, bands):
             and point.geometry == "Point"
             and point.fid >= 0
         ]
+        # Кладбище уступает всем, кто стоит выше него в дереве: его
+        # значок не должен перекрывать более важные объекты.
+        neighbours = []
+        if any(point.name in YIELDING_ICON_LAYERS for point in entries):
+            neighbours = [
+                point for point in points
+                if index in point.bands
+                and point.name not in YIELDING_ICON_LAYERS
+                and point.fid >= 0
+            ]
         # Представительский масштаб диапазона: на нём же посчитаны
         # размеры значков в point.sizes.  Верхняя граница диапазона
         # завышала бы радиус на 15-30 %.
@@ -1721,7 +1735,7 @@ def _hidden_icon_bands(points, bands):
 
         max_size = max(
             [point.sizes.get(index, 0.0)
-             for point in entries + settlements],
+             for point in entries + settlements + neighbours],
             default=0.0,
         )
         if max_size <= 0:
@@ -1742,6 +1756,7 @@ def _hidden_icon_bands(points, bands):
 
         grid = grid_of(entries)
         settlement_grid = grid_of(settlements)
+        neighbour_grid = grid_of(neighbours)
         for position, point in enumerate(entries):
             gx = int(point.lon // cell)
             gy = int(point.lat // cell)
@@ -1755,6 +1770,23 @@ def _hidden_icon_bands(points, bands):
                         for other in settlement_grid.get(
                                 (gx + dx, gy + dy), ()):
                             neighbour = settlements[other]
+                            if neighbour.rank >= point.rank:
+                                continue
+                            if distance(point, neighbour) <= radius(
+                                    point, neighbour):
+                                found = True
+                                break
+                        if found:
+                            break
+                    if found:
+                        break
+            # Кладбище уступает любому значку выше него в дереве.
+            if not found and point.name in YIELDING_ICON_LAYERS:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for other in neighbour_grid.get(
+                                (gx + dx, gy + dy), ()):
+                            neighbour = neighbours[other]
                             if neighbour.rank >= point.rank:
                                 continue
                             if distance(point, neighbour) <= radius(
