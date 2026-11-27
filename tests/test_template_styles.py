@@ -4188,6 +4188,105 @@ class PoiObstacleTest(unittest.TestCase):
             len({layer.rank for layer in obstacles}), len(obstacles),
         )
 
+    def test_packed_multipoint_is_skipped(self):
+        """Упакованный MultiPoint не роняет расчёт подавления."""
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from osgeo import ogr, osr
+
+        from tests import qgis_app
+
+        qgis_app()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vector = root / "vector"
+            vector.mkdir()
+            path = vector / "tree.sqlite"
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(path))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            layer = dataset.CreateLayer("tree", srs, ogr.wkbMultiPoint)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(ogr.CreateGeometryFromWkt(
+                "MULTIPOINT ((6.9 46.05), (6.9005 46.05))"))
+            layer.CreateFeature(feature)
+            dataset = None
+
+            info = poi_icons.PoiLayer(
+                name="tree",
+                source="./vector/tree.sqlite",
+                geometry="Point",
+                root=poi_icons.PoiRule(children=[
+                    poi_icons.PoiRule(size=0.8, maximum=20000.0),
+                ]),
+            )
+            config = SimpleNamespace(
+                project_dir=str(root), layers_dir=str(root),
+                vector_dir=str(vector))
+            points = poi_icons._collect_points(
+                config, [info], [(0.0, 20000.0)],
+            )
+        self.assertEqual(points, [])
+
+    def test_map_scale_is_available_in_rule_filter(self):
+        """@map_scale работает в фильтре правила: размер на экране."""
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from osgeo import ogr, osr
+
+        from tests import qgis_app
+
+        qgis_app()
+        kept_fid = None
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vector = root / "vector"
+            vector.mkdir()
+            path = vector / "cemetery.sqlite"
+            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
+                str(path))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(4326)
+            layer = dataset.CreateLayer("cemetery", srs, ogr.wkbPoint)
+            layer.CreateField(ogr.FieldDefn("area_m2", ogr.OFTReal))
+            for index, area in enumerate((5000.0, 100.0)):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetField("area_m2", area)
+                point = ogr.Geometry(ogr.wkbPoint)
+                point.AddPoint_2D(6.9 + index * 0.001, 46.05)
+                feature.SetGeometry(point)
+                layer.CreateFeature(feature)
+                if area < 1000:
+                    kept_fid = feature.GetFID()
+            dataset = None
+
+            info = poi_icons.PoiLayer(
+                name="cemetery",
+                source="./vector/cemetery.sqlite",
+                geometry="Point",
+                root=poi_icons.PoiRule(children=[
+                    poi_icons.PoiRule(
+                        size=2.5,
+                        maximum=20000.0,
+                        filter='"area_m2" * 1000000 < 6.25 * '
+                               '@map_scale * @map_scale',
+                    ),
+                ]),
+            )
+            config = SimpleNamespace(
+                project_dir=str(root), layers_dir=str(root),
+                vector_dir=str(vector))
+            points = poi_icons._collect_points(
+                config, [info], [(0.0, 20000.0)],
+            )
+        # 5000 м² при 1:10000 — 50 мм², значок не нужен; 100 м² — 1 мм².
+        self.assertEqual([point.fid for point in points], [kept_fid])
+
     def test_anchor_of_line_is_middle(self):
         from qgis.core import QgsGeometry, QgsPointXY
 
@@ -4657,6 +4756,33 @@ class CemeteryIconSuppressionTest(unittest.TestCase):
             self.assertNotIn("@map_scale", expression)
             checked += 1
         self.assertTrue(checked, "у кладбищ нет значка с подавлением")
+
+    def test_icon_is_used_only_for_small_polygons(self):
+        """На крупном масштабе рисуется штриховка, значок — только мелкий."""
+        symbols = {
+            symbol.get("name"): symbol
+            for symbol in self.layer.findall("renderer-v2/symbols/symbol")
+        }
+        groups = self.layer.findall("renderer-v2/rules/rule")
+        self.assertEqual(len(groups), 4)
+        for group in groups:
+            icon_rule, fill_rule = group.findall("rule")
+            # Значок выбирается по площади на экране, а не по площади
+            # объекта: на обзорном масштабе тот же полигон мельче значка.
+            self.assertIn("area_m2", icon_rule.get("filter"))
+            self.assertIn("@map_scale", icon_rule.get("filter"))
+            self.assertNotEqual(icon_rule.get("checkstate"), "0")
+            icon_layers = [
+                layer.get("class")
+                for layer in symbols[icon_rule.get("symbol")].findall("layer")
+            ]
+            self.assertIn("CentroidFill", icon_layers)
+            fill_layers = [
+                layer.get("class")
+                for layer in symbols[fill_rule.get("symbol")].findall("layer")
+            ]
+            self.assertIn("SVGFill", fill_layers)
+            self.assertNotIn("CentroidFill", fill_layers)
 
 
 class PoiSuppressionExpressionTest(unittest.TestCase):

@@ -56,6 +56,8 @@ DEFAULT_PAIRS = (
     ("wood", "shingle"),
     ("wood", "industrial"),
     ("wood", "plant_nursery"),
+    ("wood", "cemetery"),
+    ("cemetery", "wood"),
     ("scrub", "bare_rock"),
     ("scrub", "plant_nursery"),
     ("scree", "bare_rock"),

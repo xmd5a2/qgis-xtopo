@@ -1224,7 +1224,12 @@ def _overlay_sources(layers):
 
 
 def _evaluation_context(project, layer, level):
-    """Контекст выражения правила для данного уровня детализации."""
+    """Контекст выражения правила для данного уровня детализации.
+
+    Возвращает контекст и скоп, в котором меняются переменные
+    ``@level_of_detail`` и ``@map_scale``: у ``QgsExpressionContext`` нет
+    своего setVariable.
+    """
     from qgis.core import (
         QgsExpressionContext, QgsExpressionContextScope,
         QgsExpressionContextUtils,
@@ -1234,13 +1239,10 @@ def _evaluation_context(project, layer, level):
     context.appendScope(QgsExpressionContextUtils.globalScope())
     context.appendScope(QgsExpressionContextUtils.projectScope(project))
     context.appendScope(QgsExpressionContextUtils.layerScope(layer))
-    # Переменная проекта переопределяется отдельным скопом: у
-    # QgsExpressionContext нет setVariable, а LOD надо менять при
-    # вычислении видимости точки.
     scope = QgsExpressionContextScope("poi")
     scope.setVariable("level_of_detail", level)
     context.appendScope(scope)
-    return context
+    return context, scope
 
 
 def _in_scale(rule, scale):
@@ -1271,9 +1273,15 @@ class _RuleEvaluator:
         # стоил миллионы обращений к загрузчику модулей.
         self._expression_class = QgsExpression
         self._expressions = {}
-        self._contexts = {
+        contexts = {
             level: _evaluation_context(project, layer, level)
             for level in LOD_LEVELS
+        }
+        self._contexts = {
+            level: context for level, (context, _scope) in contexts.items()
+        }
+        self._scopes = {
+            level: scope for level, (_context, scope) in contexts.items()
         }
 
     def _expression(self, text):
@@ -1284,11 +1292,19 @@ class _RuleEvaluator:
                 self._expressions[text] = self._expression_class(text)
         return self._expressions[text]
 
-    def _matches(self, rule, feature, level):
+    def _matches(self, rule, feature, level, scale=None):
         expression = self._expression(rule.filter)
         if expression is None:
             return True
         context = self._contexts[level]
+        if scale is not None:
+            # Правила кладбища решают, помещается ли полигон на карте:
+            # на обзорных масштабах рисуется значок, на крупных —
+            # штриховка.  @map_scale — переменная контекста карты,
+            # которой в обычном скопе проекта нет.
+            scope = getattr(self, "_scopes", {}).get(level)
+            if scope is not None:
+                scope.setVariable("map_scale", scale)
         context.setFeature(feature)
         value = expression.evaluate(context)
         if expression.hasEvalError():
@@ -1319,7 +1335,7 @@ class _RuleEvaluator:
                 if child.filter.strip().upper() == "ELSE":
                     allowed = not matched
                 else:
-                    allowed = self._matches(child, feature, level)
+                    allowed = self._matches(child, feature, level, scale)
                     if allowed:
                         matched = True
                 if allowed:
@@ -1384,7 +1400,7 @@ def _collect_points(config, layers, bands, cancel=None):
     Временный проект содержит также не-POI слои из исходных фильтров:
     без них overlay_within не смог бы учесть реальную видимость соседа.
     """
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject, QgsWkbTypes
 
     project = QgsProject()
     project.setCustomVariables(template_variables())
@@ -1413,7 +1429,17 @@ def _collect_points(config, layers, bands, cancel=None):
             if not visible:
                 continue
             if info.geometry == "Point":
-                point = feature.geometry().asPoint()
+                shape = feature.geometry()
+                if shape is None or shape.isEmpty():
+                    continue
+                if shape.wkbType() == QgsWkbTypes.MultiPoint:
+                    # Упакованный точечный слой (`tree`) хранит целый
+                    # тайл в одном объекте.  Одно поле `hide` не может
+                    # скрыть отдельные части, а нижний слой POI никого
+                    # не вытесняет, поэтому такие объекты пропускаются:
+                    # иначе исключение отменяло бы весь расчёт.
+                    continue
+                point = shape.asPoint()
                 lon, lat = point.x(), point.y()
             else:
                 anchor = _icon_anchor(feature.geometry(), info.geometry)

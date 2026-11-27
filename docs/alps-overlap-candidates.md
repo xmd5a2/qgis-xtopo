@@ -79,6 +79,13 @@ tuebingen-regbez
 - `place locality polygon` — `nullSymbol`, все его пары геометрические.
 - `military_dissolved`, `cemetery`, `resort`, `camp site polygon` —
   полупрозрачные заливки, объекты под ними видны.
+- `cemetery` как верхний слой по-прежнему не вырезается: это
+  полупрозрачная заливка. Но лес под кладбищем убирает его фон, поэтому в
+  `DEFAULT_PAIRS` добавлена пара `wood` → `cemetery` и обратная
+  `cemetery` → `wood`: из двух пересекающихся полигонов вырезается
+  меньший. Так у кладбища внутри леса не двоится фон, а роща внутри
+  кладбища остаётся видимой. Проверки —
+  `test_cemetery_is_cut_out_of_wood`, `test_wood_is_cut_out_of_cemetery`.
 - `building` и `barrier polygon` — см. ограничения скана выше.
 
 В raw-проекте также проявились уже обработанные пары: `farmland`→`farmyard`

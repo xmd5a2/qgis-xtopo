@@ -3915,6 +3915,66 @@ class PolygonOverlapTest(unittest.TestCase):
         self.assertAlmostEqual(geometry.Area(), 96.0, places=6)
         self.assertEqual(_interior_rings(geometry), 1)
 
+    def test_cemetery_is_cut_out_of_wood(self):
+        """Кладбище внутри леса: лес получает дырку под кладбищем."""
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "wood.sqlite",
+                "wood",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "cemetery.sqlite",
+                "cemetery",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            wood = _read_geometries(config.vector_dir / "wood.sqlite")[0]
+            cemetery = _read_geometries(
+                config.vector_dir / "cemetery.sqlite"
+            )[0]
+        self.assertEqual(
+            results,
+            [("wood", "cemetery", 1), ("cemetery", "wood", 0)],
+        )
+        self.assertAlmostEqual(wood.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(wood), 1)
+        self.assertAlmostEqual(cemetery.Area(), 4.0, places=6)
+        self.assertEqual(_interior_rings(cemetery), 0)
+
+    def test_wood_is_cut_out_of_cemetery(self):
+        """Роща внутри кладбища: кладбище получает дырку под рощей."""
+        from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            _write_polygon_layer(
+                config.vector_dir / "wood.sqlite",
+                "wood",
+                ["POLYGON((4 4,4 6,6 6,6 4,4 4))"],
+            )
+            _write_polygon_layer(
+                config.vector_dir / "cemetery.sqlite",
+                "cemetery",
+                ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+            )
+            results = resolve_polygon_overlaps(config)
+            wood = _read_geometries(config.vector_dir / "wood.sqlite")[0]
+            cemetery = _read_geometries(
+                config.vector_dir / "cemetery.sqlite"
+            )[0]
+        self.assertEqual(
+            results,
+            [("wood", "cemetery", 0), ("cemetery", "wood", 1)],
+        )
+        self.assertAlmostEqual(wood.Area(), 4.0, places=6)
+        self.assertEqual(_interior_rings(wood), 0)
+        self.assertAlmostEqual(cemetery.Area(), 96.0, places=6)
+        self.assertEqual(_interior_rings(cemetery), 1)
+
     def test_small_overlap_is_kept(self):
         from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
 
@@ -4209,6 +4269,8 @@ class PolygonOverlapTest(unittest.TestCase):
             ("wood", "shingle"),
             ("wood", "industrial"),
             ("wood", "plant_nursery"),
+            ("wood", "cemetery"),
+            ("cemetery", "wood"),
             ("scrub", "bare_rock"),
             ("scrub", "plant_nursery"),
             ("scree", "bare_rock"),
