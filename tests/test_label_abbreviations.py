@@ -236,7 +236,7 @@ class LabelAbbreviationTests(unittest.TestCase):
         self.assertEqual(self.water("ручей Свинячий"), "руч. Свинячий")
 
     def pass_label(self, name, rtsa="н/к", ele=2800, scale=50000,
-                   pref="ru", local="0", with_local=True):
+                   pref="ru", local="0", with_local=True, units="m"):
         """Подпись перевала с заданными языком карты и названием."""
         from qgis.core import (
             QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
@@ -245,7 +245,7 @@ class LabelAbbreviationTests(unittest.TestCase):
 
         project = QgsProject.instance()
         scope = QgsExpressionContextUtils.projectScope(project)
-        keys = ("name_pref_suf_lang", "name_local")
+        keys = ("name_pref_suf_lang", "name_local", "map_units")
         previous = {key: scope.variable(key) for key in keys}
 
         def restore():
@@ -266,6 +266,9 @@ class LabelAbbreviationTests(unittest.TestCase):
         QgsExpressionContextUtils.setProjectVariable(
             project, "name_local", local
         )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, "map_units", units
+        )
         context = QgsExpressionContext()
         context.appendScope(
             QgsExpressionContextUtils.projectScope(project)
@@ -275,6 +278,47 @@ class LabelAbbreviationTests(unittest.TestCase):
             "compose_mountain_pass_name('%s', %s, '%s', %s, "
             "@name_pref_suf_lang%s)"
             % (name.replace("'", "''"), ele, rtsa, scale, tail)
+        )
+        expression.prepare(context)
+        return expression.evaluate(context)
+
+    def peak_label(self, name, ele, pref="ru", units="m", scale=50000):
+        """Подпись вершины с высотой в выбранных единицах."""
+        from qgis.core import (
+            QgsExpression, QgsExpressionContext, QgsExpressionContextUtils,
+            QgsProject,
+        )
+
+        project = QgsProject.instance()
+        scope = QgsExpressionContextUtils.projectScope(project)
+        keys = ("name_pref_suf_lang", "map_units")
+        previous = {key: scope.variable(key) for key in keys}
+
+        def restore():
+            for key, value in previous.items():
+                if value is None:
+                    QgsExpressionContextUtils.removeProjectVariable(
+                        project, key
+                    )
+                else:
+                    QgsExpressionContextUtils.setProjectVariable(
+                        project, key, value
+                    )
+
+        self.addCleanup(restore)
+        QgsExpressionContextUtils.setProjectVariable(
+            project, "name_pref_suf_lang", pref
+        )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, "map_units", units
+        )
+        context = QgsExpressionContext()
+        context.appendScope(
+            QgsExpressionContextUtils.projectScope(project)
+        )
+        expression = QgsExpression(
+            "compose_peak_name('%s', %s, %s, @name_pref_suf_lang)"
+            % (name.replace("'", "''"), ele, scale)
         )
         expression.prepare(context)
         return expression.evaluate(context)
@@ -320,6 +364,43 @@ class LabelAbbreviationTests(unittest.TestCase):
                 "Col de la Croix", pref="ru", local="1", with_local=False,
             ),
             "Col de la Croix\n2800 м",
+        )
+
+    def test_pass_height_is_converted_to_feet(self):
+        """В футах высота перевала округляется до целого."""
+        self.assertEqual(
+            self.pass_label("Col de la Croix", pref="en", units="ft"),
+            "Col de la Croix\n9186 f",
+        )
+        self.assertEqual(
+            self.pass_label(
+                "Col de la Croix", pref="ru", local="0", units="ft",
+            ),
+            "Col de la Croix\nн/к 9186 ф",
+        )
+
+    def test_peak_height_is_converted_to_feet(self):
+        """Высота вершины в футах: русская и латинская подпись."""
+        self.assertEqual(self.peak_label("Эльбрус", 5642), "Эльбрус\n5642 м")
+        self.assertEqual(
+            self.peak_label("Эльбрус", 5642, units="ft"),
+            "Эльбрус\n18510 ф",
+        )
+        self.assertEqual(
+            self.peak_label("Elbrus", 5642, pref="en", units="ft"),
+            "Elbrus\n18510 f",
+        )
+
+    def test_feet_height_is_rounded_to_whole(self):
+        """1000 м — это 3280,84 фута, в подписи 3281 ф."""
+        self.assertEqual(
+            self.peak_label("Пик", 1000, units="ft"), "Пик\n3281 ф"
+        )
+
+    def test_peak_name_with_height_is_not_doubled_in_feet(self):
+        """Если в названии уже стоит пересчитанная высота, она не дублируется."""
+        self.assertEqual(
+            self.peak_label("Пик 18510", 5642, units="ft"), "Пик 18510"
         )
 
 

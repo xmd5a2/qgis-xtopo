@@ -23,8 +23,8 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..core import (
-    dem_sources, disk_space, extracts, geofabrik, i18n, measure, net,
-    performance, proxy, slice_estimate, sonny, terrain_cache,
+    dem_sources, disk_space, extracts, geofabrik, i18n, map_units, measure,
+    net, performance, proxy, slice_estimate, sonny, terrain_cache,
 )
 from ..core.bbox import parse_bbox
 from ..core.config import (
@@ -3735,6 +3735,7 @@ class XtopoDockWidget(QDockWidget):
                 set_canvas_magnification(self.iface)
                 self._patch_transliteration()
                 apply_map_language(iface=self.iface)
+                map_units.apply_units(iface=self.iface)
                 # Скрытие панелей меняет размер холста, поэтому охват
                 # вписываем после пересчёта размера интерфейса.
                 QTimer.singleShot(0, lambda: fit_project_extent(self.iface))

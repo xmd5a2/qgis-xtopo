@@ -8,7 +8,7 @@ try:
 except ImportError:
     from qgis.PyQt.QtGui import QAction
 
-from .core import i18n, map_language, text_size
+from .core import i18n, map_language, map_units, text_size
 from .core.expressions import load_expressions
 from .core.resources import PACKAGE_DIR
 from .core.transliteration import functions_available
@@ -44,6 +44,7 @@ class QgisXtopoPlugin:
         map_language.load_map_language()
         map_language.load_transliteration()
         map_language.load_level_of_detail()
+        map_units.load_units()
         text_size.load_percent()
         i18n.add_listener(self._language_changed)
         self.dock = XtopoDockWidget(self.iface, self.iface.mainWindow())

@@ -529,6 +529,17 @@ class PipelineIntegrationTest(unittest.TestCase):
         # Невозможные значения не дают полосы.
         self.assertEqual(scale_bar(0)[0], 0.0)
 
+    def test_scale_bar_in_feet(self):
+        """В футах шкала подбирает «круглое» число футов."""
+        from qgis_xtopo.gui.extentdialog import scale_bar
+
+        length, text = scale_bar(0.3048, units="ft")
+        self.assertAlmostEqual(length, 100.0, places=3)
+        self.assertEqual(text, "100 ф")
+        length, text = scale_bar(10.0, units="ft")
+        self.assertAlmostEqual(length, 2000.0 / 32.8084, places=3)
+        self.assertEqual(text, "2 000 ф")
+
     def test_layout_scale_bar_uses_ground_meters_in_mercator(self):
         """Линейка макета в EPSG:3857 переводит метры в земные."""
         from qgis.core import (
@@ -604,6 +615,30 @@ class PipelineIntegrationTest(unittest.TestCase):
                 QgsRectangle(0, 8_700_000, 20_000, 8_720_000)
             )
             self.assertEqual(bar.current_scale()[1], "2 км")
+        finally:
+            bar.deleteLater()
+            canvas.deleteLater()
+            self.app.processEvents()
+
+    def test_canvas_scale_bar_follows_feet_setting(self):
+        """Шкала на холсте переходит на футы вместе с единицами карты."""
+        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        from qgis.gui import QgsMapCanvas
+        from qgis_xtopo.core import map_units
+        from qgis_xtopo.gui.canvasscalebar import CanvasScaleBar
+
+        saved = map_units.units()
+        self.addCleanup(map_units.set_units, saved, False)
+        map_units.set_units("ft", save=False)
+        canvas = QgsMapCanvas()
+        canvas.resize(640, 480)
+        canvas.setDestinationCrs(
+            QgsCoordinateReferenceSystem("EPSG:3857")
+        )
+        canvas.setExtent(QgsRectangle(0, 8_700_000, 100_000, 8_800_000))
+        bar = CanvasScaleBar(canvas)
+        try:
+            self.assertTrue(bar.current_scale()[1].endswith(" ф"))
         finally:
             bar.deleteLater()
             canvas.deleteLater()

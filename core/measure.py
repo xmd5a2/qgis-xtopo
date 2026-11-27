@@ -17,6 +17,7 @@ from qgis.core import (
 
 
 WEB_MERCATOR_RADIUS = 6378137.0
+FEET_PER_METER = 3.28084
 
 
 def mercator_ground_factor(y):
@@ -68,15 +69,17 @@ def ground_width(extent, crs):
     return width
 
 
-def scale_bar(meters_per_pixel, max_length=140.0):
+def scale_bar(meters_per_pixel, max_length=140.0, units="m"):
     """Длина полосы шкалы в пикселях и её подпись.
 
     Длина подбирается так, чтобы соответствовать «круглому»
-    расстоянию: 1, 2 или 5 × 10ⁿ метров.
+    расстоянию: 1, 2 или 5 × 10ⁿ метров, а при ``units="ft"`` — футов.
     """
     if not meters_per_pixel or meters_per_pixel <= 0:
         return 0.0, ""
-    target = meters_per_pixel * max_length
+    feet = str(units or "").strip().lower() == "ft"
+    unit_per_pixel = meters_per_pixel * (FEET_PER_METER if feet else 1.0)
+    target = unit_per_pixel * max_length
     exponent = math.floor(math.log10(target)) if target > 0 else 0
     best = 0.0
     for factor in (1.0, 2.0, 5.0):
@@ -85,9 +88,12 @@ def scale_bar(meters_per_pixel, max_length=140.0):
             best = value
     if best <= 0:
         best = target
-    length = best / meters_per_pixel
+    length = best / unit_per_pixel
     if length < 10 or length > max_length:
         return 0.0, ""
+    if feet:
+        text = f"{best:,.0f}".replace(",", " ")
+        return length, f"{text} ф"
     if best >= 1000:
         return length, f"{best / 1000:g} км"
     return length, f"{best:g} м"

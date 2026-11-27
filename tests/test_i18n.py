@@ -575,6 +575,32 @@ class MapLanguageTest(unittest.TestCase):
         self.assertEqual(project.customVariables()["name_translit"], "1")
         self.assertEqual(project.customVariables()["name_script"], "cyrl")
 
+    def test_units_variable_and_dirty_state(self):
+        """Единицы пишутся в переменную проекта, не помечая его изменённым."""
+        from qgis.core import QgsProject
+        from qgis_xtopo.core import map_units
+
+        project = QgsProject()
+        project.setDirty(False)
+        map_units.set_project_units("ft", project=project)
+        self.assertEqual(
+            project.customVariables()[map_units.VARIABLE], "ft"
+        )
+        self.assertFalse(project.isDirty())
+
+        map_units.set_project_units("m", project=project)
+        self.assertEqual(project.customVariables()[map_units.VARIABLE], "m")
+        self.assertFalse(project.isDirty())
+
+    def test_units_normalize(self):
+        from qgis_xtopo.core import map_units
+
+        self.assertEqual(map_units.normalize("ft"), "ft")
+        self.assertEqual(map_units.normalize("f"), "ft")
+        self.assertEqual(map_units.normalize("футы"), "ft")
+        self.assertEqual(map_units.normalize(None), "m")
+        self.assertEqual(map_units.normalize("м"), "m")
+
     def test_language_scripts(self):
         from qgis_xtopo.core import map_language
 
@@ -635,10 +661,13 @@ class DockLanguageTest(unittest.TestCase):
         cls.app = qgis_app()
 
     def setUp(self):
-        from qgis_xtopo.core import basemap, i18n, map_language, text_size
+        from qgis_xtopo.core import (
+            basemap, i18n, map_language, map_units, text_size,
+        )
 
         self.i18n = i18n
         self.map_language = map_language
+        self.map_units = map_units
         self.basemap = basemap
         self.text_size = text_size
         self.saved = i18n.language()
@@ -665,6 +694,9 @@ class DockLanguageTest(unittest.TestCase):
         self.saved_text_size_setting = self.settings.value(
             text_size.SETTINGS_KEY
         )
+        self.saved_units = map_units.units()
+        map_units.set_units(map_units.DEFAULT_UNITS, save=False)
+        self.saved_units_setting = self.settings.value(map_units.SETTINGS_KEY)
         self.saved_basemap_setting = self.settings.value(
             basemap.SETTINGS_KEY
         )
@@ -710,6 +742,13 @@ class DockLanguageTest(unittest.TestCase):
             self.settings.setValue(
                 self.text_size.SETTINGS_KEY,
                 self.saved_text_size_setting,
+            )
+        self.map_units.set_units(self.saved_units, save=False)
+        if self.saved_units_setting is None:
+            self.settings.remove(self.map_units.SETTINGS_KEY)
+        else:
+            self.settings.setValue(
+                self.map_units.SETTINGS_KEY, self.saved_units_setting
             )
         if self.saved_basemap_setting is None:
             self.settings.remove(self.basemap.SETTINGS_KEY)
@@ -872,6 +911,66 @@ class DockLanguageTest(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(
             self.settings.value(self.map_language.SETTINGS_KEY_TRANSLIT), "0"
+        )
+
+    def test_units_combo_default_and_placement(self):
+        """Список единиц стоит справа от транслитерации и показывает «м»."""
+        dock = self._dock()
+        panel = dock.project_panel
+        combo = panel.units_combo
+        self.assertEqual(combo.currentData(), "m")
+        self.assertEqual(
+            [combo.itemData(index) for index in range(combo.count())],
+            ["m", "ft"],
+        )
+        self.assertEqual(combo.itemText(0), "м")
+        self.assertEqual(combo.itemText(1), "ф")
+        row = panel.map_language_row.layout()
+        widgets = [row.itemAt(i).widget() for i in range(row.count())]
+        self.assertLess(
+            widgets.index(panel.transliteration_check), widgets.index(combo)
+        )
+        self.assertLessEqual(combo.width(), 64)
+
+    def test_units_selection_is_saved(self):
+        dock = self._dock()
+        combo = dock.project_panel.units_combo
+        combo.setCurrentIndex(combo.findData("ft"))
+        self.assertEqual(self.map_units.units(), "ft")
+        self.assertEqual(
+            self.settings.value(self.map_units.SETTINGS_KEY), "ft"
+        )
+
+    def test_saved_units_are_restored(self):
+        self.settings.setValue(self.map_units.SETTINGS_KEY, "ft")
+        self.map_units.load_units()
+        dock = self._dock()
+        self.assertEqual(dock.project_panel.units_combo.currentData(), "ft")
+
+    def test_units_are_written_to_open_project(self):
+        from unittest import mock
+
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        dock = self._dock()
+        panel = dock.project_panel
+        project = QgsProject.instance()
+        self.addCleanup(
+            QgsExpressionContextUtils.removeProjectVariable,
+            project,
+            self.map_units.VARIABLE,
+        )
+        with mock.patch.object(
+            projectpanel.ProjectPanel,
+            "is_xtopo_project",
+            staticmethod(lambda *args, **kwargs: True),
+        ):
+            combo = panel.units_combo
+            combo.setCurrentIndex(combo.findData("ft"))
+            self.app.processEvents()
+        self.assertEqual(
+            project.customVariables()[self.map_units.VARIABLE], "ft"
         )
 
     def test_map_language_selection_is_saved(self):

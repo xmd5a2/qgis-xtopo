@@ -5,6 +5,9 @@ import re
 
 # Переменная проекта: 1 для «Местных названий», 0 для русского языка.
 LOCAL_VARIABLE = "name_local"
+# Переменная проекта: m — метры, ft — футы.
+UNITS_VARIABLE = "map_units"
+FEET_PER_METER = 3.28084
 
 
 def _has_cyrillic(text):
@@ -18,6 +21,28 @@ def _project_variable(name):
         return scope.variable(name)
     except Exception:
         return None
+
+
+def _feet_enabled():
+    return str(_project_variable(UNITS_VARIABLE) or "").strip() == "ft"
+
+
+def _elevation(value, feet):
+    """Высота для подписи: целое число в выбранных единицах."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if feet:
+        number *= FEET_PER_METER
+    return int(round(number))
+
+
+def _elevation_suffix(name_pref_suf_lang, feet):
+    """« м»/« ф» на русской карте, « m»/« f» на остальных."""
+    if name_pref_suf_lang and name_pref_suf_lang == "ru":
+        return " ф" if feet else " м"
+    return " f" if feet else " m"
 
 
 def _map_language_is_ru(name_pref_suf_lang, name_local=None):
@@ -46,10 +71,8 @@ def compose_mountain_pass_name(values, feature, parent):
     else:
         name_local = _project_variable(LOCAL_VARIABLE)
     result = ""
-    if name_pref_suf_lang and name_pref_suf_lang == "ru":
-        suffix = " м"
-    else :
-        suffix = " m"
+    feet = _feet_enabled()
+    suffix = _elevation_suffix(name_pref_suf_lang, feet)
     ele_rtsa_str = ""
     ele_plus_suffix_str=""
     if ele == -9999: ele = ""
@@ -68,8 +91,9 @@ def compose_mountain_pass_name(values, feature, parent):
             ele_rtsa_str = ele_rtsa_str.strip()
         if not isBlank(rtsa): ele_rtsa_str = rtsa + " "
         if not ele == "null":
-            if str(math.floor(ele)) not in name:
-                ele_plus_suffix_str = str(round(ele)) + suffix
+            shown = _elevation(ele, feet)
+            if shown is not None and str(shown) not in name:
+                ele_plus_suffix_str = str(shown) + suffix
             ele_rtsa_str = ele_rtsa_str + ele_plus_suffix_str
         result = result + ele_rtsa_str
         if isBlank(name) and isBlank(rtsa) and map_scale > 100000: result = ""

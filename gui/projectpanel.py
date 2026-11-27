@@ -56,7 +56,8 @@ except ImportError:  # QGIS 4 / Qt 6
     from qgis.PyQt.QtGui import QAction
 
 from ..core import (
-    basemap, i18n, label_style, map_language, slope_style, text_size,
+    basemap, i18n, label_style, map_language, map_units, slope_style,
+    text_size,
 )
 from ..core.project import fit_project_extent
 from ..core.resources import plugin_version, template_path
@@ -759,9 +760,14 @@ class ProjectPanel(QWidget):
         self.transliteration_check.toggled.connect(
             self._transliteration_toggled
         )
+        self.units_combo = QComboBox(self.map_language_row)
+        self.units_combo.setObjectName("mapUnitsCombo")
+        self.units_combo.currentIndexChanged.connect(self._units_changed)
         map_language_layout.addWidget(self.map_language_label)
         map_language_layout.addWidget(self.map_language_combo)
-        map_language_layout.addWidget(self.transliteration_check, 1)
+        map_language_layout.addWidget(self.transliteration_check)
+        map_language_layout.addWidget(self.units_combo)
+        map_language_layout.addStretch(1)
         layout.addWidget(self.map_language_row)
 
         # Уровень детализации — отдельной строкой: в одной строке с языком
@@ -830,6 +836,7 @@ class ProjectPanel(QWidget):
         basemap_layout.addStretch(1)
         layout.addWidget(self.basemap_row)
         self._fill_map_language_combo()
+        self._fill_units_combo()
         self._fill_detail_combo()
         self._fill_text_size_combo()
         self._fill_basemap_combo()
@@ -2483,6 +2490,7 @@ class ProjectPanel(QWidget):
         self._update_isoline_controls()
         translate_tree(self)
         self._fill_map_language_combo()
+        self._fill_units_combo()
         self._fill_detail_combo()
         self._fill_text_size_combo()
         self._fill_basemap_combo()
@@ -2549,6 +2557,51 @@ class ProjectPanel(QWidget):
         map_language.set_transliteration(bool(checked))
         if self.is_xtopo_project():
             map_language.apply_map_language(iface=self.iface)
+
+    UNITS_TIP = (
+        "Единицы длины на карте: метры или футы. Высоты вершин, перевалов "
+        "и вулканов показываются в выбранных единицах; по умолчанию метры"
+    )
+
+    def _fill_units_combo(self):
+        """Заполняет компактный список единиц длины, сохраняя выбор."""
+        combo = self.units_combo
+        current = combo.currentData() or map_units.units()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for code in map_units.UNITS:
+                combo.addItem(i18n.tr(map_units.short_label(code)), code)
+                combo.setItemData(
+                    combo.count() - 1,
+                    i18n.tr(map_units.title(code)),
+                    _enum(Qt, "ItemDataRole", "ToolTipRole"),
+                )
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+        finally:
+            combo.blockSignals(False)
+        tip = i18n.tr(self.UNITS_TIP)
+        combo.setToolTip(tip)
+        combo.setAccessibleName(i18n.tr("Единицы карты"))
+        metrics = combo.fontMetrics()
+        text_width = max(
+            (metrics.horizontalAdvance(combo.itemText(i))
+             for i in range(combo.count())),
+            default=0,
+        )
+        combo.setFixedWidth(max(40, text_width + 30))
+        combo.setFixedHeight(22)
+
+    def _units_changed(self, _index=None):
+        value = self.units_combo.currentData()
+        if not value:
+            return
+        map_units.set_units(value)
+        if self.is_xtopo_project():
+            map_units.set_project_units(
+                value, project=QgsProject.instance(), iface=self.iface
+            )
+            self._repaint_canvas()
 
     DETAIL_TITLES = {
         2: "2 — минимум",

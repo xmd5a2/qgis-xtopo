@@ -19,6 +19,7 @@ from qgis.PyQt.QtGui import (
 )
 from qgis.PyQt.QtWidgets import QWidget
 
+from ..core import map_units
 from ..core.measure import ground_width, scale_bar
 
 MARGIN = 10
@@ -111,7 +112,9 @@ class CanvasScaleBar(QWidget):
 
     def current_scale(self):
         """Длина полосы в пикселях и подпись для текущего охвата."""
-        return scale_bar(self.meters_per_pixel(), MAX_LENGTH)
+        return scale_bar(
+            self.meters_per_pixel(), MAX_LENGTH, map_units.units()
+        )
 
     def paintEvent(self, event):
         painter = QPainter(self)

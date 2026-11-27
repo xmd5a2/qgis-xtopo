@@ -14,6 +14,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QPainter, QPainterPath, QPen
 
+from ..core import map_units
 from ..core.measure import ground_width, scale_bar
 
 SCALE_BAR_MAX_MM = 45.0
@@ -70,7 +71,9 @@ class LayoutScaleBarItem(QgsLayoutItem):
         meters_per_mm = self._meters_per_mm()
         if meters_per_mm <= 0:
             return
-        length_mm, text = scale_bar(meters_per_mm, SCALE_BAR_MAX_MM)
+        length_mm, text = scale_bar(
+            meters_per_mm, SCALE_BAR_MAX_MM, map_units.units()
+        )
         if not length_mm:
             return
 
