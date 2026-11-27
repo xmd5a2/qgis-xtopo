@@ -102,6 +102,15 @@ def collect_targets(layers, mask_layers):
                 and layer.get("geometry") == "Line"
             ):
                 targets.append(layer)
+    # Слой обзора рисует ту же линейную графику на мелких масштабах.
+    # Без него ровно на 1:200000 дорога выходит из-под маски: highway
+    # main скрывается, а highway main overview остаётся.
+    for layer in layers.values():
+        name = layer.findtext("layername") or ""
+        if not name.endswith(" overview") or layer in targets:
+            continue
+        if layer.get("geometry") == "Line" and name[:-len(" overview")] in names:
+            targets.append(layer)
     targets.sort(key=lambda layer: (
         layer.findtext("layername") or "",
         layer.findtext("id"),

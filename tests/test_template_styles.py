@@ -2355,6 +2355,37 @@ class IconMaskReferencesTest(unittest.TestCase):
                 borders, masked,
                 f"{name}: маска должна резать все границы слоя")
 
+    def test_overview_road_layer_is_a_mask_target(self):
+        """На 1:200000 дорогу рисует overview-слой: он тоже в масках.
+
+        ``highway main`` скрывается ровно на 1:200000, и обводку дороги
+        под значком place of worship режет только его обзорная копия.
+        """
+        overview = next(
+            layer for layer in self.layers.values()
+            if layer.findtext("layername") == "highway main overview"
+        )
+        option = _find_option(self.masks[0][1], "mask_symbollayers")
+        parts = (option.get("value") or "").split(";")
+        masked = {
+            parts[index + 1]
+            for index in range(0, len(parts) - 1, 2)
+            if parts[index] == overview.findtext("id")
+        }
+        borders = {
+            symbol_layer.get("id")
+            for symbol_layer in overview.find("renderer-v2").iter("layer")
+            if symbol_layer.get("class") in (
+                "SimpleLine", "MarkerLine", "ArrowLine",
+                "InterpolatedLine", "HashLine",
+            )
+        }
+        self.assertTrue(borders)
+        self.assertLessEqual(
+            borders, masked,
+            "highway main overview: обводка дороги не вырезается под значком",
+        )
+
 
 class ServiceRoadLodTest(unittest.TestCase):
     """Два уровня service: без service=* до 300k, с service=* до 100k."""
