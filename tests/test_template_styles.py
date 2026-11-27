@@ -3601,6 +3601,12 @@ class PoiSuppressionTest(unittest.TestCase):
         for name in ("volcano", "volcano dirt", "peak"):
             self.assertGreater(ranks["places main"], ranks[name], name)
 
+    def test_huts_are_below_locality(self):
+        """Урочище не перекрывается домиками для отдыха."""
+        ranks = {layer.name: layer.rank for layer in self.layers}
+        for name in ("alpine hut", "wilderness hut"):
+            self.assertGreater(ranks[name], ranks["place locality point"], name)
+
     def test_city_is_not_suppressed_by_peak(self):
         """Город рядом с пиком остаётся, пик уступает городу."""
         from qgis_xtopo.core.poi_icons import (
