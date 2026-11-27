@@ -111,7 +111,19 @@ NO_ISOLINE_PROCESSES_ENV = "QGIS_XTOPO_NO_ISOLINE_PROCESSES"
 _WORKER_PYTHON = None
 
 
+_GDAL_MODULES = None
+
+
 def _gdal():
+    """Модули GDAL с настройками процесса.
+
+    Функция вызывается и в горячих циклах (запись каждого контура),
+    поэтому настройки и чтение памяти выполняются один раз на процесс:
+    повторный ``gdal_cache_mb`` читал /proc и cgroup тысячи раз.
+    """
+    global _GDAL_MODULES
+    if _GDAL_MODULES is not None:
+        return _GDAL_MODULES
     from osgeo import gdal, ogr, osr
 
     from .memory import gdal_cache_mb
@@ -131,7 +143,8 @@ def _gdal():
     # Кэш GDAL — часть общего бюджета памяти. На 8 ГБ он меньше, на
     # машинах с запасом — больше, но не выше 2 ГБ.
     gdal.SetConfigOption("GDAL_CACHEMAX", str(gdal_cache_mb()))
-    return gdal, ogr, osr
+    _GDAL_MODULES = (gdal, ogr, osr)
+    return _GDAL_MODULES
 
 
 def _numpy():
@@ -1807,9 +1820,146 @@ def _collect_water_polygons(water_paths, target_srs):
     return polygons, envelope
 
 
+WATER_CUT_PARALLEL_MIN = 512
+WATER_CUT_BATCH = 2048
+WATER_CUT_WORKER_BYTES = 96 * 1024 * 1024
+
+
+def _water_cut_workers(count):
+    """Сколько потоков режет контуры по воде.
+
+    Difference освобождает GIL, поэтому линии независимы друг от друга
+    и делятся между потоками.  Потолок — три четверти ядер и 8: дальше
+    конкуренция за память съедает выигрыш.
+    """
+    from .cpu import cpu_workers
+    from .memory import worker_cap
+
+    limit = max(1, min(cpu_workers(limit=8), count // 128 or 1))
+    return max(1, min(limit, worker_cap(WATER_CUT_WORKER_BYTES)))
+
+
+def _cut_feature_parts(geometry, positions, polygons, prepared):
+    """Части линии вне полигонов воды; порядок полигонов сохраняется."""
+    parts = [geometry]
+    changed = 0
+    touched = False
+    for position in positions:
+        if not parts:
+            break
+        polygon = polygons[position]
+        prepared_polygon = prepared[position]
+        remaining = []
+        for part in parts:
+            if prepared_polygon is not None:
+                intersects = prepared_polygon.Intersects(part)
+            else:
+                intersects = polygon.Intersects(part)
+            if not intersects:
+                remaining.append(part)
+                continue
+            touched = True
+            changed += 1
+            clipped = part.Difference(polygon)
+            remaining.extend(_geometry_lines(clipped))
+        parts = remaining
+    return parts, changed, touched
+
+
+def _subtract_water_parallel(layer, polygons, candidates,
+                             only_keys, key_index, touched_out, id_index,
+                             cancel):
+    """Параллельная резка: каждая линия независима от остальных.
+
+    Набор вызовов ``Difference`` и их порядок для линии те же, что в
+    последовательном пути, поэтому геометрии совпадают побайтно.
+    """
+    fids = sorted(candidates)
+    workers = _water_cut_workers(len(fids))
+    local = threading.local()
+
+    def cut_chunk(items):
+        if getattr(local, "polygons", None) is None:
+            local.polygons = [polygon.Clone() for polygon in polygons]
+            prepared = []
+            for polygon in local.polygons:
+                create = getattr(polygon, "CreatePreparedGeometry", None)
+                try:
+                    prepared.append(
+                        create() if create is not None else None
+                    )
+                except Exception:  # noqa: BLE001 - без индекса результат тот же
+                    prepared.append(None)
+            local.prepared = prepared
+        result = {}
+        for fid, geometry, positions in items:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            result[fid] = _cut_feature_parts(
+                geometry, positions, local.polygons, local.prepared,
+            )
+        return result
+
+    changed = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start in range(0, len(fids), WATER_CUT_BATCH):
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            items = []
+            for fid in fids[start:start + WATER_CUT_BATCH]:
+                if only_keys is not None:
+                    feature = layer.GetFeature(fid)
+                    if feature is None or key_index < 0:
+                        continue
+                    if feature.GetField(key_index) not in only_keys:
+                        continue
+                else:
+                    feature = layer.GetFeature(fid)
+                if feature is None:
+                    continue
+                geometry = feature.GetGeometryRef()
+                if geometry is not None and not geometry.IsEmpty():
+                    items.append(
+                        (fid, geometry.Clone(), candidates[fid])
+                    )
+                feature = None
+            if not items:
+                continue
+            chunks = [
+                items[index::workers] for index in range(workers)
+            ]
+            futures = [
+                pool.submit(cut_chunk, chunk) for chunk in chunks if chunk
+            ]
+            results = {}
+            for future in futures:
+                results.update(future.result())
+            for fid in sorted(results):
+                parts, feature_changed, touched = results[fid]
+                feature = layer.GetFeature(fid)
+                if feature is None:
+                    continue
+                changed += feature_changed
+                if touched and touched_out is not None and id_index >= 0:
+                    touched_out.add(feature.GetField(id_index))
+                if not parts:
+                    layer.DeleteFeature(fid)
+                    feature = None
+                    continue
+                feature.SetGeometry(parts[0])
+                layer.SetFeature(feature)
+                for part in parts[1:]:
+                    additional = feature.Clone()
+                    additional.SetGeometry(part)
+                    additional.SetFID(-1)
+                    layer.CreateFeature(additional)
+                feature = None
+    return changed
+
+
 def _subtract_water_from_layer(layer, water_paths, target_srs,
                                touched_out=None, only_keys=None,
-                               key_field="SRC"):
+                               key_field="SRC", max_workers=0):
     """Режет контуры, заходящие на воду, по полигонам воды.
 
     Обход перевернут: контуры попадают в сетку по охватам, а для каждого
@@ -1822,6 +1972,9 @@ def _subtract_water_from_layer(layer, water_paths, target_srs,
     упрощена максимум на 10 м, поэтому воду достаточно проверять там,
     где её уже коснулась подробная линия.  На остальных линиях
     отклонение упрощения меньше пикселя обзорного масштаба.
+
+    ``max_workers=1`` выключает внутренние потоки: в процессе тайла
+    изолинии уже режутся параллельно своими процессами.
     """
     if only_keys is not None and not only_keys:
         return 0
@@ -1872,6 +2025,25 @@ def _subtract_water_from_layer(layer, water_paths, target_srs,
     for fid, feature_envelope in feature_envelopes.items():
         index.add(feature_envelope, fid)
 
+    workers = 1 if max_workers == 1 else _water_cut_workers(
+        len(feature_envelopes)
+    )
+    if workers > 1 and len(feature_envelopes) >= WATER_CUT_PARALLEL_MIN:
+        polygon_index = _EnvelopeGrid(envelope)
+        for position, polygon in enumerate(polygons):
+            polygon_index.add(polygon.GetEnvelope(), position)
+        candidates = {
+            fid: sorted(polygon_index.find(feature_envelope))
+            for fid, feature_envelope in feature_envelopes.items()
+        }
+        candidates = {
+            fid: positions for fid, positions in candidates.items() if positions
+        }
+        return _subtract_water_parallel(
+            layer, polygons, candidates, only_keys,
+            key_index, touched_out, id_index, None,
+        )
+
     changed = 0
     for position, polygon in enumerate(polygons):
         polygon_envelope = polygon.GetEnvelope()
@@ -1920,6 +2092,49 @@ def _subtract_water_from_layer(layer, water_paths, target_srs,
     return changed
 
 
+ISOLINES_SNAPSHOT_DIR = "isolines_water"
+
+
+def _isolines_snapshot_dir(config):
+    return Path(config.temp_dir) / ISOLINES_SNAPSHOT_DIR
+
+
+def snapshot_isolines_layers(config):
+    """Копия воды и ледников на момент начала изолиний.
+
+    ``polygon_overlaps`` переписывает эти слои параллельно, а изолинии
+    читают их дважды — для подробного и обзорного наборов.  Без копии
+    наборы могли обрезаться по разным версиям воды, и результат зависел
+    от того, успел ли шаг пересечений заменить файл.  Снимок делается
+    синхронно до запуска потока изолиний; повторный вызов ничего не
+    меняет.
+    """
+    directory = _isolines_snapshot_dir(config)
+    if directory.is_dir() and any(directory.iterdir()):
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = list(_water_mask_paths(config))
+    glacier = Path(config.vector_dir) / "glacier.sqlite"
+    if glacier.exists():
+        paths.append(glacier)
+    copied = False
+    for path in paths:
+        try:
+            shutil.copy2(path, directory / path.name)
+        except OSError:
+            continue
+        copied = True
+    if not copied:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _glacier_path(config):
+    snapshot = _isolines_snapshot_dir(config) / "glacier.sqlite"
+    if snapshot.exists():
+        return snapshot
+    return Path(config.vector_dir) / "glacier.sqlite"
+
+
 def _water_mask_paths(config):
     """Слои воды, по которым режутся изолинии.
 
@@ -1927,7 +2142,9 @@ def _water_mask_paths(config):
     озёра и водохранилища): по сухому озеру горизонтали не нужны, а без
     этого срезания контуры шли по площадиrelation'а вроде Chott el Djerid
     (relation/3969167).  Растворённый слой предпочтительнее исходного.
+    Снимок изолиний важнее: он фиксирует одно состояние на всю стадию.
     """
+    snapshot = _isolines_snapshot_dir(config)
     paths = []
     groups = (
         ("water_dissolved.sqlite", "water.sqlite"),
@@ -1935,10 +2152,14 @@ def _water_mask_paths(config):
     )
     for names in groups:
         for name in names:
-            path = config.vector_dir / name
-            if path.exists():
-                paths.append(path)
-                break
+            for directory in (snapshot, Path(config.vector_dir)):
+                path = directory / name
+                if path.exists():
+                    paths.append(path)
+                    break
+            else:
+                continue
+            break
     return paths
 
 
@@ -2540,6 +2761,7 @@ def generate_isolines(config, bbox, progress=None, cancel=None):
     source = config.raster_dir / "merged_dem.tif"
     if not source.exists():
         raise RuntimeError("DEM raster is missing")
+    snapshot_isolines_layers(config)
     destination = _generate_isolines_processes(
         config, source, progress, cancel,
     )
@@ -3249,7 +3471,7 @@ def _merge_isolines_parallel(config, results, split_results, simplify, progress,
 def _has_glacier_polygons(config):
     """Есть ли в слое ледников хотя бы один непустой полигон."""
     _, ogr, _ = _gdal()
-    path = config.vector_dir / "glacier.sqlite"
+    path = _glacier_path(config)
     if not path.exists():
         return False
     dataset = ogr.Open(str(path))
@@ -3589,7 +3811,7 @@ def _glacier_polygons(config):
     """Полигоны ледников со слоя glacier.sqlite."""
     from osgeo import ogr
 
-    glacier = config.vector_dir / "glacier.sqlite"
+    glacier = _glacier_path(config)
     if not glacier.exists():
         return []
     dataset = ogr.Open(str(glacier))

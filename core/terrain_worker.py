@@ -138,12 +138,16 @@ def _run_contour(job):
     overview_count = overview.GetFeatureCount() if overview is not None else 0
 
     touched = set()
+    # Тайлы уже идут отдельными процессами: внутренние потоки здесь
+    # только перегружали бы ядра.
     water_cut = terrain._subtract_water_from_layer(
         detailed, water_paths, spatial_ref, touched_out=touched,
+        max_workers=1,
     )
     if overview is not None:
         terrain._subtract_water_from_layer(
             overview, water_paths, spatial_ref, only_keys=touched,
+            max_workers=1,
         )
 
     detail_path = temp_dir / f"isolines_tile{index}.sqlite"

@@ -352,6 +352,70 @@ class TerrainTest(unittest.TestCase):
             }
             self.assertAlmostEqual(geometries[1].Length(), 2 ** 0.5 * 0.6)
 
+    def test_parallel_water_subtraction_matches_sequential(self):
+        """Потоковая резка даёт те же линии, что и последовательная."""
+        from osgeo import ogr, osr
+
+        ogr.RegisterAll()
+        from qgis_xtopo.core.terrain import _subtract_water_from_layer
+
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        with tempfile.TemporaryDirectory() as directory:
+            water_path = Path(directory) / "water.geojson"
+            water_dataset = ogr.GetDriverByName("GeoJSON").CreateDataSource(
+                str(water_path)
+            )
+            water_layer = water_dataset.CreateLayer(
+                "water", srs, ogr.wkbPolygon
+            )
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in ((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)):
+                ring.AddPoint(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(water_layer.GetLayerDefn())
+            feature.SetGeometry(polygon)
+            water_layer.CreateFeature(feature)
+            water_dataset = None
+
+            def make_layer():
+                dataset = ogr.GetDriverByName("Memory").CreateDataSource(
+                    "contours"
+                )
+                layer = dataset.CreateLayer(
+                    "isolines", srs, ogr.wkbLineString
+                )
+                layer.CreateField(ogr.FieldDefn("ID", ogr.OFTInteger))
+                for index in range(600):
+                    y = -0.5 + index * 0.0025
+                    line = ogr.Geometry(ogr.wkbLineString)
+                    line.AddPoint(-1, y)
+                    line.AddPoint(2, y)
+                    item = ogr.Feature(layer.GetLayerDefn())
+                    item.SetField("ID", index)
+                    item.SetGeometry(line)
+                    layer.CreateFeature(item)
+                return dataset, layer
+
+            def run(max_workers):
+                dataset, layer = make_layer()
+                touched = set()
+                changed = _subtract_water_from_layer(
+                    layer, [water_path], srs, touched_out=touched,
+                    max_workers=max_workers,
+                )
+                geometries = [
+                    item.GetGeometryRef().ExportToWkb()
+                    for item in layer
+                    if item.GetGeometryRef() is not None
+                ]
+                dataset = None
+                return changed, touched, sorted(geometries)
+
+            self.assertEqual(run(1), run(0))
+
     def test_contours_are_cut_by_intermittent_water(self):
         """По пересыхающей воде (intermittent=yes) изолинии тоже режутся.
 

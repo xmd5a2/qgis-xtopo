@@ -4251,9 +4251,11 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                         time.monotonic() - started_isolines
                     )
 
-            # Контуры читают воду и ледники, поэтому стартуют после
-            # пересечений полигонов, но не ждут значков POI: их файлы не
-            # пересекаются, а упаковка слоёв начинается после join.
+            # Снимок берётся здесь, до шага пересечений: иначе поток
+            # мог бы прочитать воду уже после замены файла.  Дальше
+            # пересечения полигонов переписывают настоящие слои
+            # параллельно, а оба набора контуров видят одно состояние.
+            terrain.snapshot_isolines_layers(config)
             isolines_thread = threading.Thread(
                 target=_isolines_worker, name="xtopo-isolines", daemon=True,
             )
@@ -4311,13 +4313,6 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # значки видимыми, поэтому ошибка не отменяет сборку карты.
             report(f"WARNING: POI: {exc}; подавление наложений пропущено")
         timings.add_stage("значки POI", time.monotonic() - started)
-        if isolines_thread is not None:
-            isolines_thread.join()
-            timings.add_stage("изолинии", isolines_seconds[0])
-            if cancel is not None and cancel.is_set():
-                raise InterruptedError("Preparation cancelled")
-            if isolines_error:
-                raise isolines_error[0]
         report("Углы поворота значков")
         started = time.monotonic()
         try:
@@ -4371,6 +4366,15 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         timings.add_stage(
             "упаковка площадей, зданий и линий", time.monotonic() - started
         )
+        # Изолинии пишут свои файлы и не мешают POI и упаковке, поэтому
+        # ждём их только перед очисткой проекта.
+        if isolines_thread is not None:
+            isolines_thread.join()
+            timings.add_stage("изолинии", isolines_seconds[0])
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Preparation cancelled")
+            if isolines_error:
+                raise isolines_error[0]
         report("Удаление пустых слоёв")
         started = time.monotonic()
         # Атрибуция наборов DEM пишется здесь же: отдельная перезапись
