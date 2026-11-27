@@ -54,9 +54,10 @@ LABEL_SCALE = {
 }
 
 # Автовыбор по тому же детектору, что и вариант раскраски уклонов.
+# «Редко» остаётся ручным режимом.
 VARIANT_DENSITY = {
-    slope_style.MOUNTAINS: SPARSE,
-    slope_style.FOOTHILLS: NORMAL,
+    slope_style.MOUNTAINS: NORMAL,
+    slope_style.FOOTHILLS: DENSE,
     slope_style.PLAINS: VERY_DENSE,
 }
 

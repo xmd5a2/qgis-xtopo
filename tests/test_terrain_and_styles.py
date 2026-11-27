@@ -1922,11 +1922,11 @@ class IsolineDensityTest(unittest.TestCase):
 
         self.assertEqual(
             isoline_density.choose_density(slope_style.MOUNTAINS),
-            isoline_density.SPARSE,
+            isoline_density.NORMAL,
         )
         self.assertEqual(
             isoline_density.choose_density(slope_style.FOOTHILLS),
-            isoline_density.NORMAL,
+            isoline_density.DENSE,
         )
         self.assertEqual(
             isoline_density.choose_density(slope_style.PLAINS),
