@@ -202,13 +202,27 @@ def _extended_end(line, start, distance, tail):
     )
 
 
-def _extend_open_lines(source, destination, distance):
-    """Продолжает оба конца каждой незамкнутой линии за пределы охвата.
+def _inside_bbox(bbox, x, y):
+    """Лежит ли точка внутри охвата (граница считается снаружи)."""
+    return (
+        bbox.lon_min < x < bbox.lon_max
+        and bbox.lat_min < y < bbox.lat_max
+    )
+
+
+def _extend_open_lines(source, destination, distance, bbox=None):
+    """Продолжает концы незамкнутых линий, оборванные внутри охвата.
 
     Берег, оборванный границей выгрузки внутри охвата, не делит его на
     море и сушу.  Направление берётся по хвосту линии длиной
     ``OCEAN_EXTENSION_TAIL``: у границы выгрузки последние вершины часто
     идут вдоль неё, а не вдоль берега.
+
+    Конец, уже лежащий вне охвата, не продлевается: исходная выгрузка
+    хранит линии целиком, и такой берег сам пересекает рамку.  Продление
+    наружу от него может развернуться внутрь охвата (западный берег
+    Чеджу) и разрезать море ложной линией.  Если ``bbox`` не задан,
+    продлеваются оба конца — как в прежнем поведении.
     """
     from osgeo import ogr
 
@@ -242,8 +256,19 @@ def _extend_open_lines(source, destination, distance):
                 end = _extended_end(
                     part, False, distance, OCEAN_EXTENSION_TAIL
                 )
+                if bbox is not None:
+                    if start is not None and not _inside_bbox(
+                            bbox, points[0][0], points[0][1]):
+                        start = None
+                    if end is not None and not _inside_bbox(
+                            bbox, points[-1][0], points[-1][1]):
+                        end = None
                 if start is None and end is None:
-                    continue
+                    # Линия, пересекающая охват целиком, не продлевается,
+                    # но должна остаться в слое: именно она делит рамку на
+                    # море и сушу.  Пропускаем только вырожденные линии.
+                    if part.GetPointCount() < 2 or part.Length() <= 0:
+                        continue
                 if start is not None:
                     points.insert(0, start)
                 if end is not None:
@@ -942,6 +967,7 @@ def prepare_coastline(config, bbox, progress=None, cancel=None):
                 open_parts,
                 config.temp_dir / "coastline_open_extended.gpkg",
                 extension,
+                bbox,
             )
             if open_parts is not None:
                 open_parts = _run(runner, "native:clip", {

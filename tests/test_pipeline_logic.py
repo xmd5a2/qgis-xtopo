@@ -2473,8 +2473,8 @@ class CoastlineIntermediateTest(unittest.TestCase):
                     ), \
                     mock.patch.object(
                         coastline, "_extend_open_lines",
-                        side_effect=lambda source, destination, distance:
-                        destination,
+                        side_effect=lambda source, destination, distance,
+                        bbox=None: destination,
                     ), \
                     mock.patch.object(
                         coastline, "_largest_polygon", side_effect=largest,
@@ -2590,6 +2590,84 @@ class CoastlineIntermediateTest(unittest.TestCase):
         x, y = _extended_end(line, False, 1.0, 0.01)
         self.assertLess(x, 0.0)
         self.assertLess(y, 0.0)
+
+    def test_outside_end_is_not_extended(self):
+        """Хвост берега вне охвата не должен разворачиваться внутрь.
+
+        Западный берег Чеджу обрывается южнее рамки, но его хвост смотрит
+        на северо-запад.  Продление такого конца резало море диагональю.
+        """
+        from osgeo import ogr
+
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import _extend_open_lines
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "open.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("coastline", geom_type=ogr.wkbLineString)
+            line = ogr.Geometry(ogr.wkbLineString)
+            for x, y in (
+                (126.40, 33.49), (126.45, 33.47),
+                (126.55, 33.47), (126.60, 33.55),
+            ):
+                line.AddPoint_2D(x, y)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+            dataset = None
+
+            bbox = BBox(125.5, 33.5016, 127.0, 35.0)
+            result = _extend_open_lines(
+                source, base / "extended.gpkg", 3.0, bbox
+            )
+            dataset = ogr.Open(str(result))
+            feature = dataset.GetLayer(0).GetNextFeature()
+            geometry = feature.GetGeometryRef().Clone()
+            feature = None
+            count = geometry.GetPointCount()
+            self.assertEqual(count, line.GetPointCount() + 1)
+            # Внешний конец остался на месте, внутренний продлён.
+            self.assertEqual(geometry.GetPoint(0)[:2], (126.40, 33.49))
+            self.assertGreater(geometry.GetY(count - 1), 33.55)
+            self.assertGreater(geometry.GetX(count - 1), 126.60)
+            dataset = None
+
+    def test_crossing_line_is_kept_without_extension(self):
+        """Берег, пересекающий охват целиком, остаётся в слое без продления."""
+        from osgeo import ogr
+
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import _extend_open_lines
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "open.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("coastline", geom_type=ogr.wkbLineString)
+            line = ogr.Geometry(ogr.wkbLineString)
+            for x, y in ((0.5, -0.5), (0.8, 0.4), (1.5, 0.6)):
+                line.AddPoint_2D(x, y)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetGeometry(line)
+            layer.CreateFeature(feature)
+            dataset = None
+
+            bbox = BBox(0.0, 0.0, 1.0, 1.0)
+            result = _extend_open_lines(
+                source, base / "extended.gpkg", 2.0, bbox
+            )
+            self.assertIsNotNone(result)
+            dataset = ogr.Open(str(result))
+            feature = dataset.GetLayer(0).GetNextFeature()
+            geometry = feature.GetGeometryRef().Clone()
+            feature = None
+            count = geometry.GetPointCount()
+            self.assertEqual(count, line.GetPointCount())
+            self.assertEqual(geometry.GetPoint(0)[:2], (0.5, -0.5))
+            self.assertEqual(geometry.GetPoint(count - 1)[:2], (1.5, 0.6))
+            dataset = None
 
     def test_inland_water_is_not_dissolved_into_ocean(self):
         """Озеро у берега не должно сливаться с океаном.
