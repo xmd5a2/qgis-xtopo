@@ -1,4 +1,7 @@
+import importlib.util
+import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +11,14 @@ INSTALLER = ROOT / "installer"
 
 def _read(path):
     return path.read_text(encoding="utf-8")
+
+
+def _load_build_plugin():
+    path = ROOT / "tools" / "build_plugin.py"
+    spec = importlib.util.spec_from_file_location("build_plugin", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class InstallerTest(unittest.TestCase):
@@ -124,6 +135,40 @@ class InstallerTest(unittest.TestCase):
     def test_build_does_not_make_a_ready_bundle(self):
         text = _read(ROOT / "tools" / "build_plugin.py")
         self.assertNotIn("qgis-xtopo-ready", text)
+
+
+class DistPruningTest(unittest.TestCase):
+    """dist не разрастается: остаются пять последних сборок одного типа."""
+
+    def test_old_builds_are_removed(self):
+        module = _load_build_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            names = []
+            for index in range(7):
+                path = directory / f"qgis_xtopo-0.{index}.zip"
+                path.write_text("x", encoding="utf-8")
+                os.utime(path, (1000 + index, 1000 + index))
+                names.append(path.name)
+            setup = directory / "qgis-xtopo-setup-0.7.exe"
+            setup.write_text("x", encoding="utf-8")
+
+            removed = module.prune_builds(directory, "qgis_xtopo-*.zip")
+
+            self.assertEqual(sorted(path.name for path in removed), names[:2])
+            self.assertEqual(
+                sorted(path.name for path in directory.glob("*.zip")), names[2:]
+            )
+            # Сборки другого типа чистка не затрагивает.
+            self.assertTrue(setup.exists())
+
+    def test_installer_prunes_setup_builds(self):
+        text = _read(INSTALLER / "build-installer.sh")
+        self.assertIn("prune_builds", text)
+        self.assertIn("qgis-xtopo-setup-*.exe", text)
+        text = _read(INSTALLER / "build-installer.ps1")
+        self.assertIn("Remove-OldBuilds", text)
+        self.assertIn("qgis-xtopo-setup-*.exe", text)
 
 
 if __name__ == "__main__":

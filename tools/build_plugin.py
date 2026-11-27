@@ -21,6 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_NAME = "qgis_xtopo"
 DIST = ROOT / "dist"
+# Старые однотипные сборки не копятся: в dist остаются пять последних.
+KEEP_BUILDS = 5
 # Шаблон проекта хранится один раз — в корне репозитория.  В собранный
 # пакет он попадает как resources/automap.qgz.
 TEMPLATE = ROOT / "automap.qgz"
@@ -112,6 +114,20 @@ def stage(target):
     return package
 
 
+def prune_builds(directory, pattern, keep=KEEP_BUILDS):
+    """Удаляет лишние сборки одного типа, оставляя `keep` самых свежих."""
+    builds = sorted(
+        Path(directory).glob(pattern),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    removed = []
+    for path in builds[keep:]:
+        path.unlink(missing_ok=True)
+        removed.append(path)
+    return removed
+
+
 def build_zip():
     version = plugin_version()
     DIST.mkdir(parents=True, exist_ok=True)
@@ -123,6 +139,8 @@ def build_zip():
                 if path.is_dir():
                     continue
                 zipped.write(path, path.relative_to(package.parent))
+    for path in prune_builds(DIST, f"{PACKAGE_NAME}-*.zip"):
+        print(f"Удалена старая сборка: {path.name}")
     return archive
 
 

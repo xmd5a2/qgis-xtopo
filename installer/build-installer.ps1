@@ -10,6 +10,20 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Dist = Join-Path $Root "dist"
 $Payload = Join-Path $PSScriptRoot "payload"
+# Старые однотипные сборки не копятся: в dist остаются пять последних.
+$KeepBuilds = 5
+
+# Оставляет в dist $KeepBuilds самых свежих файлов, подходящих под маску.
+function Remove-OldBuilds {
+    param([string]$Pattern)
+    Get-ChildItem -Path (Join-Path $Dist $Pattern) -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip $KeepBuilds |
+        ForEach-Object {
+            Remove-Item $_.FullName -Force
+            Write-Host "Удалена старая сборка: $($_.Name)"
+        }
+}
 
 Push-Location $Root
 try {
@@ -53,6 +67,7 @@ try {
 
     $setup = Join-Path $Dist "qgis-xtopo-setup-$version.exe"
     if (-not (Test-Path $setup)) { throw "Инсталлятор не собран: $setup" }
+    Remove-OldBuilds "qgis-xtopo-setup-*.exe"
     Write-Host "== Готово =="
     Get-Item $setup | Select-Object FullName, Length
 }

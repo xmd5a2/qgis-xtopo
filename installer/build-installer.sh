@@ -22,6 +22,18 @@ ROOT=$(dirname "$DIR")
 DIST="$ROOT/dist"
 PAYLOAD="$DIR/payload"
 VERSION=$(sed -n 's/^version=//p' "$ROOT/metadata.txt" | tr -d '\r' | head -1)
+# Старые однотипные сборки не копятся: в dist остаются пять последних.
+KEEP_BUILDS=5
+
+# Оставляет в dist KEEP_BUILDS самых свежих файлов, подходящих под маску $1.
+prune_builds() {
+    ls -1t "$DIST"/$1 2>/dev/null |
+        tail -n +$((KEEP_BUILDS + 1)) |
+        while IFS= read -r file; do
+            rm -f -- "$file"
+            echo "Удалена старая сборка: ${file##*/}"
+        done
+}
 
 if [ -z "$VERSION" ]; then
     echo "metadata.txt: не найдена строка version=" >&2
@@ -106,6 +118,7 @@ if [ ! -f "$SETUP" ]; then
     echo "Инсталлятор не собран: $SETUP не найден" >&2
     exit 1
 fi
+prune_builds "qgis-xtopo-setup-*.exe"
 
 echo "== Готово =="
 ls -l "$SETUP"

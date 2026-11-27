@@ -359,6 +359,10 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   использовать как тестовые полигоны; чтение и offscreen-открытие допустимы.
 - `dist/`, `output/`, `installer/payload/`, `__pycache__/`,
   `resources/automap.qgz` — артефакты, не редактировать.
+- **В `dist/` — не больше 5 сборок одного типа.** Устаревшие однотипные
+  файлы (`qgis_xtopo-<версия>.zip`, `qgis-xtopo-setup-<версия>.exe`)
+  удаляют при новой сборке сами `tools/build_plugin.py` и
+  `installer/build-installer.sh`/`.ps1`, чтобы каталог не разрастался.
 
 ## Стиль изменений
 
