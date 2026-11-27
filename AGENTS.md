@@ -329,6 +329,9 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 - UI-строки пишутся по-русски; английский — в `resources/lang/en.json`
   (словарь «русская строка → английская», работает в обе стороны). Уже
   построенные виджеты переводит `gui/translation.py`.
+- Сообщения журнала (`progress`, `status`, `_append_log`, `WARNING`/`ERROR`)
+  тоже должны быть в `resources/lang/en.json`: `test_i18n` собирает их по
+  AST и падает на отсутствующей строке.
 - Тесты добавлять в существующие тематические файлы. Запуск — только через
   `./tools/run_tests.sh`.
 - После изменения поведения обновляйте docstring'и и README (разделы
