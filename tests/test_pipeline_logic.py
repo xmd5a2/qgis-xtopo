@@ -2075,6 +2075,59 @@ class AdminNameFallbackTest(unittest.TestCase):
         with mock.patch.object(osmium_tool, "find_osmium", return_value=None):
             self.assertEqual(pipeline._admin_relation_names(source), {})
 
+    def test_maritime_border_side_uses_nearest_land(self):
+        """Морская граница ориентируется по ближайшему берегу."""
+        self._write_lines([
+            self._feature(
+                None, [[0, 0], [1, 0]],
+                **{"@id": "way/200", "maritime": "yes"},
+            ),
+        ])
+        coast = self.config.temp_dir / "coast.geojson"
+        coast.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0, -0.5], [1, -0.5]],
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        save_vector(
+            coast, self.config.vector_dir / "coastline.sqlite",
+            "coastline",
+        )
+        relation = {"admin_level": "2", "name": "Страна"}
+        names = {
+            "2": {
+                "ways": {200: relation},
+                "relations": {1: relation},
+                "way_relations": {200: [(1, relation)]},
+                "fields": {"name"},
+            },
+        }
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            self.target, "admin_level_2_relation",
+            names=names, level="2",
+        )
+        self.assertEqual(created, 1)
+        dataset = ogr.Open(str(self.target))
+        feature = next(iter(dataset.GetLayer(0)))
+        label_line = ogr.CreateGeometryFromWkt(
+            feature.GetField("label_line")
+        )
+        line = label_line.GetGeometryRef(0)
+        self.assertGreater(line.GetPoint(0)[0], line.GetPoint(1)[0])
+
     def test_existing_relation_is_kept(self):
         relation = self.config.temp_dir / "relation.geojson"
         relation.write_text(

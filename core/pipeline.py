@@ -899,6 +899,8 @@ class Pipeline:
         self.fraction = fraction or (lambda value: None)
         self.warnings = []
         self.counter = 0
+        self._admin_land_loaded = False
+        self._admin_land_cache = None
         self.timings = timings or Timings()
         # Выходы слоёв, у которых не оказалось исходных объектов.  Общий
         # набор для последовательной и параллельной обработки: если
@@ -1029,6 +1031,45 @@ class Pipeline:
                 names, _parse_admin_relation_tags(text)
             )
         return names
+
+    def _admin_land_geometry(self):
+        """Берег и острова проекта для определения стороны морской границы."""
+        if self._admin_land_loaded:
+            return self._admin_land_cache
+        from osgeo import ogr
+        from qgis.core import QgsGeometry
+
+        parts = []
+        for name in ("coastline", "island"):
+            path = self.config.vector_dir / f"{name}.sqlite"
+            if not path.exists():
+                continue
+            dataset = ogr.Open(str(path))
+            if dataset is None:
+                continue
+            layer = dataset.GetLayer(0)
+            try:
+                for feature in layer:
+                    geometry = feature.GetGeometryRef()
+                    if geometry is None or geometry.IsEmpty():
+                        continue
+                    if geometry.GetGeometryName() in (
+                        "POLYGON", "MULTIPOLYGON",
+                    ):
+                        geometry = geometry.Boundary()
+                        if geometry is None or geometry.IsEmpty():
+                            continue
+                    parts.append(
+                        QgsGeometry.fromWkt(geometry.ExportToWkt())
+                    )
+            finally:
+                layer = None
+                dataset = None
+        self._admin_land_loaded = True
+        self._admin_land_cache = (
+            QgsGeometry.collectGeometry(parts) if parts else None
+        )
+        return self._admin_land_cache
 
     def _admin_border_members(self, source, names):
         """Дописывает в линии границы членов отношений без admin_level.
@@ -1230,6 +1271,15 @@ class Pipeline:
                     if not values:
                         continue
                     side = _admin_border_side(feature, tags)
+                    inside_side = 0
+                    if (
+                        not side
+                        and len(relations) == 1
+                        and _feature_is_maritime(feature)
+                    ):
+                        land = self._admin_land_geometry()
+                        if land is not None:
+                            inside_side = _relation_land_side(geometry, land)
                     if side:
                         polygons = _offset_line_multipolygon(
                             geometry, side
@@ -1239,6 +1289,13 @@ class Pipeline:
                         # ``AboveLine`` ставит подпись с её стороны.
                         label_line = _oriented_line_geometry(
                             geometry, side
+                        )
+                    elif inside_side:
+                        # У морской границы без left/right сторону задаёт
+                        # ближайший берег: страна обращена к своему берегу.
+                        polygons = _open_line_multipolygon(geometry)
+                        label_line = _oriented_line_geometry(
+                            geometry, inside_side
                         )
                     elif len(relations) == 1:
                         polygons = _open_line_multipolygon(geometry)
@@ -2610,6 +2667,54 @@ def _admin_border_side(feature, tags):
         if value and _admin_name_matches(value, tags):
             return sign
     return 0
+
+
+def _feature_is_maritime(feature):
+    """Признак ``maritime=yes`` у линии границы."""
+    index = feature.GetFieldIndex("maritime")
+    return index >= 0 and str(feature.GetField(index) or "") == "yes"
+
+
+def _relation_land_side(geometry, land):
+    """Сторона морской границы, на которой лежит ближайшая суша.
+
+    У морской границы страна всегда обращена к своему берегу. Направление
+    way в OSM произвольно, поэтому сторона определяется по береговой линии
+    и островам: для каждого отрезка берётся ближайшая к его середине точка
+    суши. Длинные отрезки весят больше — на них обычно и ставится подпись.
+    """
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    left = 0.0
+    right = 0.0
+    for part in _line_parts(geometry):
+        count = part.GetPointCount()
+        for index in range(1, count):
+            x1, y1 = part.GetPoint(index - 1)[:2]
+            x2, y2 = part.GetPoint(index)[:2]
+            dx = x2 - x1
+            dy = y2 - y1
+            length = (dx * dx + dy * dy) ** 0.5
+            if length <= 0:
+                continue
+            midpoint = QgsGeometry.fromPointXY(
+                QgsPointXY((x1 + x2) / 2, (y1 + y2) / 2)
+            )
+            try:
+                nearest = land.nearestPoint(midpoint)
+            except Exception:  # noqa: BLE001 - сторона не критична
+                continue
+            if nearest is None or nearest.isEmpty():
+                continue
+            point = nearest.asPoint()
+            cross = dx * (point.y() - y1) - dy * (point.x() - x1)
+            if cross > 0:
+                left += length
+            elif cross < 0:
+                right += length
+    if abs(left - right) < 1e-12:
+        return 0
+    return 1 if left > right else -1
 
 
 def _offset_line_multipolygon(geometry, side):
