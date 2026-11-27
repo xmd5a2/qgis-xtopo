@@ -89,7 +89,65 @@ end-to-end случая на сильно упрощённой геометри�
 - редкие точки на крупной суше (плотностной фильтр);
 - замкнутое кольцо острова (вычитание, а не заливка).
 
-Запуск: `./tools/run_tests.sh`. На 2026-11-26 проходят все 28 модулей.
+Запуск: `./tools/run_tests.sh` (все модули).
+
+## Быстрый прогон только берега
+
+Полный проект для проверки берега не нужен. Рабочий рецепт (проверен на
+мировых охватах): подготовить `coastline`/`island`/`water` и вызвать
+`prepare_coastline` в том же процессе. `import tests` регистрирует корень
+репозитория как пакет `qgis_xtopo` и создаёт `QgsApplication`.
+
+```python
+import json, os, sys
+from types import SimpleNamespace
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, "<репозиторий>")
+import tests
+tests.qgis_app()
+
+from qgis_xtopo.core.bbox import BBox
+from qgis_xtopo.core.coastline import prepare_coastline
+from qgis_xtopo.core.config import Config
+from qgis_xtopo.core.pbf_source import prepare_dataset
+from qgis_xtopo.core.pipeline import Pipeline, ProcessingRunner
+from qgis_xtopo.core.resources import read_query
+
+work = Path("/mnt/data/temp/coastline")
+text = "21.0,59.8,23.0,61.0"
+sources = [Path("finland.osm.pbf")]  # можно несколько: Chile + Argentina
+config = Config(
+    qgis_projects_dir=str(work), project_name="finland", bbox=text,
+    array_queries=["coastline", "island", "water"],
+    source_mode="pbf", pbf_path=str(sources[0]),
+)
+config.ensure_directories()
+bbox = BBox(*[float(value) for value in text.split(",")])
+with open(config.crop_path, "w", encoding="utf-8") as handle:
+    json.dump(bbox.polygon_geojson(), handle)
+
+names = ["coastline", "island", "water"]
+dataset = prepare_dataset(
+    config, bbox, names,
+    query_texts={name: read_query(name) for name in names},
+    sources=sources,
+)
+runner = ProcessingRunner()
+try:
+    pipeline = Pipeline(config, bbox, runner)
+    source = SimpleNamespace(dataset=dataset, files={})
+    for index, name in enumerate(names, 1):
+        pipeline._run_layer(name, source, index, len(names))
+finally:
+    runner.release()
+prepare_coastline(config, bbox)
+```
+
+Несколько PBF передаются списком `sources`: `prepare_dataset` сам отсекает
+дубли по `@id`. Сливать файлы `osmium merge` нельзя — на границе остаются
+разные версии одних и тех же объектов.
 
 ## Проверка по растровым тайлам OSM
 
