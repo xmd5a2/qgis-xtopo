@@ -45,6 +45,23 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(loaded.generate_terrain)
         self.assertEqual(loaded.isolines_step, 25)
 
+    def test_isolines_units_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.ini"
+            config = Config(
+                qgis_projects_dir=directory,
+                project_name="demo",
+                bbox="1,2,3,4",
+                array_queries=["water"],
+                generate_terrain=True,
+                isolines_step=40,
+                isolines_units="ft",
+            )
+            config.to_file(path)
+            loaded = Config.from_file(path)
+        self.assertEqual(loaded.isolines_units, "ft")
+        self.assertEqual(loaded.isolines_step, 40)
+
     def test_default_overpass_endpoints(self):
         config = Config()
         # По умолчанию — глобальный инстанс, а не региональное зеркало.

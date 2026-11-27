@@ -621,15 +621,27 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.app.processEvents()
 
     def test_canvas_scale_bar_follows_feet_setting(self):
-        """Шкала на холсте переходит на футы вместе с единицами карты."""
-        from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+        """Шкала на холсте переходит на футы вместе с данными карты."""
+        from qgis.core import (
+            QgsCoordinateReferenceSystem, QgsExpressionContextUtils,
+            QgsProject, QgsRectangle,
+        )
         from qgis.gui import QgsMapCanvas
         from qgis_xtopo.core import map_units
         from qgis_xtopo.gui.canvasscalebar import CanvasScaleBar
 
-        saved = map_units.units()
-        self.addCleanup(map_units.set_units, saved, False)
-        map_units.set_units("ft", save=False)
+        project = QgsProject.instance()
+        QgsExpressionContextUtils.setProjectVariable(
+            project, map_units.DATA_VARIABLE, "ft"
+        )
+        for name in (
+            map_units.DATA_VARIABLE, map_units.VARIABLE
+        ):
+            self.addCleanup(
+                QgsExpressionContextUtils.removeProjectVariable,
+                project,
+                name,
+            )
         canvas = QgsMapCanvas()
         canvas.resize(640, 480)
         canvas.setDestinationCrs(
@@ -639,6 +651,12 @@ class PipelineIntegrationTest(unittest.TestCase):
         bar = CanvasScaleBar(canvas)
         try:
             self.assertTrue(bar.current_scale()[1].endswith(" ф"))
+            # Подписи можно переключить в метры, хотя данные в футах:
+            # изолинии остаются в футах, шкала следует единицам подписей.
+            QgsExpressionContextUtils.setProjectVariable(
+                project, map_units.VARIABLE, "m"
+            )
+            self.assertTrue(bar.current_scale()[1].endswith(" км"))
         finally:
             bar.deleteLater()
             canvas.deleteLater()
@@ -933,6 +951,63 @@ class PipelineIntegrationTest(unittest.TestCase):
                 self.assertTrue(available[label], label)
         finally:
             panel.deleteLater()
+
+    def test_terrain_units_switch_isolines_steps(self):
+        """Футы на вкладке «Рельеф» пересобирают кратности в футах."""
+        from qgis_xtopo.core import map_units
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        saved = map_units.prep_units()
+        self.addCleanup(map_units.set_prep_units, saved, False)
+        map_units.set_prep_units("m", save=False)
+        dock = XtopoDockWidget(None)
+        try:
+            dock.generate_terrain.setChecked(True)
+            combo = dock.terrain_units_combo
+            self.assertEqual(combo.currentData(), "m")
+            self.assertIn("м", dock.isolines_steps_label.text())
+            self.assertEqual(
+                sorted(dock.isolines_steps), [5, 10, 25, 50, 100, 200]
+            )
+            self.assertEqual(dock._current_isolines_step(), 10)
+
+            combo.setCurrentIndex(combo.findData("ft"))
+            self.app.processEvents()
+            self.assertEqual(map_units.prep_units(), "ft")
+            self.assertEqual(
+                sorted(dock.isolines_steps),
+                [20, 40, 100, 200, 500, 1000],
+            )
+            self.assertIn("ф", dock.isolines_steps_label.text())
+            self.assertEqual(dock._current_isolines_step(), 40)
+            self.assertEqual(
+                dock.isolines_steps[20].text(), "20 ф"
+            )
+            self.assertEqual(dock._current_isolines_units(), "ft")
+        finally:
+            dock.deleteLater()
+
+    def test_prepare_config_keeps_isolines_units(self):
+        """Единицы подготовки попадают в Config."""
+        from qgis_xtopo.core import map_units
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.gui.dockwidget import XtopoDockWidget
+
+        saved = map_units.prep_units()
+        self.addCleanup(map_units.set_prep_units, saved, False)
+        map_units.set_prep_units("ft", save=False)
+        dock = XtopoDockWidget(None)
+        try:
+            dock.generate_terrain.setChecked(True)
+            dock._fill_terrain_units_combo("ft")
+            dock._rebuild_isolines_steps("ft", 40)
+            config = dock._terrain_estimate_config(
+                BBox(0.0, 0.0, 1.0, 1.0)
+            )
+            self.assertEqual(config.isolines_units, "ft")
+            self.assertEqual(config.isolines_step, 40)
+        finally:
+            dock.deleteLater()
 
     def test_dock_terrain_options(self):
         from qgis_xtopo.gui.dockwidget import XtopoDockWidget

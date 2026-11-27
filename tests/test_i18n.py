@@ -948,6 +948,31 @@ class DockLanguageTest(unittest.TestCase):
         self.assertEqual(dock.project_panel.units_combo.currentData(), "ft")
 
     def test_units_are_written_to_open_project(self):
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+
+        dock = self._dock()
+        project = QgsProject.instance()
+        for name in (
+            self.map_units.VARIABLE, self.map_units.DATA_VARIABLE
+        ):
+            self.addCleanup(
+                QgsExpressionContextUtils.removeProjectVariable,
+                project,
+                name,
+            )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.map_units.DATA_VARIABLE, "ft"
+        )
+        self.map_units.sync_project(project)
+        self.assertEqual(
+            project.customVariables()[self.map_units.VARIABLE], "ft"
+        )
+        self.assertEqual(
+            project.customVariables()[self.map_units.DATA_VARIABLE], "ft"
+        )
+
+    def test_feet_project_can_switch_to_meters(self):
+        """Футовые данные можно показывать в метрах, изолинии не трогаются."""
         from unittest import mock
 
         from qgis.core import QgsExpressionContextUtils, QgsProject
@@ -956,22 +981,112 @@ class DockLanguageTest(unittest.TestCase):
         dock = self._dock()
         panel = dock.project_panel
         project = QgsProject.instance()
-        self.addCleanup(
-            QgsExpressionContextUtils.removeProjectVariable,
-            project,
-            self.map_units.VARIABLE,
+        for name in (
+            self.map_units.VARIABLE, self.map_units.DATA_VARIABLE
+        ):
+            self.addCleanup(
+                QgsExpressionContextUtils.removeProjectVariable,
+                project,
+                name,
+            )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.map_units.DATA_VARIABLE, "ft"
         )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.map_units.VARIABLE, "ft"
+        )
+        messages = []
+        panel.statusMessage.connect(messages.append)
         with mock.patch.object(
             projectpanel.ProjectPanel,
             "is_xtopo_project",
             staticmethod(lambda *args, **kwargs: True),
         ):
+            panel._sync_units_combo()
+            combo = panel.units_combo
+            self.assertEqual(combo.currentData(), "ft")
+            combo.setCurrentIndex(combo.findData("m"))
+            self.app.processEvents()
+        self.assertEqual(combo.currentData(), "m")
+        self.assertEqual(
+            project.customVariables()[self.map_units.VARIABLE], "m"
+        )
+        self.assertTrue(messages)
+        self.assertIn("изолинии останутся в футах", messages[-1])
+
+    def test_metric_project_can_show_labels_in_feet(self):
+        """Метрические данные можно показывать в футах с предупреждением."""
+        from unittest import mock
+
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+        from qgis_xtopo.gui import projectpanel
+
+        dock = self._dock()
+        panel = dock.project_panel
+        project = QgsProject.instance()
+        for name in (
+            self.map_units.VARIABLE, self.map_units.DATA_VARIABLE
+        ):
+            self.addCleanup(
+                QgsExpressionContextUtils.removeProjectVariable,
+                project,
+                name,
+            )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.map_units.DATA_VARIABLE, "m"
+        )
+        QgsExpressionContextUtils.setProjectVariable(
+            project, self.map_units.VARIABLE, "m"
+        )
+        messages = []
+        panel.statusMessage.connect(messages.append)
+        with mock.patch.object(
+            projectpanel.ProjectPanel,
+            "is_xtopo_project",
+            staticmethod(lambda *args, **kwargs: True),
+        ):
+            panel._sync_units_combo()
             combo = panel.units_combo
             combo.setCurrentIndex(combo.findData("ft"))
             self.app.processEvents()
+        self.assertEqual(combo.currentData(), "ft")
         self.assertEqual(
             project.customVariables()[self.map_units.VARIABLE], "ft"
         )
+        self.assertTrue(messages)
+        self.assertIn("изолинии останутся в метрах", messages[-1])
+
+    def test_sync_keeps_selected_display_units(self):
+        """Выбор подписей сохраняется независимо от единиц данных."""
+        from qgis.core import QgsExpressionContextUtils, QgsProject
+
+        dock = self._dock()
+        project = QgsProject.instance()
+        for data, display, expected in (
+            ("m", "ft", "ft"),
+            ("ft", "m", "m"),
+        ):
+            for name in (
+                self.map_units.VARIABLE, self.map_units.DATA_VARIABLE
+            ):
+                self.addCleanup(
+                    QgsExpressionContextUtils.removeProjectVariable,
+                    project,
+                    name,
+                )
+            QgsExpressionContextUtils.setProjectVariable(
+                project, self.map_units.DATA_VARIABLE, data
+            )
+            QgsExpressionContextUtils.setProjectVariable(
+                project, self.map_units.VARIABLE, display
+            )
+            self.assertEqual(
+                self.map_units.sync_project(project), expected
+            )
+            self.assertEqual(
+                project.customVariables()[self.map_units.VARIABLE],
+                expected,
+            )
 
     def test_map_language_selection_is_saved(self):
         dock = self._dock()

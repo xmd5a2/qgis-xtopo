@@ -208,6 +208,18 @@ class TerrainCacheTest(unittest.TestCase):
             config.isolines_step = 25
             self.assertNotEqual(first, terrain_cache.isolines_signature(config, bbox, key))
 
+    def test_isolines_signature_depends_on_units(self):
+        """Метры и футы не переиспользуют один и тот же кэш."""
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            bbox = BBox(43.0, 42.0, 43.1, 42.1)
+            key = terrain_cache.dem_signature(config, bbox)
+            first = terrain_cache.isolines_signature(config, bbox, key)
+            config.isolines_units = "ft"
+            self.assertNotEqual(
+                first, terrain_cache.isolines_signature(config, bbox, key)
+            )
+
     def test_isolines_are_restored_from_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(directory)

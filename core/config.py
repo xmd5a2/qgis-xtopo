@@ -138,6 +138,14 @@ def _as_float(value, default=0.0):
         return default
 
 
+def _as_units(value, default="m"):
+    """Единицы высот: ``m`` или ``ft``."""
+    text = str(value or "").strip().lower()
+    if text in ("ft", "f", "feet", "ф", "фут", "футы"):
+        return "ft"
+    return default
+
+
 def default_queries():
     path = Path(resource_path("config.ini"))
     if path.exists():
@@ -191,6 +199,10 @@ class Config:
     terrain_resample_method: str = "cubicspline"
     generate_terrain_isolines: bool = True
     isolines_step: int = 10
+    # Единицы высот при подготовке: m или ft.  В них строятся изолинии и
+    # записывается поле ELEV, поэтому метры и футы в одном наборе данных
+    # не смешиваются.
+    isolines_units: str = "m"
     smooth_isolines: bool = False
     manual_coastline_processing: bool = False
 
@@ -213,6 +225,7 @@ class Config:
 
     def __post_init__(self):
         self.project_name = normalize_project_name(self.project_name)
+        self.isolines_units = _as_units(self.isolines_units)
 
     @property
     def projects_dir(self):
@@ -369,6 +382,7 @@ class Config:
             terrain_resample_method=values.get("terrain_resample_method", "cubicspline"),
             generate_terrain_isolines=_as_bool(values.get("generate_terrain_isolines"), True),
             isolines_step=_as_int(values.get("isolines_step"), 10),
+            isolines_units=_as_units(values.get("isolines_units")),
             smooth_isolines=_as_bool(values.get("smooth_isolines")),
             manual_coastline_processing=_as_bool(values.get("manual_coastline_processing")),
             resolve_polygon_overlaps=_as_bool(
@@ -418,6 +432,7 @@ generate_terrain_hillshade_slope={str(self.generate_terrain_hillshade_slope).low
 terrain_resample_method={self.terrain_resample_method}
 generate_terrain_isolines={str(self.generate_terrain_isolines).lower()}
 isolines_step={self.isolines_step}
+isolines_units={self.isolines_units}
 smooth_isolines={str(self.smooth_isolines).lower()}
 manual_coastline_processing={str(self.manual_coastline_processing).lower()}
 resolve_polygon_overlaps={str(self.resolve_polygon_overlaps).lower()}

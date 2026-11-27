@@ -72,7 +72,8 @@ class LayoutScaleBarItem(QgsLayoutItem):
         if meters_per_mm <= 0:
             return
         length_mm, text = scale_bar(
-            meters_per_mm, SCALE_BAR_MAX_MM, map_units.units()
+            meters_per_mm, SCALE_BAR_MAX_MM,
+            map_units.display_units(),
         )
         if not length_mm:
             return

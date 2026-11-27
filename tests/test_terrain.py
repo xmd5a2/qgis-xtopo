@@ -2933,6 +2933,43 @@ class ContourTilingTest(unittest.TestCase):
                     self.assertIn(key, detail)
                     self.assertEqual(values, detail[key])
 
+    def test_generate_isolines_in_feet(self):
+        """Футы: шаг в футах, поле ELEV тоже в целых футах."""
+        from osgeo import ogr
+
+        from qgis_xtopo.core import terrain
+        from qgis_xtopo.core.config import Config
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(
+                qgis_projects_dir=directory, project_name="feet"
+            )
+            config.ensure_directories()
+            config.isolines_step = 40
+            config.isolines_units = "ft"
+            config.parallel_workers = 1
+            shutil.copy2(
+                self.source, config.raster_dir / "merged_dem.tif"
+            )
+            terrain.generate_isolines(
+                config, BBox(0.0, 0.0, 0.6, 0.6)
+            )
+            dataset = ogr.Open(
+                str(config.vector_dir / "isolines_full.sqlite")
+            )
+            try:
+                levels = [
+                    feature.GetField("ELEV")
+                    for feature in dataset.GetLayer(0)
+                ]
+            finally:
+                dataset = None
+        self.assertTrue(levels)
+        for level in levels:
+            value = int(round(level))
+            self.assertEqual(level, value)
+            self.assertEqual(value % 40, 0, value)
+
     def test_process_tiles_match_single_process(self):
         """Процессы тайлов дают те же изолинии, что один процесс."""
         from unittest import mock

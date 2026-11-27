@@ -2559,8 +2559,9 @@ class ProjectPanel(QWidget):
             map_language.apply_map_language(iface=self.iface)
 
     UNITS_TIP = (
-        "Единицы длины на карте: метры или футы. Высоты вершин, перевалов "
-        "и вулканов показываются в выбранных единицах; по умолчанию метры"
+        "Единицы карты: подписи высот вершин, перевалов и вулканов и шкала "
+        "масштаба. Изолинии не пересчитываются и остаются в единицах "
+        "подготовки; при расхождении появится предупреждение"
     )
 
     def _fill_units_combo(self):
@@ -2596,12 +2597,33 @@ class ProjectPanel(QWidget):
         value = self.units_combo.currentData()
         if not value:
             return
-        map_units.set_units(value)
-        if self.is_xtopo_project():
+        project = QgsProject.instance()
+        if self.is_xtopo_project(project):
+            data_units = map_units.project_data_units(project)
             map_units.set_project_units(
-                value, project=QgsProject.instance(), iface=self.iface
+                value, project=project, iface=self.iface
             )
+            if value != data_units:
+                # Изолинии остаются в единицах подготовки: готовые
+                # данные не пересчитываются, меняются только подписи.
+                self._notify(map_units.prepared_warning(data_units))
             self._repaint_canvas()
+        else:
+            map_units.set_units(value)
+
+    def _sync_units_combo(self):
+        """Показывает единицы отображения открытого проекта."""
+        project = QgsProject.instance()
+        if not self.is_xtopo_project(project):
+            return
+        units = map_units.display_units(project)
+        combo = self.units_combo
+        if combo.currentData() != units:
+            combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(max(0, combo.findData(units)))
+            finally:
+                combo.blockSignals(False)
 
     DETAIL_TITLES = {
         2: "2 — минимум",
@@ -3067,6 +3089,7 @@ class ProjectPanel(QWidget):
         self._connect_style_layer()
         self._rebuild_rules()
         self._sync_from_project()
+        self._sync_units_combo()
         self._sync_isoline_color()
         # Прямоугольник подписи атрибуции сжимается по тексту: в шаблоне
         # он широкий, чтобы длинная строка не переносилась.

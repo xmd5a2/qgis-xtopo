@@ -115,6 +115,7 @@ def _run_contour(job):
     source = job["source"]
     tile = job["tile"]
     step = job["step"]
+    feet = bool(job.get("feet"))
     simplify = job["simplify"]
     index = job["index"]
     temp_dir = Path(job["temp_dir"])
@@ -122,7 +123,7 @@ def _run_contour(job):
     water_paths = [Path(path) for path in job["water_paths"]]
 
     dataset, detail_count = terrain._contour_tile(
-        (source, tile, step), simplify
+        (source, tile, step), simplify, feet
     )
     detailed = dataset.GetLayer(0)
     overview = dataset.GetLayer(1) if simplify > 0 else None

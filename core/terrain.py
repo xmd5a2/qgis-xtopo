@@ -71,6 +71,9 @@ CONTOUR_TILE_MAX_PIXELS = 6_000_000
 # географической СК.  Для проекционной СК масштаб берётся из неё самой.
 GEOGRAPHIC_SCALE = 111120.0
 
+# Метр в международном футе (1 фут = 0,3048 м).
+FEET_PER_METER = 3.28084
+
 # Сколько долей ядер можно занять расчётом контуров: больше потоков —
 # быстрее, но дальше потолок, GEOS держит GIL, и лишние потоки мешают.
 CONTOUR_TILE_WORKERS_RATIO = 0.75
@@ -2221,7 +2224,27 @@ def _clip_to_core(geometry, box):
     return _geometry_lines(clipped) if clipped is not None else []
 
 
-def _contour_tile(task, simplify=0.0):
+def _isolines_units(config):
+    """Единицы высот подготовки: ``m`` или ``ft``."""
+    return "ft" if str(
+        getattr(config, "isolines_units", "m") or ""
+    ).strip().lower() == "ft" else "m"
+
+
+def _contour_step_meters(config):
+    """Шаг изолиний в метрах.
+
+    DEM хранит высоты в метрах, поэтому шаг в футах переводится в метры:
+    контуры ложатся точно на круглые значения футов, а поле ``ELEV``
+    затем пересчитывается обратно в футы.
+    """
+    step = float(config.isolines_step)
+    if _isolines_units(config) == "ft":
+        return step / FEET_PER_METER
+    return step
+
+
+def _contour_tile(task, simplify=0.0, feet=False):
     """Контуры одного тайла: только то, что попадает в его ядро.
 
     Тайл считается по окну с запасом, а в результат попадает только
@@ -2232,6 +2255,9 @@ def _contour_tile(task, simplify=0.0):
     один раз; рядом с подробным слоем сразу пишется упрощённая копия
     для обзорных масштабов.  Второй проход по DEM стоил бы столько же,
     сколько первый, а упрощение в потоке тайла почти ничего не добавляет.
+
+    ``feet`` — шаг задан в футах, а DEM в метрах: уровни уже переведены
+    в метры вызывающим кодом, здесь поле ``ELEV`` пересчитывается в футы.
 
     Вода в растре не вырезается: контуры считаются по всему DEM, а
     полигоны воды вычитаются из готовых линий.  Так концы изолиний
@@ -2300,6 +2326,10 @@ def _contour_tile(task, simplify=0.0):
     for feature in contour_layer:
         geometry = feature.GetGeometryRef()
         elevation = feature.GetField("ELEV")
+        if feet:
+            # Уровни заданы в метрах, но кратны шагу в футах: обратный
+            # пересчёт даёт целое число футов.
+            elevation = int(round(float(elevation) * FEET_PER_METER))
         for piece in _clip_to_core(geometry, box):
             source_id = written
             item = ogr.Feature(layer.GetLayerDefn())
@@ -2501,10 +2531,12 @@ def _contour_untiled(config, source, spatial_ref, simplify, outputs):
     contour_layer = _new_contour_layer(contours, spatial_ref)
     memory_band = memory.GetRasterBand(1)
     nodata = memory_band.GetNoDataValue()
+    step = _contour_step_meters(config)
+    feet = _isolines_units(config) == "ft"
     if nodata is not None:
         gdal.ContourGenerate(
             memory_band,
-            float(config.isolines_step),
+            float(step),
             0.0,
             [],
             1,
@@ -2516,7 +2548,7 @@ def _contour_untiled(config, source, spatial_ref, simplify, outputs):
     else:
         gdal.ContourGenerate(
             memory_band,
-            float(config.isolines_step),
+            float(step),
             0.0,
             [],
             0,
@@ -2530,6 +2562,8 @@ def _contour_untiled(config, source, spatial_ref, simplify, outputs):
     for feature in contour_layer:
         geometry = feature.GetGeometryRef()
         elevation = feature.GetField("ELEV")
+        if feet:
+            elevation = int(round(float(elevation) * FEET_PER_METER))
         source_id = counters[0]
         counters[0] = _write_contour_feature(
             targets[0], geometry, elevation, counters[0]
@@ -2548,8 +2582,10 @@ def _contour_tiled(config, source, raster, side, simplify, outputs,
                    progress, cancel):
     """Контуры крупного DEM: тайлы считаются один раз на оба слоя."""
     tiles = _contour_tiles(raster, side, CONTOUR_HALO)
+    step = _contour_step_meters(config)
+    feet = _isolines_units(config) == "ft"
     tasks = [
-        (str(source), tile, config.isolines_step)
+        (str(source), tile, step)
         for tile in tiles
     ]
     workers = _contour_workers(len(tasks))
@@ -2557,7 +2593,7 @@ def _contour_tiled(config, source, raster, side, simplify, outputs,
     counters = [0] * len(targets)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_contour_tile, task, simplify): index
+            pool.submit(_contour_tile, task, simplify, feet): index
             for index, task in enumerate(tasks)
         }
         done = 0
@@ -2596,7 +2632,7 @@ def _contour_shapefiles(config, source, progress, cancel):
     spatial_ref = osr.SpatialReference()
     spatial_ref.ImportFromWkt(raster.GetProjection())
     simplify = _contour_simplify_tolerance(
-        spatial_ref, config.isolines_step
+        spatial_ref, _contour_step_meters(config)
     )
     driver = ogr.GetDriverByName("ESRI Shapefile")
     outputs = []
@@ -3174,7 +3210,7 @@ def _generate_isolines_processes(config, source, progress, cancel):
     spatial_ref = osr.SpatialReference()
     spatial_ref.ImportFromWkt(raster.GetProjection())
     simplify = _contour_simplify_tolerance(
-        spatial_ref, config.isolines_step
+        spatial_ref, _contour_step_meters(config)
     )
     tiles = _contour_tiles(raster, side, CONTOUR_HALO)
     raster = None
@@ -3194,13 +3230,16 @@ def _generate_isolines_processes(config, source, progress, cancel):
     water_paths = [str(path) for path in _water_mask_paths(config)]
     _clean_isolines_tiles(config)
     jobs = []
+    step = _contour_step_meters(config)
+    feet = _isolines_units(config) == "ft"
     for index, tile in enumerate(tiles):
         job = {
             "mode": "contour",
             "index": index,
             "source": str(source),
             "tile": tile,
-            "step": config.isolines_step,
+            "step": step,
+            "feet": feet,
             "simplify": simplify,
             "temp_dir": str(config.temp_dir),
             "vector_dir": str(config.vector_dir),

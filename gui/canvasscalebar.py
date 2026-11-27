@@ -113,7 +113,8 @@ class CanvasScaleBar(QWidget):
     def current_scale(self):
         """Длина полосы в пикселях и подпись для текущего охвата."""
         return scale_bar(
-            self.meters_per_pixel(), MAX_LENGTH, map_units.units()
+            self.meters_per_pixel(), MAX_LENGTH,
+            map_units.display_units(),
         )
 
     def paintEvent(self, event):

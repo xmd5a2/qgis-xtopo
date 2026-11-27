@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from .bbox import parse_bbox
-from . import dem_sources, text_size
+from . import dem_sources, map_units, text_size
 from .map_language import DETAIL_VARIABLE
 from .resources import plugin_version, resource_path, template_path
 
@@ -213,6 +213,7 @@ def prepare_project(config):
             dem_sources.attribution_for(config.resolved_terrain_source())
             if config.generate_terrain else ""
         ),
+        units=config.isolines_units,
     )
     # config.ini читает только tools/check_pbf_coverage.py, поэтому
     # пользовательская правка не должна затираться каждой подготовкой.
@@ -783,8 +784,9 @@ def _marker_edits(text, marker, replacement):
     return edits
 
 
-def _project_text_edits(text, project_name, dem_attribution):
+def _project_text_edits(text, project_name, dem_attribution, units="m"):
     """Все правки qgs для новой подготовки, кроме замены шрифта."""
+    units = map_units.normalize(units)
     edits = _marker_edits(
         text, 'projectname="automap"', f'projectname="{project_name}"'
     )
@@ -801,6 +803,8 @@ def _project_text_edits(text, project_name, dem_attribution):
     edits.extend(_variable_edits(text, (
         (DETAIL_VARIABLE, None),
         (text_size.VARIABLE, text_size.multiplier()),
+        (map_units.VARIABLE, units),
+        (map_units.DATA_VARIABLE, units),
         ("dem_attribution", dem_attribution),
         ("xtopo_version", plugin_version()),
     )))
@@ -813,7 +817,8 @@ def _project_text_edits(text, project_name, dem_attribution):
     return edits
 
 
-def rewrite_project_archive(source, destination, project_name, dem_attribution=""):
+def rewrite_project_archive(source, destination, project_name, dem_attribution="",
+                            units="m"):
     source = Path(source)
     destination = Path(destination)
     if not source.exists():
@@ -835,7 +840,7 @@ def rewrite_project_archive(source, destination, project_name, dem_attribution="
                 if name.endswith(".qgs"):
                     text = data.decode("utf-8")
                     edits = _project_text_edits(
-                        text, project_name, dem_attribution
+                        text, project_name, dem_attribution, units
                     )
                     text = _apply_edits(text, edits, old_font, new_font)
                     data = text.encode("utf-8")

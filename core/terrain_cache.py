@@ -373,6 +373,7 @@ def isolines_signature(config, bbox, dem_key):
     parts = [
         dem_key,
         config.isolines_step,
+        getattr(config, "isolines_units", "m"),
         config.smooth_isolines,
         bbox.as_key() if hasattr(bbox, "as_key") else str(bbox),
         # Слои, по которым режутся изолинии: отпечаток содержимого вместо

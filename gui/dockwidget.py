@@ -75,6 +75,15 @@ RARE_SOURCE_MODES = ("overpass", "pbf", "local", "ssh")
 # Цвет приглушённых пунктов списка источников.
 RARE_SOURCE_COLOR = "#7f7f7f"
 
+# Кратности изолиний по единицам подготовки.  В футах набор повторяет
+# принятую в OsmAnd-tools лестницу 20/40/200/1000; остальные значения
+# добавлены, чтобы выбор был таким же гибким, как в метрах.
+ISOLINE_STEPS = {
+    "m": (5, 10, 25, 50, 100, 200),
+    "ft": (20, 40, 100, 200, 500, 1000),
+}
+DEFAULT_ISOLINE_STEP = {"m": 10, "ft": 40}
+
 
 def _enum(owner, group, name):
     try:
@@ -1407,27 +1416,21 @@ class XtopoDockWidget(QDockWidget):
             )
         )
         terrain_form.addRow(self.isolines)
+        self.terrain_units_combo = QComboBox()
+        self.terrain_units_combo.setObjectName("terrainUnitsCombo")
+        self.terrain_units_combo.currentIndexChanged.connect(
+            self._terrain_units_changed
+        )
+        terrain_form.addRow("Единицы высот:", self.terrain_units_combo)
+        self.terrain_units_label = terrain_form.labelForField(
+            self.terrain_units_combo
+        )
         self.isolines_steps = {}
         self.isolines_steps_widget = QWidget()
         steps_layout = QGridLayout(self.isolines_steps_widget)
         steps_layout.setContentsMargins(0, 0, 0, 0)
         steps_layout.setHorizontalSpacing(8)
         steps_layout.setVerticalSpacing(2)
-        for index, value in enumerate((5, 10, 25, 50, 100, 200)):
-            box = QCheckBox(f"{value} м")
-            box.setToolTip(
-                "Отметка включает эту кратность и все кратные ей. "
-                "Снятие убирает одну галочку — набор можно уточнять по "
-                "одной. Контуры строятся с минимальной из отмеченных; "
-                "последнюю галочку снять нельзя."
-            )
-            box.toggled.connect(
-                lambda checked, step=value: self._isolines_step_toggled(
-                    step, checked
-                )
-            )
-            steps_layout.addWidget(box, index // 3, index % 3)
-            self.isolines_steps[value] = box
         terrain_form.addRow("Кратность, м:", self.isolines_steps_widget)
         self.isolines_steps_label = terrain_form.labelForField(
             self.isolines_steps_widget
@@ -1436,7 +1439,8 @@ class XtopoDockWidget(QDockWidget):
         terrain_form.addRow(self.smooth_isolines)
         terrain_layout.addWidget(terrain_group)
         terrain_layout.addStretch(1)
-        self._set_isolines_step(10)
+        self._fill_terrain_units_combo()
+        self._rebuild_isolines_steps(map_units.prep_units())
         self._terrain_changed(self.generate_terrain.isChecked())
 
         self.tabs.addTab(data_tab, "Данные")
@@ -2689,6 +2693,7 @@ class XtopoDockWidget(QDockWidget):
             terrain_resample_method="cubicspline",
             generate_terrain_isolines=self.isolines.isChecked(),
             isolines_step=self._current_isolines_step(),
+            isolines_units=self._current_isolines_units(),
             smooth_isolines=self.smooth_isolines.isChecked(),
         )
 
@@ -3224,6 +3229,9 @@ class XtopoDockWidget(QDockWidget):
         if self.dem_dir_label is not None:
             self.dem_dir_label.setVisible(enabled and manual)
         steps_enabled = enabled and self.isolines.isChecked()
+        self.terrain_units_combo.setEnabled(steps_enabled)
+        if self.terrain_units_label is not None:
+            self.terrain_units_label.setEnabled(steps_enabled)
         for box in self.isolines_steps.values():
             box.setEnabled(steps_enabled)
         self._update_dem_info()
@@ -3463,12 +3471,135 @@ class XtopoDockWidget(QDockWidget):
                 return key
         return dem_sources.MANUAL_SOURCE
 
-    def _current_isolines_step(self):
+    def _current_isolines_units(self):
+        """Единицы высот, выбранные для подготовки рельефа."""
+        return map_units.normalize(
+            self.terrain_units_combo.currentData()
+            if hasattr(self, "terrain_units_combo") else None
+        ) or map_units.prep_units()
+
+    def _checked_isolines_step(self, units):
         checked = [
             value for value, box in self.isolines_steps.items()
             if box.isChecked()
         ]
-        return min(checked) if checked else 10
+        return min(checked) if checked else DEFAULT_ISOLINE_STEP[units]
+
+    def _current_isolines_step(self):
+        return self._checked_isolines_step(self._current_isolines_units())
+
+    def _fill_terrain_units_combo(self, current=None):
+        """Заполняет компактный список единиц подготовки."""
+        combo = self.terrain_units_combo
+        if current is None:
+            current = combo.currentData() or map_units.prep_units()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for code in map_units.UNITS:
+                combo.addItem(i18n.tr(map_units.short_label(code)), code)
+                combo.setItemData(
+                    combo.count() - 1,
+                    i18n.tr(map_units.title(code)),
+                    _enum(Qt, "ItemDataRole", "ToolTipRole"),
+                )
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+        finally:
+            combo.blockSignals(False)
+        combo.setToolTip(i18n.tr(
+            "Единицы высот при подготовке: метры или футы. Контуры "
+            "строятся с шагом в выбранных единицах; метры и футы в одном "
+            "наборе данных не смешиваются"
+        ))
+        combo.setAccessibleName(i18n.tr("Единицы высот"))
+        metrics = combo.fontMetrics()
+        text_width = max(
+            (metrics.horizontalAdvance(combo.itemText(i))
+             for i in range(combo.count())),
+            default=0,
+        )
+        combo.setFixedWidth(max(44, text_width + 30))
+
+    def _isolines_step_tip(self):
+        return i18n.tr(
+            "Отметка включает эту кратность и все кратные ей. "
+            "Снятие убирает одну галочку — набор можно уточнять по "
+            "одной. Контуры строятся с минимальной из отмеченных; "
+            "последнюю галочку снять нельзя."
+        )
+
+    def _rebuild_isolines_steps(self, units, step=None):
+        """Пересобирает галочки кратности под выбранные единицы."""
+        units = map_units.normalize(units)
+        layout = self.isolines_steps_widget.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                # Убираем сразу: deleteLater обрабатывается только на
+                # следующем цикле событий, и до него старые галочки
+                # остаются видимыми поверх новых.
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        self.isolines_steps = {}
+        for index, value in enumerate(ISOLINE_STEPS[units]):
+            box = QCheckBox(
+                f"{value} {i18n.tr(map_units.short_label(units))}"
+            )
+            box.setToolTip(self._isolines_step_tip())
+            box.toggled.connect(
+                lambda checked, step=value: self._isolines_step_toggled(
+                    step, checked
+                )
+            )
+            layout.addWidget(box, index // 3, index % 3)
+            self.isolines_steps[value] = box
+        self.isolines_steps_label.setText(
+            i18n.tr("Кратность, м:" if units == "m" else "Кратность, ф:")
+        )
+        self._set_isolines_step(
+            DEFAULT_ISOLINE_STEP[units] if step is None else step
+        )
+
+    def _nearest_isolines_step(self, step, old_units, new_units):
+        """Ближайшая кратность при смене единиц."""
+        meters = (
+            float(step) if old_units == "m"
+            else float(step) / map_units.FEET_PER_METER
+        )
+        target = (
+            meters * map_units.FEET_PER_METER
+            if new_units == "ft" else meters
+        )
+        return min(
+            ISOLINE_STEPS[new_units],
+            key=lambda value: (abs(value - target), value),
+        )
+
+    def _terrain_units_changed(self, _index=None):
+        units = self._current_isolines_units()
+        old_units = map_units.prep_units()
+        if units == old_units:
+            return
+        old_step = self._checked_isolines_step(old_units)
+        map_units.set_prep_units(units)
+        step = self._nearest_isolines_step(old_step, old_units, units)
+        self._rebuild_isolines_steps(units, step)
+        self._terrain_changed(self.generate_terrain.isChecked())
+
+    def _relabel_isolines_steps(self):
+        """Обновляет подписи галочек после смены языка интерфейса."""
+        units = self._current_isolines_units()
+        self.isolines_steps_label.setText(
+            i18n.tr("Кратность, м:" if units == "m" else "Кратность, ф:")
+        )
+        tooltip = self._isolines_step_tip()
+        for value, box in self.isolines_steps.items():
+            box.setText(
+                f"{value} {i18n.tr(map_units.short_label(units))}"
+            )
+            box.setToolTip(tooltip)
 
     def _isolines_step_toggled(self, value, checked):
         if checked:
@@ -3568,7 +3699,15 @@ class XtopoDockWidget(QDockWidget):
             self.dem_source.setCurrentIndex(max(0, source_index))
         finally:
             self._dem_source_syncing = False
-        saved_steps = str(self.settings.value("isolines_steps", "") or "")
+        units = map_units.normalize(
+            self.settings.value(map_units.PREP_SETTINGS_KEY, map_units.DEFAULT_UNITS)
+        )
+        map_units.set_prep_units(units, save=False)
+        self._fill_terrain_units_combo(units)
+        self._rebuild_isolines_steps(units)
+        steps_key = "isolines_steps" if units == "m" else "isolines_steps_ft"
+        step_key = "isolines_step" if units == "m" else "isolines_step_ft"
+        saved_steps = str(self.settings.value(steps_key, "") or "")
         checked = []
         for item in saved_steps.split(","):
             item = item.strip()
@@ -3577,15 +3716,20 @@ class XtopoDockWidget(QDockWidget):
         if checked:
             known = set(self.isolines_steps)
             checked = [value for value in checked if value in known]
+        if checked:
             for value, box in self.isolines_steps.items():
                 box.blockSignals(True)
                 box.setChecked(value in checked)
                 box.blockSignals(False)
         else:
             try:
-                step = int(self.settings.value("isolines_step", 10))
+                step = int(
+                    self.settings.value(
+                        step_key, DEFAULT_ISOLINE_STEP[units]
+                    )
+                )
             except (TypeError, ValueError):
-                step = 10
+                step = DEFAULT_ISOLINE_STEP[units]
             self._set_isolines_step(step)
         self.generate_terrain.setChecked(
             self.settings.value("generate_terrain", "true") == "true"
@@ -3617,13 +3761,17 @@ class XtopoDockWidget(QDockWidget):
             self.dem_source.currentData() or dem_sources.DEFAULT_SOURCE,
         )
         self.settings.setValue("generate_terrain", str(self.generate_terrain.isChecked()).lower())
-        self.settings.setValue("isolines_step", str(self._current_isolines_step()))
+        units = self._current_isolines_units()
+        self.settings.setValue(map_units.PREP_SETTINGS_KEY, units)
+        step_key = "isolines_step" if units == "m" else "isolines_step_ft"
+        steps_key = "isolines_steps" if units == "m" else "isolines_steps_ft"
+        self.settings.setValue(step_key, str(self._current_isolines_step()))
         checked_steps = ",".join(
             str(value)
             for value, box in sorted(self.isolines_steps.items())
             if box.isChecked()
         )
-        self.settings.setValue("isolines_steps", checked_steps)
+        self.settings.setValue(steps_key, checked_steps)
         if self._hidden_panels:
             self.settings.setValue("hidden_panels", list(self._hidden_panels))
         else:
@@ -3735,7 +3883,7 @@ class XtopoDockWidget(QDockWidget):
                 set_canvas_magnification(self.iface)
                 self._patch_transliteration()
                 apply_map_language(iface=self.iface)
-                map_units.apply_units(iface=self.iface)
+                map_units.sync_project(iface=self.iface)
                 # Скрытие панелей меняет размер холста, поэтому охват
                 # вписываем после пересчёта размера интерфейса.
                 QTimer.singleShot(0, lambda: fit_project_extent(self.iface))
@@ -3862,6 +4010,8 @@ class XtopoDockWidget(QDockWidget):
 
     def _retranslate_dynamic(self):
         """Пересобирает динамические подписи на текущем языке."""
+        self._fill_terrain_units_combo()
+        self._relabel_isolines_steps()
         self._render_pbf_info()
         self._render_slice_estimate()
         self._update_dem_info()
@@ -4011,6 +4161,7 @@ class XtopoDockWidget(QDockWidget):
             terrain_resample_method="cubicspline",
             generate_terrain_isolines=self.isolines.isChecked(),
             isolines_step=self._current_isolines_step(),
+            isolines_units=self._current_isolines_units(),
             smooth_isolines=self.smooth_isolines.isChecked(),
         )
         parse_bbox(config.bbox)

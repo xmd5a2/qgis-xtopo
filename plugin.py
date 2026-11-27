@@ -45,6 +45,7 @@ class QgisXtopoPlugin:
         map_language.load_transliteration()
         map_language.load_level_of_detail()
         map_units.load_units()
+        map_units.load_prep_units()
         text_size.load_percent()
         i18n.add_listener(self._language_changed)
         self.dock = XtopoDockWidget(self.iface, self.iface.mainWindow())

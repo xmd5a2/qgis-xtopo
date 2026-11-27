@@ -494,6 +494,19 @@ class ProjectTextSizeTest(unittest.TestCase):
             text_size.set_percent(previous, save=False)
         self.assertEqual(project_variables(text)["text_size_mult"], "1.5")
 
+    def test_rewrite_writes_units(self):
+        """Единицы подготовки записываются в проект и в данные."""
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "demo.qgz"
+            rewrite_project_archive(
+                template_path(), destination, "demo", units="ft"
+            )
+            with zipfile.ZipFile(destination) as archive:
+                text = archive.read("demo.qgs").decode("utf-8")
+        variables = project_variables(text)
+        self.assertEqual(variables["map_units"], "ft")
+        self.assertEqual(variables["map_units_data"], "ft")
+
     def test_rewrite_keeps_variable_positions(self):
         """Пустое значение dem_attribution не сдвигает остальные."""
         with tempfile.TemporaryDirectory() as directory:
@@ -960,7 +973,7 @@ class ProjectTextEditsTest(unittest.TestCase):
     def test_combined_edits_match_sequential(self):
         from unittest import mock
 
-        from qgis_xtopo.core import map_language, text_size
+        from qgis_xtopo.core import map_language, map_units, text_size
         from qgis_xtopo.core.project import (
             _apply_edits,
             _project_text_edits,
@@ -990,6 +1003,12 @@ class ProjectTextEditsTest(unittest.TestCase):
             sequential = _set_detail_variable(sequential)
         sequential = _set_project_variable(
             sequential, text_size.VARIABLE, text_size.multiplier()
+        )
+        sequential = _set_project_variable(
+            sequential, map_units.VARIABLE, map_units.DEFAULT_UNITS
+        )
+        sequential = _set_project_variable(
+            sequential, map_units.DATA_VARIABLE, map_units.DEFAULT_UNITS
         )
         sequential = _set_project_variable(
             sequential, "dem_attribution", "DEM test"
