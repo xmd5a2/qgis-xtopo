@@ -91,7 +91,10 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
 - **Git**: после каждой законченной feature (не тестовой!) делать коммит с
   осмысленным комментарием на английском; пометку «gen by AI» ставить в тело
   сообщения, заголовок оставлять без неё. Без явной просьбы не делать `push`,
-  `checkout`, `reset --hard`, `stash`.
+  `checkout`, `reset --hard`, `stash`. Каждый коммит поднимает версию в
+  `metadata.txt` и `installer/qgis-xtopo.iss`: документация и мелкие правки —
+  третья цифра (`0.0.x`), изменения поведения и более важные — вторая
+  (`0.x.x`).
 - **Стиль — только в `automap.qgz`**. Переноса стиля в готовые проекты нет
   (не возвращать `tools/patch_template_*.py`).
   `core/project.py: repair_project` при открытии убирает пустые слои,
