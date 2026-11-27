@@ -3813,7 +3813,7 @@ class PlacesQuerySplitTest(unittest.TestCase):
         for place in ("city", "town"):
             self.assertIn(f'["place"="{place}"]', major)
         for place in (
-            "suburb", "neighbourhood", "village", "hamlet",
+            "suburb", "quarter", "neighbourhood", "village", "hamlet",
             "isolated_dwelling",
         ):
             self.assertNotIn(f'["place"="{place}"]', major)
@@ -3824,7 +3824,9 @@ class PlacesQuerySplitTest(unittest.TestCase):
         minor = read_query("places_main")
         for place in ("city", "town"):
             self.assertNotIn(f'["place"="{place}"]', minor)
-        for place in ("suburb", "neighbourhood", "village", "hamlet"):
+        for place in (
+            "suburb", "quarter", "neighbourhood", "village", "hamlet",
+        ):
             self.assertIn(f'["place"="{place}"]', minor)
 
 

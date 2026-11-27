@@ -1682,6 +1682,37 @@ class SettlementScaleEngineTest(unittest.TestCase):
         self.assertEqual(self._visible(leaves, 500000), [])
 
 
+class QuarterPlaceTest(unittest.TestCase):
+    """`place=quarter` рисуется правилом suburb/neighbourhood.
+
+    Отдельный символ кварталу не нужен: как и neighbourhood, он
+    показывает только подпись, а не значок.  Правило общее в обоих
+    слоях населённых пунктов, чтобы стиль совпадал.
+    """
+
+    def test_quarter_is_in_renderer_and_label_filters(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+            if layer.findtext("layername") in (
+                "places main", "places main major",
+            )
+        }
+        self.assertEqual(set(layers), {"places main", "places main major"})
+        for name, layer in layers.items():
+            for container in ("renderer-v2", "labeling"):
+                filters = [
+                    rule.get("filter") or ""
+                    for rule in layer.find(container).iter("rule")
+                    if "place = 'suburb'" in (rule.get("filter") or "")
+                ]
+                self.assertEqual(len(filters), 1, (name, container))
+                for place in ("suburb", "quarter", "neighbourhood"):
+                    self.assertIn(
+                        f"place = '{place}'", filters[0], (name, container),
+                    )
+
+
 class LocalityScaleTest(unittest.TestCase):
     """`place=locality` скрывается на обзорных масштабах по уровню детализации.
 
@@ -4122,6 +4153,18 @@ class SettlementPriorityTest(unittest.TestCase):
         )
         self.assertLess(
             self._priority("town"), self._priority("village"),
+        )
+
+    def test_quarter_sits_between_suburb_and_neighbourhood(self):
+        self.assertLess(
+            self._priority("suburb"), self._priority("quarter"),
+        )
+        self.assertLess(
+            self._priority("quarter"), self._priority("neighbourhood"),
+        )
+        self.assertLess(
+            self._priority("neighbourhood"),
+            self._priority("isolated_dwelling"),
         )
 
     def test_population_breaks_ties_of_one_type(self):

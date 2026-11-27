@@ -1,5 +1,6 @@
 (
 node["place"="suburb"];
+node["place"="quarter"];
 node["place"="neighbourhood"];
 node["place"="village"];
 node["place"="hamlet"];
