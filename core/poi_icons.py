@@ -100,6 +100,11 @@ SELF_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
     "cemetery",
 )
+# Слои мостов: их значок уступает и населённому пункту, а не только
+# соседнему мосту.  Линия моста при этом остаётся.
+BRIDGE_ICON_LAYERS = (
+    "highway main bridge", "track bridge", "path bridge", "railway bridge",
+)
 # Поле с индексами диапазонов, где значок моста скрыт.
 ICON_HIDE_FIELD = "icon_hide"
 
@@ -1628,12 +1633,14 @@ def _prune_band(points, index, scale, latitude_max):
 
 
 def _hidden_icon_bands(points, bands):
-    """Диапазоны, где значок проигрывает соседу того же слоя.
+    """Диапазоны, где значок проигрывает соседу.
 
     Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
-    Побеждает объект с меньшими координатами, как у точечных POI; радиус
-    сравнения — размер значка скрываемого объекта.  Соседи ищутся по
-    сетке, чтобы не перебирать все пары на больших выгрузках.
+    Внутри слоя побеждает объект с меньшими координатами, как у точечных
+    POI; значок моста уступает ещё и населённому пункту, стоящему выше
+    в дереве.  Радиус сравнения — размер значка скрываемого объекта.
+    Соседи ищутся по сетке, чтобы не перебирать все пары на больших
+    выгрузках.
     """
     result = {}
     for index, band in enumerate(bands):
@@ -1644,55 +1651,95 @@ def _hidden_icon_bands(points, bands):
             and point.geometry in ("Line", "Polygon")
             and point.fid >= 0
         ]
-        if len(entries) < 2:
+        if not entries:
             continue
+        settlements = [
+            point for point in points
+            if index in point.bands
+            and point.name in SETTLEMENT_LAYERS
+            and point.geometry == "Point"
+            and point.fid >= 0
+        ]
         lower, upper = band
         scale = upper if upper else _band_scale(band)
 
         def limit(point):
             return point.sizes.get(index, 0.0) * scale / 1000.0
 
-        max_limit = max((limit(point) for point in entries), default=0.0)
+        def distance(one, other):
+            """Расстояние в метрах с поправкой на широту, как в шаблоне."""
+            return math.hypot(
+                (other.lon - one.lon)
+                * math.cos(math.radians(one.lat)),
+                other.lat - one.lat,
+            ) * 111320.0
+
+        max_limit = max(
+            [limit(point) for point in entries]
+            + [limit(point) for point in settlements],
+            default=0.0,
+        )
         if max_limit <= 0:
             continue
-        latitude_max = max(abs(point.lat) for point in entries)
+        latitude_max = max(
+            abs(point.lat) for point in entries + settlements
+        )
         worst = math.cos(math.radians(latitude_max))
         cell = max(max_limit / (111320.0 * max(worst, 0.01)), 1e-6)
-        grid = {}
-        for position, point in enumerate(entries):
-            grid.setdefault(
-                (int(point.lon // cell), int(point.lat // cell)), []
-            ).append(position)
+
+        def grid_of(items):
+            grid = {}
+            for position, point in enumerate(items):
+                grid.setdefault(
+                    (int(point.lon // cell), int(point.lat // cell)), []
+                ).append(position)
+            return grid
+
+        grid = grid_of(entries)
+        settlement_grid = grid_of(settlements)
         for position, point in enumerate(entries):
             gx = int(point.lon // cell)
             gy = int(point.lat // cell)
             found = False
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for other in grid.get((gx + dx, gy + dy), ()):
-                        if other == position:
-                            continue
-                        neighbour = entries[other]
-                        if neighbour.name != point.name:
-                            continue
-                        if (neighbour.lon, neighbour.lat) >= (
-                                point.lon, point.lat):
-                            continue
-                        distance = math.hypot(
-                            (neighbour.lon - point.lon)
-                            * math.cos(math.radians(point.lat)),
-                            neighbour.lat - point.lat,
-                        ) * 111320.0
-                        if distance <= limit(point):
-                            result.setdefault(
-                                (point.name, point.fid), set()
-                            ).add(index)
-                            found = True
+            # Населенный пункт важнее моста: его значок скрывает значок
+            # моста, чтобы тот не перекрывал название.  Линия моста
+            # остается, скрывается только MarkerLine.
+            if point.name in BRIDGE_ICON_LAYERS:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for other in settlement_grid.get(
+                                (gx + dx, gy + dy), ()):
+                            neighbour = settlements[other]
+                            if neighbour.rank >= point.rank:
+                                continue
+                            if distance(point, neighbour) <= limit(point):
+                                found = True
+                                break
+                        if found:
                             break
                     if found:
                         break
-                if found:
-                    break
+            if not found:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for other in grid.get((gx + dx, gy + dy), ()):
+                            if other == position:
+                                continue
+                            neighbour = entries[other]
+                            if neighbour.name != point.name:
+                                continue
+                            if (neighbour.lon, neighbour.lat) >= (
+                                    point.lon, point.lat):
+                                continue
+                            if distance(point, neighbour) <= limit(point):
+                                found = True
+                                break
+                        if found:
+                            break
+                    if found:
+                        break
+            if found:
+                result.setdefault((point.name, point.fid), set()).add(index)
     return result
 
 

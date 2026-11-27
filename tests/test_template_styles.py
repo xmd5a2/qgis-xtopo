@@ -4360,6 +4360,42 @@ class BridgeIconHideTest(unittest.TestCase):
         )
         self.assertFalse(hidden)
 
+    @staticmethod
+    def _settlement(lon, lat, name="places main", fid=10):
+        return poi_icons._Point(
+            rank=0.005, lon=lon, lat=lat, name=name, fid=fid,
+            geometry="Point", bands={0: 4}, sizes={0: 1.2},
+        )
+
+    def test_settlement_suppresses_bridge_icon(self):
+        """Населённый пункт выше моста: мост уступает ему значок."""
+        bridge = self._point(6.9000, 46.05, fid=1)
+        place = self._settlement(6.9006, 46.05)
+        hidden = poi_icons._hidden_icon_bands(
+            [bridge, place], [(100000.0, 130000.0)],
+        )
+        self.assertIn(("highway main bridge", 1), hidden)
+
+    def test_distant_settlement_keeps_bridge_icon(self):
+        bridge = self._point(6.9000, 46.05, fid=1)
+        place = self._settlement(6.9300, 46.05)
+        hidden = poi_icons._hidden_icon_bands(
+            [bridge, place], [(100000.0, 130000.0)],
+        )
+        self.assertFalse(hidden)
+
+    def test_settlement_keeps_cemetery_icon(self):
+        """Кладбище у населённого пункта не прячется."""
+        cemetery = poi_icons._Point(
+            rank=0.02, lon=6.9000, lat=46.05, name="cemetery", fid=1,
+            geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
+        )
+        place = self._settlement(6.9006, 46.05)
+        hidden = poi_icons._hidden_icon_bands(
+            [cemetery, place], [(100000.0, 130000.0)],
+        )
+        self.assertFalse(hidden)
+
     def test_field_is_written_to_bridge_layer(self):
         import tempfile
         from pathlib import Path
