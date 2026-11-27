@@ -189,6 +189,13 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   развёрнуты в обычный `RuleRenderer`: точки рисуются отдельными
   значками, кластерный символ не используется. Подробности —
   `docs/agents/styles.md`.
+- **Два списка подложек не связаны.** `core/basemap.py: SOURCES` — это
+  «Растровая подложка» готового проекта (Google sat, Bing sat, ArcGIS sat,
+  OSM), а `gui/extentdialog.py: BASEMAPS` — подложка окна выбора охвата.
+  Источник `osm` назван `OSM`, чтобы не путать его с шаблонным слоем
+  `OpenStreetMap`, видимость которого хранят `_hide_osm`/`_restore_osm`.
+  Точные списки и подсказку проверяют `tests/test_project.py` и
+  `tests/test_i18n.py`. Подробности — `docs/agents/styles.md`.
 - **Одноразовые скрипты правки шаблона удаляются после применения.**
   Их результат уже в `automap.qgz`, а повторный запуск на изменённом
   шаблоне может испортить стиль. Код удалённых скриптов остаётся в
