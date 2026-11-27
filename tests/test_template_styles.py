@@ -4384,10 +4384,18 @@ class BridgeIconHideTest(unittest.TestCase):
         self.assertFalse(hidden)
 
     @staticmethod
-    def _settlement(lon, lat, name="places main", fid=10):
+    def _settlement(lon, lat, name="places main", fid=10, size=1.2):
         return poi_icons._Point(
             rank=0.005, lon=lon, lat=lat, name=name, fid=fid,
-            geometry="Point", bands={0: 4}, sizes={0: 1.2},
+            geometry="Point", bands={0: 4}, sizes={0: size},
+        )
+
+    @staticmethod
+    def _bridge(lon, lat, fid, size=2.2):
+        return poi_icons._Point(
+            rank=0.02, lon=lon, lat=lat, name="highway main bridge",
+            fid=fid, geometry="Line", bands={0: 4},
+            sizes={0: size},
         )
 
     def test_settlement_suppresses_bridge_icon(self):
@@ -4402,6 +4410,47 @@ class BridgeIconHideTest(unittest.TestCase):
     def test_distant_settlement_keeps_bridge_icon(self):
         bridge = self._point(6.9000, 46.05, fid=1)
         place = self._settlement(6.9300, 46.05)
+        hidden = poi_icons._hidden_icon_bands(
+            [bridge, place], [(100000.0, 130000.0)],
+        )
+        self.assertFalse(hidden)
+
+    def test_spaced_bridge_icons_stay_at_map_scale(self):
+        """Два моста в 211 м на 1:100000 видны: значки не перекрываются.
+
+        Случай Ананьево: раньше радиус считался по полному размеру
+        значка на верхней границе диапазона, и северный мост скрывался,
+        хотя между значками оставалось место.  На 1:130000 они уже
+        соприкасаются, поэтому в следующем диапазоне мост уступает.
+        """
+        south = self._bridge(77.671663, 42.740497, fid=37)
+        north = self._bridge(77.671716, 42.742393, fid=38)
+        hidden = poi_icons._hidden_icon_bands(
+            [south, north], [(100000.0, 130000.0)],
+        )
+        self.assertNotIn(("highway main bridge", 38), hidden)
+        hidden = poi_icons._hidden_icon_bands(
+            [south, north], [(130000.0, 150000.0)],
+        )
+        self.assertIn(("highway main bridge", 38), hidden)
+
+    def test_near_settlement_still_suppresses_bridge_at_100k(self):
+        """Мост в 122 м от деревни значок уступает — они перекрываются."""
+        bridge = self._bridge(77.671663, 42.740497, fid=37)
+        place = self._settlement(
+            77.672848, 42.739828, size=1.6,
+        )
+        hidden = poi_icons._hidden_icon_bands(
+            [bridge, place], [(100000.0, 130000.0)],
+        )
+        self.assertIn(("highway main bridge", 37), hidden)
+
+    def test_far_settlement_keeps_bridge_icon_at_100k(self):
+        """Мост в 300 м от деревни на 1:100000 остаётся видимым."""
+        bridge = self._bridge(77.671716, 42.742393, fid=38)
+        place = self._settlement(
+            77.672848, 42.739828, size=1.6,
+        )
         hidden = poi_icons._hidden_icon_bands(
             [bridge, place], [(100000.0, 130000.0)],
         )

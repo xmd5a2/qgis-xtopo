@@ -1638,9 +1638,8 @@ def _hidden_icon_bands(points, bands):
     Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
     Внутри слоя побеждает объект с меньшими координатами, как у точечных
     POI; значок моста уступает ещё и населённому пункту, стоящему выше
-    в дереве.  Радиус сравнения — размер значка скрываемого объекта.
-    Соседи ищутся по сетке, чтобы не перебирать все пары на больших
-    выгрузках.
+    в дереве.  Соседи ищутся по сетке, чтобы не перебирать все пары на
+    больших выгрузках.
     """
     result = {}
     for index, band in enumerate(bands):
@@ -1660,11 +1659,29 @@ def _hidden_icon_bands(points, bands):
             and point.geometry == "Point"
             and point.fid >= 0
         ]
-        lower, upper = band
-        scale = upper if upper else _band_scale(band)
+        # Представительский масштаб диапазона: на нём же посчитаны
+        # размеры значков в point.sizes.  Верхняя граница диапазона
+        # завышала бы радиус на 15-30 %.
+        scale = _band_scale(band)
 
-        def limit(point):
-            return point.sizes.get(index, 0.0) * scale / 1000.0
+        def radius(point, neighbour):
+            """Радиус на земле, в котором значки перекрываются.
+
+            Знаменатель в EPSG:3857 считается по метрам проекции: на
+            широте φ метр на земле занимает 1/cos φ единиц карты.
+            Поэтому значок ``size`` мм при знаменателе ``scale``
+            закрывает на земле ``size * scale / 1000 * cos φ`` метров.
+            Перекрытие — когда расстояние меньше полусуммы размеров
+            двух значков.
+            """
+            size = (
+                point.sizes.get(index, 0.0)
+                + neighbour.sizes.get(index, 0.0)
+            ) / 2.0
+            return (
+                size * scale / 1000.0
+                * math.cos(math.radians(point.lat))
+            )
 
         def distance(one, other):
             """Расстояние в метрах с поправкой на широту, как в шаблоне."""
@@ -1674,18 +1691,18 @@ def _hidden_icon_bands(points, bands):
                 other.lat - one.lat,
             ) * 111320.0
 
-        max_limit = max(
-            [limit(point) for point in entries]
-            + [limit(point) for point in settlements],
+        max_size = max(
+            [point.sizes.get(index, 0.0)
+             for point in entries + settlements],
             default=0.0,
         )
-        if max_limit <= 0:
+        if max_size <= 0:
             continue
-        latitude_max = max(
-            abs(point.lat) for point in entries + settlements
-        )
-        worst = math.cos(math.radians(latitude_max))
-        cell = max(max_limit / (111320.0 * max(worst, 0.01)), 1e-6)
+        # Полусумма размеров не больше max_size.  Ячейка в градусах:
+        # радиус в градусах широты равен size * scale / 1000 / 111320,
+        # а в градусах долготы — столько же (cos сокращается с
+        # поправкой широты в радиусе).
+        cell = max(max_size * scale / 1000.0 / 111320.0, 1e-6)
 
         def grid_of(items):
             grid = {}
@@ -1712,7 +1729,8 @@ def _hidden_icon_bands(points, bands):
                             neighbour = settlements[other]
                             if neighbour.rank >= point.rank:
                                 continue
-                            if distance(point, neighbour) <= limit(point):
+                            if distance(point, neighbour) <= radius(
+                                    point, neighbour):
                                 found = True
                                 break
                         if found:
@@ -1731,7 +1749,8 @@ def _hidden_icon_bands(points, bands):
                             if (neighbour.lon, neighbour.lat) >= (
                                     point.lon, point.lat):
                                 continue
-                            if distance(point, neighbour) <= limit(point):
+                            if distance(point, neighbour) <= radius(
+                                    point, neighbour):
                                 found = True
                                 break
                         if found:
