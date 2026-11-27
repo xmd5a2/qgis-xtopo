@@ -2298,7 +2298,7 @@ class IconMaskReferencesTest(unittest.TestCase):
             "разные MaskMarker маскируют разные наборы symbol layer",
         )
 
-    def test_each_target_masks_all_its_symbol_layers(self):
+    def test_each_target_masks_all_its_borders(self):
         self.assertTrue(self.masks)
         option = _find_option(self.masks[0][1], "mask_symbollayers")
         parts = (option.get("value") or "").split(";")
@@ -2307,6 +2307,10 @@ class IconMaskReferencesTest(unittest.TestCase):
         for index in range(0, len(parts), 2):
             targets.setdefault(parts[index], set()).add(parts[index + 1])
         self.assertTrue(targets)
+        line_classes = {
+            "SimpleLine", "MarkerLine", "ArrowLine",
+            "InterpolatedLine", "HashLine",
+        }
         for layer_id, masked in targets.items():
             layer = self.layers[layer_id]
             name = layer.findtext("layername")
@@ -2318,7 +2322,15 @@ class IconMaskReferencesTest(unittest.TestCase):
                 for symbol_layer in renderer.iter("layer")
             }
             self.assertNotIn(None, actual, name)
-            self.assertEqual(masked, actual, name)
+            self.assertLessEqual(masked, actual, name)
+            borders = {
+                symbol_layer.get("id")
+                for symbol_layer in renderer.iter("layer")
+                if symbol_layer.get("class") in line_classes
+            }
+            self.assertLessEqual(
+                borders, masked,
+                f"{name}: маска должна резать все границы слоя")
 
 
 class ServiceRoadLodTest(unittest.TestCase):

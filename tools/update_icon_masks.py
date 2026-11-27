@@ -3,13 +3,16 @@
 
 QGIS предупреждает, если разные источники маскируют один слой разными
 наборами symbol layer id. Шаблон хранит для всех источников один и тот же
-полный набор: каждая линейная и площадная цель маскируется целиком.
+набор: у каждой цели маскируются все её линейные symbol layer (границы).
+Заливки (`SimpleFill`, `SVGFill`, `CentroidFill`) целями маски не
+добавляются: значок на площади не должен оставлять в ней дыру. Уже
+записанные заливки сохраняются, пока их id существуют в рендерере.
 
 Скрипт читает цели из существующих масок (устаревшие и точечные слои
-отбрасываются), при необходимости назначает отсутствующие symbol layer id
-и записывает одинаковый список во все MaskMarker. Проект не открывается в
-QGIS: слои шаблона невалидны, и QGIS сохранил бы их исходный XML вместо
-изменённых рендереров.
+отбрасываются), при необходимости добавляет отсутствующие линейные
+symbol layer id и записывает одинаковый список во все MaskMarker. Проект
+не открывается в QGIS: слои шаблона невалидны, и QGIS сохранил бы их
+исходный XML вместо изменённых рендереров.
 
     python3 tools/update_icon_masks.py --dry-run
     python3 tools/update_icon_masks.py
@@ -29,20 +32,37 @@ DEFAULT_TEMPLATE = os.path.join(
 )
 
 
-def parse_mask_targets(value):
-    """id целевых слоёв из значения mask_symbollayers (новый и старый формат)."""
-    ids = set()
+# Symbol layer, рисующие границы. Заливки в маски не добавляются:
+# значок не должен оставлять дыру в площади.
+LINE_CLASSES = {
+    "SimpleLine",
+    "MarkerLine",
+    "ArrowLine",
+    "InterpolatedLine",
+    "HashLine",
+}
+
+
+def parse_mask_pairs(value):
+    """Пары (id слоя, id symbol layer) из mask_symbollayers."""
+    pairs = []
     if not value:
-        return ids
+        return pairs
     if "," in value:
         for part in value.split(";"):
-            if part:
-                ids.add(part.split(",")[0])
+            if part and "," in part:
+                layer_id, symbol_layer_id = part.split(",", 1)
+                pairs.append((layer_id, symbol_layer_id))
     else:
         parts = value.split(";")
         for index in range(0, len(parts) - 1, 2):
-            ids.add(parts[index])
-    return ids
+            pairs.append((parts[index], parts[index + 1]))
+    return pairs
+
+
+def parse_mask_targets(value):
+    """id целевых слоёв из значения mask_symbollayers (новый и старый формат)."""
+    return {layer_id for layer_id, _ in parse_mask_pairs(value)}
 
 
 def renderer_layers(layer):
@@ -109,14 +129,30 @@ def update(root, dry_run=False):
         if symbol_layer.get("class") == "MaskMarker"
     ]
     targets = collect_targets(layers, mask_layers)
-    ids = {
-        layer.findtext("id"): sorted({
+    existing = {}
+    for symbol_layer in mask_layers:
+        option = mask_option(symbol_layer)
+        if option is None:
+            continue
+        for layer_id, symbol_layer_id in parse_mask_pairs(
+                option.get("value") or ""):
+            existing.setdefault(layer_id, set()).add(symbol_layer_id)
+    ids = {}
+    for layer in targets:
+        layer_id = layer.findtext("id")
+        renderer = {
             symbol_layer.get("id")
             for symbol_layer in renderer_layers(layer)
             if symbol_layer.get("id")
-        })
-        for layer in targets
-    }
+        }
+        borders = {
+            symbol_layer.get("id")
+            for symbol_layer in renderer_layers(layer)
+            if symbol_layer.get("id")
+            and symbol_layer.get("class") in LINE_CLASSES
+        }
+        ids[layer_id] = sorted((existing.get(layer_id, set()) & renderer)
+                               | borders)
     parts = []
     for layer in targets:
         layer_id = layer.findtext("id")
