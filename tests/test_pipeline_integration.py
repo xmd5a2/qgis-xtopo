@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -4902,6 +4903,32 @@ class CoastlineGeometryTest(unittest.TestCase):
 
         point = ogr.CreateGeometryFromWkt(f"POINT ({x} {y})")
         return any(geometry.Contains(point) for geometry in geometries)
+
+    def test_adjacent_water_is_dissolved(self):
+        """Соприкасающиеся водоёмы теряют общую границу, раздельные — нет."""
+        from osgeo import ogr
+        from qgis_xtopo.core.bbox import BBox
+        from qgis_xtopo.core.coastline import dissolve_water
+
+        bbox = BBox(0, 0, 5, 5)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory, bbox)
+            water = config.vector_dir / "water_dissolved.sqlite"
+            self._write_layer(
+                water, "water_dissolved", ogr.wkbPolygon, [
+                    "POLYGON ((0 0,2 0,2 2,0 2,0 0))",
+                    "POLYGON ((1 1,3 1,3 3,1 3,1 1))",
+                    "POLYGON ((4 4,4.5 4,4.5 4.5,4 4.5,4 4))",
+                ],
+            )
+            self.assertTrue(dissolve_water(config, cancel=threading.Event()))
+            geometries = self._water_geometries(water)
+            self.assertEqual(len(geometries), 2)
+            self.assertTrue(self._contains(geometries, 1.5, 1.5))
+            self.assertTrue(self._contains(geometries, 4.25, 4.25))
+            self.assertAlmostEqual(
+                sum(geometry.Area() for geometry in geometries), 7.25, places=3,
+            )
 
     def test_open_coastline_inside_crop_is_extended(self):
         """Берег, оборванный внутри охвата, делит его на море и сушу."""

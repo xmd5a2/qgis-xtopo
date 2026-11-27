@@ -604,6 +604,140 @@ def _largest_polygon(source, destination):
     return destination
 
 
+def _unary_union(geometries):
+    """Объединяет геометрии, повторяя медленный путь QGIS при ошибке GEOS.
+
+    ``native:dissolve`` после сбоя ``unaryUnion`` объединяет объекты по
+    одному: так GEOS справляется с частью некорректных полигонов, на
+    которых пакетный вызов возвращает ошибку.
+    """
+    from qgis.core import QgsGeometry
+
+    merged = QgsGeometry.unaryUnion(geometries)
+    if not merged.lastError() or len(geometries) <= 2:
+        return merged
+    result = QgsGeometry()
+    for geometry in geometries:
+        result = QgsGeometry.unaryUnion([result, geometry])
+    return result
+
+
+def dissolve_water(config, progress=None, cancel=None):
+    """Убирает общие границы воды после вырезания пересечений.
+
+    ``prepare_coastline`` намеренно не растворяет океан с внутренними
+    водами: озеро, касающееся моря, вошло бы в геометрию океана и
+    пропало вместе с островом при вычитании пересечений.  После этого
+    шага растворять безопасно: ``unaryUnion`` сливает только
+    соприкасающиеся водоёмы, а раздельные остаются отдельными объектами.
+
+    ``native:dissolve`` делает то же самое, но заметную часть времени
+    тратит на запуск Processing, промежуточный GeoPackage и повторную
+    запись слоя.  Здесь геометрии объединяются напрямую, а результат
+    пишется в SQLite одной транзакцией.
+    """
+    from osgeo import ogr
+    from qgis.core import QgsGeometry
+
+    water = config.vector_dir / "water_dissolved.sqlite"
+    if not water.exists() or not _has_features(water):
+        return False
+    dataset = ogr.Open(str(water))
+    if dataset is None:
+        raise CoastlineError(f"Cannot open {water}")
+    layer = dataset.GetLayer(0)
+    if layer is None:
+        dataset = None
+        return False
+    source_ref = layer.GetSpatialRef()
+    spatial_ref = source_ref.Clone() if source_ref is not None else None
+    geometries = []
+    for feature in layer:
+        if cancel is not None and cancel.is_set():
+            dataset = None
+            raise InterruptedError
+        geometry = feature.GetGeometryRef()
+        if geometry is None or geometry.IsEmpty() or geometry.GetDimension() != 2:
+            continue
+        merged_geometry = QgsGeometry()
+        merged_geometry.fromWkb(bytes(geometry.ExportToWkb()))
+        if merged_geometry.isNull() or merged_geometry.isEmpty():
+            continue
+        geometries.append(merged_geometry)
+    dataset = None
+    if not geometries:
+        return False
+    if len(geometries) == 1:
+        merged = geometries[0]
+    else:
+        merged = _unary_union(geometries)
+    if merged.isNull() or merged.isEmpty():
+        raise CoastlineError("Water dissolve returned no output")
+    parts = merged.asGeometryCollection()
+    if not parts:
+        return False
+    temporary = water.with_name("water_dissolved.part.sqlite")
+    try:
+        if not _write_water_parts(parts, spatial_ref, temporary):
+            temporary.unlink(missing_ok=True)
+            return False
+        temporary.replace(water)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return True
+
+
+def _write_water_parts(parts, spatial_ref, destination):
+    """Пишет части растворённой воды в SQLite одной транзакцией.
+
+    Без транзакции OGR фиксирует каждый объект отдельно, и запись сотни
+    крупных полигонов занимает больше времени, чем само объединение.
+    """
+    from osgeo import ogr
+
+    from .spatialite import CREATION_OPTIONS
+
+    driver = ogr.GetDriverByName("SQLite")
+    destination = Path(destination)
+    destination.unlink(missing_ok=True)
+    output = driver.CreateDataSource(
+        str(destination), options=list(CREATION_OPTIONS)
+    )
+    if output is None:
+        raise CoastlineError(f"Cannot create {destination}")
+    try:
+        layer = output.CreateLayer(
+            "water_dissolved", spatial_ref, geom_type=ogr.wkbMultiPolygon
+        )
+        output.StartTransaction()
+        written = 0
+        for part in parts:
+            geometry = ogr.CreateGeometryFromWkb(bytes(part.asWkb()))
+            if (
+                geometry is None
+                or geometry.IsEmpty()
+                or geometry.GetDimension() != 2
+            ):
+                continue
+            if _geometry_area(geometry) <= MIN_POLYGON_AREA:
+                continue
+            if geometry.GetGeometryName() == "POLYGON":
+                geometry = ogr.ForceToMultiPolygon(geometry)
+            if geometry.GetGeometryName() != "MULTIPOLYGON":
+                continue
+            item = ogr.Feature(layer.GetLayerDefn())
+            item.SetGeometry(geometry)
+            layer.CreateFeature(item)
+            written += 1
+        output.CommitTransaction()
+        if not written:
+            return False
+    finally:
+        output = None
+    return True
+
+
 def _write_polygons(source, destination):
     """Записать только полигональные объекты, сохранив поля.
 

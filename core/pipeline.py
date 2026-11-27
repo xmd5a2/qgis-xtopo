@@ -4297,6 +4297,22 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             finally:
                 gdal_log.LOG.restore()
             timings.add_stage("пересечения полигонов", time.monotonic() - started)
+        report("Растворение воды")
+        started = time.monotonic()
+        gdal_log.LOG.install()
+        try:
+            coastline.dissolve_water(
+                config, progress=report, cancel=cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - карта не должна страдать
+            report(i18n.trf(
+                "WARNING: растворение воды: {}; шаг пропущен", exc,
+            ))
+        finally:
+            gdal_log.LOG.restore()
+        timings.add_stage("растворение воды", time.monotonic() - started)
         # Данные шаблона нужны служебным слоям значков; к этому моменту
         # фоновый разбор давно готов.
         template_thread.join()
