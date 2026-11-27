@@ -241,11 +241,23 @@ class OsmConvertTest(unittest.TestCase):
         keys = set(first) | set(second)
         self.assertEqual(len(keys), len({key.lower() for key in keys}))
 
+    def test_hyphenated_fields_are_unique_after_sqlite_laundering(self):
+        """SQLite заменяет дефис на подчёркивание и приводит к нижнему регистру."""
+        names = FieldNames()
+        resolved = names.apply({
+            "name:ko-Hani": "hanja",
+            "name:ko_hani": "duplicate",
+        })
+        self.assertEqual(
+            resolved,
+            {"name:ko_hani": "hanja", "name:ko_hani2": "duplicate"},
+        )
+
     def test_rename_is_the_same_for_all_features(self):
         names = FieldNames()
         first = names.apply({"communication:5G": "yes"})
         second = names.apply({"communication:5g": "no"})
-        self.assertIn("communication:5G", first)
+        self.assertIn("communication:5g", first)
         self.assertNotIn("communication:5g", second)
         self.assertEqual(len(second), 1)
 

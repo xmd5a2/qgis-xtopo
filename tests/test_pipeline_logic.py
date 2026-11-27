@@ -1764,6 +1764,57 @@ class AdminNameFallbackTest(unittest.TestCase):
         )
         self.assertEqual(label_line.GetGeometryName(), "MULTILINESTRING")
 
+    def test_hyphenated_relation_name_does_not_duplicate_source_field(self):
+        """Тег ``name:ko-Hani`` не создаёт второй колонки ``name:ko_hani``.
+
+        Драйвер SQLite заменяет дефис на подчёркивание.  Если исходный
+        слой уже содержит ``name:ko_hani``, добавление поля из тега
+        отношения с дефисом роняло создание таблицы.
+        """
+        self._write_lines([
+            self._feature(
+                None, [[0, 0], [0, 1]],
+                **{
+                    "@id": "way/777",
+                    "name:ko_hani": "大韓民國 領海線",
+                },
+            ),
+        ])
+        names = {
+            "2": {
+                "ways": {
+                    777: {
+                        "name": "대한민국 영해선",
+                        "name:ko-Hani": "大韓民國 領海線",
+                    },
+                },
+                "relations": {},
+                "fields": {"name", "name:ko-Hani"},
+            },
+        }
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            self.target, "admin_level_2_relation",
+            names=names, level="2",
+        )
+        self.assertEqual(created, 1)
+        dataset = ogr.Open(str(self.target))
+        feature = next(iter(dataset.GetLayer(0)))
+        self.assertEqual(feature.GetField("name"), "대한민국 영해선")
+        self.assertEqual(
+            feature.GetField("name:ko_hani"), "大韓民國 領海線"
+        )
+        fields = [
+            feature.GetDefnRef().GetFieldDefn(index).GetName()
+            for index in range(feature.GetDefnRef().GetFieldCount())
+        ]
+        self.assertEqual(
+            len(fields), len({field.lower() for field in fields})
+        )
+
     def test_open_land_border_gets_outside_label_marker(self):
         """Открытая сухопутная граница тоже помечается для подписи снаружи."""
         self._write_lines([

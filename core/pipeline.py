@@ -824,13 +824,19 @@ class _GpkgWriter:
         for index in range(definition.GetFieldCount()):
             field = definition.GetFieldDefn(index)
             self.layer.CreateField(ogr.FieldDefn(field.GetName(), field.GetType()))
-        existing = {
-            self.layer.GetLayerDefn().GetFieldDefn(index).GetName()
+        # Имена, которые SQLite записывает на диск: дефис и решётка
+        # заменяются на подчёркивание, регистр понижается.
+        self.field_names = {
+            osm_convert.sqlite_field_name(
+                self.layer.GetLayerDefn().GetFieldDefn(index).GetName()
+            ): self.layer.GetLayerDefn().GetFieldDefn(index).GetName()
             for index in range(self.layer.GetLayerDefn().GetFieldCount())
         }
         for name in extra_fields:
-            if name not in existing:
-                self.layer.CreateField(ogr.FieldDefn(name, ogr.OFTString))
+            key = osm_convert.sqlite_field_name(name)
+            if key not in self.field_names:
+                self.layer.CreateField(ogr.FieldDefn(key, ogr.OFTString))
+                self.field_names[key] = key
         # Транзакция начинается с первым объектом: пустой GPKG-слой
         # закрывается без неё. Иначе GPKG фиксирует каждый объект отдельной
         # транзакцией.
@@ -849,8 +855,11 @@ class _GpkgWriter:
         # колонок: на смешанных слоях этот цикл держал GIL.
         output.SetFrom(feature)
         for name, value in (values or {}).items():
-            if value and definition.GetFieldIndex(name) >= 0:
-                output.SetField(name, value)
+            field = self.field_names.get(
+                osm_convert.sqlite_field_name(name), name
+            )
+            if value and definition.GetFieldIndex(field) >= 0:
+                output.SetField(field, value)
         if geometry is not None:
             output.SetGeometry(geometry)
         if not self.started:
@@ -2506,9 +2515,10 @@ def _admin_feature_tags(feature, entry):
 
 
 def _admin_name_values(tags):
-    """Поля name* из тегов отношения."""
+    """Поля name* из тегов отношения в именах колонок SQLite."""
     names = {
-        name: value for name, value in (tags or {}).items()
+        osm_convert.sqlite_field_name(name): value
+        for name, value in (tags or {}).items()
         if name == "name" or name.startswith("name:")
     }
     return names or None
@@ -3085,7 +3095,7 @@ def _parse_admin_relation_tags(text):
             )
         for key in tags:
             if key == "name" or key.startswith("name:"):
-                entry["fields"].add(key)
+                entry["fields"].add(osm_convert.sqlite_field_name(key))
     return names
 
 

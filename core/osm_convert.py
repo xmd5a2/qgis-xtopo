@@ -37,12 +37,29 @@ def _tags(element):
     return result
 
 
-class FieldNames:
-    """Имена полей, уникальные без учёта регистра.
+def sqlite_field_name(name):
+    """Имя поля в том виде, в каком его создаёт драйвер SQLite.
 
-    SQLite не различает регистр имён колонок, поэтому теги вроде
-    `communication:5G` и `communication:5g` приводят к ошибке создания
-    таблицы, и слой молча теряется. Совпадающие имена переименуются
+    GDAL SQLite приводит имя к нижнему регистру и заменяет апостроф,
+    дефис и решётку на подчёркивание (``LaunderName``).  Теги вроде
+    ``name:ko-Hani`` и ``name:ko_hani`` после этого неразличимы, и
+    создание таблицы падает на повторяющейся колонке.
+    """
+    return (
+        str(name).lower()
+        .replace("'", "_")
+        .replace("-", "_")
+        .replace("#", "_")
+    )
+
+
+class FieldNames:
+    """Имена полей, уникальные в том виде, в каком их хранит SQLite.
+
+    SQLite не различает регистр имён колонок и заменяет часть символов,
+    поэтому теги вроде `communication:5G`/`communication:5g` или
+    `name:ko-Hani`/`name:ko_hani` приводили бы к ошибке создания
+    таблицы, и слой молча терялся. Совпадающие имена переименуются
     одинаково для всех объектов слоя.
     """
 
@@ -56,16 +73,16 @@ class FieldNames:
         target = self._mapping.get(name)
         if target is not None:
             return target
-        target = name
-        lowered = target.lower()
-        if lowered in self._used:
+        target = sqlite_field_name(name)
+        used = target
+        if used in self._used:
             index = 2
-            while f"{lowered}{index}" in self._used:
+            while f"{used}{index}" in self._used:
                 index += 1
-            target = f"{name}{index}"
-            lowered = target.lower()
+            target = f"{used}{index}"
+            used = target
         self._mapping[name] = target
-        self._used.add(lowered)
+        self._used.add(used)
         return target
 
     def apply(self, properties):
