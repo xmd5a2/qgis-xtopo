@@ -1071,6 +1071,37 @@ class Pipeline:
         )
         return self._admin_land_cache
 
+    def _closed_relation_polygons(self, layer, entry):
+        """Замкнутые контуры отношений: ``(id, QgsGeometry)``.
+
+        Ближайший берег может принадлежать чужой стране: морская граница
+        Кореи у Цусимы проходит ближе к японскому острову, чем к Корее.
+        Замкнутые контуры стран позволяют проверить, чей это берег, и
+        выбрать противоположную сторону.
+        """
+        from qgis.core import QgsGeometry
+
+        layer.ResetReading()
+        polygons = []
+        for position, feature in enumerate(layer):
+            if (
+                self.cancel is not None
+                and position % 64 == 0
+                and self.cancel.is_set()
+            ):
+                raise InterruptedError("Preparation cancelled")
+            multiple = _closed_ring_multipolygon(feature.GetGeometryRef())
+            if multiple is None:
+                continue
+            shape = QgsGeometry.fromWkt(multiple.ExportToWkt())
+            for relation_id, _tags in _admin_feature_relations(
+                feature, entry
+            ):
+                if relation_id is not None:
+                    polygons.append((relation_id, shape))
+        layer.ResetReading()
+        return polygons
+
     def _admin_border_members(self, source, names):
         """Дописывает в линии границы членов отношений без admin_level.
 
@@ -1237,6 +1268,9 @@ class Pipeline:
             layer.GetSpatialRef(), geometry_type=ogr.wkbMultiPolygon,
             cancel=self.cancel, extra_fields=sorted(extra_fields),
         )
+        # Замкнутые контуры других отношений нужны, чтобы отличить
+        # ближайший берег своей страны от чужого острова.
+        country_polygons = self._closed_relation_polygons(layer, entry)
         # Полосы одной страны или региона сливаются в один объект: иначе
         # подпись повторяется на каждом куске границы.
         groups = {}
@@ -1279,7 +1313,11 @@ class Pipeline:
                     ):
                         land = self._admin_land_geometry()
                         if land is not None:
-                            inside_side = _relation_land_side(geometry, land)
+                            inside_side = _relation_land_side(
+                                geometry, land,
+                                relation_id=relation_id,
+                                country_polygons=country_polygons,
+                            )
                     if side:
                         polygons = _offset_line_multipolygon(
                             geometry, side
@@ -2789,13 +2827,38 @@ def _feature_is_maritime(feature):
     return index >= 0 and str(feature.GetField(index) or "") == "yes"
 
 
-def _relation_land_side(geometry, land):
+def _land_point_is_foreign(point, relation_id, country_polygons):
+    """Лежит ли точка берега внутри замкнутого контура другого отношения."""
+    from qgis.core import QgsGeometry
+
+    if relation_id is None or not country_polygons:
+        return False
+    geometry = QgsGeometry.fromPointXY(point)
+    for other_id, polygon in country_polygons:
+        if other_id == relation_id:
+            continue
+        try:
+            if not polygon.boundingBox().contains(point):
+                continue
+            if polygon.contains(geometry):
+                return True
+        except Exception:  # noqa: BLE001 - сторона не критична
+            continue
+    return False
+
+
+def _relation_land_side(geometry, land, relation_id=None,
+                        country_polygons=()):
     """Сторона морской границы, на которой лежит ближайшая суша.
 
     У морской границы страна всегда обращена к своему берегу. Направление
     way в OSM произвольно, поэтому сторона определяется по береговой линии
     и островам: для каждого отрезка берётся ближайшая к его середине точка
     суши. Длинные отрезки весят больше — на них обычно и ставится подпись.
+
+    Если ближайший берег принадлежит другому отношению (например, граница
+    Кореи проходит ближе к японской Цусиме), сторона меняется на
+    противоположную: страна находится не на стороне чужого берега.
     """
     from qgis.core import QgsGeometry, QgsPointXY
 
@@ -2822,6 +2885,10 @@ def _relation_land_side(geometry, land):
                 continue
             point = nearest.asPoint()
             cross = dx * (point.y() - y1) - dy * (point.x() - x1)
+            if _land_point_is_foreign(
+                point, relation_id, country_polygons
+            ):
+                cross = -cross
             if cross > 0:
                 left += length
             elif cross < 0:

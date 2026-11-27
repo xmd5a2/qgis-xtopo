@@ -2263,6 +2263,110 @@ class AdminNameFallbackTest(unittest.TestCase):
         line = label_line.GetGeometryRef(0)
         self.assertGreater(line.GetPoint(0)[0], line.GetPoint(1)[0])
 
+    def test_foreign_land_flips_maritime_side(self):
+        """Берег другого отношения не считается стороной страны."""
+        from qgis.core import QgsGeometry
+        from qgis_xtopo.core.pipeline import _relation_land_side
+
+        line = ogr.CreateGeometryFromWkt("LINESTRING (0 -0.5, 1 -0.5)")
+        land = QgsGeometry.fromWkt("POINT (0.5 0.5)")
+        foreign = QgsGeometry.fromWkt(
+            "POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))"
+        )
+        self.assertEqual(_relation_land_side(line, land), 1)
+        self.assertEqual(
+            _relation_land_side(
+                line, land, relation_id=1,
+                country_polygons=[(2, foreign)],
+            ),
+            -1,
+        )
+
+    def test_foreign_land_does_not_flip_own_island(self):
+        """Свой замкнутый контур не делает берег чужим."""
+        from qgis.core import QgsGeometry
+        from qgis_xtopo.core.pipeline import _relation_land_side
+
+        line = ogr.CreateGeometryFromWkt("LINESTRING (0 -0.5, 1 -0.5)")
+        land = QgsGeometry.fromWkt("POINT (0.5 0.5)")
+        own = QgsGeometry.fromWkt(
+            "POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))"
+        )
+        self.assertEqual(
+            _relation_land_side(
+                line, land, relation_id=1,
+                country_polygons=[(1, own)],
+            ),
+            1,
+        )
+
+    def test_foreign_island_keeps_country_label_on_own_side(self):
+        """Чужой остров рядом с границей не переворачивает подпись."""
+        coast = self.config.temp_dir / "coast.geojson"
+        coast.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [0.5, 0.5],
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        save_vector(
+            coast, self.config.vector_dir / "coastline.sqlite",
+            "coastline",
+        )
+        self._write_lines([
+            self._feature(
+                None, [[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]],
+                **{"@id": "way/2"},
+            ),
+            self._feature(
+                None, [[0, -0.5], [1, -0.5]],
+                **{"@id": "way/1", "maritime": "yes"},
+            ),
+        ])
+        relation_a = {"admin_level": "2", "name": "A"}
+        relation_b = {"admin_level": "2", "name": "B"}
+        names = {
+            "2": {
+                "ways": {1: relation_a, 2: relation_b},
+                "relations": {1: relation_a, 2: relation_b},
+                "way_relations": {
+                    1: [(1, relation_a)],
+                    2: [(2, relation_b)],
+                },
+                "fields": {"name"},
+            },
+        }
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        created = pipeline._name_polygons_from_lines(
+            self.config.vector_dir / "admin_level_2_dissolved.sqlite",
+            self.target, "admin_level_2_relation",
+            names=names, level="2",
+        )
+        self.assertEqual(created, 2)
+
+        dataset = ogr.Open(str(self.target))
+        for feature in dataset.GetLayer(0):
+            if feature.GetField("name") != "A":
+                continue
+            label_line = ogr.CreateGeometryFromWkt(
+                feature.GetField("label_line")
+            )
+            line = label_line.GetGeometryRef(0)
+            self.assertGreater(line.GetPoint(0)[0], line.GetPoint(1)[0])
+            break
+        else:
+            self.fail("relation A not found")
+
     def test_existing_relation_is_kept(self):
         relation = self.config.temp_dir / "relation.geojson"
         relation.write_text(
