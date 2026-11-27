@@ -47,6 +47,8 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `QT_QPA_PLATFORM=offscreen` уже выставлен. Запускайте имена модулей, а не
   отдельные классы: часть тестов создаёт `QgsApplication` в `setUpClass`, и
   класс, запущенный первым, может упасть на `QFontDatabase`.
+  Для разового скрипта вне `unittest` сначала выполните `import tests`: он
+  регистрирует корень репозитория как пакет `qgis_xtopo`.
 - Интеграционные тесты с PBF пропускаются, пока `QGIS_XTOPO_TEST_PBF` не
   указывает на локальный `.pbf`. `check_pbf_coverage.py` требует выгрузки
   Geofabrik в `~/qgis_projects/qgisxtopo-cache/geofabrik`; участки без
@@ -156,6 +158,15 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   такие же полосы до 1:3M. Океан не фильтруется: его площадь на порядки
   больше порога. Подписи воды повторяют порог с 1:3M. Подробности —
   `docs/agents/styles.md`, проверка — `WaterLodTest`.
+- **Имя речного полигона не дублирует подпись линии.** Шаг
+  `core/riverbank_names.py` очищает все поля имён у полигонов
+  `water=river`/`waterway=riverbank`, если вариант имени совпадает с
+  пересекающей линией `river`/`river_intermittent`. В `water.sqlite`
+  сохраняется `waterway` (`field_subset.WATER`). Полигоны
+  `natural=water` без речного тега не трогаются: их линия вычитается
+  `water_without_riverbanks`, и имя полигона остаётся единственной
+  подписью. Подробности — `docs/agents/labels.md`, проверка —
+  `RiverbankNameTest`.
 - **Подписи слоёв-блокировщиков дорог скрыты**: у слоёв
   `[blocking] highway*` текст и halo прозрачные, а приоритет понижен —
   иначе копия подписи дороги отнимает размещение у настоящей подписи,
