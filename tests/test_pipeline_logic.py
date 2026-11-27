@@ -1413,6 +1413,25 @@ class GeometryRepairRecipeTest(unittest.TestCase):
                 self.assertIn('["boundary"!="disputed"]', line, name)
                 self.assertIn('["disputed"!="yes"]', line, name)
 
+    def test_camp_site_query_skips_protected_areas(self):
+        """Кемпинг с boundary=protected_area не попадает в слой кемпингов."""
+        from qgis_xtopo.core.pbf_source import filter_features
+        from qgis_xtopo.core.resources import read_query
+
+        text = read_query("camp_site")
+        protected = {
+            "properties": {
+                "tourism": "camp_site",
+                "boundary": "protected_area",
+                "@type": "relation",
+            },
+        }
+        camp = {
+            "properties": {"tourism": "camp_site", "@type": "node"},
+        }
+        self.assertEqual(filter_features([protected], text), [])
+        self.assertEqual(filter_features([camp], text), [camp])
+
     def test_admin_relation_rings_are_oriented(self):
         """Кольца отношений ориентируются до подписи по границе."""
         from qgis_xtopo.core.query_recipes import recipe_for

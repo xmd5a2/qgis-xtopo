@@ -1,5 +1,5 @@
 (
-node["tourism"="camp_site"]["abandoned"!="yes"];
-way["tourism"="camp_site"]["abandoned"!="yes"];
-relation["tourism"="camp_site"]["abandoned"!="yes"];
+node["tourism"="camp_site"]["abandoned"!="yes"]["boundary"!="protected_area"];
+way["tourism"="camp_site"]["abandoned"!="yes"]["boundary"!="protected_area"];
+relation["tourism"="camp_site"]["abandoned"!="yes"]["boundary"!="protected_area"];
 );
