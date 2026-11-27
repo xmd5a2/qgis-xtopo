@@ -1,4 +1,4 @@
 (
-way["admin_level"="2"][!"building"];
-relation["admin_level"="2"][!"building"];
+way["admin_level"="2"][!"building"]["boundary"!="historic"]["boundary"!="disputed"]["disputed"!="yes"];
+relation["admin_level"="2"][!"building"]["boundary"!="historic"]["boundary"!="disputed"]["disputed"!="yes"];
 );

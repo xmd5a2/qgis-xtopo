@@ -1673,6 +1673,8 @@ class Pipeline:
                 parameters.get("target_crs"),
                 parameters.get("fields"),
             )
+        if operation == "orient_rings":
+            return self._orient_rings(name, current)
         if operation == "load":
             path = self.config.vector_dir / f"{parameters['name']}.sqlite"
             if path.exists():
@@ -1910,6 +1912,47 @@ class Pipeline:
                     f"{name}: высота 0 убрана у {cleared} объектов"
                 )
         self.progress(f"{name}: saved {destination.name}")
+        return current
+
+    def _orient_rings(self, name, current):
+        """Приводит кольца сохранённого слоя к виду «внутренность слева».
+
+        Шаблон ставит подпись региона вдоль ``boundary($geometry)`` слева
+        от линии, поэтому направление колец в OSM должно быть
+        нормализовано: внешние — против часовой стрелки, дырки — по
+        часовой. Иначе название региона попадает на внешнюю сторону.
+        """
+        from osgeo import ogr
+
+        path = self.config.vector_dir / f"{name}.sqlite"
+        if not path.exists():
+            return current
+        dataset = ogr.Open(str(path), 1)
+        if dataset is None:
+            return current
+        layer = dataset.GetLayer(0)
+        changed = 0
+        try:
+            for position, feature in enumerate(layer):
+                if (
+                    self.cancel is not None
+                    and position % 256 == 0
+                    and self.cancel.is_set()
+                ):
+                    raise InterruptedError("Preparation cancelled")
+                geometry = _oriented_ogr_geometry(feature.GetGeometryRef())
+                if geometry is None:
+                    continue
+                feature.SetGeometry(geometry)
+                layer.SetFeature(feature)
+                changed += 1
+        finally:
+            layer = None
+            dataset = None
+        if changed:
+            self.progress(
+                f"{name}: кольца ориентированы, объектов {changed}"
+            )
         return current
 
     def _missing_layer(self, name, reference):
@@ -2506,11 +2549,82 @@ def _ring_points(line):
     return ring
 
 
+def _ring_is_clockwise(ring):
+    """Направление линейного кольца OGR по знаку площади."""
+    count = ring.GetPointCount()
+    area = 0.0
+    for index in range(count - 1):
+        x1, y1 = ring.GetPoint(index)[:2]
+        x2, y2 = ring.GetPoint(index + 1)[:2]
+        area += x1 * y2 - x2 * y1
+    if count > 1:
+        x1, y1 = ring.GetPoint(count - 1)[:2]
+        x2, y2 = ring.GetPoint(0)[:2]
+        area += x1 * y2 - x2 * y1
+    return area < 0
+
+
+def _oriented_ring(ring, clockwise):
+    """Копия кольца OGR в нужном направлении."""
+    from osgeo import ogr
+
+    if _ring_is_clockwise(ring) == clockwise:
+        return ring.Clone()
+    result = ogr.Geometry(ogr.wkbLinearRing)
+    for index in range(ring.GetPointCount() - 1, -1, -1):
+        x, y = ring.GetPoint(index)[:2]
+        result.AddPoint_2D(x, y)
+    return result
+
+
+def _oriented_ogr_geometry(geometry):
+    """Полигон с нормализованными кольцами; None — менять нечего."""
+    from osgeo import ogr
+
+    if geometry is None or geometry.IsEmpty():
+        return None
+    name = geometry.GetGeometryName()
+    if name not in ("POLYGON", "MULTIPOLYGON"):
+        return None
+    if name == "POLYGON":
+        polygons = [geometry]
+    else:
+        polygons = [
+            geometry.GetGeometryRef(index)
+            for index in range(geometry.GetGeometryCount())
+        ]
+    result = []
+    changed = False
+    for polygon in polygons:
+        rings = []
+        for index in range(polygon.GetGeometryCount()):
+            ring = polygon.GetGeometryRef(index)
+            clockwise = index > 0
+            if _ring_is_clockwise(ring) != clockwise:
+                ring = _oriented_ring(ring, clockwise)
+                changed = True
+            rings.append(ring)
+        oriented = ogr.Geometry(ogr.wkbPolygon)
+        for ring in rings:
+            oriented.AddGeometry(ring)
+        result.append(oriented)
+    if not changed:
+        return None
+    if name == "POLYGON":
+        return result[0]
+    multiple = ogr.Geometry(ogr.wkbMultiPolygon)
+    for polygon in result:
+        multiple.AddGeometry(polygon)
+    return multiple
+
+
 def _closed_ring_multipolygon(geometry):
     """MultiPolygon только из замкнутых колец линейной геометрии.
 
     Разомкнутые части пропускаются: площадь из них не собрать, а для
-    подписи достаточно любого замкнутого контура.
+    подписи достаточно любого замкнутого контура. Кольца ориентируются
+    против часовой стрелки: шаблон ставит подпись слева от границы, то
+    есть внутри полигона.
     """
     from osgeo import ogr
 
@@ -2523,7 +2637,7 @@ def _closed_ring_multipolygon(geometry):
         if ring is None:
             return False
         polygon = ogr.Geometry(ogr.wkbPolygon)
-        polygon.AddGeometry(ring)
+        polygon.AddGeometry(_oriented_ring(ring, clockwise=False))
         multiple.AddGeometry(polygon)
         return True
 
@@ -3183,6 +3297,13 @@ def _parse_admin_relation_tags(text):
                 )
         level = tags.get("admin_level", "")
         if level not in ("2", "4"):
+            continue
+        # Исторические и спорные границы не показываются на карте. Без
+        # этой проверки их участки снова попадали бы в линии через
+        # _admin_border_members, даже если запрос их уже исключил.
+        if tags.get("boundary") in ("historic", "disputed"):
+            continue
+        if tags.get("disputed") == "yes":
             continue
         entry = names.setdefault(
             level, {

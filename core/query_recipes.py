@@ -80,6 +80,16 @@ def label_axis(main_flow=False):
     return step("label_axis", main_flow=main_flow)
 
 
+def orient_rings():
+    """Кольца полигонов против часовой стрелки, дырки — по часовой.
+
+    Шаблон ставит названия регионов вдоль ``boundary($geometry)`` слева
+    от линии. Направление кольца в OSM произвольно, поэтому без
+    нормализации подпись может оказаться снаружи полигона.
+    """
+    return step("orient_rings")
+
+
 def split_layer(fields=None):
     return step("split_layer", fields=fields)
 
@@ -168,6 +178,8 @@ RECIPES = {
         difference("admin_level_2_dissolved"),
         dissolve(), singleparts(), save("_proc"),
     ]),
+    "admin_level_2_relation": Recipe([save(), orient_rings()]),
+    "admin_level_4_relation": Recipe([save(), orient_rings()]),
     "railway_all": Recipe([
         save(), explode(), reproject(), save("_exploded"), pack_roads(),
     ]),

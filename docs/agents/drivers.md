@@ -242,6 +242,16 @@
   оставляет мультитип — иначе граница исчезает из проекта целиком.
   Проверки — `tests/test_pipeline_logic.py` и
   `OpenBorderAdminLabelTest` в `tests/test_template_styles.py`.
+- **Исторические и спорные границы не загружаются.** Запросы
+  `admin_level_2/4` и `admin_level_*_relation` отбрасывают
+  `boundary=historic`, `boundary=disputed` и `disputed=yes`. Ту же
+  проверку делает `_parse_admin_relation_tags`: иначе
+  `_admin_border_members` снова дописывал бы участки таких отношений в
+  `_lines`, и fallback возвращал бы их на карту. Замкнутые контуры
+  `admin_level_*_relation` проходят шаг `orient_rings` (внешнее кольцо —
+  против часовой, дырки — по часовой), потому что шаблон ставит подпись
+  слева от `boundary($geometry)`; fallback ориентирует кольца в
+  `_closed_ring_multipolygon`.
 - **Члены отношений без `admin_level` тоже нужны границе.** Участок
   границы может быть обычной рекой: у way нет `boundary`/`admin_level`,
   он входит только в отношение. GDAL выбрасывает неполное отношение

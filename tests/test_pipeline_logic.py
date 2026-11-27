@@ -1398,6 +1398,30 @@ class GeometryRepairRecipeTest(unittest.TestCase):
                 if "admin_level" in line:
                     self.assertIn('[!"building"]', line, name)
 
+    def test_admin_queries_skip_historic_and_disputed_boundaries(self):
+        """Исторические и спорные границы не должны попадать на карту."""
+        from qgis_xtopo.core.resources import read_query
+
+        for name in (
+            "admin_level_2", "admin_level_4",
+            "admin_level_2_relation", "admin_level_4_relation",
+        ):
+            for line in read_query(name).splitlines():
+                if "admin_level" not in line:
+                    continue
+                self.assertIn('["boundary"!="historic"]', line, name)
+                self.assertIn('["boundary"!="disputed"]', line, name)
+                self.assertIn('["disputed"!="yes"]', line, name)
+
+    def test_admin_relation_rings_are_oriented(self):
+        """Кольца отношений ориентируются до подписи по границе."""
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        for name in ("admin_level_2_relation", "admin_level_4_relation"):
+            steps = [operation for operation, _ in recipe_for(name).steps]
+            self.assertEqual(steps[0], "save", name)
+            self.assertEqual(steps[-1], "orient_rings", name)
+
     def test_barrier_repairs_invalid_relations(self):
         """Крепостные стены — вложенные мультиполигоны, QGIS их отбрасывает."""
         from qgis_xtopo.core.query_recipes import recipe_for
@@ -1691,6 +1715,61 @@ class AdminNameFallbackTest(unittest.TestCase):
             features[0].GetGeometryRef().GetGeometryName(), "MULTIPOLYGON"
         )
         self.assertIn("подписи собраны", messages[-1])
+
+    def test_closed_ring_polygon_is_counter_clockwise(self):
+        """Внутренность полигона должна оставаться слева от границы."""
+        from qgis_xtopo.core.pipeline import _ring_is_clockwise
+
+        self._write_lines([
+            self._feature(
+                "Closed", [[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]
+            ),
+        ])
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        pipeline._admin_name_fallback()
+
+        dataset = ogr.Open(str(self.target))
+        feature = next(iter(dataset.GetLayer(0)))
+        ring = feature.GetGeometryRef().GetGeometryRef(0).GetGeometryRef(0)
+        self.assertFalse(_ring_is_clockwise(ring))
+
+    def test_orient_rings_step_rewrites_saved_layer(self):
+        """Шаг orient_rings правит уже сохранённый слой отношений."""
+        from qgis_xtopo.core.pipeline import _ring_is_clockwise
+
+        source = self.config.temp_dir / "rings.geojson"
+        source.write_text(
+            json.dumps({
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"name": "Region"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [0, 0], [0, 1], [1, 1], [1, 0], [0, 0],
+                        ]],
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        save_vector(source, self.target, "admin_level_2_relation")
+        pipeline = Pipeline(
+            self.config, BBox(0, 0, 1, 1), _FakeRunner(None)
+        )
+        pipeline._step(
+            "admin_level_2_relation", source, "orient_rings", {}
+        )
+
+        dataset = ogr.Open(str(self.target))
+        feature = next(iter(dataset.GetLayer(0)))
+        self.assertFalse(
+            _ring_is_clockwise(feature.GetGeometryRef().GetGeometryRef(0))
+        )
+        self.assertEqual(feature.GetField("name"), "Region")
 
     def test_open_lines_do_not_create_names(self):
         self._write_lines([self._feature("Open", [[2, 0], [3, 1]])])
@@ -2021,6 +2100,43 @@ class AdminNameFallbackTest(unittest.TestCase):
         self.assertEqual(
             names["2"]["way_relations"][97376702][0][0], 60189
         )
+
+    def test_relation_polygon_rings_are_oriented(self):
+        """Внешнее кольцо — против часовой, дырка — по часовой."""
+        from qgis_xtopo.core.pipeline import (
+            _oriented_ogr_geometry, _ring_is_clockwise,
+        )
+
+        geometry = ogr.CreateGeometryFromWkt(
+            "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0),"
+            " (0.2 0.2, 0.8 0.2, 0.8 0.8, 0.2 0.8, 0.2 0.2))"
+        )
+        self.assertTrue(_ring_is_clockwise(geometry.GetGeometryRef(0)))
+        self.assertFalse(_ring_is_clockwise(geometry.GetGeometryRef(1)))
+        oriented = _oriented_ogr_geometry(geometry)
+        self.assertFalse(_ring_is_clockwise(oriented.GetGeometryRef(0)))
+        self.assertTrue(_ring_is_clockwise(oriented.GetGeometryRef(1)))
+
+    def test_historic_and_disputed_relations_are_skipped(self):
+        """Исторические и спорные границы не дают названий и участков."""
+        from qgis_xtopo.core.pipeline import _parse_admin_relation_tags
+
+        names = _parse_admin_relation_tags(
+            "r1 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=4,boundary=historic,name=Old Mw5@outer\n"
+            "r2 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=2,boundary=administrative,disputed=yes,"
+            "name=Claim Mw6@outer\n"
+            "r3 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=4,boundary=disputed,name=Split Mw7@outer\n"
+            "r4 v1 dV c0 t2026-01-01T00:00:00Z i0 u "
+            "Tadmin_level=2,boundary=administrative,name=Country "
+            "Mw8@outer"
+        )
+        self.assertNotIn(1, names.get("4", {}).get("relations", {}))
+        self.assertNotIn(6, names.get("2", {}).get("ways", {}))
+        self.assertNotIn(7, names.get("4", {}).get("ways", {}))
+        self.assertEqual(names["2"]["ways"][8]["name"], "Country")
 
     def test_opl_escaped_names_are_decoded(self):
         """OPL пишет пробел и процент как ``%XX%``, а не ``%XX``."""

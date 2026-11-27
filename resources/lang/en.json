@@ -586,6 +586,8 @@
   "Пики: проверено {}, удалено {}, исправлено ele {}": "Peaks: checked {}, removed {}, ele fixed {}",
   "{}: подписи собраны из линий границы, объектов {}": "{}: labels assembled from boundary lines, {} features",
   "admin_level_{}: добавлены участки границы без тегов admin_level, объектов {}": "admin_level_{}: added boundary segments without admin_level tags, {} features",
+  "{}: кольца ориентированы, объектов {}": "{}: rings oriented, {} features",
+  "{}: кольца ориентированы, объектов {}": "{}: rings oriented, {} features",
   "Подводные вершины: удалено {}": "Underwater peaks and volcanoes: removed {}",
   "WARNING: подводные объекты: {}; шаг пропущен": "WARNING: underwater objects: {}; step skipped",
   "Имена речных полигонов": "River polygon names",
