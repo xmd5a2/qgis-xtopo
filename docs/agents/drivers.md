@@ -60,6 +60,17 @@
   → `_` (`name:ru` → `name_ru`, `@id` → `xid`). После `skeleton` имена
   восстанавливает `Pipeline._restore_field_names` (правило
   `_grass_field_name`). Растворение — по `@id`.
+- **SQLite «причёсывает» имена полей, GeoPackage — нет.** Драйвер SQLite
+  (`LaunderName`) приводит имя к нижнему регистру и заменяет `'`, `-`, `#`
+  на `_`: `name:ko-Hani` и `name:ko_hani` после этого неразличимы. Имена
+  нужно нормализовать до записи (`osm_convert.sqlite_field_name`,
+  `FieldNames`), а поля, добавляемые позже из тегов (например, названия
+  отношений в `_name_polygons_from_lines`), приводить к тому же виду вместе
+  со значениями. Иначе `gdal.VectorTranslate` с `-select` падает на
+  `CREATE TABLE ... duplicate column name`, а без `-select` GDAL может
+  переименовать вторую колонку в `...2` — полагаться на это нельзя.
+  Промежуточный GeoPackage хранит исходное имя, поэтому расхождение
+  проявляется только на финальном сохранении в SQLite.
 - **Порядок углов GDAL**: `SetSpatialFilterRect` принимает
   `(minx, miny, maxx, maxy)`, а `GetEnvelope()` отдаёт
   `(minx, maxx, miny, maxy)`. Не смешивать; отбор полигонов — через
