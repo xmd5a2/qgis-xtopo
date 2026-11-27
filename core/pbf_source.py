@@ -32,12 +32,20 @@ OPL_ESCAPE = re.compile(r"%([0-9a-fA-F]+)%")
 
 # Слои, где восстанавливаются way-члены отношений.  Драйвер GDAL не
 # отдаёт отдельным объектом замкнутый внешний член мультиполигона: он
-# входит в геометрию отношения.  Если у самого way есть площадные теги
-# (постоянная вода внутри пересыхающего водохранилища), эти теги теряются
-# и объект пропадает из слоя.  osmium достаёт такие члены по тегам
-# отношений; совпадающие по слою с отношением не добавляются, чтобы не
-# плодить дубликаты.
-RELATION_MEMBER_LAYERS = ("water", "water_intermittent")
+# входит в геометрию отношения.  Если у самого way есть собственные теги
+# (постоянная вода внутри пересыхающего водохранилища, граница с
+# admin_level), эти теги теряются и объект пропадает из слоя.  osmium
+# достаёт такие члены по тегам отношений; совпадающие по слою с полным
+# отношением не добавляются, чтобы не плодить дубликаты.
+RELATION_MEMBER_LAYERS = (
+    "water", "water_intermittent", "admin_level_2", "admin_level_4",
+)
+
+# Для этих слоёв osmium ищет ещё и сами way: граница может быть внешним
+# членом отношения другого уровня (город, admin_level=7), и тогда GDAL
+# забирает её в геометрию этого отношения, хотя собственный тег way
+# относится к стране или региону.
+RELATION_MEMBER_WAY_LAYERS = ("admin_level_2", "admin_level_4")
 
 
 class PbfError(RuntimeError):
@@ -604,11 +612,11 @@ def _parse_opl_objects(text):
     return nodes, ways, relations
 
 
-def _relation_member_filters(index, names):
-    """Фильтры osmium для отношений, у которых нужны члены.
+def _member_filters(index, names, kind):
+    """Фильтры osmium для объектов указанного вида, у которых нужны члены.
 
     Берутся только положительные условия ``[key="value"]``: они дают
-    надмножество отношений запроса, а точное совпадение (включая
+    надмножество объектов запроса, а точное совпадение (включая
     ``intermittent``) проверяется тем же ``QueryIndex``, что и при
     обычном чтении PBF.
     """
@@ -619,7 +627,7 @@ def _relation_member_filters(index, names):
         if spec is None:
             continue
         for query_filter in spec.filters:
-            if query_filter.kind != "relation":
+            if query_filter.kind != kind:
                 continue
             parts = []
             for key, operator, value, _regex_operator, _regex in (
@@ -630,10 +638,18 @@ def _relation_member_filters(index, names):
                 if any(item in key or item in value for item in (",", "=")):
                     continue
                 parts.append(f"{key}={value}")
-            expression = "r/" + ",".join(parts)
+            expression = f"{kind[:1]}/" + ",".join(parts)
             if parts and expression not in expressions:
                 expressions.append(expression)
     return expressions
+
+
+def _relation_member_filters(index, names):
+    return _member_filters(index, names, "relation")
+
+
+def _way_member_filters(index, names):
+    return _member_filters(index, names, "way")
 
 
 def _ring_geometry(points):
@@ -663,15 +679,23 @@ def _recover_relation_member_ways(config, index, handles, feature_files,
     площадные теги, он пропадает из своего слоя: например, постоянная
     вода внутри пересыхающего водохранилища остаётся дыркой в отношении.
     osmium достаёт отношения по тем же тегам, а члены — вместе с ними.
+    Для границ way ищутся и напрямую: член отношения другого уровня
+    (город, admin_level=7) забирается в его геометрию, хотя собственный
+    тег way относится к стране или региону.
 
-    Объект добавляется только в те слои, которые не покрывает отношение:
-    иначе те же полигоны дублировались бы.  Работает без osmium молча:
-    основной путь чтения PBF от этого не зависит.
+    Объект добавляется только в те слои, которые не покрывает полное
+    отношение и в которые его уже не записал основной проход: иначе те
+    же полигоны дублировались бы.  Работает без osmium молча: основной
+    путь чтения PBF от этого не зависит.
     """
     names = [name for name in RELATION_MEMBER_LAYERS if name in field_sets]
     if not names:
         return 0
     expressions = _relation_member_filters(index, names)
+    way_names = [
+        name for name in names if name in RELATION_MEMBER_WAY_LAYERS
+    ]
+    expressions += _way_member_filters(index, way_names)
     if not expressions:
         return 0
     executable = osmium_tool.find_osmium(config.temp_dir)
@@ -713,37 +737,52 @@ def _recover_relation_member_ways(config, index, handles, feature_files,
         nodes.update(part_nodes)
         ways.update(part_ways)
         relations.update(part_relations)
-    if not relations:
+    if not ways:
         return 0
 
     # Слои, которые уже покрывают отношения-владельцы way: их повторно
-    # добавлять не нужно.
+    # добавлять не нужно.  Неполное отношение драйвер выбрасывает целиком,
+    # поэтому его члены не считаются покрытыми.
     relation_layers = {}
     for members, tags in relations.values():
         properties = dict(tags)
         properties["@type"] = "relation"
         layers = set(index.matching_names("relation", properties))
+        if not layers:
+            continue
+        if any(
+            kind == "w" and ref not in ways
+            for kind, ref, _role in members
+        ):
+            continue
         for kind, ref, role in members:
             if kind == "w" and role.lower() == "outer":
                 relation_layers.setdefault(ref, set()).update(layers)
 
     written = 0
-    for way_id, covered in relation_layers.items():
-        refs, tags = ways.get(way_id, ([], {}))
+    for way_id, (refs, tags) in ways.items():
         if not tags or len(refs) < 4 or refs[0] != refs[-1]:
-            continue
-        points = [nodes.get(ref) for ref in refs]
-        if any(point is None for point in points):
             continue
         properties = dict(tags)
         properties["@type"] = "way"
         properties["@id"] = f"way/{way_id}"
         matched = set(index.matching_names("way", properties)) & set(names)
-        matched -= covered
+        if not matched:
+            continue
+        # Way уже пришёл отдельным объектом: восстанавливать нечего.
+        if any(
+            (layer, properties["@id"]) in seen
+            for layer in ("lines", "multipolygons")
+        ):
+            continue
+        matched -= relation_layers.get(way_id, set())
         matched = {
             name for name in matched if (name, properties["@id"]) not in seen
         }
         if not matched:
+            continue
+        points = [nodes.get(ref) for ref in refs]
+        if any(point is None for point in points):
             continue
         polygon = _ring_geometry(points)
         if polygon is None:

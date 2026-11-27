@@ -815,7 +815,19 @@ class RelationMemberWaysTest(unittest.TestCase):
             name: source_fields(name) for name in names
         }, {name: FieldNames() for name in names}
 
-    def _run(self, opl, names, index, field_sets, field_names):
+    def _admin_states(self):
+        from qgis_xtopo.core.osm_convert import FieldNames
+        from qgis_xtopo.core.pbf_source import QueryIndex
+        from qgis_xtopo.core.query_recipes import source_fields
+        from qgis_xtopo.core.resources import read_query
+
+        names = ["admin_level_2", "admin_level_4"]
+        index = QueryIndex({name: read_query(name) for name in names})
+        return names, index, {
+            name: source_fields(name) for name in names
+        }, {name: FieldNames() for name in names}
+
+    def _run(self, opl, names, index, field_sets, field_names, seen=None):
         from qgis_xtopo.core.config import Config
         from qgis_xtopo.core.pbf_source import _recover_relation_member_ways
 
@@ -830,7 +842,7 @@ class RelationMemberWaysTest(unittest.TestCase):
             pbf_dir.mkdir(parents=True, exist_ok=True)
             handles = {}
             feature_files = {}
-            seen = set()
+            seen = set() if seen is None else seen
             warnings = []
 
             def fake_run(command, cancel=None):
@@ -922,3 +934,89 @@ class RelationMemberWaysTest(unittest.TestCase):
         )
         self.assertEqual(written, 0)
         self.assertEqual(content, {})
+
+    ADMIN_RING = [
+        "n1 v1 dV c0 t i0 u T x0 y0",
+        "n2 v1 dV c0 t i0 u T x1 y0",
+        "n3 v1 dV c0 t i0 u T x1 y1",
+        "n4 v1 dV c0 t i0 u T x0 y1",
+        (
+            "w1 v1 dV c0 t i0 u "
+            "Tadmin_level=2,boundary=administrative Nn1,n2,n3,n4,n1"
+        ),
+    ]
+
+    def test_way_filters_include_admin_ways(self):
+        from qgis_xtopo.core.pbf_source import _way_member_filters
+
+        _names, index, _field_sets, _field_names = self._admin_states()
+        expressions = _way_member_filters(
+            index, ["admin_level_2", "admin_level_4"]
+        )
+        self.assertEqual(
+            set(expressions),
+            {"w/admin_level=2", "w/admin_level=4"},
+        )
+
+    def test_lost_admin_way_is_recovered(self):
+        """Городское отношение другого уровня не прячет границу страны."""
+        names, index, field_sets, field_names = self._admin_states()
+        opl = "\n".join(self.ADMIN_RING + [
+            (
+                "r1 v1 dV c0 t i0 u "
+                "Tadmin_level=2,boundary=administrative,type=boundary "
+                "Mw1@outer,w99@outer"
+            ),
+            (
+                "r2 v1 dV c0 t i0 u "
+                "Tadmin_level=4,boundary=administrative,type=boundary "
+                "Mw1@outer"
+            ),
+        ])
+        written, again, content, warnings = self._run(
+            opl, names, index, field_sets, field_names
+        )
+        self.assertEqual(written, 1)
+        self.assertEqual(again, 0)
+        self.assertEqual(warnings, [])
+        self.assertEqual(set(content), {"admin_level_2"})
+        feature = content["admin_level_2"][0]
+        self.assertEqual(feature["properties"]["@id"], "way/1")
+        self.assertEqual(feature["properties"]["admin_level"], "2")
+        self.assertEqual(feature["geometry"]["type"], "Polygon")
+
+    def test_complete_admin_relation_covers_way(self):
+        """Полное отношение того же уровня уже содержит контур way."""
+        names, index, field_sets, field_names = self._admin_states()
+        opl = "\n".join(self.ADMIN_RING + [
+            (
+                "r1 v1 dV c0 t i0 u "
+                "Tadmin_level=2,boundary=administrative,type=boundary "
+                "Mw1@outer"
+            ),
+        ])
+        written, _again, content, _warnings = self._run(
+            opl, names, index, field_sets, field_names
+        )
+        self.assertEqual(written, 0)
+        self.assertEqual(content, {})
+
+    def test_delivered_admin_way_is_not_recovered(self):
+        names, index, field_sets, field_names = self._admin_states()
+        opl = "\n".join(self.ADMIN_RING)
+        written, _again, content, _warnings = self._run(
+            opl, names, index, field_sets, field_names,
+            seen={("multipolygons", "way/1")},
+        )
+        self.assertEqual(written, 0)
+        self.assertEqual(content, {})
+
+    def test_admin_way_without_relation_is_recovered(self):
+        """Way мог остаться только в отношении другого уровня."""
+        names, index, field_sets, field_names = self._admin_states()
+        opl = "\n".join(self.ADMIN_RING)
+        written, _again, content, _warnings = self._run(
+            opl, names, index, field_sets, field_names
+        )
+        self.assertEqual(written, 1)
+        self.assertEqual(set(content), {"admin_level_2"})
