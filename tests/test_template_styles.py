@@ -4859,6 +4859,95 @@ class FarmyardScaleFilterTest(unittest.TestCase):
         self.assertFalse(visible.get("value").startswith("0,0,0,0"))
 
 
+class ResidentialScaleFillTest(unittest.TestCase):
+    """Заливка residential светлеет на обзоре и исчезает с 1:1000000."""
+
+    BANDS = (("1", "200000"), ("200000", "500000"), ("500000", "1000000"))
+    COLORS = {
+        "rural": ("176,176,176,255", "196,196,196,255", "216,216,216,255"),
+        "urban": ("242,211,182,149", "245,222,200,149", "249,233,219,149"),
+        "else": ("176,176,176,255", "196,196,196,255", "216,216,216,255"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        cls.layer = layers["landuse residential"]
+        cls.blocking = layers["[blocking] landuse residential"]
+        renderer = cls.layer.find("renderer-v2")
+        cls.parents = {
+            rule.get("label"): rule
+            for rule in renderer.find("rules").findall("rule")
+        }
+        cls.symbols = {
+            symbol.get("name"): symbol
+            for symbol in renderer.find("symbols").findall("symbol")
+        }
+
+    @staticmethod
+    def _rgba(symbol):
+        for layer in symbol.findall("layer"):
+            if layer.get("class") != "SimpleFill":
+                continue
+            for option in layer.findall("./Option/Option"):
+                if option.get("name") == "color":
+                    return tuple(
+                        int(part) for part in option.get("value").split(",")[:4]
+                    )
+        return None
+
+    def test_parent_filters(self):
+        self.assertEqual(
+            {name: rule.get("filter") for name, rule in self.parents.items()},
+            {
+                "rural": "residential='rural'",
+                "urban": "residential='urban'",
+                "else": "ELSE",
+            },
+        )
+
+    def test_three_scale_bands_per_type(self):
+        for name in self.COLORS:
+            leaves = self.parents[name].findall("rule")
+            self.assertEqual(len(leaves), 3, name)
+            for leaf, (minimum, maximum) in zip(leaves, self.BANDS):
+                self.assertEqual(leaf.get("scalemindenom"), minimum, name)
+                self.assertEqual(leaf.get("scalemaxdenom"), maximum, name)
+                self.assertIn(leaf.get("symbol"), self.symbols, name)
+
+    def test_fill_gets_lighter_with_scale(self):
+        for name, colors in self.COLORS.items():
+            leaves = self.parents[name].findall("rule")
+            actual = tuple(
+                self._rgba(self.symbols[leaf.get("symbol")]) for leaf in leaves
+            )
+            expected = tuple(
+                tuple(int(part) for part in color.split(","))
+                for color in colors
+            )
+            self.assertEqual(actual, expected, name)
+
+    def test_no_fill_from_one_million(self):
+        for name in self.COLORS:
+            for leaf in self.parents[name].findall("rule"):
+                self.assertLessEqual(
+                    int(leaf.get("scalemaxdenom")), 1000000, name
+                )
+        self.assertEqual(self.layer.get("minScale"), "1000000")
+        self.assertEqual(self.layer.get("maxScale"), "0")
+        self.assertEqual(
+            self.layer.get("hasScaleBasedVisibilityFlag"), "1"
+        )
+        self.assertEqual(self.blocking.get("minScale"), "1000000")
+        self.assertEqual(self.blocking.get("maxScale"), "0")
+        self.assertEqual(
+            self.blocking.get("hasScaleBasedVisibilityFlag"), "1"
+        )
+
+
 class AreaFieldFilterTest(unittest.TestCase):
     """Фильтры по площади должны уходить в SQL, а не считаться в кадре."""
 
