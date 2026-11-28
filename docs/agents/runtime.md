@@ -35,11 +35,17 @@
   (`pipeline._warm_template_data`) идёт в фоновом потоке одновременно со
   слоями; без него первый же слой сам разбирал шаблон, а значки — ещё раз
   в конце.
-- **Архив пишется с `ARCHIVE_COMPRESSLEVEL = 1`.** Уровень 6 тратит
-  около 0,7 с на запись, уровень 1 — 0,27 с; архив больше примерно на
-  2 МБ и читается быстрее. Важно: `ZipFile.writestr(ZipInfo, data)`
-  игнорирует `compresslevel` архива — уровень надо передавать в
-  `writestr` явно, иначе используется уровень по умолчанию.
+- **Архив готового проекта пишется с `ARCHIVE_COMPRESSLEVEL = 1`.**
+  Уровень 6 тратит около 0,7 с на запись, уровень 1 — 0,27 с; архив
+  больше примерно на 2 МБ и читается быстрее. Важно:
+  `ZipFile.writestr(ZipInfo, data)` игнорирует `compresslevel` архива —
+  уровень надо передавать в `writestr` явно, иначе используется уровень
+  по умолчанию.
+- **Шаблон `automap.qgz` пересобирается с `compresslevel=9`.** Правило
+  уровня 1 относится к готовым проектам. На шаблоне уровень 1 даёт
+  12,3 МБ вместо 10,2, уровень 6 — 10,4. Разовая правка шаблона через
+  `zipfile` должна сохранять сжатие 9, иначе раздуваются и шаблон, и
+  инсталлятор.
 - **Архив пишется один раз и уже без пустых слоёв.**
   `prepare_project(write_archive=False)` только готовит каталог, иконки и
   `crop.geojson`; `finish_project` в конце собирает qgz из шаблона,
@@ -123,6 +129,27 @@ image.save('/mnt/data/temp/map.png')
 через `QgsCoordinateTransform`. У `QgsRectangle` нет `combine` и `united` —
 объединять через `combineExtentWith`. Готовый PNG класть в `/mnt/data/temp`, не
 в репозиторий. Рабочие данные пользователя можно читать, но не изменять.
+
+Правила, читающие переменные проекта (`@level_of_detail`), при рендере
+отдельного слоя не сработают: у `QgsMapSettings` нет `setCustomVariables`,
+есть только `setExpressionContext`. Собирать контекст с проектом:
+
+```python
+from qgis.core import (
+    QgsExpressionContext, QgsExpressionContextUtils,
+)
+context = QgsExpressionContext()
+context.appendScope(QgsExpressionContextUtils.globalScope())
+context.appendScope(QgsExpressionContextUtils.projectScope(project))
+settings.setExpressionContext(context)
+```
+
+Без этого выражения с `@level_of_detail` дают ошибку, и слой рисуется
+пустым — картинка получается «всё пропало» без всякой ошибки в логе.
+
+Для простого кадра удобнее `QgsMapRendererSequentialJob`: он сам рисует
+в `QImage`, который отдаёт методом `renderedImage()` ( Painter-вариант
+нужен, когда рисуют в свой `QPainter`).
 
 `waitForFinished()` в примере безопасен только для простого слоя без
 выражений. Для проекта целиком он блокирует event loop, а `overlay_nearest`,
