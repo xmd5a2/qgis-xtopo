@@ -134,6 +134,40 @@ class PbfSourceTest(unittest.TestCase):
         )
 
 
+    def test_query_index_simple_and_exists(self):
+        index = QueryIndex({
+            "water": 'way["natural"="water"];',
+            "any_building": 'way["building"];',
+            "river": 'way["natural"="water"]["waterway"="river"];',
+            "peak": 'node["natural"="peak"];',
+        })
+        # Одно условие: объект подходит по самому значению поля.
+        self.assertEqual(
+            index.matching_names("way", {"natural": "water"}), {"water"}
+        )
+        # Условие «поле есть»: подходит любое непустое значение.
+        self.assertEqual(
+            index.matching_names("way", {"building": "house"}),
+            {"any_building"},
+        )
+        # Два условия: второе проверяется отдельно от первого.
+        self.assertEqual(
+            index.matching_names(
+                "way", {"natural": "water", "waterway": "river"},
+            ),
+            {"water", "river"},
+        )
+        self.assertEqual(
+            index.matching_names(
+                "way", {"natural": "water", "waterway": "stream"},
+            ),
+            {"water"},
+        )
+        # Вид объекта различает запросы.
+        self.assertEqual(
+            index.matching_names("node", {"natural": "water"}), set()
+        )
+
     def test_filter_extent_expands_bbox(self):
         from qgis_xtopo.core.bbox import BBox
         from qgis_xtopo.core.pbf_source import _filter_extent

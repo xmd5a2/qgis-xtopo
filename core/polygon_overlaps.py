@@ -9,7 +9,7 @@ OsmAnd при равном ``order`` рисует меньший полигон 
 подписи не меняются.
 """
 import math
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import i18n
 from .cpu import cpu_workers
@@ -104,7 +104,7 @@ def _prepared_intersects(prepared, geometry):
         return True
 
 
-def _intersection_areas(geometry, candidates, cancel=None):
+def _intersection_areas(geometry, candidates, cancel=None, workers=None):
     """Площади пересечения кандидатов с геометрией, параллельно.
 
     Возвращает список в порядке кандидатов.  ``geometry`` не меняется,
@@ -112,8 +112,14 @@ def _intersection_areas(geometry, candidates, cancel=None):
     отсева заведомо мелких пересечений: точная разность всё равно
     пересчитывается последовательно, иначе изменился бы результат при
     перекрывающихся кандидатах.
+
+    ``workers`` задаёт потолок потоков: когда несколько слоёв режутся
+    одновременно, внутренняя параллельность делится между ними.
     """
-    workers = min(cpu_workers(limit=8), len(candidates))
+    if workers is None:
+        workers = min(cpu_workers(limit=8), len(candidates))
+    else:
+        workers = min(max(1, workers), len(candidates))
     if workers <= 1:
         return None
     size = (len(candidates) + workers - 1) // workers
@@ -148,7 +154,12 @@ def _intersection_areas(geometry, candidates, cancel=None):
 
 
 def resolve_polygon_overlaps(config, progress=None, cancel=None):
-    """Вырезает меньшие полигоны из больших для пар по умолчанию."""
+    """Вырезает меньшие полигоны из больших для пар по умолчанию.
+
+    Слои, между которыми нет зависимости, режутся одновременно: они
+    читают разные файлы, а результат зависит только от порядка
+    «верхний — нижний», который задают рёбра графа.
+    """
     notify = progress or (lambda message: None)
     pairs = _configured_pairs(config)
     min_area = float(
@@ -157,40 +168,104 @@ def resolve_polygon_overlaps(config, progress=None, cancel=None):
     grouped = {}
     for upper, lower in pairs:
         grouped.setdefault(upper, []).append(lower)
-    results = []
-    for upper, lowers in grouped.items():
+    uppers = list(grouped)
+    edges = _layer_dependencies(grouped)
+
+    def process(upper, workers):
+        """Режет один верхний слой; возвращает результаты и предупреждение."""
         upper_path = _layer_path(config, upper)
         if not upper_path.exists():
-            continue
+            return upper, [], None
         available = [
             (
                 lower,
                 _layer_path(config, lower),
                 PAIR_MIN_AREA_M2.get((upper, lower), min_area),
             )
-            for lower in lowers
+            for lower in grouped[upper]
             if _layer_path(config, lower).exists()
         ]
         if not available:
-            continue
+            return upper, [], None
         try:
             changed = _cut_layer(
                 upper_path, available, cancel,
+                intersection_workers=workers,
             )
         except InterruptedError:
             raise
         except Exception as exc:  # noqa: BLE001 - сборка не должна падать
-            notify(
-                i18n.trf(
-                    "WARNING: пересечения {}: {}; слой не изменён",
-                    upper, exc,
-                )
+            return upper, [], i18n.trf(
+                "WARNING: пересечения {}: {}; слой не изменён",
+                upper, exc,
             )
-            continue
-        for lower, _, _ in available:
-            results.append((upper, lower, changed.get(lower, 0)))
+        return upper, [
+            (upper, lower, changed.get(lower, 0))
+            for lower, _, _ in available
+        ], None
+
+    # Слои, между которыми нет зависимости, можно резать одновременно:
+    # они читают разные файлы, а результат зависит только от порядка
+    # «верхний — нижний», который задают рёбра.  Внутри уровня потоки
+    # делятся между слоями, чтобы не перегружать процессор.
+    done = set()
+    pending = list(uppers)
+    by_upper = {}
+    while pending:
+        ready = [name for name in pending if edges[name].issubset(done)]
+        if not ready:
+            # Цикл в пользовательских парах: сохраняем прежний порядок.
+            ready = [pending[0]]
+        level_workers = min(len(ready), cpu_workers(limit=4))
+        workers = (
+            max(1, cpu_workers(limit=8) // level_workers)
+            if level_workers > 1 else None
+        )
+        if level_workers > 1:
+            with ThreadPoolExecutor(max_workers=level_workers) as pool:
+                futures = [
+                    pool.submit(process, name, workers) for name in ready
+                ]
+                for future in as_completed(futures):
+                    upper, items, warning = future.result()
+                    by_upper[upper] = items
+                    if warning:
+                        notify(warning)
+        else:
+            upper, items, warning = process(ready[0], None)
+            by_upper[upper] = items
+            if warning:
+                notify(warning)
+        done.update(ready)
+        pending = [name for name in pending if name not in done]
+
+    results = []
+    for upper in uppers:
+        results.extend(by_upper.get(upper, ()))
     _report_summary(results, notify)
     return results
+
+
+def _layer_dependencies(grouped):
+    """Какие слои должны быть вырезаны до данного.
+
+    Пара «верхний — нижний» задаёт порядок только тогда, когда нижний
+    слой сам переписывается на этом шаге.  Если он идёт раньше, верхний
+    должен увидеть уже изменённый файл; если позже — наоборот, нижний
+    обязан дождаться верхнего.  Слои без таких рёбер независимы.
+    """
+    positions = {name: index for index, name in enumerate(grouped)}
+    edges = {name: set() for name in grouped}
+    for upper, lowers in grouped.items():
+        for lower in lowers:
+            index = positions.get(lower)
+            if index is None or lower == upper:
+                continue
+            if index < positions[upper]:
+                edges[upper].add(lower)
+            else:
+                edges[lower].add(upper)
+    return edges
 
 
 def _report_summary(results, notify):
@@ -231,7 +306,7 @@ def _configured_pairs(config):
     return tuple(pairs) or DEFAULT_PAIRS
 
 
-def _cut_layer(upper_path, lowers, cancel):
+def _cut_layer(upper_path, lowers, cancel, intersection_workers=None):
     """Переписывает верхний слой, вычитая меньшие полигоны нижних слоёв."""
     from osgeo import ogr
 
@@ -322,7 +397,10 @@ def _cut_layer(upper_path, lowers, cancel):
                 # отсеять, не трогая текущую геометрию.
                 areas = None
                 if len(candidates) >= PARALLEL_INTERSECTIONS_MIN:
-                    areas = _intersection_areas(geometry, candidates, cancel)
+                    areas = _intersection_areas(
+                        geometry, candidates, cancel,
+                        workers=intersection_workers,
+                    )
                 for position, lower_geometry in enumerate(candidates):
                     if areas is not None and areas[position] < lower_min_area:
                         continue

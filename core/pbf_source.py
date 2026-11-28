@@ -317,6 +317,12 @@ class QueryIndex:
         self.by_key = {}
         self.keys_by_kind = {}
         self.other = []
+        # Разобранные запросы по видам объектов.  Подбор идёт по этим
+        # таблицам: здесь нет кортежей-ключей и проверок под условие,
+        # которые индекс уже решил.
+        self._eq_tables = {}
+        self._exists_tables = {}
+        self._other_by_kind = {}
         # Запросы, которым нужны члены отношений: драйвер PBF их не
         # отдаёт.  Это ограничение режима, а не ошибка данных, поэтому
         # список попадает в информационные заметки.
@@ -332,6 +338,7 @@ class QueryIndex:
             for query_filter in filters:
                 if not query_filter.conditions:
                     self.other.append((spec, query_filter))
+                    self._add_other(query_filter.kind, spec, query_filter)
                     continue
                 key, operator, value, regex_operator, regex = query_filter.conditions[0]
                 if operator == "=":
@@ -340,36 +347,72 @@ class QueryIndex:
                     index = (query_filter.kind, key, "exists", None)
                 else:
                     self.other.append((spec, query_filter))
+                    self._add_other(query_filter.kind, spec, query_filter)
                     continue
                 self.by_key.setdefault(index, []).append((spec, query_filter))
                 self.keys_by_kind.setdefault(query_filter.kind, set()).add(key)
+                self._add_indexed(
+                    query_filter, spec, index, key, value,
+                )
+
+    def _add_indexed(self, query_filter, spec, index, key, value):
+        """Запомнить запрос в таблице по виду объекта.
+
+        Простые запросы (одно условие) проверять при подборе не нужно:
+        условие уже выполнено — объект попал в таблицу по самому
+        значению поля.  Остальные проверяются как раньше.
+        """
+        simple = len(query_filter.conditions) == 1
+        item = (spec, query_filter, simple)
+        kind = query_filter.kind
+        if index[2] == "eq":
+            table = self._eq_tables.setdefault(kind, {}).setdefault(key, {})
+            table.setdefault(value, []).append(item)
+        else:
+            table = self._exists_tables.setdefault(kind, {}).setdefault(key, [])
+            table.append(item)
+
+    def _add_other(self, kind, spec, query_filter):
+        """Запрос без условия по значению: проверяется целиком."""
+        self._other_by_kind.setdefault(kind, []).append(
+            (spec, query_filter, False)
+        )
 
     def matching_names(self, kind, properties):
-        candidates = []
-        seen = set()
-        # Перебираются только ключи, которые вообще есть в запросах
-        # этого вида: у объекта бывает несколько сотен тегов, и
-        # проверять каждый из них незачем.
-        for key in self.keys_by_kind.get(kind, ()):
+        """Слои, в которые попадает объект с такими свойствами.
+
+        Объектов в выгрузке миллионы, а запросов — сотни, поэтому
+        подбор идёт по индексу: сначала по значению поля, потом по
+        наличию поля.  Условие, по которому объект попал в таблицу,
+        выполняется по построению, поэтому простые запросы (с одним
+        условием) не проверяются повторно.
+        """
+        names = set()
+        for key, table in self._eq_tables.get(kind, {}).items():
             value = properties.get(key)
             if value is None:
                 continue
-            for index in (
-                (kind, key, "eq", value),
-                (kind, key, "exists", None),
-            ):
-                for item in self.by_key.get(index, ()):
-                    identity = id(item)
-                    if identity not in seen:
-                        seen.add(identity)
-                        candidates.append(item)
-        for item in self.other:
-            identity = id(item)
-            if identity not in seen:
-                seen.add(identity)
-                candidates.append(item)
-        names = set()
-        for spec, query_filter in candidates:
+            items = table.get(value)
+            if not items:
+                continue
+            for spec, query_filter, simple in items:
+                if spec.name in names:
+                    continue
+                if simple or _matches_properties(
+                    kind, properties, query_filter
+                ):
+                    names.add(spec.name)
+        for key, items in self._exists_tables.get(kind, {}).items():
+            if properties.get(key) is None:
+                continue
+            for spec, query_filter, simple in items:
+                if spec.name in names:
+                    continue
+                if simple or _matches_properties(
+                    kind, properties, query_filter
+                ):
+                    names.add(spec.name)
+        for spec, query_filter, simple in self._other_by_kind.get(kind, ()):
             if spec.name in names:
                 continue
             if _matches_properties(kind, properties, query_filter):
@@ -441,13 +484,22 @@ def _bbox_geometry(ogr, bbox):
     return ogr.CreateGeometryFromWkt(wkt)
 
 
-def _kind_for_layer(layer_name, feature):
+def _kind_for_layer(layer_name, feature, internal=None):
+    """Вид объекта слоя: точка, линия или отношение.
+
+    ``internal`` — индексы служебных полей слоя: индекс поля берётся из
+    кэша, а не ищется по имени на каждом объекте.
+    """
     if layer_name == "points":
         return "node"
     if layer_name == "lines":
         return "way"
     if layer_name == "multipolygons":
-        way_id = feature.GetField("osm_way_id")
+        index = None if internal is None else internal.get("osm_way_id")
+        way_id = (
+            feature.GetField(index) if index is not None
+            else feature.GetField("osm_way_id")
+        )
         if way_id not in (None, "", 0, "0"):
             return "way"
         return "relation"
@@ -1395,11 +1447,14 @@ def _prepare_dataset(config, bbox, query_names, query_texts=None, cancel=None,
                         definition = definitions.get(layer_name)
                         if definition is None:
                             continue
-                        kind = _kind_for_layer(layer_name, feature)
+                        internal = _internal_indexes(definition, field_cache)
+                        kind = _kind_for_layer(
+                            layer_name, feature, internal,
+                        )
                         properties = _feature_properties(
                             feature, definition, kind,
                             _field_entries(definition, field_cache),
-                            _internal_indexes(definition, field_cache),
+                            internal,
                         )
                         if not properties:
                             continue
