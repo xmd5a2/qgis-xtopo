@@ -7,6 +7,8 @@
 
 Стили ``qgis_xtopo_full`` и ``qgis_xtopo_labels`` остаются в проекте:
 это позволяет переключать подложку без повторного снятия копии стиля.
+Они хранят только символьное оформление без подписей: подложка подписи
+не меняет, а разбор XML с подписями на каждом слое занимал секунды.
 
 Подложка даёт ещё и инверсию: надписи, дороги, скалы, ЛЭП, подъёмники и
 железные дороги перекрашиваются, чтобы читаться на снимке.  Цвет текста
@@ -35,12 +37,15 @@ from qgis.core import (
     QgsEffectStack,
     QgsHashedLineSymbolLayer,
     QgsLineSymbolLayer,
+    QgsMapLayer,
+    QgsMapLayerStyle,
     QgsMaskMarkerSymbolLayer,
     QgsNullSymbolRenderer,
     QgsOuterGlowEffect,
     QgsPointClusterRenderer,
     QgsProject,
     QgsRasterLayer,
+    QgsReadWriteContext,
     QgsRuleBasedRenderer,
     QgsSimpleLineSymbolLayer,
     QgsSimpleMarkerSymbolLayer,
@@ -50,6 +55,7 @@ from qgis.core import (
     Qgis,
 )
 from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtXml import QDomDocument
 
 from . import label_style, label_tags
 from .resources import resource_path
@@ -300,26 +306,49 @@ def _restore_osm(project, flags):
         _set_layer_visible(project, layer, flag == "1")
 
 
-def _store_style(manager, name, layer):
-    """Сохраняет текущий стиль слоя в менеджере стилей под именем name.
+def _renderer_style(layer):
+    """Стиль только с символьным оформлением, без подписей.
 
-    ``manager.style(name)`` возвращает копию сохранённого стиля: правка
-    копии ничего не меняет, поэтому готовый стиль заменяется целиком.
+    Подложка меняет у слоя лишь отрисовщик, поэтому полный вид можно
+    хранить без подписей. Смена стиля через менеджер разбирает весь
+    XML слоя; подписи в нём занимают основное время, и на десятках
+    площадных слоёв включение подложки затягивалось на секунды.
     """
-    style = manager.style(name)
-    style.readFromLayer(layer)
+    document = QDomDocument()
+    error = layer.exportNamedStyle(
+        document, QgsReadWriteContext(), QgsMapLayer.Symbology
+    )
+    if error:
+        return None
+    return QgsMapLayerStyle(document.toString(0))
+
+
+def _replace_style(manager, name, style):
+    """Кладёт стиль под именем name, заменяя прежний."""
+    if style is None or not style.isValid():
+        return False
+    if name == manager.currentStyle():
+        return False
+    if name in manager.styles():
+        manager.removeStyle(name)
+    return manager.addStyle(name, style)
+
+
+def _rename_current_style(manager, name):
+    """Переименовывает текущий стиль, не применяя его.
+
+    ``setCurrentStyle`` перед переключением заново выгружает весь стиль
+    слоя и загружает новый — это и есть основная задержка. Переименование
+    меняет только имя, а отрисовщик подложка подменяет сама.
+    """
     current = manager.currentStyle()
-    if name not in manager.styles():
-        manager.addStyle(name, style)
-        return
-    manager.removeStyle(name)
-    manager.addStyle(name, style)
     if current == name:
-        # Удаление сбросило текущий стиль на первый в списке: возвращаем
-        # обновлённый, иначе слой получит чужой рендерер.
-        manager.setCurrentStyle(name)
-    elif manager.currentStyle() != current and current in manager.styles():
-        manager.setCurrentStyle(current)
+        return True
+    if not current or current not in manager.styles():
+        return False
+    if name in manager.styles():
+        manager.removeStyle(name)
+    return manager.renameStyle(current, name)
 
 
 def _apply_labels_only(project):
@@ -329,33 +358,47 @@ def _apply_labels_only(project):
         if renderer is None or renderer.type() == "nullSymbol":
             continue
         manager = layer.styleManager()
-        if manager.currentStyle() == LABELS_STYLE:
+        style = _renderer_style(layer)
+        if style is None:
             continue
-        if FULL_STYLE in manager.styles():
-            if manager.currentStyle() != LABELS_STYLE:
-                _store_style(manager, FULL_STYLE, layer)
+        current = manager.currentStyle()
+        if current == FULL_STYLE:
+            # Текущий стиль хранится в менеджере только именем: сначала
+            # уводим имя на «только подписи», затем сохраняем полный вид.
+            _rename_current_style(manager, LABELS_STYLE)
+            _replace_style(manager, FULL_STYLE, style)
         else:
-            manager.addStyleFromLayer(FULL_STYLE)
-        original = layer.renderer().clone()
+            _replace_style(manager, FULL_STYLE, style)
+            if current != LABELS_STYLE:
+                user_style = current
+                _rename_current_style(manager, LABELS_STYLE)
+                # Именованный стиль пользователя остаётся в списке, но
+                # без подписей: подложка их не меняет.
+                if (user_style and user_style != FULL_STYLE
+                        and user_style not in manager.styles()):
+                    manager.addStyle(user_style, style)
         layer.setRenderer(QgsNullSymbolRenderer())
-        try:
-            if LABELS_STYLE in manager.styles():
-                _store_style(manager, LABELS_STYLE, layer)
-            else:
-                manager.addStyleFromLayer(LABELS_STYLE)
-        finally:
-            if original is not None:
-                layer.setRenderer(original)
-        manager.setCurrentStyle(LABELS_STYLE)
 
 
 def _restore_full(project):
     """Возвращает слоям обычный стиль."""
     for layer in styled_layers(project):
         manager = layer.styleManager()
-        if (FULL_STYLE in manager.styles()
-                and manager.currentStyle() == LABELS_STYLE):
-            manager.setCurrentStyle(FULL_STYLE)
+        if manager.currentStyle() == FULL_STYLE:
+            continue
+        if FULL_STYLE not in manager.styles():
+            continue
+        style = manager.style(FULL_STYLE)
+        if style is None or not style.isValid():
+            continue
+        # Категории передаются явно: без них QGIS разбирает и пустой блок
+        # подписей, сбрасывая их на слое.
+        document = QDomDocument()
+        loaded, _error = document.setContent(style.xmlData())[:2]
+        if not loaded:
+            continue
+        _rename_current_style(manager, FULL_STYLE)
+        layer.importNamedStyle(document, QgsMapLayer.Symbology)
 
 
 def _create_layer(basemap):

@@ -765,6 +765,18 @@ class ProjectBasemapTest(unittest.TestCase):
         self.assertTrue(self._visible(self.osm))
         self.assertEqual(self.bbox.renderer().type(), "singleSymbol")
 
+    def test_full_style_stores_only_symbology(self):
+        """Стили подложки не тащат подписи: иначе переключение медленное."""
+        self.basemap.apply("google", self.project)
+        manager = self.polygon.styleManager()
+        self.assertEqual(
+            manager.currentStyle(), self.basemap.LABELS_STYLE
+        )
+        xml = manager.style(self.basemap.FULL_STYLE).xmlData()
+        self.assertIn('styleCategories="Symbology"', xml)
+        self.assertNotIn("<labeling", xml)
+        self.assertTrue(self.polygon.labelsEnabled())
+
     def test_failed_switch_restores_state(self):
         from unittest import mock
 
