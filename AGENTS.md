@@ -343,17 +343,26 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   входит и `admin_level_2_dissolved`, иначе государственная граница
   возвращается в слой регионов. Подробности —
   `docs/agents/admin-boundaries.md`.
-- **Подписи admin-границ идут вдоль кривых.** У `admin level 2 (country
-  names)` открытые границы (`label_line`) и у `admin level 4 (region
-  names)` линейные правила (`boundary($geometry)` и `label_line`) используют
-  `placement="3"` (Curved); площадные названия стран — `placement="7"`
-  (PerimeterCurved). Повтор подписей: 160/320 мм у открытых границ
-  стран/регионов на мелких масштабах, 400/800 мм у площадных названий.
-  Замкнутые контуры отношений нормализуются шагом `orient_rings` (внешнее
-  кольцо — против часовой), иначе подпись уходит наружу; `boundary=historic`,
-  `boundary=disputed` и `disputed=yes` в admin-слои не попадают.
-  Проверки — `OpenBorderAdminLabelTest`, `RegionBoundaryLabelTest`.
-  Подробности — `docs/agents/labels.md` и `docs/agents/drivers.md`.
+- **Подписи admin-границ идут вдоль кривых и внутри территории.** У
+  `admin level 2 (country names)` открытые границы (`label_line`) и у
+  `admin level 4 (region names)` линейные правила (`boundary($geometry)` и
+  `label_line`) используют `placement="3"` (Curved); площадные названия
+  стран — `placement="7"` (PerimeterCurved). У всех площадных и морских
+  правил стоит `placementFlags="2"` (только `AboveLine`): внешнее кольцо
+  нормализовано против часовой, поэтому текст остаётся внутри страны.
+  `14` разрешает обе стороны и PAL выбирает наружную — так «Япония»
+  оказывалась снаружи морской границы Цусимы. Слой имён рисует только
+  подписи (`nullSymbol`), линию страны рисует один
+  `admin level 2 (country borders)`, регионов — `admin level 4 (regions)`;
+  заливка или второй слой с той же линией визуально удвоят границу.
+  Повтор подписей: 160/320 мм у открытых
+  границ стран/регионов на мелких масштабах, 400/800 мм у площадных
+  названий. Замкнутые контуры отношений нормализуются шагом
+  `orient_rings` (внешнее кольцо — против часовой), иначе подпись уходит
+  наружу; `boundary=historic`, `boundary=disputed` и `disputed=yes` в
+  admin-слои не попадают. Проверки — `OpenBorderAdminLabelTest`,
+  `RegionBoundaryLabelTest`, `AdminBoundaryDrawingTest`. Подробности —
+  `docs/agents/labels.md` и `docs/agents/drivers.md`.
 - **Рельеф в pipeline — три стадии.** `prepare_terrain_raster` (скачивание
   тайлов и сборка сырого DEM) не зависит от слоёв и в `run_project`
   работает в потоке `xtopo-terrain` параллельно `Pipeline.run` (стартует

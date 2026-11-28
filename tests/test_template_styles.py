@@ -528,10 +528,22 @@ class OpenBorderAdminLabelTest(unittest.TestCase):
             placement = rule.find("settings/placement")
             self.assertIsNotNone(placement, name)
             self.assertEqual(placement.get("placement"), "7", name)
+            self.assertEqual(placement.get("placementFlags"), "2", name)
             self.assertEqual(placement.get("fitInPolygonOnly"), "0", name)
             self.assertEqual(
                 placement.get("geometryGeneratorEnabled"), "0", name
             )
+
+    def test_all_admin_labels_stay_on_the_inner_side(self):
+        """Ни одно правило не разрешает подпись с внешней стороны линии."""
+        for name, rules in self.rules.items():
+            for rule in rules:
+                placement = rule.find("settings/placement")
+                self.assertIsNotNone(placement, name)
+                self.assertEqual(
+                    placement.get("placementFlags"), "2",
+                    f"{name}: {rule.get('description')}",
+                )
 
     @staticmethod
     def _matches(layer, filter_text, **values):
@@ -5102,6 +5114,48 @@ class BuildingLodTest(unittest.TestCase):
         self.assertEqual(self.children["else"], "ELSE")
         self.assertNotIn("@level_of_detail", self.children["abandoned"])
         self.assertNotIn("@level_of_detail", self.children["ruins"])
+
+
+class AdminBoundaryDrawingTest(unittest.TestCase):
+    """Граница рисуется один раз, слой имён — только подписи."""
+
+    NAMES = (
+        "admin level 2 (country names)",
+        "admin level 4 (region names)",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def test_names_layers_do_not_draw_geometry(self):
+        for name in self.NAMES:
+            renderer = self.layers[name].find("renderer-v2")
+            self.assertIsNotNone(renderer, name)
+            self.assertEqual(renderer.get("type"), "nullSymbol", name)
+
+    def test_border_lines_have_one_layer_each(self):
+        expected = {
+            "admin_level_2_dissolved.sqlite":
+                "admin level 2 (country borders)",
+            "admin_level_4_proc.sqlite": "admin level 4 (regions)",
+        }
+        for source, layer_name in expected.items():
+            users = [
+                name for name, layer in self.layers.items()
+                if source in (layer.findtext("datasource") or "")
+            ]
+            self.assertEqual(users, [layer_name], source)
+
+    def test_border_line_layers_do_not_label(self):
+        for name in (
+            "admin level 2 (country borders)",
+            "admin level 4 (regions)",
+        ):
+            self.assertEqual(self.layers[name].get("labelsEnabled"), "0", name)
 
 
 class RegionBoundaryLabelTest(unittest.TestCase):
