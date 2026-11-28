@@ -1,0 +1,5 @@
+(
+node["tourism"="caravan_site"];
+way["tourism"="caravan_site"];
+relation["tourism"="caravan_site"];
+);

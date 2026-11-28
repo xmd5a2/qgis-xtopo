@@ -1,0 +1,5 @@
+(
+node["tourism"="viewpoint"];
+way["tourism"="viewpoint"];
+relation["tourism"="viewpoint"];
+);

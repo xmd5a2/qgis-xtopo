@@ -1,0 +1,5 @@
+(
+node["tourism"="guest_house"];
+way["tourism"="guest_house"];
+relation["tourism"="guest_house"];
+);

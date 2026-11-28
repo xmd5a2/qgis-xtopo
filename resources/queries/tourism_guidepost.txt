@@ -1,0 +1,4 @@
+(
+node["tourism"="information"]["information"="guidepost"];
+way["tourism"="information"]["information"="guidepost"];
+);

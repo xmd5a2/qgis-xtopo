@@ -1,0 +1,4 @@
+(
+node["highway"="trailhead"];
+way["highway"="trailhead"];
+);

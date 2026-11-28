@@ -1,0 +1,5 @@
+(
+node["tourism"="aquarium"];
+way["tourism"="aquarium"];
+relation["tourism"="aquarium"];
+);

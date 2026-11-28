@@ -1,0 +1,5 @@
+(
+node["amenity"="bus_station"];
+way["amenity"="bus_station"];
+relation["amenity"="bus_station"];
+);

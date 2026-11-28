@@ -1,0 +1,5 @@
+(
+node["tourism"="theme_park"];
+way["tourism"="theme_park"];
+relation["tourism"="theme_park"];
+);

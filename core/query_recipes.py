@@ -394,6 +394,13 @@ POINT_CENTROID = {
     "alpine_hut", "wilderness_hut", "memorial", "monument", "tower_communication",
     "monastery_no_religion", "barrier_border_control", "cape", "chimney",
     "water_tower", "volcano", "volcano_dirt", "mineshaft", "mineshaft_abandoned",
+    "bus_station", "trailhead",
+    "tourism_information", "tourism_guidepost", "tourism_hotel",
+    "tourism_hostel", "tourism_guest_house", "tourism_motel",
+    "tourism_apartment", "tourism_museum", "tourism_zoo",
+    "tourism_aquarium", "tourism_viewpoint", "tourism_artwork",
+    "tourism_theme_park", "tourism_caravan_site", "tourism_camp_pitch",
+    "tourism_cabin",
 }
 POINT_ONLY = {
     "peak", "hill", "spring", "water_point", "cave_entrance", "places_main",

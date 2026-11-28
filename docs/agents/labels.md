@@ -527,3 +527,35 @@
   different sources», но не вырезал ни одного символа: кадр с маской и без неё
   совпадал побитово. Мёртвые ссылки из шаблона удалены, маска отключена.
   Проверка — `TextMaskReferencesTest`.
+
+## Туризм, проживание и придорожные объекты
+
+- **Точечные слои туризма — центроиды, как `memorial` и `wilderness hut`.**
+  Слои `viewpoint`, `trailhead`, `information`, `guidepost`, `artwork`,
+  `museum`, `zoo`, `aquarium`, `theme park`, `hotel`, `hostel`,
+  `guest house`, `motel`, `apartment`, `caravan site`, `camp pitch`,
+  `cabin` и `bus station` собираются из запросов `resources/queries/*.txt`,
+  входят в `POINT_CENTROID` (`core/query_recipes.py`) и читают файлы
+  `<запрос>_centroids.sqlite`. Значки взяты из Topo-стиля OsmAnd
+  (`osmandapp/OsmAnd-resources`, те же авторы, GPLv3), приведены к чёрному
+  силуэту 580×580 с одинаковой видимой частью (500/580): от этого зависит
+  `_svg_content_scale` и радиус вытеснения.
+- **`tourism=information` разделён надвое.** `information=guidepost`
+  попадает в слой `guidepost`, все остальные значения — в `information`.
+  Так значок указателя не смешивается с общим «i»; `board_type` и прочие
+  подтипы пока рисуются общим значком.
+- **Диапазоны масштаба повторяют Topo.** `viewpoint`, `caravan site`,
+  `cabin` и `bus station` видны до 1:130000; `trailhead`, `information`,
+  `guidepost` и все виды проживания — до 1:50000; `museum`, `zoo`,
+  `aquarium`, `theme park` — до 1:30000; `artwork` — до 1:15000. Подписи
+  включаются не позже значка.
+- **Линейные объекты не участвуют в вытеснении значков.** `ladder=yes`
+  рисуется поперечными перекладинами (`HashLine`), `ford=stepping_stones`
+  — пунктиром из точек, `highway=raceway` и `highway=escape` — штриховыми
+  линиями. Это обычные линейные слои без `MaskMarker`.
+- **Новый туристический объект добавляется вместе:** запрос в
+  `resources/queries`, имя в `POINT_CENTROID`, значок `resources/icons`
+  (`*_m.svg` пересобирает `tools/build_icon_masks.py`), слой в шаблоне
+  (копия `memorial` или `wilderness hut`), строка в `array_queries`
+  (`resources/config.ini`) и обновлённый список масок
+  (`tools/update_icon_masks.py`).
