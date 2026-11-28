@@ -4,13 +4,13 @@
 
 - OsmAnd: `rendering_styles/topo.render.xml`, ветка `master`.
 
-- qgis-xtopo: `resources/queries/*.txt` (165 запросов) + шаблон `automap.qgz`.
+- qgis-xtopo: `resources/queries/*.txt` (186 запросов) + шаблон `automap.qgz`.
 
 - Числа объектов OSM — taginfo (глобальные данные).
 
 Повторить: `python3 tools/compare_osmand_style.py` (`--no-taginfo` — без сетевых счётчиков).
 
-Всего объектов в стиле OsmAnd Topo: **555** (служебных тегов OsmAnd: 24). Поддерживает xtopo **250**, ключ без нужного значения — **201**, ключ не используется — **104**.
+Всего объектов в стиле OsmAnd Topo: **555** (служебных тегов OsmAnd: 24). Поддерживает xtopo **271**, ключ без нужного значения — **181**, ключ не используется — **103**.
 
 ## 1. Сводка по ключам тегов
 
@@ -27,7 +27,7 @@
 | `admin_level` | 12 | 3 | 9 | `2`, `4`, `6` |
 | `aerialway` | 15 | 9 | 6 | `cable_car`, `chair_lift`, `gondola`, `goods`, `j-bar`, `platter`, `pylon`, `station`, `t-bar` |
 | `aeroway` | 7 | 4 | 3 | `aerodrome`, `apron`, `runway`, `taxiway` |
-| `amenity` | 24 | 5 | 19 | `drinking_water`, `hunting_stand`, `monastery`, `place_of_worship`, `prison` |
+| `amenity` | 24 | 6 | 18 | `bus_station`, `drinking_water`, `hunting_stand`, `monastery`, `place_of_worship`, `prison` |
 | `area:highway` | 13 | 9 | 4 | `motorway`, `pedestrian`, `primary`, `residential`, `secondary`, `service`, `tertiary`, `trunk`, `unclassified` |
 | `attraction` | 1 | 0 | 1 | — |
 | `barrier` | 46 | 46 | 0 | любые |
@@ -43,18 +43,18 @@
 | `emergency` | 2 | 0 | 2 | — |
 | `entrance` | 1 | 0 | 1 | — |
 | `fixme_tag` | 1 | 0 | 1 | — |
-| `ford` | 2 | 1 | 1 | `yes` |
+| `ford` | 2 | 2 | 0 | `stepping_stones`, `yes` |
 | `geological` | 4 | 0 | 4 | — |
 | `glacial` | 1 | 1 | 0 | `crevasse_zone` |
 | `harbour` | 1 | 0 | 1 | — |
 | `healthcare` | 1 | 0 | 1 | — |
-| `highway` | 35 | 22 | 13 | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | 35 | 25 | 10 | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
 | `historic` | 23 | 6 | 17 | `archaeological_site`, `castle`, `memorial`, `mine`, `monument`, `ruins` |
 | `horse_scale` | 1 | 0 | 1 | — |
 | `icn_ref` | 1 | 0 | 1 | — |
 | `iwn_ref` | 1 | 0 | 1 | — |
 | `junction` | 1 | 0 | 1 | — |
-| `ladder` | 1 | 0 | 1 | — |
+| `ladder` | 1 | 1 | 0 | `yes` |
 | `landuse` | 34 | 19 | 15 | `allotments`, `basin`, `cemetery`, `farmland`, `farmyard`, `forest`, `grass`, `greenhouse_horticulture`, `industrial`, `landfill`, `logging`, `meadow`, `military`, `orchard`, `plant_nursery`, `quarry`, `reservoir`, `residential`, `vineyard` |
 | `lcn_ref` | 1 | 0 | 1 | — |
 | `leisure` | 13 | 2 | 11 | `nature_reserve`, `resort` |
@@ -92,7 +92,7 @@
 | `rwn_ref` | 1 | 0 | 1 | — |
 | `shop` | 1 | 0 | 1 | — |
 | `sport` | 1 | 0 | 1 | — |
-| `tourism` | 22 | 6 | 16 | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
+| `tourism` | 22 | 21 | 1 | `alpine_hut`, `apartment`, `aquarium`, `artwork`, `attraction`, `cabin`, `camp_pitch`, `camp_site`, `caravan_site`, `chalet`, `guest_house`, `hostel`, `hotel`, `information`, `motel`, `museum`, `picnic_site`, `theme_park`, `viewpoint`, `wilderness_hut`, `zoo` |
 | `waterway` | 16 | 10 | 6 | `canal`, `dam`, `ditch`, `drain`, `drystream`, `river`, `riverbank`, `stream`, `waterfall`, `weir` |
 | `wood:lost` | 3 | 0 | 3 | — |
 
@@ -112,7 +112,6 @@
 | `highway`=`turning_circle` | 2.6 млн | точка | — |
 | `highway`=`traffic_signals` | 2 млн | точка, подпись | — |
 | `leisure`=`garden` | 1.6 млн | точка, полигон, подпись | — |
-| `tourism`=`information` | 1.5 млн | точка, подпись | board_type_nature, board_type_plants |
 | `amenity`=`school` | 1.5 млн | подпись | — |
 | `leisure`=`park` | 1.3 млн | точка, полигон, подпись | — |
 | `admin_level`=`8` | 755 тыс. | линия | — |
@@ -122,10 +121,8 @@
 | `leisure`=`picnic_table` | 511 тыс. | точка, подпись | — |
 | `admin_level`=`10` | 472 тыс. | линия | — |
 | `man_made`=`utility_pole` | 457 тыс. | точка | — |
-| `tourism`=`hotel` | 456 тыс. | точка, подпись | — |
 | `landuse`=`retail` | 427 тыс. | подпись | — |
 | `man_made`=`pipeline` | 387 тыс. | линия, подпись | — |
-| `tourism`=`artwork` | 376 тыс. | полигон, подпись | memorial_statue |
 | `man_made`=`silo` | 374 тыс. | полигон, подпись | — |
 | `man_made`=`petroleum_well` | 343 тыс. | точка, подпись | — |
 | `amenity`=`kindergarten` | 341 тыс. | подпись | — |
@@ -138,19 +135,22 @@
 | `place`=`farm` | 290 тыс. | точка, подпись | — |
 | `railway`=`buffer_stop` | 283 тыс. | точка | — |
 | `landuse`=`construction` | 278 тыс. | полигон, подпись | — |
-| `tourism`=`viewpoint` | 266 тыс. | точка, подпись | — |
 | `power`=`transformer` | 265 тыс. | точка, подпись | — |
 | `man_made`=`works` | 244 тыс. | подпись | — |
 | `historic`=`wayside_cross` | 242 тыс. | точка, подпись | — |
 | `amenity`=`clinic` | 223 тыс. | подпись | — |
 | `amenity`=`hospital` | 218 тыс. | подпись | — |
 | `public_transport`=`station` | 204 тыс. | точка, полигон, подпись | — |
+| `amenity`=`fountain` | 204 тыс. | полигон | — |
+| `railway`=`disused` | 196 тыс. | линия, подпись | — |
+| `landuse`=`recreation_ground` | 195 тыс. | полигон, подпись | — |
+| `admin_level`=`7` | 186 тыс. | линия | — |
 
 ## 3. Полный список неподдерживаемых объектов
 
 ### 3.1. Ключ не используется xtopo вовсе
 
-Всего: 80.
+Всего: 79.
 
 | тег | значение | объектов в OSM | где рисует OsmAnd | значок |
 |---|---|---|---|---|
@@ -214,7 +214,6 @@
 | `icn_ref` | `*` | — | порядок | — |
 | `iwn_ref` | `*` | — | порядок | — |
 | `junction` | `yes` | 134 тыс. | точка, подпись | — |
-| `ladder` | `yes` | 12 тыс. | линия, точка | — |
 | `lcn_ref` | `*` | — | порядок | — |
 | `lit` | `*` | — | порядок | — |
 | `lit` | `interval` | 640 | линия | — |
@@ -239,7 +238,7 @@
 
 ### 3.2. Ключ поддержан, но конкретного значения нет
 
-Всего: 201.
+Всего: 181.
 
 | тег | значение | объектов в OSM | где рисует OsmAnd | значок | значения в xtopo |
 |---|---|---|---|---|---|
@@ -261,25 +260,24 @@
 | `aeroway` | `*` | — | порядок | — | `aerodrome`, `apron`, `runway`, `taxiway` |
 | `aeroway` | `helipad` | 71 тыс. | точка, полигон, подпись | — | `aerodrome`, `apron`, `runway`, `taxiway` |
 | `aeroway` | `terminal` | 10 тыс. | полигон, подпись | — | `aerodrome`, `apron`, `runway`, `taxiway` |
-| `amenity` | `*` | — | точка, подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `bench` | 3.5 млн | точка, подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `bus_station` | 67 тыс. | точка, подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `cinema` | 31 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `clinic` | 223 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `college` | 72 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `ferry_terminal` | 37 тыс. | полигон | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `fire_station` | 149 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `fountain` | 204 тыс. | полигон | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `hospital` | 218 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `kindergarten` | 341 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `library` | 113 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `lounger` | 19 тыс. | точка, подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `police` | 163 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `school` | 1.5 млн | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `shelter` | 702 тыс. | точка, подпись | topo_lean_to | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `social_facility` | 183 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `theatre` | 53 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
-| `amenity` | `university` | 58 тыс. | подпись | — | `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `*` | — | точка, подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `bench` | 3.5 млн | точка, подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `cinema` | 31 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `clinic` | 223 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `college` | 72 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `ferry_terminal` | 37 тыс. | полигон | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `fire_station` | 149 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `fountain` | 204 тыс. | полигон | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `hospital` | 218 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `kindergarten` | 341 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `library` | 113 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `lounger` | 19 тыс. | точка, подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `police` | 163 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `school` | 1.5 млн | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `shelter` | 702 тыс. | точка, подпись | topo_lean_to | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `social_facility` | 183 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `theatre` | 53 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
+| `amenity` | `university` | 58 тыс. | подпись | — | `bus_station`, `drinking_water`, `grave_yard`, `hunting_stand`, `marketplace`, `monastery`, `place_of_worship`, `prison`, `water_point` |
 | `area:highway` | `cycleway` | 11 тыс. | полигон, подпись | — | `living_street`, `motorway`, `motorway_link`, `pedestrian`, `primary`, `primary_link`, `residential`, `secondary`, `secondary_link`, `service`, `tertiary`, `tertiary_link`, `trunk`, `trunk_link`, `unclassified` |
 | `area:highway` | `footway` | 100 тыс. | полигон, подпись | — | `living_street`, `motorway`, `motorway_link`, `pedestrian`, `primary`, `primary_link`, `residential`, `secondary`, `secondary_link`, `service`, `tertiary`, `tertiary_link`, `trunk`, `trunk_link`, `unclassified` |
 | `area:highway` | `steps` | 8 тыс. | полигон, подпись | — | `living_street`, `motorway`, `motorway_link`, `pedestrian`, `primary`, `primary_link`, `residential`, `secondary`, `secondary_link`, `service`, `tertiary`, `tertiary_link`, `trunk`, `trunk_link`, `unclassified` |
@@ -288,20 +286,16 @@
 | `boundary` | `aboriginal_lands` | 6 тыс. | подпись | — | `forest_compartment`, `forestry_compartment`, `land_area`, `national_park` |
 | `boundary` | `border_zone` | 61 | подпись | — | `forest_compartment`, `forestry_compartment`, `land_area`, `national_park` |
 | `boundary` | `protected_area` | 137 тыс. | полигон, подпись | — | `forest_compartment`, `forestry_compartment`, `land_area`, `national_park` |
-| `ford` | `stepping_stones` | 18 тыс. | линия, точка, подпись | — | `yes` |
-| `highway` | `bus_guideway` | 574 | подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `bus_stop` | 4.2 млн | точка, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `busway` | 40 тыс. | линия, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `crossing` | 13.8 млн | точка | crossing_traffic_signals_map, crossing_uncontrolled_map | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `elevator` | 59 тыс. | линия, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `escape` | 2 тыс. | подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `passing_place` | 70 тыс. | точка | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `raceway` | 46 тыс. | подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `services` | 33 тыс. | линия, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `traffic_signals` | 2 млн | точка, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `trailhead` | 19 тыс. | точка, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `turning_circle` | 2.6 млн | точка | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
-| `highway` | `via_ferrata` | 5 тыс. | линия, точка, подпись | — | `bridleway`, `cycleway`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `bus_guideway` | 574 | подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `bus_stop` | 4.2 млн | точка, подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `busway` | 40 тыс. | линия, подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `crossing` | 13.8 млн | точка | crossing_traffic_signals_map, crossing_uncontrolled_map | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `elevator` | 59 тыс. | линия, подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `passing_place` | 70 тыс. | точка | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `services` | 33 тыс. | линия, подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `traffic_signals` | 2 млн | точка, подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `turning_circle` | 2.6 млн | точка | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
+| `highway` | `via_ferrata` | 5 тыс. | линия, точка, подпись | — | `bridleway`, `cycleway`, `escape`, `footway`, `living_street`, `motorway`, `motorway_link`, `path`, `pedestrian`, `primary`, `primary_link`, `raceway`, `residential`, `road`, `secondary`, `secondary_link`, `service`, `steps`, `tertiary`, `tertiary_link`, `track`, `trailhead`, `trunk`, `trunk_link`, `unclassified` |
 | `historic` | `*` | — | точка, подпись | — | `archaeological_site`, `castle`, `memorial`, `mine`, `monastery`, `monument`, `ruins` |
 | `historic` | `aircraft` | 8 тыс. | точка, полигон, подпись | — | `archaeological_site`, `castle`, `memorial`, `mine`, `monastery`, `monument`, `ruins` |
 | `historic` | `battlefield` | 1 тыс. | подпись | — | `archaeological_site`, `castle`, `memorial`, `mine`, `monastery`, `monument`, `ruins` |
@@ -422,22 +416,7 @@
 | `railway` | `traverser` | 852 | полигон | — | `abandoned`, `dismantled`, `funicular`, `halt`, `narrow_gauge`, `rail`, `razed`, `station` |
 | `railway` | `turntable` | 4 тыс. | полигон | — | `abandoned`, `dismantled`, `funicular`, `halt`, `narrow_gauge`, `rail`, `razed`, `station` |
 | `railway` | `yard` | 6 тыс. | точка, подпись | — | `abandoned`, `dismantled`, `funicular`, `halt`, `narrow_gauge`, `rail`, `razed`, `station` |
-| `tourism` | `*` | — | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `apartment` | 92 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `aquarium` | 1 тыс. | подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `artwork` | 376 тыс. | полигон, подпись | memorial_statue | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `cabin` | 880 | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `camp_pitch` | 146 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `caravan_site` | 36 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `guest_house` | 201 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `hostel` | 62 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `hotel` | 456 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `information` | 1.5 млн | точка, подпись | board_type_nature, board_type_plants | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `motel` | 49 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `museum` | 112 тыс. | подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `theme_park` | 11 тыс. | подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `viewpoint` | 266 тыс. | точка, подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
-| `tourism` | `zoo` | 9 тыс. | подпись | — | `alpine_hut`, `attraction`, `camp_site`, `chalet`, `picnic_site`, `wilderness_hut` |
+| `tourism` | `*` | — | точка, подпись | — | `alpine_hut`, `apartment`, `aquarium`, `artwork`, `attraction`, `cabin`, `camp_pitch`, `camp_site`, `caravan_site`, `chalet`, `guest_house`, `hostel`, `hotel`, `information`, `motel`, `museum`, `picnic_site`, `theme_park`, `viewpoint`, `wilderness_hut`, `zoo` |
 | `waterway` | `*` | — | порядок | — | `canal`, `dam`, `ditch`, `drain`, `drystream`, `river`, `riverbank`, `stream`, `waterfall`, `weir` |
 | `waterway` | `dock` | 7 тыс. | полигон | — | `canal`, `dam`, `ditch`, `drain`, `drystream`, `river`, `riverbank`, `stream`, `waterfall`, `weir` |
 | `waterway` | `fish_pass` | 3 тыс. | линия, подпись | — | `canal`, `dam`, `ditch`, `drain`, `drystream`, `river`, `riverbank`, `stream`, `waterfall`, `weir` |
@@ -475,6 +454,8 @@ OsmAnd различает объекты дополнительными тега
 | `natural` | `volcano` | `status=active`, `volcano:type=mud` |
 | `natural` | `wetland` | `intermittent=yes`, `wetland=bog`, `wetland=fen`, `wetland=mangrove`, `wetland=marsh`, `wetland=mud`, `wetland=palsa_bog`, `wetland=reedbed`, `wetland=saltmarsh`, `wetland=string_bog`, `wetland=swamp`, `wetland=tidalflat`, `wetland=wet_meadow` |
 | `place` | `city` | `capital=yes` |
+| `tourism` | `artwork` | `artwork_type=statue` |
+| `tourism` | `information` | `board_type=nature`, `board_type=plants`, `board_type=wildlife`, `information=audioguide`, `information=board`, `information=guidepost`, `information=map`, `information=office`, `information=route_marker`, `information=terminal` |
 | `waterway` | `stream` | `intermittent=yes` |
 
 ### 4.1. Свойства, которых нет ни в одном слое xtopo
@@ -495,7 +476,7 @@ OsmAnd различает объекты дополнительными тега
 | `crossing` | `crossing=traffic_signals`, `crossing=uncontrolled`, `crossing=unmarked` | **не хранится** |
 | `generator:source` | `generator:source=wind` | **не хранится** |
 | `horse_scale_highway` | `horse_scale_highway=bridleway`, `horse_scale_highway=footway`, `horse_scale_highway=path`, `horse_scale_highway=residential`, `horse_scale_highway=service`, `horse_scale_highway=track` | **не хранится** |
-| `information` | `information=audioguide`, `information=board`, `information=guidepost`, `information=map`, `information=office`, `information=route_marker`, `information=terminal` | **не хранится** |
+| `information` | `information=audioguide`, `information=board`, `information=guidepost`, `information=map`, `information=office`, `information=route_marker`, `information=terminal` | зашито в запрос (значение отбирается при выгрузке) |
 | `memorial` | `memorial=plaque`, `memorial=stolperstein` | **не хранится** |
 | `nr_high_density` | `nr_high_density=yes` | **не хранится** |
 | `object_type` | `object_type=node` | **не хранится** |
