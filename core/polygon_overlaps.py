@@ -11,7 +11,7 @@ OsmAnd при равном ``order`` рисует меньший полигон 
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import i18n
+from . import gdal_log, i18n
 from .cpu import cpu_workers
 
 # Пары (слой, из которого вычитаем, вычитаемый слой). Обычно первый слой
@@ -171,7 +171,7 @@ def resolve_polygon_overlaps(config, progress=None, cancel=None):
     uppers = list(grouped)
     edges = _layer_dependencies(grouped)
 
-    def process(upper, workers):
+    def _process(upper, workers):
         """Режет один верхний слой; возвращает результаты и предупреждение."""
         upper_path = _layer_path(config, upper)
         if not upper_path.exists():
@@ -203,6 +203,18 @@ def resolve_polygon_overlaps(config, progress=None, cancel=None):
             (upper, lower, changed.get(lower, 0))
             for lower, _, _ in available
         ], None
+
+    def process(upper, workers):
+        """Обёртка с перехватчиком GDAL для рабочего потока."""
+        # GDAL различает обработчики ошибок по потокам, а проверка
+        # валидности OGRGeometry пишет предупреждение о самопересечении
+        # прямо в консоль.  Ставим перехватчик здесь, чтобы оно попало в
+        # сводку журнала, как у остальных этапов.
+        gdal_log.LOG.install()
+        try:
+            return _process(upper, workers)
+        finally:
+            gdal_log.LOG.restore()
 
     # Слои, между которыми нет зависимости, можно резать одновременно:
     # они читают разные файлы, а результат зависит только от порядка

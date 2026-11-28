@@ -4430,6 +4430,46 @@ class PolygonOverlapTest(unittest.TestCase):
             serial_geometry.ExportToWkb(), parallel_geometry.ExportToWkb()
         )
 
+    def test_worker_gdal_warnings_are_counted(self):
+        """Предупреждения GDAL из потоков пересечений попадают в сводку."""
+        import threading
+        from unittest import mock
+
+        from osgeo import gdal
+
+        from qgis_xtopo.core import gdal_log, polygon_overlaps
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._config(directory)
+            for name in ("farmland", "grass", "wetland", "sand"):
+                _write_polygon_layer(
+                    config.vector_dir / f"{name}.sqlite",
+                    name,
+                    ["POLYGON((0 0,0 10,10 10,10 0,0 0))"],
+                )
+
+            def cut(*_args, **_kwargs):
+                threads.append(threading.current_thread())
+                gdal.Error(
+                    gdal.CE_Warning, 1,
+                    "Non closed ring detected. Test warning",
+                )
+                return {}
+
+            threads = []
+            log = gdal_log.GdalLog()
+            with mock.patch.object(gdal_log, "LOG", log), \
+                    mock.patch.object(polygon_overlaps, "_cut_layer", cut):
+                polygon_overlaps.resolve_polygon_overlaps(config)
+        self.assertTrue(
+            any(thread is not threading.main_thread() for thread in threads)
+        )
+        self.assertEqual(sum(log.counts().values()), len(threads))
+        self.assertIn(
+            "незамкнутые кольца в данных OSM (GDAL закрывает их сам)",
+            log.counts(),
+        )
+
     def test_attributes_are_preserved(self):
         from qgis_xtopo.core.polygon_overlaps import resolve_polygon_overlaps
 
