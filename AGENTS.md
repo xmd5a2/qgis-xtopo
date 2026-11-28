@@ -217,6 +217,16 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   чтобы не менять канонические диапазоны подавления. Подробности —
   `docs/agents/labels.md`, проверки — `BridgeIconTest`,
   `BridgeIconLayersTest`, `BridgeIconSuppressionTest`.
+- **Маска значка не режет поверхность дороги.** У `highway main` символ
+  из трёх линий: широкая тёмная обводка (3,5 мм), чёрная линия
+  (1,95 мм) и поверхность, цвет которой считается по полю
+  `highway_integrity` (1,46 мм). Обводка под значком вырезается, а
+  поверхность — нет: иначе в полосе дороги появляется белый клин и
+  дорога выглядит разорванной. Исключение общее для всех слоёв — любой
+  symbol layer с data-defined выражением по `highway_integrity` из целей
+  масок убран. Список целей пересобирает
+  `tools/update_icon_masks.py`, проверка —
+  `IconMaskReferencesTest.test_road_surface_is_not_masked`.
 - **Значок кладбища — отдельный точечный слой `cemetery icons` над картой.**
   Заливка и штриховка остаются в `cemetery` под зданиями, а точки для
   значка строит `core/cemetery_icons.py` из площадок (`pointOnSurface`) и

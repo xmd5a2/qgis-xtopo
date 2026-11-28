@@ -8,6 +8,11 @@ QGIS предупреждает, если разные источники мас
 добавляются: значок на площади не должен оставлять в ней дыру. Уже
 записанные заливки сохраняются, пока их id существуют в рендерере.
 
+Исключение — symbol layer, цвет которых считается по полю
+``highway_integrity``: это поверхность дороги Highway main, и её маска
+значка не режет, иначе дорога под значком разрывается. Обводка дороги
+(более широкий чёрный слой под ней) остаётся вырезанной.
+
 Скрипт читает цели из существующих масок (устаревшие и точечные слои
 отбрасываются), при необходимости добавляет отсутствующие линейные
 symbol layer id и записывает одинаковый список во все MaskMarker. Проект
@@ -41,6 +46,30 @@ LINE_CLASSES = {
     "InterpolatedLine",
     "HashLine",
 }
+
+# Поле, по которому считается цвет поверхности дороги Highway main.
+INTEGRITY_FIELD = "highway_integrity"
+
+
+def integrity_symbol_layers(layer):
+    """symbol layer слоя, цвет которых считается по highway_integrity.
+
+    Это поверхность дороги: её маска значка не режет, иначе дорога под
+    значком разрывается.  Обводка дороги — более широкий слой под ней —
+    остаётся вырезанной.
+    """
+    result = set()
+    for symbol_layer in layer.iter("layer"):
+        symbol_layer_id = symbol_layer.get("id")
+        if not symbol_layer_id:
+            continue
+        properties = symbol_layer.find("data_defined_properties")
+        if properties is None:
+            continue
+        if INTEGRITY_FIELD in ElementTree.tostring(
+                properties, encoding="unicode"):
+            result.add(symbol_layer_id)
+    return result
 
 
 def parse_mask_pairs(value):
@@ -154,14 +183,17 @@ def update(root, dry_run=False):
             for symbol_layer in renderer_layers(layer)
             if symbol_layer.get("id")
         }
+        integrity = integrity_symbol_layers(layer)
         borders = {
             symbol_layer.get("id")
             for symbol_layer in renderer_layers(layer)
             if symbol_layer.get("id")
             and symbol_layer.get("class") in LINE_CLASSES
-        }
-        ids[layer_id] = sorted((existing.get(layer_id, set()) & renderer)
-                               | borders)
+        } - integrity
+        ids[layer_id] = sorted(
+            ((existing.get(layer_id, set()) & renderer) | borders)
+            - integrity
+        )
     parts = []
     for layer in targets:
         layer_id = layer.findtext("id")
@@ -213,7 +245,10 @@ def main():
     # Без пересборки zip: меняем только qgs, остальные вложения копируем.
     output = args.output or args.template
     temporary = output + ".tmp"
-    with zipfile.ZipFile(temporary, "w") as archive:
+    # Шаблон пересобирается с максимальным сжатием: он попадает и в
+    # плагин, и в инсталлятор.
+    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED,
+                         compresslevel=9) as archive:
         for info, data in entries:
             if info.filename.endswith(".qgs"):
                 data = ElementTree.tostring(

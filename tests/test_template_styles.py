@@ -84,6 +84,26 @@ def _find_option(element, name):
     return None
 
 
+def _integrity_layers(element):
+    """symbol layer, цвет которых считается по highway_integrity.
+
+    Это поверхность дороги Highway main: её маска значка не режет, иначе
+    дорога под значком разрывается.
+    """
+    result = set()
+    for symbol_layer in element.iter("layer"):
+        symbol_layer_id = symbol_layer.get("id")
+        if not symbol_layer_id:
+            continue
+        properties = symbol_layer.find("data_defined_properties")
+        if properties is None:
+            continue
+        if "highway_integrity" in ElementTree.tostring(
+                properties, encoding="unicode"):
+            result.add(symbol_layer_id)
+    return result
+
+
 def _option_value(element, name):
     option = _find_option(element, name)
     if option is None:
@@ -2356,15 +2376,43 @@ class IconMaskReferencesTest(unittest.TestCase):
                 for symbol_layer in renderer.iter("layer")
                 if symbol_layer.get("class") in line_classes
             }
+            # Поверхность дороги, красящаяся по highway_integrity, маской
+            # не режется: иначе дорога под значком разрывается.
+            borders -= _integrity_layers(renderer)
             self.assertLessEqual(
                 borders, masked,
                 f"{name}: маска должна резать все границы слоя")
+
+    def test_road_surface_is_not_masked(self):
+        """Поверхность дороги под значком не вырезается.
+
+        Маска значка вырезает кусок из целевых слоёв.  У дороги Highway
+        main цвет поверхности считается по полю ``highway_integrity``, и
+        если её резать, дорога под значком разрывается: под широкой
+        чёрной обводкой появляется белый клин.
+        """
+        option = _find_option(self.masks[0][1], "mask_symbollayers")
+        parts = (option.get("value") or "").split(";")
+        masked = {
+            (parts[index], parts[index + 1])
+            for index in range(0, len(parts) - 1, 2)
+        }
+        found = 0
+        for layer_id, layer in self.layers.items():
+            for symbol_layer_id in _integrity_layers(layer):
+                self.assertNotIn(
+                    (layer_id, symbol_layer_id), masked,
+                    layer.findtext("layername"),
+                )
+                found += 1
+        self.assertTrue(found, "в шаблоне нет слоёв по highway_integrity")
 
     def test_overview_road_layer_is_a_mask_target(self):
         """На 1:200000 дорогу рисует overview-слой: он тоже в масках.
 
         ``highway main`` скрывается ровно на 1:200000, и обводку дороги
         под значком place of worship режет только его обзорная копия.
+        Поверхность дороги при этом не режется ни там, ни здесь.
         """
         overview = next(
             layer for layer in self.layers.values()
@@ -2386,6 +2434,7 @@ class IconMaskReferencesTest(unittest.TestCase):
             )
         }
         self.assertTrue(borders)
+        borders -= _integrity_layers(overview.find("renderer-v2"))
         self.assertLessEqual(
             borders, masked,
             "highway main overview: обводка дороги не вырезается под значком",
