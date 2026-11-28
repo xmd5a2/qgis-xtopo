@@ -7,9 +7,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    area_field, cemetery_icons, coastline, dem_sources, disk_space,
-    field_subset, gdal_log, highway_integrity, i18n, icon_angles, label_cache,
-    oneway, osm_convert, osmium_tool, peak_filter, poi_icons,
+    area_field, bridge_icons, cemetery_icons, coastline, dem_sources,
+    disk_space, field_subset, gdal_log, highway_integrity, i18n, icon_angles,
+    label_cache, oneway, osm_convert, osmium_tool, peak_filter, poi_icons,
     polygon_overlaps, project, riverbank_names, road_packing, sources,
     spatialite, stream_drying, terrain, underwater,
 )
@@ -3968,7 +3968,6 @@ def _warm_template_data():
     try:
         field_subset.template_references()
         poi_icons.read_template_poi()
-        poi_icons.read_template_obstacles()
         poi_icons.template_variables()
     except Exception:  # noqa: BLE001 - прогрев не обязателен
         pass
@@ -4325,6 +4324,21 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         started = time.monotonic()
         area_field.ensure_area_fields(config.vector_dir)
         timings.add_stage("поле площади", time.monotonic() - started)
+        report("Значки мостов")
+        started = time.monotonic()
+        try:
+            bridge_icons.build_bridge_icons(
+                config, progress=report, cancel=cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            # Без готовых точек значки мостов не рисуются: линии и
+            # остальная карта собираются.
+            report(i18n.trf(
+                "WARNING: значки мостов: {}; слой не обновлён", exc,
+            ))
+        timings.add_stage("значки мостов", time.monotonic() - started)
         report("Значки кладбищ")
         started = time.monotonic()
         try:

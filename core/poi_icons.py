@@ -39,12 +39,10 @@ QGIS не разводит значки разных слоёв: кластер�
 подавлять, и по ним считается порог.  Они лежат в дереве проекта, но
 скрыты от пользователя.
 
-В служебный слой попадают и значки, нарисованные на объектах линий:
-MarkerLine с CentralPoint (мосты).  Фильтр правила скрыл бы всю линию
-вместе со значком, поэтому такой значок участвует как препятствие, а его
-видимость решает поле ``icon_hide``.  Его ранг — место слоя в дереве
-проекта, как у точечных POI.  На объект нужна одна точка — середина
-линии, так что ни подготовка, ни отрисовка не замедляются.
+В служебный слой попадают все значки, в том числе мосты: их точки
+строит ``core.bridge_icons``, поэтому каждый значок вытесняется полем
+``hide`` и участвует в вытеснении на равных, независимо от того, была
+ли линия или площадка его источником.
 
 Значок кладбища — обычный точечный слой: точки для него строит
 ``core.cemetery_icons``, поэтому он вытесняется полем ``hide``, как все
@@ -98,21 +96,9 @@ _NEIGHBOUR_OFFSETS = tuple(
 # точек, скрытых текущим уровнем детализации.
 NEVER_RANK = 99999
 
-# Слои, у которых значок вытесняется соседом того же слоя через поле
-# icon_hide: мосты (значок в середине линии).
-SELF_ICON_LAYERS = (
-    "highway main bridge", "track bridge", "path bridge", "railway bridge",
-)
-# Слои мостов: их значок уступает и населённому пункту, а не только
-# соседнему мосту.  Линия моста при этом остаётся.
-BRIDGE_ICON_LAYERS = (
-    "highway main bridge", "track bridge", "path bridge", "railway bridge",
-)
 # Слой стоит выше карты, чтобы полигоны и линии не закрывали значок, но
 # в вытеснении уступает всем остальным значкам.
 LOWEST_ICON_LAYERS = ("cemetery icons",)
-# Поле с индексами диапазонов, где значок моста скрыт.
-ICON_HIDE_FIELD = "icon_hide"
 
 # Слои, у которых приоритет внутри слоя задаётся данными объекта, а не
 # только координатами: у населённых пунктов важнее город, чем посёлок,
@@ -471,7 +457,7 @@ def _layer_tree_order(text):
 
 
 def _template_data(path=None):
-    """Компактные данные шаблона: значки, препятствия и источники.
+    """Компактные данные шаблона: значки и источники.
 
     XML шаблона занимает десятки мегабайт, а полное дерево — сотни.
     Поэтому разбираются только блоки ``maplayer``, найденные поиском
@@ -490,7 +476,6 @@ def _template_data(path=None):
     order = _layer_tree_order(text)
     sources = {}
     layers = []
-    obstacles = []
     for start, end in _maplayer_spans(text):
         element = ElementTree.fromstring(text[start:end])
         name = element.findtext("layername")
@@ -499,14 +484,10 @@ def _template_data(path=None):
             layer = _poi_layer(element, name)
             if layer is not None:
                 layers.append(layer)
-            obstacle = _obstacle_layer(element, name)
-            if obstacle is not None:
-                obstacles.append(obstacle)
     positions = {
         name: index for index, name in enumerate(order, start=1)
     }
     layers.sort(key=lambda item: positions.get(item.name, 10**6))
-    obstacles.sort(key=lambda item: positions.get(item.name, 10**6))
     for index, item in enumerate(layers, start=1):
         # Ранг — место слоя в дереве проекта: приоритет задаёт порядок
         # слоёв, а не отдельная нумерация только среди POI.
@@ -524,11 +505,8 @@ def _template_data(path=None):
     for item in layers:
         if item.name in LOWEST_ICON_LAYERS:
             item.rank = lowest + 1
-    for index, layer in enumerate(obstacles, start=1):
-        layer.rank = positions.get(layer.name, 10**6 + index)
     data = {
         "poi": layers,
-        "obstacles": obstacles,
         "sources": sources,
     }
     _TEMPLATE_DATA[path] = data
@@ -541,7 +519,6 @@ def read_template_poi(path=None):
     Порядок рангов — порядок следования слоёв в дереве проекта: чем выше
     слой в списке, тем он приоритетнее.  В список попадают только слои,
     которые действительно рисуют значки (маркер с ненулевым размером).
-    Значки на линиях и полигонах читает :func:`read_template_obstacles`.
     """
     return list(_template_data(path)["poi"])
 
@@ -593,137 +570,6 @@ def _has_icon(tree):
     if tree.size > 0:
         return True
     return any(_has_icon(child) for child in tree.children)
-
-
-def _nested_marker_size(symbol_element):
-    """Размер значка внутри MarkerLine или CentroidFill.
-
-    ``_marker_size`` смотрит только на непосредственные слои символа: у
-    линии значок вложен в MarkerLine, у полигона — в CentroidFill.
-    Берём самый крупный значок, чтобы препятствие не оказалось меньше
-    нарисованного.
-    """
-    if symbol_element is None:
-        return 0.0
-    best = 0.0
-    for layer in symbol_element.iter("layer"):
-        if layer.get("class") not in ("SimpleMarker", "SvgMarker"):
-            continue
-        options = {
-            option.get("name"): option.get("value")
-            for option in layer.findall("Option/Option")
-        }
-        try:
-            size = float(options.get("size") or 0)
-        except ValueError:
-            continue
-        if layer.get("class") == "SvgMarker":
-            size *= _svg_content_scale(options.get("name") or "")
-        best = max(best, size)
-    return best
-
-
-def _obstacle_symbol_sizes(renderer):
-    """Размеры вложенных значков символов правил по именам."""
-    sizes = {}
-    symbols = renderer.find("symbols")
-    if symbols is None:
-        return sizes
-    for symbol in symbols.findall("symbol"):
-        sizes[symbol.get("name")] = _nested_marker_size(symbol)
-    return sizes
-
-
-def _marker_placements(element):
-    """Значения placements у слоёв MarkerLine."""
-    placements = []
-    for layer in element.iter("layer"):
-        if layer.get("class") != "MarkerLine":
-            continue
-        for option in layer.findall("Option/Option"):
-            if option.get("name") == "placements":
-                placements.append(option.get("value") or "")
-    return placements
-
-
-def _obstacle_geometry(element):
-    """Тип значка-препятствия: Line, Polygon или None.
-
-    Берём только значки, которые рисуются в одной точке объекта:
-    MarkerLine с CentralPoint (мосты) и CentroidFill.  В текущем шаблоне
-    значок кладбища вынесен в точечный слой, поэтому Polygon остаётся
-    поддержкой старых шаблонов.  Ленты стрелок вдоль рек и линии
-    электропередачи не обрабатываются: у них значков вдоль линии много,
-    и одна точка в середине соврала бы.
-    """
-    geometry = element.get("geometry") or ""
-    if geometry == "Line":
-        return "Line" if "CentralPoint" in _marker_placements(element) else None
-    if geometry == "Polygon":
-        return (
-            "Polygon"
-            if element.find(".//layer[@class='CentroidFill']") is not None
-            else None
-        )
-    return None
-
-
-def read_template_obstacles(path=None):
-    """Значки на линиях: мосты.
-
-    QGIS не умеет скрыть отдельный маркер MarkerLine:
-    фильтр правила действует на объект целиком, и вместе со значком
-    пропала бы вся линия.  Поэтому такие значки не
-    вытесняются сами, а участвуют как препятствия: центр линии
-    добавляется в служебный слой с рангом по месту слоя в
-    дереве проекта, и обычные значки ниже него скрываются.  На объект
-    нужна одна точка, поэтому это не замедляет ни подготовку, ни
-    отрисовку.  ``CentroidFill`` поддержан для старых шаблонов; значок
-    кладбища теперь точечный и сюда не попадает.
-    """
-    return list(_template_data(path)["obstacles"])
-
-
-def _obstacle_layer(element, name):
-    """Препятствие со значка линии или полигона или None."""
-    kind = _obstacle_geometry(element)
-    if kind is None:
-        return None
-    renderer = _renderer_element(element)
-    if renderer is None:
-        return None
-    sizes = _obstacle_symbol_sizes(renderer)
-    rules_element = renderer.find("rules")
-    minimum = maximum = 0.0
-    if element.get("hasScaleBasedVisibilityFlag") == "1":
-        maximum = float(element.get("minScale") or 0)
-        minimum = float(element.get("maxScale") or 0)
-        if minimum <= 1.0:
-            minimum = 0.0
-    if rules_element is not None:
-        tree = _parse_rules(rules_element, sizes, minimum, maximum)
-    else:
-        symbol = renderer.find("symbol")
-        if symbol is None:
-            symbol = renderer.find("symbols/symbol")
-        size = _nested_marker_size(symbol)
-        if size <= 0:
-            return None
-        leaf = PoiRule(size=size, minimum=minimum, maximum=maximum)
-        tree = PoiRule(
-            minimum=minimum, maximum=maximum, children=[leaf],
-        )
-    if not _has_icon(tree):
-        return None
-    return PoiLayer(
-        name=name,
-        source=element.findtext("datasource") or "",
-        crs=_layer_crs(element),
-        root=tree,
-        minimum=minimum,
-        maximum=maximum,
-        geometry=kind,
-    )
 
 
 def _icon_anchor(geometry, kind):
@@ -877,60 +723,6 @@ def _nearest_expression(size, index, rank):
         f"{ahead} AND {metric} < {size:g} * @map_scale / 1000 "
         f"AND {metric} > 0.001)) > 0, false))"
     )
-
-
-def icon_enabled_expression(index):
-    """Видимость значка моста в одном диапазоне масштаба.
-
-    Значок рисуется MarkerLine в середине линии, поэтому фильтр правила
-    скрыл бы весь мост.  Поле ``icon_hide`` заполняется при подготовке
-    данных: в нём перечислены диапазоны масштаба, где у объекта есть
-    сосед того же слоя с меньшими координатами.  Правило значка своё
-    для каждого диапазона, поэтому ``@map_scale`` (в data-defined
-    свойствах символа он недоступен) не нужен.  Свойство ``enabled`` у
-    MarkerLine отключает только значок, линии остаются.
-    """
-    return (
-        "if(coalesce(array_contains(string_to_array("
-        f"\"{ICON_HIDE_FIELD}\", ';'), '{index}'), false), false, true)"
-    )
-
-
-def icon_enabled_expression_for(indexes):
-    """Видимость значка в нескольких диапазонах масштаба.
-
-    Значок слоя может быть один на несколько диапазонов (у кладбищ
-    значок один, а диапазонов несколько).  Решение принимается по
-    верхней границе диапазона — так же, как у мостов, — поэтому
-    значок скрыт, если он скрыт в любом из диапазонов.
-    """
-    if not indexes:
-        return "true"
-    if len(indexes) == 1:
-        return icon_enabled_expression(indexes[0])
-    terms = " or ".join(
-        "array_contains(string_to_array("
-        f"\"{ICON_HIDE_FIELD}\", ';'), '{index}')"
-        for index in indexes
-    )
-    return f"if(coalesce({terms}, false), false, true)"
-
-
-def icon_symbol_bands(layer, bands):
-    """Диапазоны масштаба по символам значка слоя.
-
-    Возвращает словарь (имя символа) -> список индексов диапазонов,
-    в которых этот символ рисуется.
-    """
-    result = {}
-    for leaf in leaves(layer.root):
-        if not leaf.symbol:
-            continue
-        indexes = result.setdefault(leaf.symbol, set())
-        indexes.update(band_indexes(leaf.minimum, leaf.maximum, bands))
-    return {
-        symbol: sorted(indexes) for symbol, indexes in result.items()
-    }
 
 
 def base_filter(filter_text, suppression):
@@ -1682,195 +1474,6 @@ def _prune_band(points, index, scale, latitude_max):
     return keep
 
 
-def _hidden_icon_bands(points, bands):
-    """Диапазоны, где значок проигрывает соседу.
-
-    Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
-    Внутри слоя побеждает объект с меньшими координатами, как у точечных
-    POI; значок моста уступает ещё и населённому пункту, стоящему выше
-    в дереве.  Соседи ищутся по сетке, чтобы не перебирать все пары на
-    больших выгрузках.
-    """
-    result = {}
-    for index, band in enumerate(bands):
-        entries = [
-            point for point in points
-            if index in point.bands
-            and point.name in SELF_ICON_LAYERS
-            and point.geometry in ("Line", "Polygon")
-            and point.fid >= 0
-        ]
-        if not entries:
-            continue
-        settlements = [
-            point for point in points
-            if index in point.bands
-            and point.name in SETTLEMENT_LAYERS
-            and point.geometry == "Point"
-            and point.fid >= 0
-        ]
-        # Представительский масштаб диапазона: на нём же посчитаны
-        # размеры значков в point.sizes.  Верхняя граница диапазона
-        # завышала бы радиус на 15-30 %.
-        scale = _band_scale(band)
-
-        def radius(point, neighbour):
-            """Радиус на земле, в котором значки перекрываются.
-
-            Знаменатель в EPSG:3857 считается по метрам проекции: на
-            широте φ метр на земле занимает 1/cos φ единиц карты.
-            Поэтому значок ``size`` мм при знаменателе ``scale``
-            закрывает на земле ``size * scale / 1000 * cos φ`` метров.
-            Перекрытие — когда расстояние меньше полусуммы размеров
-            двух значков.
-            """
-            size = (
-                point.sizes.get(index, 0.0)
-                + neighbour.sizes.get(index, 0.0)
-            ) / 2.0
-            return (
-                size * scale / 1000.0
-                * math.cos(math.radians(point.lat))
-            )
-
-        def distance(one, other):
-            """Расстояние в метрах с поправкой на широту, как в шаблоне."""
-            return math.hypot(
-                (other.lon - one.lon)
-                * math.cos(math.radians(one.lat)),
-                other.lat - one.lat,
-            ) * 111320.0
-
-        max_size = max(
-            [point.sizes.get(index, 0.0)
-             for point in entries + settlements],
-            default=0.0,
-        )
-        if max_size <= 0:
-            continue
-        # Полусумма размеров не больше max_size.  Ячейка в градусах:
-        # радиус в градусах широты равен size * scale / 1000 / 111320,
-        # а в градусах долготы — столько же (cos сокращается с
-        # поправкой широты в радиусе).
-        cell = max(max_size * scale / 1000.0 / 111320.0, 1e-6)
-
-        def grid_of(items):
-            grid = {}
-            for position, point in enumerate(items):
-                grid.setdefault(
-                    (int(point.lon // cell), int(point.lat // cell)), []
-                ).append(position)
-            return grid
-
-        grid = grid_of(entries)
-        settlement_grid = grid_of(settlements)
-        for position, point in enumerate(entries):
-            gx = int(point.lon // cell)
-            gy = int(point.lat // cell)
-            found = False
-            # Населенный пункт важнее моста: его значок скрывает значок
-            # моста, чтобы тот не перекрывал название.  Линия моста
-            # остается, скрывается только MarkerLine.
-            if point.name in BRIDGE_ICON_LAYERS:
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        for other in settlement_grid.get(
-                                (gx + dx, gy + dy), ()):
-                            neighbour = settlements[other]
-                            if neighbour.rank >= point.rank:
-                                continue
-                            if distance(point, neighbour) <= radius(
-                                    point, neighbour):
-                                found = True
-                                break
-                        if found:
-                            break
-                    if found:
-                        break
-            if not found:
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        for other in grid.get((gx + dx, gy + dy), ()):
-                            if other == position:
-                                continue
-                            neighbour = entries[other]
-                            if neighbour.name != point.name:
-                                continue
-                            if (neighbour.lon, neighbour.lat) >= (
-                                    point.lon, point.lat):
-                                continue
-                            if distance(point, neighbour) <= radius(
-                                    point, neighbour):
-                                found = True
-                                break
-                        if found:
-                            break
-                    if found:
-                        break
-            if found:
-                result.setdefault((point.name, point.fid), set()).add(index)
-    return result
-
-
-def _write_icon_hide(config, layers, points, bands):
-    """Пишет поле icon_hide в слои со значком на объекте.
-
-    Поле хранит через точку с запятой индексы диапазонов, где значок
-    скрыт.  Выражение шаблона выбирает нужный индекс по @map_scale.
-
-    Запись идёт через SQLite напрямую: обновление строки через GDAL в
-    Spatialite переписывает геометрию и пространственный индекс и стоит
-    около сотни миллисекунд на объект, через SQLite — около сотни
-    микросекунд.  Геометрия при этом не меняется: триггеры Spatialite
-    висят на `UPDATE OF "GEOMETRY"`, а поле icon_hide — другое поле.
-    """
-    hidden = _hidden_icon_bands(points, bands)
-
-    updates = {}
-    for (name, fid), indexes in hidden.items():
-        updates.setdefault(name, []).append(
-            (fid, ";".join(str(index) for index in sorted(indexes)))
-        )
-    for info in layers:
-        if info.name not in SELF_ICON_LAYERS:
-            continue
-        if info.geometry not in ("Line", "Polygon"):
-            continue
-        path = _source_path(config, info.source)
-        if path is None:
-            continue
-        connection = sqlite_fields.connect(path)
-        try:
-            table = sqlite_fields.table_name(connection, path)
-            columns = {
-                row[1] for row in connection.execute(
-                    f'PRAGMA table_info("{table}")'
-                )
-            }
-            if ICON_HIDE_FIELD not in columns:
-                connection.execute(
-                    f'ALTER TABLE "{table}" ADD COLUMN "{ICON_HIDE_FIELD}" TEXT'
-                )
-            else:
-                # Мост мог перестать вытесняться: старые значения
-                # надо сбросить, иначе значок останется скрытым.
-                connection.execute(
-                    f'UPDATE "{table}" SET "{ICON_HIDE_FIELD}" = NULL'
-                )
-            values = updates.get(info.name, ())
-            if values:
-                primary = sqlite_fields.primary_key(connection, table)
-                connection.executemany(
-                    f'UPDATE "{table}" SET "{ICON_HIDE_FIELD}" = ? '
-                    f'WHERE "{primary}" = ?',
-                    [(value, fid) for fid, value in values],
-                )
-            connection.commit()
-        finally:
-            connection.close()
-    return hidden
-
-
 def _band_radius(band, candidates, band_index):
     """Предельный радиус подавления в диапазоне, метры.
 
@@ -2334,19 +1937,14 @@ def build_poi_icons(config, progress=None, cancel=None):
     layers = read_template_poi()
     if not layers:
         return 0
-    obstacles = read_template_obstacles()
-    all_layers = layers + obstacles
     bands = canonical_bands(layers)
     restore_base_filters(layers, bands)
-    points = _collect_points(config, all_layers, bands, cancel=cancel)
+    points = _collect_points(config, layers, bands, cancel=cancel)
     report(f"POI: точек {len(points)}")
     if not points:
         for file_name in (AUX_FILE_NAME, LEGACY_AUX_FILE_NAME_3857):
             (Path(config.vector_dir) / file_name).unlink(missing_ok=True)
         return 0
-    hidden = _write_icon_hide(config, obstacles, points, bands)
-    for point in points:
-        point.hidden = hidden.get((point.name, point.fid), set())
     latitude_max = max(abs(point.lat) for point in points)
     records = {}
     total = 0
@@ -2371,6 +1969,6 @@ def build_poi_icons(config, progress=None, cancel=None):
     (Path(config.vector_dir) / LEGACY_AUX_FILE_NAME_3857).unlink(missing_ok=True)
     report(
         f"POI: служебные слои значков, {total} записей "
-        f"для {len(layers)} слоёв и {len(obstacles)} препятствий"
+        f"для {len(layers)} слоёв"
     )
     return total

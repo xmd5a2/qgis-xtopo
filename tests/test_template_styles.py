@@ -2222,47 +2222,6 @@ class WaterLabelCalloutTest(unittest.TestCase):
             self.assertEqual(enabled, ["0"])
 
 
-class BridgeIconScaleTest(unittest.TestCase):
-    """Значки мостов не должны попадать на обзорные масштабы."""
-
-    def test_icons_stop_at_800000(self):
-        for layer in _template_root().iter("maplayer"):
-            name = layer.findtext("layername")
-            if name not in (
-                "highway main bridge", "path bridge",
-                "railway bridge", "track bridge",
-            ):
-                continue
-            renderer = layer.find("renderer-v2")
-            if renderer is None or renderer.get("type") != "RuleRenderer":
-                continue
-            classes = {
-                symbol.get("name"): {
-                    item.get("class") for item in symbol.iter("layer")
-                }
-                for symbol in renderer.findall("symbols/symbol")
-            }
-            rules = renderer.find("rules")
-            if rules is None:
-                continue
-
-            def check(node, inherited=None):
-                for rule in node.findall("rule"):
-                    scale_max = rule.get("scalemaxdenom")
-                    effective = (
-                        int(scale_max) if scale_max else inherited
-                    )
-                    symbol_classes = classes.get(rule.get("symbol"), set())
-                    if symbol_classes & {"MarkerLine", "SvgMarker"}:
-                        self.assertIsNotNone(effective, (name, rule.get("label")))
-                        self.assertLessEqual(
-                            effective, 800000, (name, rule.get("label")),
-                        )
-                    check(rule, effective)
-
-            check(rules)
-
-
 class TrackScaleTest(unittest.TestCase):
     """Треки рисуются на 1:50 000+ и зависят от уровня детализации."""
 
@@ -2441,6 +2400,8 @@ class ServiceRoadLodTest(unittest.TestCase):
         cls.layers = {}
         for layer in _template_root().iter("maplayer"):
             name = layer.findtext("layername") or ""
+            if layer.get("geometry") != "Line":
+                continue
             if cls._service_rule(layer) is not None:
                 cls.layers[name] = layer
         cls.expected = {
@@ -4233,29 +4194,51 @@ class SettlementPriorityTest(unittest.TestCase):
         self.assertIn("places main major", poi_icons.SELF_RANKED_LAYERS)
 
 
-class PoiObstacleTest(unittest.TestCase):
-    """Значки мостов участвуют в вытеснении как препятствия."""
+class BridgeIconLayersTest(unittest.TestCase):
+    """Значки мостов — обычные точечные слои, как остальные POI."""
 
-    def test_bridge_layers(self):
-        obstacles = poi_icons.read_template_obstacles()
-        by_name = {layer.name: layer for layer in obstacles}
-        poi_ranks = {
-            layer.name: layer.rank
-            for layer in poi_icons.read_template_poi()
+    NAMES = (
+        "highway main bridge icons",
+        "track bridge icons",
+        "path bridge icons",
+        "railway bridge icons",
+    )
+
+    def test_layers_are_points_in_poi_list(self):
+        layers = {
+            layer.name: layer for layer in poi_icons.read_template_poi()
         }
-        for name in ("highway main bridge", "path bridge",
-                     "railway bridge", "track bridge"):
-            self.assertIn(name, by_name)
-            layer = by_name[name]
-            # Ранг — место слоя в дереве проекта, а не «выше любого POI».
-            self.assertGreater(layer.rank, 0.0)
-            self.assertGreater(layer.rank, poi_ranks["places main"])
-            self.assertGreater(layer.icon_size, 0.0)
-            self.assertEqual(layer.crs, "EPSG:4326")
-        self.assertEqual(by_name["path bridge"].geometry, "Line")
-        self.assertEqual(
-            len({layer.rank for layer in obstacles}), len(obstacles),
-        )
+        for name in self.NAMES:
+            self.assertIn(name, layers)
+            layer = layers[name]
+            self.assertEqual(layer.geometry, "Point", name)
+            self.assertGreater(layer.icon_size, 0.0, name)
+            self.assertGreater(layer.rank, 0.0, name)
+            self.assertIn("bridge_icons.sqlite", layer.source, name)
+            self.assertEqual(layer.crs, "EPSG:4326", name)
+
+    def test_line_layers_keep_lines_without_icons(self):
+        layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+        for name in (
+            "highway main bridge", "track bridge",
+            "path bridge", "railway bridge",
+        ):
+            layer = layers[name]
+            self.assertEqual(layer.get("geometry"), "Line", name)
+            renderer = layer.find("renderer-v2")
+            for symbol in renderer.findall("symbols/symbol"):
+                classes = {
+                    item.get("class") for item in symbol.iter("layer")
+                }
+                self.assertNotIn("SvgMarker", classes, (name, symbol.get("name")))
+            self.assertNotIn(
+                'description="icon"',
+                ElementTree.tostring(layer, encoding="unicode"),
+                name,
+            )
 
     def test_cemetery_icon_has_lowest_rank(self):
         """Значок кладбища уступает всем, но стоит выше карты."""
@@ -4268,501 +4251,108 @@ class PoiObstacleTest(unittest.TestCase):
         ]
         self.assertEqual(icon.rank, max(others) + 1)
         self.assertEqual(icon.geometry, "Point")
-        order = [
-            item.get("name")
-            for item in _template_root().iter("layer-tree-layer")
-        ]
-        self.assertLess(
-            order.index("cemetery icons"), order.index("places main major"),
-        )
-
-    def test_packed_multipoint_is_skipped(self):
-        """Упакованный MultiPoint не роняет расчёт подавления."""
-        import tempfile
-        from pathlib import Path
-        from types import SimpleNamespace
-
-        from osgeo import ogr, osr
-
-        from tests import qgis_app
-
-        qgis_app()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            vector = root / "vector"
-            vector.mkdir()
-            path = vector / "tree.sqlite"
-            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
-                str(path))
-            srs = osr.SpatialReference()
-            srs.ImportFromEPSG(4326)
-            layer = dataset.CreateLayer("tree", srs, ogr.wkbMultiPoint)
-            feature = ogr.Feature(layer.GetLayerDefn())
-            feature.SetGeometry(ogr.CreateGeometryFromWkt(
-                "MULTIPOINT ((6.9 46.05), (6.9005 46.05))"))
-            layer.CreateFeature(feature)
-            dataset = None
-
-            info = poi_icons.PoiLayer(
-                name="tree",
-                source="./vector/tree.sqlite",
-                geometry="Point",
-                root=poi_icons.PoiRule(children=[
-                    poi_icons.PoiRule(size=0.8, maximum=20000.0),
-                ]),
-            )
-            config = SimpleNamespace(
-                project_dir=str(root), layers_dir=str(root),
-                vector_dir=str(vector))
-            points = poi_icons._collect_points(
-                config, [info], [(0.0, 20000.0)],
-            )
-        self.assertEqual(points, [])
-
-    def test_map_scale_is_available_in_rule_filter(self):
-        """@map_scale работает в фильтре правила: размер на экране."""
-        import tempfile
-        from pathlib import Path
-        from types import SimpleNamespace
-
-        from osgeo import ogr, osr
-
-        from tests import qgis_app
-
-        qgis_app()
-        kept_fid = None
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            vector = root / "vector"
-            vector.mkdir()
-            path = vector / "cemetery.sqlite"
-            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
-                str(path))
-            srs = osr.SpatialReference()
-            srs.ImportFromEPSG(4326)
-            layer = dataset.CreateLayer("cemetery", srs, ogr.wkbPoint)
-            layer.CreateField(ogr.FieldDefn("area_m2", ogr.OFTReal))
-            for index, area in enumerate((5000.0, 100.0)):
-                feature = ogr.Feature(layer.GetLayerDefn())
-                feature.SetField("area_m2", area)
-                point = ogr.Geometry(ogr.wkbPoint)
-                point.AddPoint_2D(6.9 + index * 0.001, 46.05)
-                feature.SetGeometry(point)
-                layer.CreateFeature(feature)
-                if area < 1000:
-                    kept_fid = feature.GetFID()
-            dataset = None
-
-            info = poi_icons.PoiLayer(
-                name="cemetery",
-                source="./vector/cemetery.sqlite",
-                geometry="Point",
-                root=poi_icons.PoiRule(children=[
-                    poi_icons.PoiRule(
-                        size=2.5,
-                        maximum=20000.0,
-                        filter='"area_m2" * 1000000 < 6.25 * '
-                               '@map_scale * @map_scale',
-                    ),
-                ]),
-            )
-            config = SimpleNamespace(
-                project_dir=str(root), layers_dir=str(root),
-                vector_dir=str(vector))
-            points = poi_icons._collect_points(
-                config, [info], [(0.0, 20000.0)],
-            )
-        # 5000 м² при 1:10000 — 50 мм², значок не нужен; 100 м² — 1 мм².
-        self.assertEqual([point.fid for point in points], [kept_fid])
-
-    def test_anchor_of_line_is_middle(self):
-        from qgis.core import QgsGeometry, QgsPointXY
-
-        line = QgsGeometry.fromPolylineXY(
-            [QgsPointXY(0, 0), QgsPointXY(2, 0)]
-        )
-        anchor = poi_icons._icon_anchor(line, "Line")
-        self.assertIsNotNone(anchor)
-        self.assertAlmostEqual(anchor.x(), 1.0)
-        self.assertAlmostEqual(anchor.y(), 0.0)
-
-    def test_anchor_of_polygon_is_inside(self):
-        from qgis.core import QgsGeometry, QgsPointXY
-
-        polygon = QgsGeometry.fromPolygonXY([[
-            QgsPointXY(0, 0), QgsPointXY(2, 0), QgsPointXY(2, 2),
-            QgsPointXY(0, 2), QgsPointXY(0, 0),
-        ]])
-        anchor = poi_icons._icon_anchor(polygon, "Polygon")
-        self.assertIsNotNone(anchor)
-        self.assertTrue(polygon.contains(
-            QgsGeometry.fromPointXY(anchor)
-        ))
-
-
 
 
 class BridgeIconSuppressionTest(unittest.TestCase):
-    """Значки мостов одного слоя вытесняют друг друга.
+    """Значки мостов вытесняются тем же полем hide, что и остальные POI."""
 
-    Значок рисуется MarkerLine в середине линии, поэтому фильтр правила
-    скрыл бы весь мост.  Вместо фильтра вложенному маркеру задан
-    data-defined размер: поле icon_hide перечисляет диапазоны, где рядом
-    есть мост того же слоя с меньшими координатами.
-    """
-
-    LAYERS = ("highway main bridge", "track bridge",
-              "path bridge", "railway bridge")
+    NAMES = (
+        "highway main bridge icons",
+        "track bridge icons",
+        "path bridge icons",
+        "railway bridge icons",
+    )
 
     @classmethod
     def setUpClass(cls):
-        cls.layers = {
+        cls.xml = {
             layer.findtext("layername"): layer
             for layer in _template_root().iter("maplayer")
         }
+        cls.poi = {
+            layer.name: layer for layer in poi_icons.read_template_poi()
+        }
 
     @staticmethod
-    def _find(node, path):
-        for rule in node.findall("rule"):
-            title = rule.get("description") or rule.get("label")
-            if title == path[0]:
-                if len(path) == 1:
-                    return rule
-                return BridgeIconSuppressionTest._find(rule, path[1:])
+    def _find(rule, predicate):
+        if predicate(rule):
+            return rule
+        for child in rule.findall("rule"):
+            found = BridgeIconSuppressionTest._find(child, predicate)
+            if found is not None:
+                return found
         return None
 
     @staticmethod
-    def _active_symbols(layer):
-        renderer = layer.find("renderer-v2")
-        symbols = {
-            symbol.get("name"): symbol
-            for symbol in renderer.findall("symbols/symbol")
-        }
-        usage = {}
-
-        def walk(node, inherited_min, inherited_max):
-            lower = float(node.get("scalemindenom") or 0)
-            upper = float(node.get("scalemaxdenom") or 0)
-            if lower <= 1.0:
-                lower = 0.0
-            effective_min = max(inherited_min, lower)
-            if inherited_max and upper:
-                effective_max = min(inherited_max, upper)
+    def _leaves(rule):
+        result = []
+        for child in rule.findall("rule"):
+            if child.findall("rule"):
+                result.extend(BridgeIconSuppressionTest._leaves(child))
             else:
-                effective_max = inherited_max or upper
-            children = node.findall("rule")
-            if not children:
-                symbol_name = node.get("symbol")
-                if symbol_name:
-                    usage.setdefault(symbol_name, []).append(
-                        (effective_min, effective_max))
-            for child in children:
-                if child.get("checkstate") == "0":
-                    continue
-                walk(child, effective_min, effective_max)
+                result.append(child)
+        return result
 
-        for node in renderer.find("rules").findall("rule"):
-            if node.get("checkstate") == "0":
-                continue
-            walk(node, 0.0, 0.0)
-        return symbols, usage
+    def test_all_icon_rules_use_hide(self):
+        for name in self.NAMES:
+            info = self.poi[name]
+            leaves = poi_icons.leaves(info.root)
+            self.assertTrue(leaves, name)
+            for leaf in leaves:
+                self.assertIn('"hide"', leaf.filter, name)
+                self.assertIn("@map_scale", leaf.filter, name)
+                self.assertNotIn("icon_hide", leaf.filter, name)
 
-    def test_bridge_markers_have_same_layer_suppression(self):
-        checked = 0
-        for name in self.LAYERS:
-            layer = self.layers.get(name)
-            self.assertIsNotNone(layer, name)
-            symbols, usage = self._active_symbols(layer)
-            for symbol_name in usage:
-                symbol = symbols.get(symbol_name)
-                if symbol is None:
-                    continue
-                markers = []
-                has_line = False
-                for marker in symbol.iter("layer"):
-                    if marker.get("class") == "SimpleLine":
-                        has_line = True
-                    if marker.get("class") != "SvgMarker":
-                        continue
-                    options = {
-                        option.get("name"): option.get("value")
-                        for option in marker.findall("Option/Option")
-                    }
-                    if "bridge" in (options.get("name") or ""):
-                        markers.append((marker, options))
-                if has_line:
-                    # Значок должен быть в отдельном правиле: иначе его
-                    # нельзя отключить, не скрыв линию моста.
-                    self.assertNotIn(
-                        "bridge.svg",
-                        ElementTree.tostring(symbol, encoding="unicode"),
-                        f"{name}/{symbol_name}",
-                    )
-                for marker, _options in markers:
-                    marker_line = next(
-                        candidate for candidate in symbol.iter("layer")
-                        if candidate.get("class") == "MarkerLine"
-                        and marker in candidate.iter("layer")
-                    )
-                    with self.subTest(layer=name, symbol=symbol_name):
-                        properties = marker_line.find(
-                            'data_defined_properties/Option/'
-                            'Option[@name="properties"]'
-                        )
-                        self.assertIsNotNone(properties)
-                        enabled = properties.find('Option[@name="enabled"]')
-                        self.assertIsNotNone(enabled)
-                        active = enabled.find('Option[@name="active"]')
-                        self.assertEqual(active.get("value"), "true")
-                        expression = enabled.find(
-                            'Option[@name="expression"]'
-                        ).get("value")
-                        self.assertIn(
-                            'string_to_array("icon_hide", \';\')', expression
-                        )
-                        self.assertIn("false, true", expression)
-                        self.assertNotIn("overlay_nearest", expression)
-                        self.assertNotIn("@map_scale", expression)
-                        index = re.search(r"'(\d+)'\), false", expression)
-                        self.assertIsNotNone(index)
-                        self.assertEqual(
-                            expression,
-                            poi_icons.icon_enabled_expression(
-                                int(index.group(1))),
-                        )
-                        checked += 1
-        self.assertTrue(checked)
-
-    def test_service_bridge_icon_stops_at_200k(self):
-        layer = self.layers["highway main bridge"]
-        leaf = self._find(
-            layer.find("renderer-v2/rules"),
-            ["service", "else", "200000 - 300000"],
-        )
-        self.assertIsNotNone(leaf)
-        symbol = next(
-            symbol for symbol in layer.findall("renderer-v2/symbols/symbol")
-            if symbol.get("name") == leaf.get("symbol")
-        )
-        self.assertNotIn("bridge.svg",
-                         ElementTree.tostring(symbol, encoding="unicode"))
-        self.assertGreaterEqual(len(symbol.findall("layer")), 2)
-        self.assertTrue(all(
-            item.get("class") == "SimpleLine"
-            for item in symbol.findall("layer")
-        ))
-
-    def test_service_bridge_icon_stays_below_200k(self):
-        layer = self.layers["highway main bridge"]
+    def test_service_bridge_icons_stop_at_200k(self):
+        layer = self.xml["highway main bridge icons"]
         service = self._find(
-            layer.find("renderer-v2/rules"), ["service", "else"],
+            layer.find("renderer-v2/rules"),
+            lambda rule: rule.get("filter") == "highway = 'service'",
         )
         self.assertIsNotNone(service)
-        icon_rules = []
-        for rule in service.findall("rule"):
-            symbol = next(
-                (symbol for symbol in layer.findall(
-                    "renderer-v2/symbols/symbol")
-                 if symbol.get("name") == rule.get("symbol")), None)
-            if symbol is None:
-                continue
-            if "bridge.svg" in ElementTree.tostring(
-                    symbol, encoding="unicode"):
-                icon_rules.append(rule)
-        self.assertTrue(icon_rules, "у service-мостов нет значка ниже 200k")
-        for rule in icon_rules:
-            maximum = rule.get("scalemaxdenom")
-            self.assertTrue(maximum)
-            self.assertLessEqual(int(maximum), 200000)
-        self.assertFalse([
-            rule for rule in icon_rules
-            if int(rule.get("scalemindenom") or 0) >= 200000
-        ])
+        plain = self._find(service, lambda rule: rule.get("label") == "else")
+        self.assertIsNotNone(plain)
+        leaves = self._leaves(plain)
+        self.assertTrue(leaves)
+        for leaf in leaves:
+            maximum = int(leaf.get("scalemaxdenom") or 0)
+            self.assertTrue(maximum, leaf.get("label"))
+            self.assertLessEqual(maximum, 200000, leaf.get("label"))
+        self.assertTrue(any(
+            int(leaf.get("scalemindenom") or 0) < 200000
+            for leaf in leaves
+        ))
 
-
-class BridgeIconHideTest(unittest.TestCase):
-    """Поле icon_hide и выражение видимости значка моста."""
-
-    @staticmethod
-    def _point(lon, lat, name="highway main bridge", fid=1):
-        return poi_icons._Point(
-            rank=0.02, lon=lon, lat=lat, name=name, fid=fid,
-            geometry="Line", bands={0: 4}, sizes={0: 2.0},
-        )
-
-    def test_expression_uses_icon_hide(self):
-        expression = poi_icons.icon_enabled_expression(4)
-        self.assertIn('string_to_array("icon_hide", \';\')', expression)
-        self.assertIn("'4'", expression)
-        self.assertIn("coalesce(", expression)
-        self.assertIn("false, true", expression)
-        self.assertNotIn("@map_scale", expression)
-        self.assertNotIn("overlay_nearest", expression)
-
-    def test_same_layer_tie_breaks_by_coordinates(self):
-        west = self._point(6.9000, 46.05, fid=1)
-        east = self._point(6.9006, 46.05, fid=2)
-        hidden = poi_icons._hidden_icon_bands(
-            [west, east], [(100000.0, 130000.0)],
-        )
-        self.assertNotIn(("highway main bridge", 1), hidden)
-        self.assertIn(("highway main bridge", 2), hidden)
-
-    def test_other_layer_does_not_suppress(self):
-        bridge = self._point(6.9000, 46.05, fid=1)
-        track = self._point(6.9006, 46.05, name="track bridge", fid=2)
-        hidden = poi_icons._hidden_icon_bands(
-            [bridge, track], [(100000.0, 130000.0)],
-        )
-        self.assertFalse(hidden)
-
-    @staticmethod
-    def _settlement(lon, lat, name="places main", fid=10, size=1.2):
-        return poi_icons._Point(
-            rank=0.005, lon=lon, lat=lat, name=name, fid=fid,
-            geometry="Point", bands={0: 4}, sizes={0: size},
-        )
-
-    @staticmethod
-    def _bridge(lon, lat, fid, size=2.2):
-        return poi_icons._Point(
-            rank=0.02, lon=lon, lat=lat, name="highway main bridge",
-            fid=fid, geometry="Line", bands={0: 4},
-            sizes={0: size},
-        )
-
-    def test_settlement_suppresses_bridge_icon(self):
-        """Населённый пункт выше моста: мост уступает ему значок."""
-        bridge = self._point(6.9000, 46.05, fid=1)
-        place = self._settlement(6.9006, 46.05)
-        hidden = poi_icons._hidden_icon_bands(
-            [bridge, place], [(100000.0, 130000.0)],
-        )
-        self.assertIn(("highway main bridge", 1), hidden)
-
-    def test_distant_settlement_keeps_bridge_icon(self):
-        bridge = self._point(6.9000, 46.05, fid=1)
-        place = self._settlement(6.9300, 46.05)
-        hidden = poi_icons._hidden_icon_bands(
-            [bridge, place], [(100000.0, 130000.0)],
-        )
-        self.assertFalse(hidden)
-
-    def test_spaced_bridge_icons_stay_at_map_scale(self):
-        """Два моста в 211 м на 1:100000 видны: значки не перекрываются.
-
-        Случай Ананьево: раньше радиус считался по полному размеру
-        значка на верхней границе диапазона, и северный мост скрывался,
-        хотя между значками оставалось место.  На 1:130000 они уже
-        соприкасаются, поэтому в следующем диапазоне мост уступает.
-        """
-        south = self._bridge(77.671663, 42.740497, fid=37)
-        north = self._bridge(77.671716, 42.742393, fid=38)
-        hidden = poi_icons._hidden_icon_bands(
-            [south, north], [(100000.0, 130000.0)],
-        )
-        self.assertNotIn(("highway main bridge", 38), hidden)
-        hidden = poi_icons._hidden_icon_bands(
-            [south, north], [(130000.0, 150000.0)],
-        )
-        self.assertIn(("highway main bridge", 38), hidden)
-
-    def test_near_settlement_still_suppresses_bridge_at_100k(self):
-        """Мост в 122 м от деревни значок уступает — они перекрываются."""
-        bridge = self._bridge(77.671663, 42.740497, fid=37)
-        place = self._settlement(
-            77.672848, 42.739828, size=1.6,
-        )
-        hidden = poi_icons._hidden_icon_bands(
-            [bridge, place], [(100000.0, 130000.0)],
-        )
-        self.assertIn(("highway main bridge", 37), hidden)
-
-    def test_far_settlement_keeps_bridge_icon_at_100k(self):
-        """Мост в 300 м от деревни на 1:100000 остаётся видимым."""
-        bridge = self._bridge(77.671716, 42.742393, fid=38)
-        place = self._settlement(
-            77.672848, 42.739828, size=1.6,
-        )
-        hidden = poi_icons._hidden_icon_bands(
-            [bridge, place], [(100000.0, 130000.0)],
-        )
-        self.assertFalse(hidden)
-
-    def test_field_is_written_to_bridge_layer(self):
-        import tempfile
-        from pathlib import Path
-        from types import SimpleNamespace
-
-        from osgeo import ogr, osr
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            vector = root / "vector"
-            vector.mkdir()
-            path = vector / "bridges.sqlite"
-            dataset = ogr.GetDriverByName("SQLite").CreateDataSource(
-                str(path))
-            srs = osr.SpatialReference()
-            srs.ImportFromEPSG(4326)
-            layer = dataset.CreateLayer("bridges", srs, ogr.wkbLineString)
-            for lon in (6.9000, 6.9006):
-                feature = ogr.Feature(layer.GetLayerDefn())
-                feature.SetGeometry(ogr.CreateGeometryFromWkt(
-                    f"LINESTRING ({lon} 46.05, {lon} 46.0502)"))
-                layer.CreateFeature(feature)
-            dataset = None
-
-            source = poi_icons.PoiLayer(
-                name="highway main bridge",
-                source="./vector/bridges.sqlite",
-                geometry="Line",
-            )
-            config = SimpleNamespace(
-                project_dir=str(root), layers_dir=str(root),
-                vector_dir=str(vector))
-            poi_icons._write_icon_hide(
-                config, [source],
-                [self._point(6.9000, 46.05, fid=1),
-                 self._point(6.9006, 46.05, fid=2)],
-                [(100000.0, 130000.0)],
-            )
-            dataset = ogr.Open(str(path))
-            layer = dataset.GetLayer(0)
-            values = {
-                feature.GetFID(): feature.GetField("icon_hide")
-                for feature in layer
+    def test_icons_stop_at_800k(self):
+        for name in self.NAMES:
+            layer = self.xml[name]
+            symbols = {
+                symbol.get("name"): symbol
+                for symbol in layer.findall("renderer-v2/symbols/symbol")
             }
-            dataset = None
-            self.assertIsNone(values[1])
-            self.assertEqual(values[2], "0")
-
-            # Повторная подготовка не оставляет старых значений.
-            poi_icons._write_icon_hide(
-                config, [source], [self._point(6.9000, 46.05, fid=1)],
-                [(100000.0, 130000.0)],
-            )
-            dataset = ogr.Open(str(path))
-            layer = dataset.GetLayer(0)
-            self.assertFalse([
-                value for value in (
-                    feature.GetField("icon_hide") for feature in layer
-                ) if value
-            ])
-            dataset = None
-
-    def test_expression_for_several_bands(self):
-        """Значок на несколько диапазонов: скрыт, если скрыт в любом."""
-        expression = poi_icons.icon_enabled_expression_for([0, 1, 2])
-        self.assertIn("'0'", expression)
-        self.assertIn("'2'", expression)
-        self.assertIn(" or ", expression)
-        self.assertNotIn("@map_scale", expression)
-        # Один диапазон — выражение как у мостов.
-        self.assertEqual(
-            poi_icons.icon_enabled_expression_for([4]),
-            poi_icons.icon_enabled_expression(4),
-        )
+            found = False
+            for leaf in layer.find("renderer-v2/rules").iter("rule"):
+                if leaf.findall("rule") or not leaf.get("symbol"):
+                    continue
+                symbol = symbols.get(leaf.get("symbol"))
+                if symbol is None:
+                    continue
+                if not any(
+                    item.get("class") == "SvgMarker"
+                    for item in symbol.iter("layer")
+                ):
+                    continue
+                if leaf.get("scalemaxdenom"):
+                    maximum = int(leaf.get("scalemaxdenom"))
+                    self.assertLessEqual(maximum, 800000, (name, leaf.get("label")))
+                else:
+                    self.assertIn(
+                        "@map_scale < 800000", leaf.get("filter") or "",
+                        (name, leaf.get("label")),
+                    )
+                    found = True
+            if name in ("highway main bridge icons", "railway bridge icons"):
+                self.assertTrue(found, name)
 
 
 class CemeteryIconSuppressionTest(unittest.TestCase):

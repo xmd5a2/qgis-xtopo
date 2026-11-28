@@ -81,6 +81,7 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `core/measure.py` — размеры рамки; `core/peak_placement.py` — правило
   проверки пиков; `core/peak_filter.py` — его применение к слою `peak`;
   `core/underwater.py` — удаление подводных вершин и вулканов;
+  `core/bridge_icons.py` — точки значков мостов из линий;
   `core/poi_icons.py` — вытеснение значков; `core/label_cache.py` — кэш
   линий подписи; `core/road_packing.py` — слияние и упаковка линий и
   площадей;
@@ -205,6 +206,17 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   `[blocking] highway*` текст и halo прозрачные, а приоритет понижен —
   иначе копия подписи дороги отнимает размещение у настоящей подписи,
   и название дороги выглядит не так, как задумано.
+- **Значки мостов — отдельные точечные слои над линиями.** Точки для
+  `highway main bridge icons`, `track bridge icons`, `path bridge icons`
+  и `railway bridge icons` строит `core/bridge_icons.py` из середины
+  каждой части линии; поворот лежит в `icon_angle`, длина — в
+  `bridge_length`. В шаблоне больше нет `MarkerLine` с `CentralPoint`,
+  поэтому значки вытесняются общим полем `hide`, как остальные POI.
+  У `highway main bridge icons` и `railway bridge icons` последнее
+  правило значка скрыто выше 1:800000 фильтром `@map_scale < 800000`,
+  чтобы не менять канонические диапазоны подавления. Подробности —
+  `docs/agents/labels.md`, проверки — `BridgeIconTest`,
+  `BridgeIconLayersTest`, `BridgeIconSuppressionTest`.
 - **Значок кладбища — отдельный точечный слой `cemetery icons` над картой.**
   Заливка и штриховка остаются в `cemetery` под зданиями, а точки для
   значка строит `core/cemetery_icons.py` из площадок (`pointOnSurface`) и

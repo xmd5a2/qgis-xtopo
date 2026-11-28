@@ -4704,6 +4704,114 @@ class CemeteryIconBuildTest(unittest.TestCase):
                 (vector / cemetery_icons.TARGET_FILE).exists())
 
 
+class BridgeIconTest(unittest.TestCase):
+    """Точки значков мостов строятся из линий при подготовке."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    @staticmethod
+    def _write(path):
+        from osgeo import ogr, osr
+
+        ogr.UseExceptions()
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer(
+            "highway_main_bridge_dissolved", srs, ogr.wkbUnknown,
+        )
+        layer.CreateField(ogr.FieldDefn("@id", ogr.OFTString))
+        layer.CreateField(ogr.FieldDefn("highway", ogr.OFTString))
+        layer.CreateField(ogr.FieldDefn("icon_hide", ogr.OFTString))
+        layer.CreateField(ogr.FieldDefn("hide", ogr.OFTString))
+
+        east = ogr.Feature(layer.GetLayerDefn())
+        east.SetField("@id", "way/1")
+        east.SetField("highway", "tertiary")
+        east.SetField("icon_hide", "1;2")
+        east.SetGeometry(ogr.CreateGeometryFromWkt(
+            "LINESTRING (6.9000 46.0500, 6.9000 46.0510)"))
+        layer.CreateFeature(east)
+
+        multi = ogr.Feature(layer.GetLayerDefn())
+        multi.SetField("@id", "way/2")
+        multi.SetField("highway", "primary")
+        multi.SetGeometry(ogr.CreateGeometryFromWkt(
+            "MULTILINESTRING ((6.91 46.05, 6.92 46.05), "
+            "(6.93 46.05, 6.93 46.06))"))
+        layer.CreateFeature(multi)
+
+        polygon = ogr.Feature(layer.GetLayerDefn())
+        polygon.SetField("@id", "way/3")
+        polygon.SetGeometry(ogr.CreateGeometryFromWkt(
+            "POLYGON ((6.94 46.05, 6.95 46.05, 6.95 46.06, "
+            "6.94 46.06, 6.94 46.05))"))
+        layer.CreateFeature(polygon)
+        dataset = None
+
+    def test_points_keep_midpoint_angle_and_length(self):
+        from qgis_xtopo.core import bridge_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            self._write(
+                vector / "highway_main_bridge_dissolved.sqlite",
+            )
+            config = SimpleNamespace(vector_dir=vector)
+            count = bridge_icons.build_bridge_icons(config)
+            self.assertEqual(count, 3)
+
+            path = vector / "highway_main_bridge_icons.sqlite"
+            dataset = ogr.Open(str(path))
+            layer = dataset.GetLayer(0)
+            fields = {
+                layer.GetLayerDefn().GetFieldDefn(index).GetName()
+                for index in range(layer.GetLayerDefn().GetFieldCount())
+            }
+            self.assertIn(bridge_icons.ANGLE_FIELD, fields)
+            self.assertIn(bridge_icons.LENGTH_FIELD, fields)
+            self.assertNotIn("icon_hide", fields)
+            self.assertNotIn("hide", fields)
+            rows = {}
+            for feature in layer:
+                rows.setdefault(feature.GetField("@id"), []).append(feature)
+            dataset = None
+            self.assertEqual(set(rows), {"way/1", "way/2"})
+            north = rows["way/1"][0]
+            self.assertEqual(north.GetField("highway"), "tertiary")
+            self.assertEqual(north.GetField(bridge_icons.ANGLE_FIELD), -90)
+            self.assertAlmostEqual(
+                north.GetField(bridge_icons.LENGTH_FIELD), 0.001, places=6,
+            )
+            point = north.GetGeometryRef()
+            self.assertAlmostEqual(point.GetY(), 46.0505, places=6)
+            # MultiLineString даёт точку на каждой части.
+            self.assertEqual(len(rows["way/2"]), 2)
+            self.assertEqual(
+                sorted(
+                    row.GetField(bridge_icons.ANGLE_FIELD)
+                    for row in rows["way/2"]
+                ),
+                [-90, 0],
+            )
+
+    def test_missing_sources_remove_old_targets(self):
+        from qgis_xtopo.core import bridge_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            stale = vector / "track_bridge_icons.sqlite"
+            stale.write_text("stale")
+            config = SimpleNamespace(vector_dir=vector)
+            self.assertEqual(bridge_icons.build_bridge_icons(config), 0)
+            self.assertFalse(stale.exists())
+
+
 class CemeteryStageOrderTest(unittest.TestCase):
     """Площадь и точки кладбища готовы до расчёта вытеснения значков."""
 
@@ -4714,9 +4822,11 @@ class CemeteryStageOrderTest(unittest.TestCase):
 
         source = inspect.getsource(pipeline.run_project)
         area = source.index("area_field.ensure_area_fields")
+        bridge = source.index("bridge_icons.build_bridge_icons")
         cemetery = source.index("cemetery_icons.build_cemetery_icons")
         poi = source.index("poi_icons.build_poi_icons")
-        self.assertLess(area, cemetery)
+        self.assertLess(area, bridge)
+        self.assertLess(bridge, cemetery)
         self.assertLess(cemetery, poi)
 
 
