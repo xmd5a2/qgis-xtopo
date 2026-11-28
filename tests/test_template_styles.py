@@ -824,6 +824,37 @@ class LandcoverLayerOrderTest(unittest.TestCase):
         self.assertLess(self.order.index("mud"), self.order.index("water"))
 
 
+class WoodLabelPlacementTest(unittest.TestCase):
+    """Лес подписывается внутри полигона, отдельный слой линий не нужен."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.layers = {
+            layer.findtext("layername"): layer
+            for layer in _template_root().iter("maplayer")
+        }
+
+    def test_label_lines_layer_is_gone(self):
+        self.assertNotIn("wood names", self.layers)
+
+    def test_wood_labels_are_enabled(self):
+        layer = self.layers["wood"]
+        self.assertEqual(layer.get("labelsEnabled"), "1")
+        self.assertEqual(layer.find("labeling").get("type"), "rule-based")
+        rules = layer.find("labeling/rules").findall("rule")
+        self.assertTrue(rules)
+        for rule in rules:
+            self.assertEqual(rule.get("active"), "1")
+
+    def test_wood_labels_stay_inside_the_polygon(self):
+        rules = self.layers["wood"].find("labeling/rules").findall("rule")
+        for rule in rules:
+            placement = rule.find("settings/placement")
+            self.assertEqual(placement.get("placement"), "5")
+            self.assertEqual(placement.get("layerType"), "PolygonGeometry")
+            self.assertEqual(placement.get("polygonPlacementFlags"), "2")
+
+
 class MudLayerTest(unittest.TestCase):
     """natural=mud повторяет болото, но с фоном #E3CCB4."""
 

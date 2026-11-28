@@ -293,8 +293,9 @@ RECIPES = {
         fix(), save(),
     ]),
     "wood": Recipe([
-        fix(), save(), polygonstolines(), save("_lines"), load("wood"),
-        label_axis(named_only=True), save("_names"),
+        # Лес подписывается внутри полигона (правила слоя wood в шаблоне),
+        # поэтому линия подписи и её промежуточные линии не нужны.
+        fix(), save(),
     ]),
     "strait": Recipe([
         # Шаблон ждёт два файла: strait.sqlite (исходные объекты — точки

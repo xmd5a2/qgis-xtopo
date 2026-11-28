@@ -1377,11 +1377,19 @@ class LabelAxisRecipeTest(unittest.TestCase):
         # главной ветки): алгоритм сам упрощает контур, как ему нужно.
         from qgis_xtopo.core.query_recipes import recipe_for
 
-        for name in ("glacier", "bay_polygon", "wetland", "wood", "strait"):
+        for name in ("glacier", "bay_polygon", "wetland", "strait"):
             steps = [operation for operation, _ in recipe_for(name).steps]
             axis = steps.index("label_axis")
             self.assertNotIn("buffer", steps[:axis], name)
             self.assertNotIn("simplify", steps[:axis], name)
+
+    def test_wood_uses_polygon_labels_without_label_lines(self):
+        # Лес подписывается внутри полигона, поэтому окрестные линии
+        # подписи и промежуточные контуры ему больше не строятся.
+        from qgis_xtopo.core.query_recipes import recipe_for
+
+        steps = [operation for operation, _ in recipe_for("wood").steps]
+        self.assertEqual(steps, ["fix", "save"])
 
 
 class ProcessingImportTest(unittest.TestCase):
