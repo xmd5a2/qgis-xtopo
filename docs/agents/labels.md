@@ -537,32 +537,41 @@
 
 ## Туризм, проживание и придорожные объекты
 
-- **Точечные слои туризма — центроиды, как `memorial` и `wilderness hut`.**
-  Слои `viewpoint`, `trailhead`, `information`, `guidepost`, `artwork`,
-  `museum`, `zoo`, `aquarium`, `theme park`, `hotel`, `hostel`,
-  `guest house`, `motel`, `apartment`, `caravan site`, `camp pitch`,
-  `cabin` и `bus station` собираются из запросов `resources/queries/*.txt`,
-  входят в `POINT_CENTROID` (`core/query_recipes.py`) и читают файлы
-  `<запрос>_centroids.sqlite`. Значки взяты из Topo-стиля OsmAnd
-  (`osmandapp/OsmAnd-resources`, те же авторы, GPLv3), приведены к чёрному
-  силуэту 580×580 с одинаковой видимой частью (500/580): от этого зависит
-  `_svg_content_scale` и радиус вытеснения.
+- **Точечные слои туризма — центроиды, как `memorial`.** Слои `viewpoint`,
+  `trailhead`, `information`, `guidepost`, `artwork`, `museum`, `zoo`,
+  `aquarium`, `theme park`, `hotel`, `hostel`, `guest house`, `motel`,
+  `apartment`, `caravan site`, `camp pitch` и `bus station` собираются из
+  запросов `resources/queries/*.txt`, входят в `POINT_CENTROID`
+  (`core/query_recipes.py`) и читают файлы `<запрос>_centroids.sqlite`.
+  Значки взяты из Topo-стиля OsmAnd (`osmandapp/OsmAnd-resources`, те же
+  авторы, GPLv3), приведены к чёрному силуэту 580×580 с одинаковой видимой
+  частью (500/580): от этого зависит `_svg_content_scale` и радиус
+  вытеснения.
+- **`tourism=cabin` — в слое `wilderness hut`.** Отдельного слоя и файла у
+  домика нет: запрос `wilderness_hut.txt` включает `tourism=cabin`, поэтому
+  значок, диапазоны и подпись у него те же, что у укрытия (1:130000,
+  подпись до 1:20000).
 - **`tourism=information` разделён надвое.** `information=guidepost`
   попадает в слой `guidepost`, все остальные значения — в `information`.
   Так значок указателя не смешивается с общим «i»; `board_type` и прочие
   подтипы пока рисуются общим значком.
-- **Диапазоны масштаба повторяют Topo.** `viewpoint`, `caravan site`,
-  `cabin` и `bus station` видны до 1:130000; `trailhead`, `information`,
-  `guidepost` и все виды проживания — до 1:50000; `museum`, `zoo`,
-  `aquarium`, `theme park` — до 1:30000; `artwork` — до 1:15000. Подписи
-  включаются не позже значка.
+- **Диапазоны масштаба:** `bus station` — значок до 1:30000, подпись до
+  1:20000; `viewpoint` — 20000/15000; `trailhead` — 50000/30000;
+  `information` — 30000/15000; `guidepost` — 30000/20000;
+  `hotel`/`hostel`/`guest house`/`motel`/`apartment` — 50000/30000;
+  `caravan site` — 50000/30000; `camp pitch` — 50000/50000; `museum`,
+  `zoo`, `aquarium`, `theme park` — 30000/30000; `artwork` — 15000/15000.
+  Подписи включаются не позже значка.
+- **Приоритет в дереве.** `bus station` стоит сразу под `places main`
+  (ниже населённых пунктов от hamlet и крупнее), но выше остальных POI;
+  `viewpoint` и `information` уступают всем туристическим значкам.
 - **Линейные объекты не участвуют в вытеснении значков.** `ladder=yes`
-  рисуется поперечными перекладинами (`HashLine`), `ford=stepping_stones`
-  — пунктиром из точек, `highway=raceway` и `highway=escape` — штриховыми
-  линиями. Это обычные линейные слои без `MaskMarker`.
+  виден до 1:30000 и у верхней границы рисуется тоньше; `ford=stepping_stones`
+  — до 1:20000; `highway=raceway` — до 1:70000, дорожным символом с
+  приглушёнными цветами; `highway=escape` — до 1:130000. Это обычные
+  линейные слои без `MaskMarker`.
 - **Новый туристический объект добавляется вместе:** запрос в
   `resources/queries`, имя в `POINT_CENTROID`, значок `resources/icons`
   (`*_m.svg` пересобирает `tools/build_icon_masks.py`), слой в шаблоне
-  (копия `memorial` или `wilderness hut`), строка в `array_queries`
-  (`resources/config.ini`) и обновлённый список масок
-  (`tools/update_icon_masks.py`).
+  (копия `memorial`), строка в `array_queries` (`resources/config.ini`) и
+  обновлённый список масок (`tools/update_icon_masks.py`).

@@ -400,7 +400,6 @@ POINT_CENTROID = {
     "tourism_apartment", "tourism_museum", "tourism_zoo",
     "tourism_aquarium", "tourism_viewpoint", "tourism_artwork",
     "tourism_theme_park", "tourism_caravan_site", "tourism_camp_pitch",
-    "tourism_cabin",
 }
 POINT_ONLY = {
     "peak", "hill", "spring", "water_point", "cave_entrance", "places_main",

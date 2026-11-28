@@ -1,5 +1,0 @@
-(
-node["tourism"="cabin"];
-way["tourism"="cabin"];
-relation["tourism"="cabin"];
-);
