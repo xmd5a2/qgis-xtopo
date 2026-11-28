@@ -260,6 +260,8 @@
   "Печать отправлена": "Print job sent",
   "WARNING: {}: угол поворота не посчитан": "WARNING: {}: icon rotation angle not computed",
   "Углы значков: {} слоёв": "Icon angles: {} layers",
+  "Значки кладбищ: {} точек": "Cemetery icons: {} points",
+  "WARNING: значки кладбищ: {}; слой не обновлён": "WARNING: cemetery icons: {}; layer left unchanged",
   "Продолжить": "Continue",
   "Печать": "Print",
   "В макете «Detailed» нет карты": "The \"Detailed\" layout has no map",

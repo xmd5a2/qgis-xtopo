@@ -26,14 +26,16 @@
   (alpha 90). Data-defined `fillColor` для `wetland=tidalflat` из копии
   убран, иначе тидальные грязи оставались бы серыми. Проверка —
   `MudLayerTest`.
-- **Кладбище ниже зданий, а его значок — выше карты**: слой `cemetery`
-  стоит сразу под группой `marketplace`, то есть ниже `building`. Раньше он
-  был выше зданий и закрывал их внутри кладбищ. Значок вынесен в отдельный
-  слой `cemetery icons` в начале дерева, поэтому полигоны и линии его не
-  перекрывают; в вытеснении значков он сохраняет низкий ранг площадки
-  (`RANK_ANCHORS`). Проверки —
-  `LandcoverLayerOrderTest.test_cemetery_stays_below_building` и
-  `test_cemetery_icons_stay_above_map`.
+- **Кладбище ниже зданий, а его значок — отдельные точки над картой.**
+  Слой `cemetery` стоит сразу под группой `marketplace`, то есть ниже
+  `building`: раньше он был выше зданий и закрывал их внутри кладбищ.
+  Значок вынесен в отдельный слой `cemetery icons` в начале дерева,
+  поэтому полигоны и линии его не перекрывают. Слой точечный: точки
+  строит `core/cemetery_icons.py` из площадок (`pointOnSurface`) и
+  кладёт угол поворота в `icon_angle`. В вытеснении значок уступает всем
+  (`LOWEST_ICON_LAYERS`), а после 1:100000 не рисуется вовсе. Проверки —
+  `LandcoverLayerOrderTest.test_cemetery_stays_below_building`,
+  `test_cemetery_icons_stay_above_map` и `CemeteryIconBuildTest`.
 ## Растровая подложка
 
 - **Подложка проекта** (`core/basemap.py`) — слой XYZ Google sat, Bing sat,
@@ -543,7 +545,7 @@
 - **Маска режет только границы, не заливки.** Целями становятся
   линейные symbol layer (`SimpleLine`, `MarkerLine` и т. п.), в том числе
   обводки площадных слоёв; у кладбища маскируются четыре `SimpleLine`,
-  а его `SimpleFill`/`SVGFill`/`CentroidFill` остаются. Поэтому значок на
+  а его `SimpleFill`/`SVGFill` остаются. Поэтому значок на
   городской заливке (`landuse residential`) белого кружка не оставляет,
   а обводка кладбища или дорога под ним исчезает. Заливки в маски не
   добавляются; уже записанные id заливок сохраняются, пока существуют

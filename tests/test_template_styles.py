@@ -3617,10 +3617,16 @@ class PoiSuppressionTest(unittest.TestCase):
     def test_service_layers_are_not_poi_layers(self):
         names = [layer.name for layer in self.layers]
         self.assertFalse([name for name in names if name.startswith("poi icons")])
-        ranks = [layer.rank for layer in self.layers]
+        ranks = [
+            layer.rank for layer in self.layers
+            if layer.name not in poi_icons.LOWEST_ICON_LAYERS
+        ]
         # Ранг — место слоя в дереве проекта, поэтому между соседними
         # POI могут стоять другие слои и номера идут с пропусками.
+        # Исключение — значок кладбища: он стоит в дереве выше карты,
+        # а ранг получает самый низкий.
         self.assertEqual(ranks, sorted(ranks))
+        ranks = [layer.rank for layer in self.layers]
         self.assertEqual(len(set(ranks)), len(ranks))
 
     def test_places_main_major_is_above_mountains(self):
@@ -4216,9 +4222,9 @@ class SettlementPriorityTest(unittest.TestCase):
 
 
 class PoiObstacleTest(unittest.TestCase):
-    """Значки мостов и кладбищ участвуют в вытеснении как препятствия."""
+    """Значки мостов участвуют в вытеснении как препятствия."""
 
-    def test_bridge_and_cemetery_layers(self):
+    def test_bridge_layers(self):
         obstacles = poi_icons.read_template_obstacles()
         by_name = {layer.name: layer for layer in obstacles}
         poi_ranks = {
@@ -4226,7 +4232,7 @@ class PoiObstacleTest(unittest.TestCase):
             for layer in poi_icons.read_template_poi()
         }
         for name in ("highway main bridge", "path bridge",
-                     "railway bridge", "track bridge", "cemetery icons"):
+                     "railway bridge", "track bridge"):
             self.assertIn(name, by_name)
             layer = by_name[name]
             # Ранг — место слоя в дереве проекта, а не «выше любого POI».
@@ -4234,23 +4240,26 @@ class PoiObstacleTest(unittest.TestCase):
             self.assertGreater(layer.rank, poi_ranks["places main"])
             self.assertGreater(layer.icon_size, 0.0)
             self.assertEqual(layer.crs, "EPSG:4326")
-        self.assertEqual(by_name["cemetery icons"].geometry, "Polygon")
         self.assertEqual(by_name["path bridge"].geometry, "Line")
         self.assertEqual(
             len({layer.rank for layer in obstacles}), len(obstacles),
         )
 
-    def test_cemetery_icon_keeps_polygon_rank(self):
-        """В вытеснении значок кладбища остаётся на месте площадки."""
+    def test_cemetery_icon_has_lowest_rank(self):
+        """Значок кладбища уступает всем, но стоит выше карты."""
+        layers = poi_icons.read_template_poi()
+        by_name = {layer.name: layer for layer in layers}
+        icon = by_name["cemetery icons"]
+        others = [
+            layer.rank for layer in layers
+            if layer.name != "cemetery icons"
+        ]
+        self.assertEqual(icon.rank, max(others) + 1)
+        self.assertEqual(icon.geometry, "Point")
         order = [
             item.get("name")
             for item in _template_root().iter("layer-tree-layer")
         ]
-        icon = next(
-            layer for layer in poi_icons.read_template_obstacles()
-            if layer.name == "cemetery icons"
-        )
-        self.assertEqual(icon.rank, order.index("cemetery") + 1)
         self.assertLess(
             order.index("cemetery icons"), order.index("places main major"),
         )
@@ -4668,46 +4677,6 @@ class BridgeIconHideTest(unittest.TestCase):
         )
         self.assertFalse(hidden)
 
-    @staticmethod
-    def _cemetery(lon, lat, fid=1, size=2.0):
-        return poi_icons._Point(
-            rank=0.02, lon=lon, lat=lat, name="cemetery icons", fid=fid,
-            geometry="Polygon", bands={0: 4}, sizes={0: size},
-        )
-
-    def test_settlement_suppresses_cemetery_icon(self):
-        """Населённый пункт важнее кладбища: значок кладбища уступает."""
-        cemetery = self._cemetery(6.9000, 46.05)
-        place = self._settlement(6.9006, 46.05)
-        hidden = poi_icons._hidden_icon_bands(
-            [cemetery, place], [(100000.0, 130000.0)],
-        )
-        self.assertIn(("cemetery icons", 1), hidden)
-
-    def test_higher_priority_icon_suppresses_cemetery_icon(self):
-        """Любой значок выше кладбища в дереве скрывает его значок."""
-        cemetery = self._cemetery(6.9000, 46.05)
-        monument = poi_icons._Point(
-            rank=0.01, lon=6.9006, lat=46.05, name="monument", fid=2,
-            geometry="Point", bands={0: 4}, sizes={0: 2.0},
-        )
-        hidden = poi_icons._hidden_icon_bands(
-            [cemetery, monument], [(100000.0, 130000.0)],
-        )
-        self.assertIn(("cemetery icons", 1), hidden)
-
-    def test_lower_priority_icon_keeps_cemetery_icon(self):
-        """Значок ниже кладбища в дереве ему не мешает."""
-        cemetery = self._cemetery(6.9000, 46.05)
-        tree = poi_icons._Point(
-            rank=0.03, lon=6.9006, lat=46.05, name="tree", fid=2,
-            geometry="Point", bands={0: 4}, sizes={0: 2.0},
-        )
-        hidden = poi_icons._hidden_icon_bands(
-            [cemetery, tree], [(100000.0, 130000.0)],
-        )
-        self.assertFalse(hidden)
-
     def test_field_is_written_to_bridge_layer(self):
         import tempfile
         from pathlib import Path
@@ -4770,22 +4739,6 @@ class BridgeIconHideTest(unittest.TestCase):
             ])
             dataset = None
 
-    def test_cemetery_icon_is_suppressed_too(self):
-        """Значок кладбища вытесняется соседним кладбищем."""
-        west = poi_icons._Point(
-            rank=0.02, lon=6.9000, lat=46.05, name="cemetery icons", fid=1,
-            geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
-        )
-        east = poi_icons._Point(
-            rank=0.02, lon=6.9006, lat=46.05, name="cemetery icons", fid=2,
-            geometry="Polygon", bands={0: 4}, sizes={0: 2.0},
-        )
-        hidden = poi_icons._hidden_icon_bands(
-            [west, east], [(100000.0, 130000.0)],
-        )
-        self.assertNotIn(("cemetery icons", 1), hidden)
-        self.assertIn(("cemetery icons", 2), hidden)
-
     def test_expression_for_several_bands(self):
         """Значок на несколько диапазонов: скрыт, если скрыт в любом."""
         expression = poi_icons.icon_enabled_expression_for([0, 1, 2])
@@ -4801,7 +4754,7 @@ class BridgeIconHideTest(unittest.TestCase):
 
 
 class CemeteryIconSuppressionTest(unittest.TestCase):
-    """Значок кладбища скрывается по данным слоя, а не фильтром правила."""
+    """Значок кладбища — обычная точка, вытесняется полем hide."""
 
     @classmethod
     def setUpClass(cls):
@@ -4811,96 +4764,76 @@ class CemeteryIconSuppressionTest(unittest.TestCase):
         }
         cls.layer = layers["cemetery icons"]
         cls.fill_layer = layers["cemetery"]
-        cls.obstacle = next(
-            layer for layer in poi_icons.read_template_obstacles()
+        cls.info = next(
+            layer for layer in poi_icons.read_template_poi()
             if layer.name == "cemetery icons"
         )
 
-    def test_icon_symbol_has_enabled_property(self):
-        """У символа со значком стоит свойство enabled по полю icon_hide."""
+    def test_layer_is_built_from_generated_points(self):
+        """Шаблон читает точечный файл, а не полигоны кладбищ."""
+        self.assertEqual(self.layer.get("geometry"), "Point")
+        self.assertEqual(self.layer.get("wkbType"), "Point")
+        source = self.layer.findtext("datasource")
+        self.assertIn("cemetery_icons.sqlite", source)
+        self.assertIn("geometrytype=Point", source)
+        symbols = {
+            symbol.get("name"): symbol
+            for symbol in self.layer.findall("renderer-v2/symbols/symbol")
+        }
+        for symbol in symbols.values():
+            classes = [layer.get("class") for layer in symbol.findall("layer")]
+            self.assertIn("SvgMarker", classes)
+            self.assertNotIn("CentroidFill", classes)
+
+    def test_icon_is_used_only_up_to_100k(self):
+        """После 1:100000 значка нет: остаётся заливка и штриховка."""
+        groups = self.layer.findall("renderer-v2/rules/rule")
+        self.assertEqual(len(groups), 2)
+        groups = [
+            group for group in groups
+            if group.get("checkstate") != "0"
+        ]
+        self.assertEqual(
+            [group.get("scalemaxdenom") for group in groups],
+            ["50000", "100000"],
+        )
+        for group in groups:
+            (icon_rule,) = group.findall("rule")
+            self.assertIn("area_m2", icon_rule.get("filter"))
+            self.assertIn("@map_scale", icon_rule.get("filter"))
+            self.assertIn('"hide"', icon_rule.get("filter"))
+            self.assertIn("@level_of_detail", icon_rule.get("filter"))
+
+    def test_icon_rotates_by_prepared_angle(self):
+        """Поворот значка берётся из поля icon_angle, а не из площадки."""
         symbols = {
             symbol.get("name"): symbol
             for symbol in self.layer.findall("renderer-v2/symbols/symbol")
         }
         checked = 0
-        for name, indexes in poi_icons.icon_symbol_bands(
-            self.obstacle, poi_icons.canonical_bands(
-                poi_icons.read_template_poi()),
-        ).items():
-            symbol = symbols.get(name)
-            self.assertIsNotNone(symbol, name)
-            centroid = next(
-                (
-                    item for item in symbol.findall("layer")
-                    if item.get("class") == "CentroidFill"
-                ),
-                None,
+        for name, symbol in symbols.items():
+            marker = next(
+                layer for layer in symbol.findall("layer")
+                if layer.get("class") == "SvgMarker"
             )
-            self.assertIsNotNone(centroid, name)
-            properties = centroid.find(
+            properties = marker.find(
                 'data_defined_properties/Option/Option[@name="properties"]'
             )
             self.assertIsNotNone(properties, name)
-            enabled = properties.find('Option[@name="enabled"]')
-            self.assertIsNotNone(enabled, name)
-            expression = enabled.find(
-                'Option[@name="expression"]'
-            ).get("value")
-            self.assertEqual(
-                expression,
-                poi_icons.icon_enabled_expression_for(indexes),
-            )
-            self.assertNotIn("@map_scale", expression)
+            angle = properties.find('Option[@name="angle"]')
+            self.assertIsNotNone(angle, name)
+            expression = angle.find('Option[@name="expression"]').get("value")
+            self.assertEqual(expression, '"icon_angle"')
+            self.assertNotIn("main_angle", expression)
             checked += 1
-        self.assertTrue(checked, "у кладбищ нет значка с подавлением")
+        self.assertTrue(checked, "у кладбищ нет значка с поворотом")
 
-    def test_icon_is_used_only_for_small_polygons(self):
-        """На крупном масштабе рисуется штриховка, значок — только мелкий."""
-        icon_symbols = {
-            symbol.get("name"): symbol
-            for symbol in self.layer.findall("renderer-v2/symbols/symbol")
-        }
-        icon_groups = self.layer.findall("renderer-v2/rules/rule")
-        self.assertEqual(len(icon_groups), 4)
-        for group in icon_groups:
-            (icon_rule,) = group.findall("rule")
-            # Значок выбирается по площади на экране, а не по площади
-            # объекта: на обзорном масштабе тот же полигон мельче значка.
-            self.assertIn("area_m2", icon_rule.get("filter"))
-            self.assertIn("@map_scale", icon_rule.get("filter"))
-            self.assertNotEqual(icon_rule.get("checkstate"), "0")
-            icon_layers = [
-                layer.get("class")
-                for layer in icon_symbols[
-                    icon_rule.get("symbol")
-                ].findall("layer")
-            ]
-            self.assertIn("CentroidFill", icon_layers)
-
-        fill_symbols = {
-            symbol.get("name"): symbol
-            for symbol in self.fill_layer.findall(
-                "renderer-v2/symbols/symbol"
-            )
-        }
-        fill_groups = self.fill_layer.findall("renderer-v2/rules/rule")
-        self.assertEqual(len(fill_groups), 4)
-        for group in fill_groups:
-            icon_rule, fill_rule = group.findall("rule")
-            self.assertIn("area_m2", icon_rule.get("filter"))
-            # Для мелкого полигона базовая заливка не рисуется: значок
-            # вынесен в отдельный слой выше карты.
-            self.assertFalse(
-                fill_symbols[icon_rule.get("symbol")].findall("layer")
-            )
-            fill_layers = [
-                layer.get("class")
-                for layer in fill_symbols[
-                    fill_rule.get("symbol")
-                ].findall("layer")
-            ]
-            self.assertIn("SVGFill", fill_layers)
-            self.assertNotIn("CentroidFill", fill_layers)
+    def test_fill_layer_has_no_centroid_icon(self):
+        """Заливка кладбища больше не рисует значок в центре."""
+        for symbol in self.fill_layer.findall(
+                "renderer-v2/symbols/symbol"):
+            classes = [layer.get("class") for layer in symbol.findall("layer")]
+            self.assertNotIn("CentroidFill", classes)
 
 
 class PoiSuppressionExpressionTest(unittest.TestCase):

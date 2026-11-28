@@ -39,15 +39,18 @@ QGIS не разводит значки разных слоёв: кластер�
 подавлять, и по ним считается порог.  Они лежат в дереве проекта, но
 скрыты от пользователя.
 
-В служебный слой попадают и значки, нарисованные на объектах линий и
-полигонов: MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).
-Фильтр правила скрыл бы весь объект вместе со значком, поэтому такие
-значки участвуют как препятствия, а их видимость решает поле
-``icon_hide``.  Их ранг — место слоя в дереве проекта, как у точечных
-POI; у значка кладбища слой стоит выше карты, поэтому его ранг
-привязан к площадке (``RANK_ANCHORS``), и он дополнительно уступает
-любому значку выше него.  На объект нужна одна точка — центр линии или
-площадки, так что ни подготовка, ни отрисовка не замедляются.
+В служебный слой попадают и значки, нарисованные на объектах линий:
+MarkerLine с CentralPoint (мосты).  Фильтр правила скрыл бы всю линию
+вместе со значком, поэтому такой значок участвует как препятствие, а его
+видимость решает поле ``icon_hide``.  Его ранг — место слоя в дереве
+проекта, как у точечных POI.  На объект нужна одна точка — середина
+линии, так что ни подготовка, ни отрисовка не замедляются.
+
+Значок кладбища — обычный точечный слой: точки для него строит
+``core.cemetery_icons``, поэтому он вытесняется полем ``hide``, как все
+остальные значки.  В дереве он стоит выше карты, а его ранг принудительно
+самый низкий среди значков (``LOWEST_ICON_LAYERS``): кладбище не
+перекрывает населённые пункты и другие объекты.
 """
 
 import heapq
@@ -96,23 +99,18 @@ _NEIGHBOUR_OFFSETS = tuple(
 NEVER_RANK = 99999
 
 # Слои, у которых значок вытесняется соседом того же слоя через поле
-# icon_hide: мосты (значок в середине линии) и кладбища (значок в
-# центре площадки).
+# icon_hide: мосты (значок в середине линии).
 SELF_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
-    "cemetery icons",
 )
 # Слои мостов: их значок уступает и населённому пункту, а не только
 # соседнему мосту.  Линия моста при этом остаётся.
 BRIDGE_ICON_LAYERS = (
     "highway main bridge", "track bridge", "path bridge", "railway bridge",
 )
-# Слои, значок которых уступает любому значку выше в дереве: кладбище
-# не должно перекрывать более важные объекты — храм, памятник, родник.
-YIELDING_ICON_LAYERS = ("cemetery icons",)
-# Слой подписи и заливки кладбища задаёт приоритет его значка: сам значок
-# стоит высоко в дереве, чтобы его не закрывали полигоны и линии.
-RANK_ANCHORS = {"cemetery icons": "cemetery"}
+# Слой стоит выше карты, чтобы полигоны и линии не закрывали значок, но
+# в вытеснении уступает всем остальным значкам.
+LOWEST_ICON_LAYERS = ("cemetery icons",)
 # Поле с индексами диапазонов, где значок моста скрыт.
 ICON_HIDE_FIELD = "icon_hide"
 
@@ -509,19 +507,25 @@ def _template_data(path=None):
     }
     layers.sort(key=lambda item: positions.get(item.name, 10**6))
     obstacles.sort(key=lambda item: positions.get(item.name, 10**6))
-
-    def rank_of(name, fallback):
-        # Значок кладбища нарисован отдельным слоем выше карты, но
-        # в вытеснении сохраняет место площадки: RANK_ANCHORS.
-        anchor = RANK_ANCHORS.get(name, name)
-        return positions.get(anchor, fallback)
-
     for index, item in enumerate(layers, start=1):
         # Ранг — место слоя в дереве проекта: приоритет задаёт порядок
         # слоёв, а не отдельная нумерация только среди POI.
-        item.rank = rank_of(item.name, 10**6 + index)
+        item.rank = positions.get(item.name, 10**6 + index)
+    # Значок кладбища нарисован отдельным слоем выше карты, но в
+    # вытеснении должен уступать всем: его ранг ставится после самого
+    # нижнего значка, хотя сам слой остаётся в начале дерева.
+    lowest = max(
+        (
+            item.rank for item in layers
+            if item.name not in LOWEST_ICON_LAYERS
+        ),
+        default=0,
+    )
+    for item in layers:
+        if item.name in LOWEST_ICON_LAYERS:
+            item.rank = lowest + 1
     for index, layer in enumerate(obstacles, start=1):
-        layer.rank = rank_of(layer.name, 10**6 + index)
+        layer.rank = positions.get(layer.name, 10**6 + index)
     data = {
         "poi": layers,
         "obstacles": obstacles,
@@ -646,9 +650,11 @@ def _obstacle_geometry(element):
     """Тип значка-препятствия: Line, Polygon или None.
 
     Берём только значки, которые рисуются в одной точке объекта:
-    MarkerLine с CentralPoint (мосты) и CentroidFill (кладбища).  Ленты
-    стрелок вдоль рек и линии электропередачи не обрабатываются: у них
-    значков вдоль линии много, и одна точка в середине соврала бы.
+    MarkerLine с CentralPoint (мосты) и CentroidFill.  В текущем шаблоне
+    значок кладбища вынесен в точечный слой, поэтому Polygon остаётся
+    поддержкой старых шаблонов.  Ленты стрелок вдоль рек и линии
+    электропередачи не обрабатываются: у них значков вдоль линии много,
+    и одна точка в середине соврала бы.
     """
     geometry = element.get("geometry") or ""
     if geometry == "Line":
@@ -663,16 +669,17 @@ def _obstacle_geometry(element):
 
 
 def read_template_obstacles(path=None):
-    """Значки на линиях и полигонах: мосты, кладбища.
+    """Значки на линиях: мосты.
 
-    QGIS не умеет скрыть отдельный маркер MarkerLine/CentroidFill:
+    QGIS не умеет скрыть отдельный маркер MarkerLine:
     фильтр правила действует на объект целиком, и вместе со значком
-    пропала бы вся линия или полигон.  Поэтому такие значки не
-    вытесняются сами, а участвуют как препятствия: центр линии или
-    площадки добавляется в служебный слой с рангом по месту слоя в
+    пропала бы вся линия.  Поэтому такие значки не
+    вытесняются сами, а участвуют как препятствия: центр линии
+    добавляется в служебный слой с рангом по месту слоя в
     дереве проекта, и обычные значки ниже него скрываются.  На объект
     нужна одна точка, поэтому это не замедляет ни подготовку, ни
-    отрисовку.
+    отрисовку.  ``CentroidFill`` поддержан для старых шаблонов; значок
+    кладбища теперь точечный и сюда не попадает.
     """
     return list(_template_data(path)["obstacles"])
 
@@ -1681,8 +1688,8 @@ def _hidden_icon_bands(points, bands):
     Возвращает словарь (имя слоя, fid) -> множество индексов диапазонов.
     Внутри слоя побеждает объект с меньшими координатами, как у точечных
     POI; значок моста уступает ещё и населённому пункту, стоящему выше
-    в дереве, а значок кладбища — любому значку выше него.  Соседи
-    ищутся по сетке, чтобы не перебирать все пары на больших выгрузках.
+    в дереве.  Соседи ищутся по сетке, чтобы не перебирать все пары на
+    больших выгрузках.
     """
     result = {}
     for index, band in enumerate(bands):
@@ -1702,16 +1709,6 @@ def _hidden_icon_bands(points, bands):
             and point.geometry == "Point"
             and point.fid >= 0
         ]
-        # Кладбище уступает всем, кто стоит выше него в дереве: его
-        # значок не должен перекрывать более важные объекты.
-        neighbours = []
-        if any(point.name in YIELDING_ICON_LAYERS for point in entries):
-            neighbours = [
-                point for point in points
-                if index in point.bands
-                and point.name not in YIELDING_ICON_LAYERS
-                and point.fid >= 0
-            ]
         # Представительский масштаб диапазона: на нём же посчитаны
         # размеры значков в point.sizes.  Верхняя граница диапазона
         # завышала бы радиус на 15-30 %.
@@ -1746,7 +1743,7 @@ def _hidden_icon_bands(points, bands):
 
         max_size = max(
             [point.sizes.get(index, 0.0)
-             for point in entries + settlements + neighbours],
+             for point in entries + settlements],
             default=0.0,
         )
         if max_size <= 0:
@@ -1767,7 +1764,6 @@ def _hidden_icon_bands(points, bands):
 
         grid = grid_of(entries)
         settlement_grid = grid_of(settlements)
-        neighbour_grid = grid_of(neighbours)
         for position, point in enumerate(entries):
             gx = int(point.lon // cell)
             gy = int(point.lat // cell)
@@ -1781,23 +1777,6 @@ def _hidden_icon_bands(points, bands):
                         for other in settlement_grid.get(
                                 (gx + dx, gy + dy), ()):
                             neighbour = settlements[other]
-                            if neighbour.rank >= point.rank:
-                                continue
-                            if distance(point, neighbour) <= radius(
-                                    point, neighbour):
-                                found = True
-                                break
-                        if found:
-                            break
-                    if found:
-                        break
-            # Кладбище уступает любому значку выше него в дереве.
-            if not found and point.name in YIELDING_ICON_LAYERS:
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        for other in neighbour_grid.get(
-                                (gx + dx, gy + dy), ()):
-                            neighbour = neighbours[other]
                             if neighbour.rank >= point.rank:
                                 continue
                             if distance(point, neighbour) <= radius(

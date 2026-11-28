@@ -7,11 +7,11 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from . import (
-    area_field, coastline, dem_sources, disk_space, field_subset, gdal_log,
-    highway_integrity, i18n, icon_angles, label_cache, oneway, osm_convert,
-    osmium_tool, peak_filter, poi_icons, polygon_overlaps, project,
-    riverbank_names, road_packing, sources, spatialite, stream_drying,
-    terrain, underwater,
+    area_field, cemetery_icons, coastline, dem_sources, disk_space,
+    field_subset, gdal_log, highway_integrity, i18n, icon_angles, label_cache,
+    oneway, osm_convert, osmium_tool, peak_filter, poi_icons,
+    polygon_overlaps, project, riverbank_names, road_packing, sources,
+    spatialite, stream_drying, terrain, underwater,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -4316,6 +4316,30 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
         # Данные шаблона нужны служебным слоям значков; к этому моменту
         # фоновый разбор давно готов.
         template_thread.join()
+        # Фильтры рендерера по площади должны уходить в SQL, а не
+        # считаться для каждого объекта в кадре.  Поле добавляется после
+        # шагов, которые переписывают геометрию (пересечения полигонов и
+        # растворение воды), и до значков: правило значка кладбища
+        # сравнивает area_m2 с размером на экране.
+        report("Поле площади")
+        started = time.monotonic()
+        area_field.ensure_area_fields(config.vector_dir)
+        timings.add_stage("поле площади", time.monotonic() - started)
+        report("Значки кладбищ")
+        started = time.monotonic()
+        try:
+            cemetery_icons.build_cemetery_icons(
+                config, progress=report, cancel=cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            # Без готовых точек значок кладбища не рисуется: площадка и
+            # штриховка остаются, карта собирается.
+            report(i18n.trf(
+                "WARNING: значки кладбищ: {}; слой не обновлён", exc,
+            ))
+        timings.add_stage("значки кладбищ", time.monotonic() - started)
         report("Размещение значков POI")
         started = time.monotonic()
         try:
@@ -4342,13 +4366,6 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
             # собирается, поворот пересчитается при следующей сборке.
             report(f"WARNING: углы значков: {exc}; поворот пропущен")
         timings.add_stage("углы значков", time.monotonic() - started)
-        # Фильтры рендерера по площади должны уходить в SQL, а не
-        # считаться для каждого объекта в кадре.  Поле добавляется после
-        # всех шагов, которые переписывают слои, и до очистки проекта.
-        report("Поле площади")
-        started = time.monotonic()
-        area_field.ensure_area_fields(config.vector_dir)
-        timings.add_stage("поле площади", time.monotonic() - started)
         report("Подсыхание ручьёв")
         started = time.monotonic()
         try:

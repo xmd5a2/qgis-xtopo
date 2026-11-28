@@ -4586,6 +4586,140 @@ class IconAngleTest(unittest.TestCase):
             dataset = None
 
 
+class CemeteryIconBuildTest(unittest.TestCase):
+    """Точки значков кладбищ строятся из площадок при подготовке."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    @staticmethod
+    def _write(path, area=True):
+        from osgeo import ogr, osr
+
+        ogr.UseExceptions()
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = dataset.CreateLayer("cemetery", srs, ogr.wkbPolygon)
+        layer.CreateField(ogr.FieldDefn("@id", ogr.OFTString))
+        layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+        if area:
+            layer.CreateField(ogr.FieldDefn("area_m2", ogr.OFTReal))
+        feature = ogr.Feature(layer.GetLayerDefn())
+        feature.SetField("@id", "way/1")
+        feature.SetField("name", "Test cemetery")
+        if area:
+            feature.SetField("area_m2", 1000.0)
+        feature.SetGeometry(ogr.CreateGeometryFromWkt(
+            "POLYGON ((6.9 46.05, 6.91 46.05, 6.91 46.052, "
+            "6.9 46.052, 6.9 46.05))"))
+        layer.CreateFeature(feature)
+        dataset = None
+
+    def test_points_keep_anchor_angle_and_area(self):
+        from qgis.core import QgsExpression, QgsExpressionContext, QgsFeature
+        from qgis.core import QgsGeometry
+
+        from qgis_xtopo.core import cemetery_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            self._write(vector / "cemetery.sqlite")
+
+            class _Config:
+                pass
+
+            config = _Config()
+            config.vector_dir = vector
+            count = cemetery_icons.build_cemetery_icons(config)
+            self.assertEqual(count, 1)
+
+            dataset = ogr.Open(str(vector / "cemetery_icons.sqlite"))
+            layer = dataset.GetLayer(0)
+            feature = layer.GetNextFeature()
+            point = feature.GetGeometryRef()
+            self.assertEqual(point.GetGeometryName(), "POINT")
+            self.assertEqual(feature.GetField("@id"), "way/1")
+            self.assertEqual(feature.GetField("name"), "Test cemetery")
+            self.assertEqual(feature.GetField("area_m2"), 1000.0)
+
+            shape = QgsFeature()
+            shape.setGeometry(QgsGeometry.fromWkt(
+                "POLYGON ((6.9 46.05, 6.91 46.05, 6.91 46.052, "
+                "6.9 46.052, 6.9 46.05))"))
+            context = QgsExpressionContext()
+            context.setFeature(shape)
+            expression = QgsExpression("main_angle($geometry)")
+            expected = int(round(expression.evaluate(context)))
+            self.assertEqual(feature.GetField(cemetery_icons.ANGLE_FIELD),
+                             expected)
+            dataset = None
+            self.assertFalse(
+                (vector / "cemetery_icons.part.sqlite").exists())
+
+    def test_missing_area_field_is_computed(self):
+        from qgis_xtopo.core import area_field, cemetery_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            self._write(vector / "cemetery.sqlite", area=False)
+
+            class _Config:
+                pass
+
+            config = _Config()
+            config.vector_dir = vector
+            self.assertEqual(
+                cemetery_icons.build_cemetery_icons(config), 1,
+            )
+
+            dataset = ogr.Open(str(vector / "cemetery_icons.sqlite"))
+            feature = dataset.GetLayer(0).GetNextFeature()
+            expected = 0.01 * 0.002 * area_field.DEGREE_TO_METER ** 2
+            self.assertAlmostEqual(
+                feature.GetField("area_m2"), expected, places=3,
+            )
+            dataset = None
+
+    def test_missing_source_removes_old_target(self):
+        from qgis_xtopo.core import cemetery_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            (vector / cemetery_icons.TARGET_FILE).write_text("stale")
+
+            class _Config:
+                pass
+
+            config = _Config()
+            config.vector_dir = vector
+            self.assertEqual(
+                cemetery_icons.build_cemetery_icons(config), 0,
+            )
+            self.assertFalse(
+                (vector / cemetery_icons.TARGET_FILE).exists())
+
+
+class CemeteryStageOrderTest(unittest.TestCase):
+    """Площадь и точки кладбища готовы до расчёта вытеснения значков."""
+
+    def test_area_fields_and_points_come_before_poi_icons(self):
+        import inspect
+
+        from qgis_xtopo.core import pipeline
+
+        source = inspect.getsource(pipeline.run_project)
+        area = source.index("area_field.ensure_area_fields")
+        cemetery = source.index("cemetery_icons.build_cemetery_icons")
+        poi = source.index("poi_icons.build_poi_icons")
+        self.assertLess(area, cemetery)
+        self.assertLess(cemetery, poi)
+
+
 class PoiSuppressionTest(unittest.TestCase):
     """Вытеснение значков: расстояние и диапазоны масштаба."""
 
