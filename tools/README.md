@@ -50,6 +50,11 @@ python3 tools/update_icon_masks.py --output /tmp/automap.qgz
 изолинии и т.п.) или после пересборки их стилей. Проверка —
 `IconMaskReferencesTest` в `tests/test_template_styles.py`.
 
+Инструмент не добавляет в цели поверхность дорог: symbol layer с
+data-defined выражением по `highway_integrity` и серую поверхность
+пешеходных дорог (все слои правила `pedestrian`, кроме обводки). Иначе
+под значком разрывается полоса дороги.
+
 Маска значка — белая копия рисунка, увеличенная равномерным полем. Файл
 `resources/icons/*_m.svg` хранит основу (белую копию значка) в `<defs>`
 как `<path id="base">`, а саму маску — вторым `<path>`. По этой основе

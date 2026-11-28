@@ -113,6 +113,37 @@ def _options(element):
     }
 
 
+def _pedestrian_surface_layers(renderer):
+    """symbol layer поверхности пешеходных дорог.
+
+    У правила ``pedestrian`` символ двухслойный: первый symbol layer —
+    тёмная обводка, остальные — серая поверхность.  Маска режет только
+    обводку, поверхность остаётся: иначе в полосе пешеходной дороги под
+    значком появляется светлый разрыв.
+    """
+    symbols = set()
+    for rule in renderer.iter("rule"):
+        text = rule.get("filter") or ""
+        if ("highway = 'pedestrian'" not in text
+                and "highway='pedestrian'" not in text):
+            continue
+        for child in rule.iter("rule"):
+            if child.get("symbol"):
+                symbols.add(child.get("symbol"))
+        if rule.get("symbol"):
+            symbols.add(rule.get("symbol"))
+    result = set()
+    for name in symbols:
+        symbol = renderer.find(f"symbols/symbol[@name='{name}']")
+        if symbol is None:
+            continue
+        layers = [
+            item for item in symbol.findall("layer") if item.get("id")
+        ]
+        result |= {item.get("id") for item in layers[1:]}
+    return result
+
+
 def _icon_masks():
     """Файлы масок значков и их размер в шаблоне.
 
@@ -2593,9 +2624,38 @@ class IconMaskReferencesTest(unittest.TestCase):
             # Поверхность дороги, красящаяся по highway_integrity, маской
             # не режется: иначе дорога под значком разрывается.
             borders -= _integrity_layers(renderer)
+            # Поверхность пешеходных дорог тоже остаётся целой.
+            borders -= _pedestrian_surface_layers(renderer)
             self.assertLessEqual(
                 borders, masked,
                 f"{name}: маска должна резать все границы слоя")
+
+    def test_pedestrian_surface_is_not_masked(self):
+        """Серая поверхность пешеходной дороги под значком остаётся.
+
+        Правило ``pedestrian`` рисует дорогу тёмной обводкой и серой
+        поверхностью.  Если резать поверхность, в серой полосе под
+        значком появляется светлый разрыв, как у дороги Highway main без
+        исключения по ``highway_integrity``.
+        """
+        option = _find_option(self.masks[0][1], "mask_symbollayers")
+        parts = (option.get("value") or "").split(";")
+        masked = {
+            (parts[index], parts[index + 1])
+            for index in range(0, len(parts) - 1, 2)
+        }
+        found = 0
+        for layer_id, layer in self.layers.items():
+            renderer = layer.find("renderer-v2")
+            if renderer is None:
+                continue
+            for symbol_layer_id in _pedestrian_surface_layers(renderer):
+                self.assertNotIn(
+                    (layer_id, symbol_layer_id), masked,
+                    layer.findtext("layername"),
+                )
+                found += 1
+        self.assertGreater(found, 0, "поверхность пешеходных дорог не найдена")
 
     def test_road_surface_is_not_masked(self):
         """Поверхность дороги под значком не вырезается.

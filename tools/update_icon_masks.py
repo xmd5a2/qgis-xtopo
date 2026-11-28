@@ -13,6 +13,10 @@ QGIS предупреждает, если разные источники мас
 значка не режет, иначе дорога под значком разрывается. Обводка дороги
 (более широкий чёрный слой под ней) остаётся вырезанной.
 
+Так же не режется поверхность пешеходных дорог (правило ``pedestrian``):
+символ состоит из тёмной обводки и серой поверхности, и маска должна
+резать только обводку — иначе серая полоса под значком разрывается.
+
 Скрипт читает цели из существующих масок (устаревшие и точечные слои
 отбрасываются), при необходимости добавляет отсутствующие линейные
 symbol layer id и записывает одинаковый список во все MaskMarker. Проект
@@ -49,6 +53,47 @@ LINE_CLASSES = {
 
 # Поле, по которому считается цвет поверхности дороги Highway main.
 INTEGRITY_FIELD = "highway_integrity"
+
+# Правила, рисующие пешеходные дороги.  Их символ двухслойный: обводка и
+# поверхность.
+PEDESTRIAN_FILTERS = ("highway = 'pedestrian'", "highway='pedestrian'")
+
+
+def pedestrian_surface_layers(layer):
+    """Поверхность пешеходных дорог: маска режет только обводку.
+
+    В символе правила ``pedestrian`` первый symbol layer — тёмная
+    обводка, следующие — серая поверхность.  Поверхность в цели масок не
+    попадает: иначе в полосе пешеходной дороги под значком появляется
+    светлый разрыв, как было бы у дороги Highway main без исключения по
+    ``highway_integrity``.
+    """
+    renderer = layer.find("renderer-v2")
+    if renderer is None:
+        return set()
+    symbols = set()
+    for rule in renderer.iter("rule"):
+        text = rule.get("filter") or ""
+        if not any(filter_text in text for filter_text in PEDESTRIAN_FILTERS):
+            continue
+        # Символ обычно у дочерних правил, у родительского его нет.
+        for child in rule.iter("rule"):
+            if child.get("symbol"):
+                symbols.add(child.get("symbol"))
+        if rule.get("symbol"):
+            symbols.add(rule.get("symbol"))
+    result = set()
+    for name in symbols:
+        symbol = renderer.find(f"symbols/symbol[@name='{name}']")
+        if symbol is None:
+            continue
+        layers = [
+            symbol_layer for symbol_layer in symbol.findall("layer")
+            if symbol_layer.get("id")
+        ]
+        for symbol_layer in layers[1:]:
+            result.add(symbol_layer.get("id"))
+    return result
 
 
 def integrity_symbol_layers(layer):
@@ -184,6 +229,7 @@ def update(root, dry_run=False):
             if symbol_layer.get("id")
         }
         integrity = integrity_symbol_layers(layer)
+        pedestrian = pedestrian_surface_layers(layer)
         borders = {
             symbol_layer.get("id")
             for symbol_layer in renderer_layers(layer)
@@ -192,7 +238,7 @@ def update(root, dry_run=False):
         } - integrity
         ids[layer_id] = sorted(
             ((existing.get(layer_id, set()) & renderer) | borders)
-            - integrity
+            - integrity - pedestrian
         )
     parts = []
     for layer in targets:

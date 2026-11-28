@@ -241,6 +241,14 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   масок убран. Список целей пересобирает
   `tools/update_icon_masks.py`, проверка —
   `IconMaskReferencesTest.test_road_surface_is_not_masked`.
+- **Маска не режет поверхность пешеходных дорог.** В правиле `pedestrian`
+  символ двухслойный: тёмная обводка и серая поверхность. Маска режет
+  только обводку, поверхность остаётся — иначе в серой полосе под
+  значком появляется светлый разрыв, как у дороги без исключения по
+  `highway_integrity`. Это касается всех вариантов слоя (`highway main`,
+  `highway main bridge`, `highway main layer >=1`/`<=-1`,
+  `highway main tunnel`). Проверка —
+  `IconMaskReferencesTest.test_pedestrian_surface_is_not_masked`.
 - **Маска значка: равномерное поле 0,1667 мм.** Маска значка —
   белая копия рисунка, увеличенная полем: **0,1667 мм от контура с
   обеих сторон** (было 0,25 мм, уменьшили в 1,5 раза). Поле считается
