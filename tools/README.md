@@ -18,6 +18,7 @@
 | `render_peak_review.py` | рисует фрагменты карты с изолиниями по CSV разметки |
 | `make_peak_map.py` | собирает интерактивную карту пиков по CSV |
 | `dem_compare_server.py` + `dem_compare.html` | сравнение наборов DEM между собой |
+| `compare_osmand_style.py` | сравнение объектов стиля OsmAnd Topo с запросами и слоями плагина |
 
 ## Одноразовые правки шаблона
 
@@ -596,3 +597,25 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py
 
 Кэш Geofabrik при этом должен быть скачан в
 `~/qgis_projects/qgisxtopo-cache/geofabrik`.
+
+## Сравнение с OsmAnd Topo
+
+`tools/compare_osmand_style.py` скачивает `rendering_styles/topo.render.xml`
+из `osmandapp/OsmAnd-resources` и сопоставляет его объекты (`<case tag=… value=…>`)
+с запросами `resources/queries/*.txt` и полями слоёв шаблона. Счётчики
+объектов берутся из taginfo, поэтому разницу можно сортировать по массе
+объектов в OSM.
+
+```sh
+python3 tools/compare_osmand_style.py               # docs/osmand-topo-vs-xtopo.md
+python3 tools/compare_osmand_style.py --no-taginfo  # без сети
+python3 tools/compare_osmand_style.py --refresh     # перекачать стиль из master
+```
+
+Отчёт пишется в `docs/osmand-topo-vs-xtopo.md`: сводка по ключам тегов,
+приоритетный список неподдерживаемых объектов, полный список по значениям и
+разбор дополнительных свойств (`additional=`) против полей слоёв. Скачанный
+стиль и кэш taginfo лежат в `~/.cache/qgis-xtopo/osmand-compare`.
+
+Запускать после обновления стиля OsmAnd или после добавления запросов, чтобы
+видеть, что ещё не поддержано.
