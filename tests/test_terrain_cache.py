@@ -199,6 +199,22 @@ class TerrainCacheTest(unittest.TestCase):
             third = terrain_cache.isolines_signature(config, bbox, key)
             self.assertNotEqual(second, third)
 
+    def test_layer_digest_is_stable(self):
+        """Отпечаток слоя не меняется: от него зависят ключи кэшей.
+
+        Поля читаются по индексу, а не по имени (поиск имени на каждом
+        объекте стоил почти всё время отпечатка), но значение отпечатка
+        остаётся прежним — иначе у пользователей пропадут кэши DEM,
+        изолиний и линий подписи.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layer.sqlite"
+            _write_layer(path, "layer", [(1.0, 2.0), (3.0, 4.0)])
+            self.assertEqual(
+                terrain_cache.layer_digest(path),
+                "6f80610d91885cfb9a102bed5eb30c0206e37d8e",
+            )
+
     def test_isolines_signature_depends_on_step(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(directory)

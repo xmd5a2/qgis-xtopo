@@ -1093,6 +1093,81 @@ class LabelAxisTest(unittest.TestCase):
             self.assertEqual(len(names), 1)
             dataset = None
 
+    def test_named_only_skips_unnamed_objects(self):
+        """Безымянным объектам линии не нужны: подписи всё равно нет."""
+        from osgeo import ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "wood.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("wood", None, ogr.wkbPolygon)
+            layer.CreateField(ogr.FieldDefn("id", ogr.OFTString))
+            layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+            corners = ((0.0, 0.0), (0.02, 0.0), (0.02, 0.006), (0.0, 0.006))
+            for index, name in enumerate(("Лес", "")):
+                feature = ogr.Feature(layer.GetLayerDefn())
+                feature.SetField("id", f"way/{index + 1}")
+                feature.SetField("name", name)
+                ring = ogr.Geometry(ogr.wkbLinearRing)
+                for x, y in corners + corners[:1]:
+                    ring.AddPoint_2D(x + index * 0.05, y)
+                polygon = ogr.Geometry(ogr.wkbPolygon)
+                polygon.AddGeometry(ring)
+                feature.SetGeometry(polygon)
+                layer.CreateFeature(feature)
+            dataset = None
+
+            pipeline = Pipeline(
+                config, BBox(0, 0, 0.07, 0.006), _FakeRunner(None),
+            )
+            output = pipeline._label_axis("wood", source, False, True)
+            dataset = ogr.Open(str(output))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(layer.GetFeatureCount(), 1)
+            feature = next(iter(layer))
+            self.assertEqual(feature.GetField("id"), "way/1")
+            dataset = None
+
+    def test_named_only_without_names_gives_empty_layer(self):
+        """Слой без полей с именем остаётся пустым, но ошибки не даёт."""
+        from osgeo import ogr
+
+        from qgis_xtopo.core.pipeline import Pipeline
+
+        ogr.RegisterAll()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(qgis_projects_dir=directory, project_name="logic")
+            config.ensure_directories()
+            source = config.temp_dir / "wetland.gpkg"
+            dataset = ogr.GetDriverByName("GPKG").CreateDataSource(str(source))
+            layer = dataset.CreateLayer("wetland", None, ogr.wkbPolygon)
+            layer.CreateField(ogr.FieldDefn("natural", ogr.OFTString))
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            corners = ((0.0, 0.0), (0.02, 0.0), (0.02, 0.006), (0.0, 0.006))
+            for x, y in corners + corners[:1]:
+                ring.AddPoint_2D(x, y)
+            polygon = ogr.Geometry(ogr.wkbPolygon)
+            polygon.AddGeometry(ring)
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("natural", "wetland")
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+            dataset = None
+
+            pipeline = Pipeline(
+                config, BBox(0, 0, 0.02, 0.006), _FakeRunner(None),
+            )
+            output = pipeline._label_axis("wetland", source, False, True)
+            dataset = ogr.Open(str(output))
+            layer = dataset.GetLayer(0)
+            self.assertEqual(layer.GetFeatureCount(), 0)
+            dataset = None
+
 
 class CentroidStepTest(unittest.TestCase):
     """Шаг centroid пишет точки и не оставляет пустые геометрии."""

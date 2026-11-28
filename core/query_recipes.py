@@ -75,9 +75,17 @@ def merge(layers):
     return step("merge", layers=layers)
 
 
-def label_axis(main_flow=False):
-    """Линия подписи вдоль формы; main_flow — концы по длине фигуры."""
-    return step("label_axis", main_flow=main_flow)
+def label_axis(main_flow=False, named_only=False):
+    """Линия подписи вдоль формы; main_flow — концы по длине фигуры.
+
+    named_only — считать линии только для объектов с именем.  Так можно
+    делать, если слой подписей шаблон не считает препятствием для других
+    подписей (``obstacle="0"``): безымянному объекту подпись не
+    показывают, а линия его стоит дорого — у леса и ледников это десятки
+    секунд на слой.  У слоя-препятствия линии безымянных объектов всё
+    равно участвуют в размещении соседних названий.
+    """
+    return step("label_axis", main_flow=main_flow, named_only=named_only)
 
 
 def orient_rings():
@@ -268,13 +276,17 @@ RECIPES = {
         # ломал его запись (полигоны сплющивались в линии).
         linestopolygons(drop_others=True), fix(), save(),
         polygonstolines(), save("_lines"), load("glacier"),
-        label_axis(main_flow=True), save("_names"),
+        label_axis(main_flow=True, named_only=True), save("_names"),
     ]),
     "bay_polygon": Recipe([
+        # Линии подписи безымянных заливов не нужны для текста, но слой
+        # подписей шаблон считает препятствием для других подписей:
+        # убрать их — значит сдвинуть размещение соседних названий.
         fix(), save(), polygonstolines(), save("_lines"), load("bay_polygon"),
         label_axis(), save("_names"),
     ]),
     "wetland": Recipe([
+        # Как и у залива: слой у шаблона — препятствие для подписей.
         fix(), save(), polygonstolines(), save("_lines"), load("wetland"),
         label_axis(), save("_names"),
     ]),
@@ -283,7 +295,7 @@ RECIPES = {
     ]),
     "wood": Recipe([
         fix(), save(), polygonstolines(), save("_lines"), load("wood"),
-        label_axis(), save("_names"),
+        label_axis(named_only=True), save("_names"),
     ]),
     "strait": Recipe([
         # Шаблон ждёт два файла: strait.sqlite (исходные объекты — точки

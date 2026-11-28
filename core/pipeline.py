@@ -781,6 +781,31 @@ def _label_name(feature):
     return None
 
 
+def _name_field_indexes(definition):
+    """Индексы полей, где может лежать название объекта.
+
+    Название берётся из ``name`` или ``name:<язык>`` — какое именно поле
+    показывать, решает язык карты.
+    """
+    indexes = []
+    for index in range(definition.GetFieldCount()):
+        name = definition.GetFieldDefn(index).GetName()
+        if name == "name" or name.startswith("name:"):
+            indexes.append(index)
+    return indexes
+
+
+def _has_name(feature, indexes):
+    """Есть ли у объекта название: без него подпись не показывают."""
+    for index in indexes:
+        try:
+            if feature.GetField(index):
+                return True
+        except Exception:  # noqa: BLE001 - битое поле не считаем названием
+            continue
+    return False
+
+
 def _same_outline(first, second, tolerance=1e-5, area_share=0.95):
     """Похожи ли контуры: дубликаты OSM расходятся на доли метра."""
     first_envelope, first_area = first
@@ -1871,7 +1896,9 @@ class Pipeline:
             })
         if operation == "label_axis":
             return self._label_axis(
-                name, current, bool(parameters.get("main_flow", False))
+                name, current,
+                bool(parameters.get("main_flow", False)),
+                bool(parameters.get("named_only", False)),
             )
         if operation == "split_layer":
             return self._split_layer(
@@ -2407,8 +2434,13 @@ class Pipeline:
             )
         return writer.path
 
-    def _label_axis(self, name, current, main_flow=False):
-        """Линия подписи вдоль полигона: свой алгоритм вместо скелета GRASS."""
+    def _label_axis(self, name, current, main_flow=False, named_only=False):
+        """Линия подписи вдоль полигона: свой алгоритм вместо скелета GRASS.
+
+        named_only — считать линии только для объектов с именем: слой с
+        линиями нужен лишь для подписей, а безымянному объекту подпись не
+        показывают.
+        """
         from osgeo import ogr
 
         from .label_line import label_line_geometry
@@ -2433,6 +2465,12 @@ class Pipeline:
             cancel=self.cancel,
         )
         built = 0
+        skipped = 0
+        # Поля с названием объекта: без них подпись показать нечем, и линии
+        # считать не нужно.
+        name_fields = (
+            _name_field_indexes(definition) if named_only else []
+        )
         # Одинаковые названия у разных relation — дубликаты OSM. Второй
         # контур с тем же именем и почти той же геометрией пропускаем,
         # иначе на карте появляются две подписи друг над другом.
@@ -2441,6 +2479,12 @@ class Pipeline:
             for feature in layer:
                 if self.cancel is not None and built % 200 == 0 and self.cancel.is_set():
                     raise InterruptedError("Preparation cancelled")
+                # Имя проверяется до чтения геометрии: у источника GeoJSON
+                # она разбирается лениво, и у безымянного леса это самые
+                # дорогие секунды шага.
+                if named_only and not _has_name(feature, name_fields):
+                    skipped += 1
+                    continue
                 geometry = feature.GetGeometryRef()
                 if geometry is None or geometry.IsEmpty():
                     continue
@@ -2471,8 +2515,16 @@ class Pipeline:
         finally:
             source = None
         writer.close()
+        if named_only and skipped:
+            self.progress(
+                f"{name}: безымянных объектов пропущено: {skipped}"
+            )
         if not writer.count:
-            raise PipelineError(f"{name}: no label lines built")
+            if not named_only:
+                raise PipelineError(f"{name}: no label lines built")
+            # Имён нет — подписывать нечего.  Пустой слой всё равно нужен
+            # шаблону, поэтому файл остаётся, но пустым.
+            return writer.path
         label_cache.store(self.config, key, path)
         self.progress(f"{name}: label lines for {built} objects")
         return writer.path

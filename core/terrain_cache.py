@@ -153,12 +153,19 @@ def _layer_digest(path):
                 for position in range(definition.GetFieldCount())
             ]
             digest.update(("|".join(fields)).encode("utf-8"))
+            # Поля читаются по индексу: поиск по имени на каждом объекте
+            # стоил почти всё время отпечатка большого слоя.
+            indexes = [
+                definition.GetFieldIndex(name) for name in fields
+            ]
             for feature in layer:
                 geometry = feature.GetGeometryRef()
                 if geometry is not None and not geometry.IsEmpty():
                     digest.update(geometry.ExportToWkb())
-                for name in fields:
-                    digest.update(str(feature.GetField(name)).encode("utf-8"))
+                for position in indexes:
+                    digest.update(
+                        str(feature.GetField(position)).encode("utf-8")
+                    )
     finally:
         dataset = None
     return digest.hexdigest()

@@ -758,6 +758,7 @@
   "{}: замкнутых линий преобразовано в полигоны: {}": "{}: converted {} closed lines to polygons",
   "{}: полигонов преобразовано в линии: {}, линий сохранено: {}": "{}: converted {} polygons to lines, kept {} lines",
   "{}: линий подписи для {} объектов": "{}: label lines for {} objects",
+  "{}: безымянных объектов пропущено: {}": "{}: unnamed objects skipped: {}",
   "{}: линии подписи восстановлены из кэша": "{}: label lines restored from cache",
   "{}: слой {} сохранён": "{}: saved {} layer",
   "{}: пропущено (исходный слой не удался)": "{}: skipped (source layer failed)",
