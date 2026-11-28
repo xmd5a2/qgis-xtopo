@@ -4840,12 +4840,13 @@ class MountainPassTemplateTest(unittest.TestCase):
 
 
 class IconAngleTest(unittest.TestCase):
-    """Углы поворота значков берутся из готового поля, а не из выражения.
+    """Углы поворота и теги значков берутся из готовых полей.
 
     Раньше угол перевала и станции считался выражением в шаблоне: при
     каждой отрисовке QGIS строил индекс всего слоя гребней или рельсов.
     Теперь угол пишется в поле `icon_angle` при подготовке, а в шаблоне
-    остаётся только обращение к полю.
+    остаётся только обращение к полю.  Значок станции выбирается так же:
+    в поле `icon` лежит путь к значку.
     """
 
     LAYERS = ("mountain pass", "railway station icons", "railway halt icons")
@@ -4873,6 +4874,27 @@ class IconAngleTest(unittest.TestCase):
                     expressions.append(value)
         return expressions
 
+    def _marker_properties(self, layer):
+        """Свойства значков слоя: имя свойства -> выражение."""
+        properties = []
+        for symbol in layer.iter("symbol"):
+            for marker in symbol.findall("layer"):
+                if marker.get("class") != "SvgMarker":
+                    continue
+                block = marker.find(
+                    'data_defined_properties/Option/Option[@name="properties"]'
+                )
+                if block is None:
+                    continue
+                values = {}
+                for option in block.findall("Option"):
+                    expression = option.find('Option[@name="expression"]')
+                    if expression is None:
+                        continue
+                    values[option.get("name")] = expression.get("value") or ""
+                properties.append(values)
+        return properties
+
     def test_angles_use_ready_field(self):
         for name in self.LAYERS:
             layer = self._layer(name)
@@ -4881,20 +4903,28 @@ class IconAngleTest(unittest.TestCase):
             self.assertTrue(expressions, name)
             for expression in expressions:
                 self.assertNotIn("overlay_nearest", expression)
-                self.assertTrue(
-                    "icon_angle" in expression or "icon_building" in expression,
-                    expression,
-                )
+                self.assertIn("icon_angle", expression)
 
-    def test_station_icon_uses_ready_flag(self):
+    def test_station_icon_uses_ready_field(self):
+        """Значок вокзала выбирается готовым полем, а не выражением."""
         layer = self._layer("railway station icons")
-        expressions = [
-            expression for expression in self._expressions(layer)
-            if "railway_station_building.svg" in expression
-        ]
-        self.assertTrue(expressions)
-        for expression in expressions:
-            self.assertIn("icon_building", expression)
+        properties = self._marker_properties(layer)
+        self.assertTrue(properties)
+        for values in properties:
+            self.assertEqual(values.get("name"), '"icon"')
+            self.assertEqual(values.get("angle"), '"icon_angle"')
+            for expression in values.values():
+                self.assertNotIn("overlay_nearest", expression)
+                self.assertNotIn("icon_building", expression)
+
+    def test_station_layer_reads_prepared_points(self):
+        """Слой значков читает готовый точечный файл, а не центроиды."""
+        layer = self._layer("railway station icons")
+        source = layer.findtext("datasource")
+        self.assertIn("railway_station_icons.sqlite", source)
+        self.assertIn("geometrytype=Point", source)
+        self.assertEqual(layer.get("geometry"), "Point")
+        self.assertEqual(layer.get("wkbType"), "Point")
 
     def test_pass_keeps_rotation_switch(self):
         layer = self._layer("mountain pass")

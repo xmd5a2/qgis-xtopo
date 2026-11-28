@@ -11,7 +11,7 @@ from . import (
     disk_space, field_subset, gdal_log, highway_integrity, i18n, icon_angles,
     label_cache, oneway, osm_convert, osmium_tool, peak_filter, poi_icons,
     polygon_overlaps, project, riverbank_names, road_packing, sources,
-    spatialite, stream_drying, terrain, underwater,
+    spatialite, station_icons, stream_drying, terrain, underwater,
 )
 from .bbox import parse_bbox
 from .cpu import cpu_workers
@@ -4354,6 +4354,21 @@ def run_project(config, progress=None, cancel=None, percent=None, status=None):
                 "WARNING: значки кладбищ: {}; слой не обновлён", exc,
             ))
         timings.add_stage("значки кладбищ", time.monotonic() - started)
+        report("Значки станций")
+        started = time.monotonic()
+        try:
+            station_icons.build_station_icons(
+                config, progress=report, cancel=cancel,
+            )
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            # Без готовых точек значок станции не рисуется: карта
+            # собирается, значки появятся при следующей сборке.
+            report(i18n.trf(
+                "WARNING: значки станций: {}; слой не обновлён", exc,
+            ))
+        timings.add_stage("значки станций", time.monotonic() - started)
         report("Размещение значков POI")
         started = time.monotonic()
         try:

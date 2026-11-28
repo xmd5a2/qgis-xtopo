@@ -324,8 +324,10 @@ RECIPES = {
         save("_buffered_dissolved_centroids"),
     ]),
     "railway_station_icons": Recipe([
-        fix(), buffer(0.004), dissolve("name"), centroid(),
-        save("_buffered_dissolved_centroids"),
+        # Значок ставится в точку самой станции: буферизация и растворение
+        # по названию уводили его от рельсов, а теги подземной станции
+        # терялись.  Готовый слой значков собирает core/station_icons.py.
+        fix(), centroid(), save("_raw", fields="railway_station_icons"),
     ]),
     "barrier": Recipe([
         # Замкнутые барьеры GDAL/OSM может отнести к полигонам (например,

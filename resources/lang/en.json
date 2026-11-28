@@ -265,6 +265,8 @@
   "WARNING: значки мостов: {}; слой не обновлён": "WARNING: bridge icons: {}; layer left unchanged",
   "Значки кладбищ: {} точек": "Cemetery icons: {} points",
   "WARNING: значки кладбищ: {}; слой не обновлён": "WARNING: cemetery icons: {}; layer left unchanged",
+  "Значки станций: {} точек": "Station icons: {} points",
+  "WARNING: значки станций: {}; слой не обновлён": "WARNING: station icons: {}; layer left unchanged",
   "Продолжить": "Continue",
   "Печать": "Print",
   "В макете «Detailed» нет карты": "The \"Detailed\" layout has no map",

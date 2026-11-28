@@ -258,6 +258,14 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   кладёт поворот в `icon_angle`. В вытеснении значок уступает всем
   (`LOWEST_ICON_LAYERS`), а после 1:100000 не рисуется. Подробности —
   `docs/agents/labels.md` и `docs/agents/styles.md`.
+- **Значок станции выбирается при подготовке.** `core/station_icons.py`
+  собирает `railway_station_icons.sqlite` из точек станций: поле `icon`
+  хранит путь к SVG, `icon_angle` — поворот по рельсам. Значок вокзала
+  ставится только при трёх условиях сразу: станция не подземная, здание
+  вокзала не дальше 100 м, станция стоит на наземных рельсах (25 м).
+  Шаблон читает только поля, `overlay_nearest` и `icon_building` из него
+  убраны. Подробности — `docs/agents/labels.md`, проверка —
+  `StationIconBuildTest`.
 - **Кластеризация точек убрана из шаблона.** 56 слоёв `pointCluster`
   развёрнуты в обычный `RuleRenderer`: точки рисуются отдельными
   значками, кластерный символ не используется. Подробности —

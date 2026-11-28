@@ -4812,6 +4812,191 @@ class BridgeIconTest(unittest.TestCase):
             self.assertFalse(stale.exists())
 
 
+class StationIconBuildTest(unittest.TestCase):
+    """Значки станций: тег и поворот считаются при подготовке.
+
+    Значок вокзала ставится, когда станция не подземная, здание
+    вокзала не дальше 100 м, а сама станция стоит на наземных
+    рельсах.  Всё это считается при подготовке, в шаблоне остаётся
+    только обращение к полю.
+    """
+
+    LAT = 46.0
+    LON = 7.0
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+
+    @classmethod
+    def _transform(cls, source, target):
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(source)
+        srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        other = osr.SpatialReference()
+        other.ImportFromEPSG(target)
+        other.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        return osr.CoordinateTransformation(srs, other)
+
+    @classmethod
+    def _ground(cls, meters):
+        """Смещение в EPSG:3857, равное `meters` метрам на земле."""
+        import math
+
+        return meters / math.cos(math.radians(cls.LAT))
+
+    @classmethod
+    def _station(cls, east=0.0, north=0.0):
+        """Станция в EPSG:4326 по смещению от опорной точки."""
+        x, y = cls._metric(east, north)
+        point = cls._transform(3857, 4326).TransformPoint(x, y)
+        return (point[0], point[1])
+
+    @classmethod
+    def _metric(cls, east=0.0, north=0.0):
+        """Опорная точка в EPSG:3857 плюс смещение."""
+        base = cls._transform(4326, 3857).TransformPoint(cls.LON, cls.LAT)
+        return base[0] + east, base[1] + north
+
+    @staticmethod
+    def _write_points(path, crs, items, fields=()):
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(crs)
+        layer = dataset.CreateLayer(path.stem, srs, ogr.wkbPoint)
+        for name, kind in fields:
+            layer.CreateField(ogr.FieldDefn(name, kind))
+        for item in items:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            for key, value in item.get("fields", {}).items():
+                feature.SetField(key, value)
+            geometry = ogr.Geometry(ogr.wkbPoint)
+            geometry.AddPoint(item["xy"][0], item["xy"][1])
+            feature.SetGeometry(geometry)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    @staticmethod
+    def _write_lines(path, crs, items):
+        path.unlink(missing_ok=True)
+        dataset = ogr.GetDriverByName("SQLite").CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(crs)
+        layer = dataset.CreateLayer(path.stem, srs, ogr.wkbLineString)
+        for item in items:
+            feature = ogr.Feature(layer.GetLayerDefn())
+            geometry = ogr.Geometry(ogr.wkbLineString)
+            for point in item["xy"]:
+                geometry.AddPoint(point[0], point[1])
+            feature.SetGeometry(geometry)
+            layer.CreateFeature(feature)
+        dataset = None
+
+    def _build(self, stations, buildings):
+        """Строит слой значков; возвращает строки по именам станций."""
+        from qgis_xtopo.core import station_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            self._write_points(
+                vector / "railway_station_icons_raw.sqlite", 4326,
+                stations, (
+                    ("name", ogr.OFTString),
+                    ("location", ogr.OFTString),
+                ),
+            )
+            self._write_points(
+                vector / "building_train_station_reproj.sqlite", 3857,
+                buildings,
+            )
+            start = self._metric(-1000.0, 0.0)
+            end = self._metric(1000.0, 0.0)
+            self._write_lines(
+                vector / "railway_all_exploded.sqlite", 3857,
+                [{"xy": [start, end]}],
+            )
+            config = SimpleNamespace(vector_dir=vector)
+            count = station_icons.build_station_icons(config)
+            self.assertEqual(count, len(stations))
+            dataset = ogr.Open(str(vector / station_icons.TARGET_FILE))
+            layer = dataset.GetLayer(0)
+            fields = {
+                layer.GetLayerDefn().GetFieldDefn(index).GetName()
+                for index in range(layer.GetLayerDefn().GetFieldCount())
+            }
+            self.assertIn(station_icons.ICON_FIELD, fields)
+            self.assertIn(station_icons.ANGLE_FIELD, fields)
+            self.assertNotIn("hide", fields)
+            rows = {}
+            for feature in layer:
+                rows[feature.GetField("name")] = {
+                    "icon": feature.GetField(station_icons.ICON_FIELD),
+                    "angle": feature.GetField(station_icons.ANGLE_FIELD),
+                }
+            dataset = None
+            return rows
+
+    def test_station_on_rails_with_building_gets_building_icon(self):
+        """Станция на рельсах у здания вокзала: особый значок."""
+        from qgis_xtopo.core import station_icons
+
+        rows = self._build(
+            [{"xy": self._station(), "fields": {"name": "A"}}],
+            [{"xy": self._metric(self._ground(50.0), 0.0)}],
+        )
+        self.assertEqual(rows["A"]["icon"], station_icons.BUILDING_ICON)
+        self.assertIsNotNone(rows["A"]["angle"])
+
+    def test_station_far_from_building_keeps_plain_icon(self):
+        """Здание вокзала дальше 100 м: обычный значок станции."""
+        from qgis_xtopo.core import station_icons
+
+        rows = self._build(
+            [{"xy": self._station(), "fields": {"name": "A"}}],
+            [{"xy": self._metric(self._ground(200.0), 0.0)}],
+        )
+        self.assertEqual(rows["A"]["icon"], station_icons.STATION_ICON)
+
+    def test_underground_station_keeps_plain_icon(self):
+        """Подземная станция: значок вокзала не ставится."""
+        from qgis_xtopo.core import station_icons
+
+        rows = self._build(
+            [{"xy": self._station(), "fields": {
+                "name": "A", "location": "underground",
+            }}],
+            [{"xy": self._metric(self._ground(50.0), 0.0)}],
+        )
+        self.assertEqual(rows["A"]["icon"], station_icons.STATION_ICON)
+
+    def test_station_away_from_rails_keeps_plain_icon(self):
+        """Станция не на рельсах: значок вокзала не ставится."""
+        from qgis_xtopo.core import station_icons
+
+        rows = self._build(
+            [{"xy": self._station(0.0, self._ground(60.0)),
+              "fields": {"name": "A"}}],
+            [{"xy": self._metric(self._ground(50.0), self._ground(60.0))}],
+        )
+        self.assertEqual(rows["A"]["icon"], station_icons.STATION_ICON)
+
+    def test_missing_source_removes_old_target(self):
+        from qgis_xtopo.core import station_icons
+
+        with tempfile.TemporaryDirectory() as directory:
+            vector = Path(directory)
+            stale = vector / station_icons.TARGET_FILE
+            stale.write_text("stale")
+            config = SimpleNamespace(vector_dir=vector)
+            self.assertEqual(
+                station_icons.build_station_icons(config), 0,
+            )
+            self.assertFalse(stale.exists())
+
+
 class CemeteryStageOrderTest(unittest.TestCase):
     """Площадь и точки кладбища готовы до расчёта вытеснения значков."""
 
@@ -4824,10 +5009,12 @@ class CemeteryStageOrderTest(unittest.TestCase):
         area = source.index("area_field.ensure_area_fields")
         bridge = source.index("bridge_icons.build_bridge_icons")
         cemetery = source.index("cemetery_icons.build_cemetery_icons")
+        station = source.index("station_icons.build_station_icons")
         poi = source.index("poi_icons.build_poi_icons")
         self.assertLess(area, bridge)
         self.assertLess(bridge, cemetery)
-        self.assertLess(cemetery, poi)
+        self.assertLess(cemetery, station)
+        self.assertLess(station, poi)
 
 
 class PoiSuppressionTest(unittest.TestCase):

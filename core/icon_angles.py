@@ -1,8 +1,7 @@
 """Углы поворота значков: считаются при подготовке, а не при отрисовке.
 
 Значок перевала поворачивается по направлению ближайшего гребня, значок
-железнодорожной станции — по направлению ближайшей железной дороги, а
-станция рядом со зданием вокзала получает другой значок.  Раньше всё это
+остановки — по направлению ближайшей железной дороги.  Раньше всё это
 считалось выражениями в шаблоне, и QGIS при каждой отрисовке строил
 индекс всего слоя гребней или рельсов: карта открывалась заметно
 дольше нужного.
@@ -17,8 +16,8 @@
 переводят их в систему слоя значков сами, поэтому и здесь слои
 подключаются теми же именами, что и в шаблоне.
 
-Поле ``icon_angle`` — угол в градусах, ``icon_building`` — признак
-станции рядом со зданием вокзала (1 — значок вокзала).
+Поле ``icon_angle`` — угол в градусах.  Значок станции и его поворот
+считает ``core/station_icons.py``: там же выбирается тег значка.
 """
 
 from pathlib import Path
@@ -27,8 +26,6 @@ from . import i18n
 
 # Поле с готовым углом в слоях значков.
 FIELD = "icon_angle"
-# Поле с признаком станции у вокзала.
-BUILDING_FIELD = "icon_building"
 
 # Выражения взяты из шаблона automap.qgz без изменений: пересчитанное
 # значение должно совпадать с тем, что QGIS считал при отрисовке.
@@ -50,24 +47,9 @@ PASS_EXPRESSION = (
     "'ridge_exploded',$geometry,1,1),0)),end_point(array_get("
     "overlay_nearest('ridge_exploded',$geometry,1,1),0))))),NULL)"
 )
-STATION_EXPRESSION = (
-    "round(main_angle(array_get(overlay_nearest( "
-    "'railway_all_exploded', $geometry,50),0))) +\n"
-    "IF(layer_property('building_train_station_reproj',id) IS NOT NULL,(\n"
-    "IF((main_angle(array_get(overlay_nearest( 'railway_all_exploded', "
-    "$geometry,50),0)) - degrees(azimuth($geometry, array_get("
-    "overlay_nearest( 'building_train_station_reproj', $geometry,50),0)))"
-    " + 360)%360 > 180, 0, 180)\n"
-    "),0)"
-)
 HALT_EXPRESSION = (
     "round(main_angle(array_get(overlay_nearest( "
     "'railway_all_exploded', $geometry,50),0)))"
-)
-# Станция ближе 500 м к зданию вокзала получает другой значок.
-BUILDING_EXPRESSION = (
-    "IF(distance($geometry,array_get(overlay_nearest( "
-    "'building_train_station_reproj', $geometry,50),0)) < 500, 1, 0)"
 )
 
 # (файл слоя значков, имя слоя в шаблоне, поля с выражениями,
@@ -78,16 +60,6 @@ TARGETS = (
         "mountain pass",
         ((FIELD, PASS_EXPRESSION),),
         (("ridge_exploded.sqlite", "ridge_exploded"),),
-    ),
-    (
-        "railway_station_icons_buffered_dissolved_centroids.sqlite",
-        "railway station icons",
-        ((FIELD, STATION_EXPRESSION), (BUILDING_FIELD, BUILDING_EXPRESSION)),
-        (
-            ("railway_all_exploded.sqlite", "railway_all_exploded"),
-            ("building_train_station_reproj.sqlite",
-             "building_train_station_reproj"),
-        ),
     ),
     (
         "railway_halt_icons_buffered_dissolved_centroids.sqlite",

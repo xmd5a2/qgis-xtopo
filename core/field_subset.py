@@ -46,6 +46,12 @@ PLACES_MAIN = (
     "place", "population", "capital", "admin_centre_2", "admin_centre_4",
     "hide",
 )
+# Станции: теги нужны выбору значка — подземная станция и её
+# положение относительно рельсов (`core/station_icons.py`).
+RAILWAY_STATION = (
+    "railway", "station", "subway", "location", "tunnel", "layer",
+    "level",
+)
 PATH = (
     "highway", "embankment", "ice_road", "winter_road", "ref",
     "surface", "smoothness", "tracktype",
@@ -69,6 +75,7 @@ PRESETS = {
     "place_locality_point": PLACE_LOCALITY,
     "places_main": PLACES_MAIN,
     "path": PATH,
+    "railway_station_icons": RAILWAY_STATION,
     "water": WATER,
     "track": TRACK,
     "peak": PEAK,
