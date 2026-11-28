@@ -14,6 +14,7 @@
 | `bench_label_line.py` | замер скорости линий подписи и сравнение со старой цепочкой GRASS |
 | `make_label_fixtures.py` | собирает компактные копии отмеченных объектов для тестов линии подписи |
 | `update_icon_masks.py` | обновляет единый список масок значков `MaskMarker` в `automap.qgz` |
+| `build_icon_masks.py` | пересобирает файлы масок значков `resources/icons/*_m.svg` с заданным отступом |
 | `render_peak_review.py` | рисует фрагменты карты с изолиниями по CSV разметки |
 | `make_peak_map.py` | собирает интерактивную карту пиков по CSV |
 | `dem_compare_server.py` + `dem_compare.html` | сравнение наборов DEM между собой |
@@ -47,6 +48,22 @@ python3 tools/update_icon_masks.py --output /tmp/automap.qgz
 Запускать после добавления symbol layer в целевые слои (дороги, вода,
 изолинии и т.п.) или после пересборки их стилей. Проверка —
 `IconMaskReferencesTest` в `tests/test_template_styles.py`.
+
+Маска значка — белая копия рисунка, увеличенная равномерным полем. Файл
+`resources/icons/*_m.svg` хранит основу (белую копию значка) в `<defs>`
+как `<path id="base">`, а саму маску — вторым `<path>`. По этой основе
+`tools/build_icon_masks.py` пересчитывает отступ: он берёт размер значка
+из `automap.qgz` и буферизует растр основы (OGR Buffer + GDAL Polygonize).
+
+```sh
+python3 tools/build_icon_masks.py --dry-run
+python3 tools/build_icon_masks.py --margin 0.1667
+```
+
+Отступ задаётся в миллиметрах поля вокруг контура значка (по умолчанию
+0,1667 мм) и пересчитывается от размера значка: при уменьшении значка
+поле уменьшается вместе с ним. Скрипт идемпотентен. Проверка —
+`IconMaskGeometryTest` в `tests/test_template_styles.py`.
 
 ## Замер скорости линий подписи
 

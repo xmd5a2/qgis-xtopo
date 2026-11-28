@@ -10,6 +10,7 @@ import re
 import unittest
 import zipfile
 from collections import Counter
+from pathlib import Path
 from xml.etree import ElementTree
 
 from qgis_xtopo.core import poi_icons
@@ -102,6 +103,65 @@ def _integrity_layers(element):
                 properties, encoding="unicode"):
             result.add(symbol_layer_id)
     return result
+
+
+def _options(element):
+    """Свойства symbol layer в виде словаря."""
+    return {
+        option.get("name"): option.get("value")
+        for option in element.findall("Option/Option")
+    }
+
+
+def _icon_masks():
+    """Файлы масок значков и их размер в шаблоне.
+
+    Возвращает словарь ``имя файла -> размер значка, мм``.  Размер
+    нужен, чтобы пересчитать отступ маски: он считается от размера
+    значка, с которым тот рисуется.
+    """
+    sizes = {}
+    for maplayer in _template_root().iter("maplayer"):
+        for symbol in maplayer.iter("symbol"):
+            for layer in symbol.findall("layer"):
+                if layer.get("class") != "MaskMarker":
+                    continue
+                sub = layer.find("symbol")
+                if sub is None:
+                    continue
+                marker = next(
+                    (item for item in sub.findall("layer")
+                     if item.get("class") == "SvgMarker"),
+                    None,
+                )
+                if marker is None:
+                    continue
+                options = _options(marker)
+                name = Path(options.get("name") or "").name
+                if not name:
+                    continue
+                mask_file = (
+                    name if name.endswith("_m.svg")
+                    else Path(name).stem + "_m.svg"
+                )
+                size = float(options.get("size") or 0)
+                if size:
+                    sizes[mask_file] = max(sizes.get(mask_file, 0.0), size)
+    return sizes
+
+
+def _mask_paths(root):
+    """Контуры маски: основа из <defs> и сама маска."""
+    base = ""
+    data = ""
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "path":
+            continue
+        if element.get("id") == "base":
+            base = element.get("d") or ""
+        elif not data:
+            data = element.get("d") or ""
+    return base, data
 
 
 def _option_value(element, name):
@@ -2312,6 +2372,160 @@ class TextMaskReferencesTest(unittest.TestCase):
                 self.assertNotIn(";;", value, name)
                 if not value:
                     self.assertNotEqual(mask.get("maskEnabled"), "1", name)
+
+
+class IconMaskGeometryTest(unittest.TestCase):
+    """Отступ маски значка от основы: равномерный и небольшой.
+
+    Маска — это белая копия значка (основа лежит в ``<defs>`` того же
+    файла), увеличенная равномерным отступом: поле вокруг значка
+    одинаково и снаружи, и в вырезах.  Простая увеличенная копия
+    силуэта давала неровное поле — у внешнего контура шире, у
+    внутренних вырезов уже.
+
+    Отступ считается от размера значка в шаблоне, поэтому при
+    уменьшении значка поле тоже должно уменьшиться.  Пересобирает
+    маски ``tools/build_icon_masks.py``.
+    """
+
+    # Отступ маски от контура значка, мм.
+    MARGIN_MM = 0.25 / 1.5
+    # Растр, в котором измеряется отступ.
+    RASTER = 256
+    # Допуск измерения: площадь и периметр считаются по растру, и
+    # погрешность достигает пятой части отступа.
+    TOLERANCE = 0.3
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import qgis_app
+
+        cls.app = qgis_app()
+        cls.sizes = _icon_masks()
+        cls.icons = PACKAGE_DIR / "resources" / "icons"
+
+    @staticmethod
+    def _raster(text, width, height, viewbox):
+        """Растр белого контура."""
+        import numpy
+        from qgis.PyQt.QtCore import QRectF, Qt
+        from qgis.PyQt.QtGui import QImage, QPainter
+        from qgis.PyQt.QtSvg import QSvgRenderer
+
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:g}" '
+            f'height="{height:g}" viewBox="{viewbox}">'
+            f'<path fill="#ffffff" fill-rule="evenodd" d="{text}"/></svg>'
+        )
+        renderer = QSvgRenderer(bytearray(svg.encode("utf-8")))
+        self_check = renderer.isValid()
+        if not self_check:
+            raise AssertionError("неверный SVG")
+        pixels = IconMaskGeometryTest.RASTER
+        image = QImage(pixels, pixels, QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        renderer.render(painter, QRectF(0, 0, pixels, pixels))
+        painter.end()
+        stride = image.bytesPerLine()
+        bits = image.constBits()
+        bits.setsize(image.byteCount())
+        raw = numpy.frombuffer(bytes(bits), dtype="uint8").reshape(
+            pixels, stride,
+        )
+        return (raw[:, : pixels * 4].reshape(pixels, pixels, 4)[:, :, 3] > 16)
+
+    @staticmethod
+    def _edge(mask):
+        """Пиксели границы фигуры."""
+        import numpy
+        inner = mask.copy()
+        inner[1:, :] &= mask[:-1, :]
+        inner[:-1, :] &= mask[1:, :]
+        inner[:, 1:] &= mask[:, :-1]
+        inner[:, :-1] &= mask[:, 1:]
+        return int((mask & ~inner).sum())
+
+    def test_base_is_kept(self):
+        """У каждой маски есть основа: из неё считается отступ."""
+        files = sorted(self.icons.glob("*_m.svg"))
+        self.assertTrue(files)
+        for path in files:
+            root = ElementTree.parse(path).getroot()
+            base, data = _mask_paths(root)
+            self.assertTrue(base, path.name)
+            self.assertTrue(data, path.name)
+
+    def test_offset_is_uniform(self):
+        """Отступ одинаковый и равен заданному."""
+        import numpy
+
+        checked = 0
+        for name, size_mm in sorted(self.sizes.items()):
+            path = self.icons / name
+            if not path.exists():
+                continue
+            root = ElementTree.parse(path).getroot()
+            width = float(root.get("width") or 0)
+            height = float(root.get("height") or 0)
+            viewbox = root.get("viewBox") or f"0 0 {width:g} {height:g}"
+            base, data = _mask_paths(root)
+            base_mask = self._raster(base, width, height, viewbox)
+            mask = self._raster(data, width, height, viewbox)
+            edge = self._edge(base_mask)
+            self.assertTrue(edge, name)
+            # Площадь полосы отступа: длина контура плюс углы.
+            pixels = (int(mask.sum()) - int(base_mask.sum())) / edge
+            # Отступ в мм: один пиксель равен size_mm / RASTER.
+            millimetres = pixels * size_mm / self.RASTER
+            self.assertAlmostEqual(
+                millimetres, self.MARGIN_MM,
+                delta=self.MARGIN_MM * self.TOLERANCE,
+                msg=f"{name}: отступ {millimetres:.3f} мм",
+            )
+            checked += 1
+        self.assertGreater(checked, 30, "маски значков не проверены")
+
+    def test_mask_sub_symbol_matches_icon(self):
+        """Суб-символ маски того же размера, что значок."""
+        for maplayer in _template_root().iter("maplayer"):
+            for symbol in maplayer.iter("symbol"):
+                for layer in symbol.findall("layer"):
+                    if layer.get("class") != "MaskMarker":
+                        continue
+                    sub = layer.find("symbol")
+                    if sub is None:
+                        continue
+                    marker = next(
+                        (item for item in sub.findall("layer")
+                         if item.get("class") in ("SvgMarker", "SimpleMarker")),
+                        None,
+                    )
+                    if marker is None:
+                        continue
+                    mask_options = _options(marker)
+                    icons = [
+                        item for item in symbol.findall("layer")
+                        if item.get("class") in ("SvgMarker", "SimpleMarker")
+                        and not (_options(item).get("name") or "").endswith(
+                            "_m.svg")
+                    ]
+                    if not icons:
+                        continue
+                    icon_options = _options(icons[0])
+                    mask_size = float(mask_options.get("size") or 0)
+                    icon_size = float(icon_options.get("size") or 0)
+                    name = maplayer.findtext("layername")
+                    if marker.get("class") == "SvgMarker":
+                        self.assertAlmostEqual(
+                            mask_size, icon_size, places=3,
+                            msg=f"{name}: размер маски {mask_size}",
+                        )
+                    else:
+                        self.assertAlmostEqual(
+                            mask_size, icon_size + 0.5, places=3,
+                            msg=f"{name}: размер маски {mask_size}",
+                        )
 
 
 class IconMaskReferencesTest(unittest.TestCase):
