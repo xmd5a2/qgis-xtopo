@@ -11,6 +11,12 @@
 
     python3 tools/build_icon_masks.py --dry-run
     python3 tools/build_icon_masks.py --margin 0.1667
+    python3 tools/build_icon_masks.py --init bridge bridge_rail
+    python3 tools/build_icon_masks.py --rebase
+
+Основа маски — сам рисунок значка, а не старая белая копия с вшитой
+обводкой: ``--rebase`` пересобирает основу из значка, если рисунок
+изменился.
 
 Отступ считается от размера значка в шаблоне ``automap.qgz``: при
 уменьшении значка поле тоже должно уменьшиться.
@@ -49,55 +55,39 @@ BASE_SIMPLIFY_PX = 4.0
 BASE_ID = "base"
 
 
-def template_sizes():
-    """Максимальный размер значка (мм) для каждого файла маски."""
+def template_sizes(template=None):
+    """Максимальный размер значка (мм) для каждого файла маски.
+
+    Размер берётся у всех SvgMarker шаблона, а не только у символов с
+    готовой маской: новому значку маску ещё предстоит собрать.
+    """
     import zipfile
 
-    with zipfile.ZipFile(TEMPLATE) as archive:
+    with zipfile.ZipFile(template or TEMPLATE) as archive:
         name = next(n for n in archive.namelist() if n.endswith(".qgs"))
         root = ET.fromstring(archive.read(name).decode("utf-8"))
     sizes = {}
-    for maplayer in root.iter("maplayer"):
-        for symbol in maplayer.iter("symbol"):
-            for layer in symbol.findall("layer"):
-                if layer.get("class") != "MaskMarker":
-                    continue
-                sub = layer.find("symbol")
-                if sub is None:
-                    continue
-                marker = next(
-                    (item for item in sub.findall("layer")
-                     if item.get("class") == "SvgMarker"),
-                    None,
-                )
-                if marker is None:
-                    continue
-                options = {
-                    option.get("name"): option.get("value")
-                    for option in marker.findall("Option/Option")
-                }
-                name = Path(options.get("name") or "").name
-                mask_file = (
-                    name if name.endswith("_m.svg")
-                    else Path(name).stem + "_m.svg"
-                )
-                icon_size = None
-                for item in symbol.findall("layer"):
-                    if item.get("class") != "SvgMarker":
-                        continue
-                    icon_options = {
-                        option.get("name"): option.get("value")
-                        for option in item.findall("Option/Option")
-                    }
-                    icon_name = Path(icon_options.get("name") or "").name
-                    if icon_name.endswith("_m.svg"):
-                        continue
-                    icon_size = float(icon_options.get("size") or 0)
-                    break
-                if icon_size:
-                    sizes[mask_file] = max(
-                        sizes.get(mask_file, 0.0), icon_size,
-                    )
+    for symbol_layer in root.iter("layer"):
+        if symbol_layer.get("class") != "SvgMarker":
+            continue
+        options = {
+            option.get("name"): option.get("value")
+            for option in symbol_layer.findall("Option/Option")
+        }
+        icon = Path(options.get("name") or "").name
+        if not icon:
+            continue
+        try:
+            size = float(options.get("size") or 0)
+        except ValueError:
+            continue
+        if not size:
+            continue
+        mask_file = (
+            icon if icon.endswith("_m.svg")
+            else Path(icon).stem + "_m.svg"
+        )
+        sizes[mask_file] = max(sizes.get(mask_file, 0.0), size)
     return sizes
 
 
@@ -112,6 +102,8 @@ def svg_size(root):
         if len(parts) == 4:
             width = width or parts[2]
             height = height or parts[3]
+    if not viewbox:
+        viewbox = f"0 0 {width:g} {height:g}"
     return width, height, viewbox
 
 
@@ -237,6 +229,21 @@ def geometry_data(geometry, scale):
     return " ".join(pieces)
 
 
+def icon_base(path, width, height, viewbox):
+    """Силуэт значка для новой маски.
+
+    Основа новой маски — видимый силуэт самого значка: та же геометрия,
+    что рисует карта.  У готовых масок основа уже лежит в ``<defs>``.
+    """
+    geometry = polygonize(render_file(path))
+    if geometry is None or geometry.IsEmpty():
+        return ""
+    simplified = geometry.SimplifyPreserveTopology(
+        BASE_SIMPLIFY_PX * width / PIXELS,
+    )
+    return geometry_data(simplified, PIXELS / width)
+
+
 def write_mask(path, width, height, viewbox, base, data):
     text = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -255,12 +262,58 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--margin", type=float, default=MARGIN_MM,
                         help="отступ маски от контура значка, мм")
+    parser.add_argument("--init", nargs="+", metavar="ICON",
+                        help="создать маски для значков, у которых их ещё нет")
+    parser.add_argument("--rebase", nargs="*", metavar="ICON", default=None,
+                        help="пересобрать основу из значка (без имён — всё)")
+    parser.add_argument("--template", help="шаблон для размеров значков")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     if not QGuiApplication.instance():
         QGuiApplication([])
-    sizes = template_sizes()
+    rebase = args.rebase
+    if rebase is not None and not rebase:
+        rebase = [
+            path.name[:-6] for path in sorted(ICONS.glob("*_m.svg"))
+            if (ICONS / (path.name[:-6] + ".svg")).exists()
+        ]
+    for icon_name in rebase or []:
+        stem = icon_name[:-4] if icon_name.endswith(".svg") else icon_name
+        icon = ICONS / (stem + ".svg")
+        if not icon.exists():
+            print("нет значка:", icon.name)
+            continue
+        width, height, viewbox = svg_size(ET.parse(icon).getroot())
+        base = icon_base(icon, width, height, viewbox)
+        if not base:
+            print("пустой значок:", icon.name)
+            continue
+        print("основа из значка:", icon.name)
+        if not args.dry_run:
+            write_mask(ICONS / (stem + "_m.svg"), width, height, viewbox,
+                       base, "")
+    for icon_name in args.init or []:
+        stem = icon_name[:-4] if icon_name.endswith(".svg") else icon_name
+        mask_path = ICONS / (stem + "_m.svg")
+        if mask_path.exists():
+            print("маска уже есть:", mask_path.name)
+            continue
+        icon = ICONS / (stem + ".svg")
+        if not icon.exists():
+            print("нет значка:", icon.name)
+            continue
+        width, height, viewbox = svg_size(ET.parse(icon).getroot())
+        base = icon_base(icon, width, height, viewbox)
+        if not base:
+            print("пустой значок:", icon.name)
+            continue
+        print("основа маски:", mask_path.name)
+        if not args.dry_run:
+            # Контур маски дорисует обычный проход ниже.
+            write_mask(mask_path, width, height, viewbox, base, "")
+
+    sizes = template_sizes(args.template)
     changed = 0
     for path in sorted(ICONS.glob("*_m.svg")):
         root = ET.parse(path).getroot()

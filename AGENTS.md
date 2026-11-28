@@ -228,9 +228,14 @@ QT_QPA_PLATFORM=offscreen python3 tools/check_pbf_coverage.py       # сверк
   поэтому значки вытесняются общим полем `hide`, как остальные POI.
   У `highway main bridge icons` и `railway bridge icons` последнее
   правило значка скрыто выше 1:800000 фильтром `@map_scale < 800000`,
-  чтобы не менять канонические диапазоны подавления. Подробности —
+  чтобы не менять канонические диапазоны подавления. Белой обводки в
+  рисунке мостовых значков (`bridge.svg`, `bridge_pedestrian.svg`,
+  `bridge_rail.svg`) нет: разделение с картой даёт `MaskMarker` с тем же
+  общим списком целей, что у остальных значков, а маски `*_m.svg` строит
+  `tools/build_icon_masks.py --init`. Подробности —
   `docs/agents/labels.md`, проверки — `BridgeIconTest`,
-  `BridgeIconLayersTest`, `BridgeIconSuppressionTest`.
+  `BridgeIconLayersTest`, `BridgeIconSuppressionTest`,
+  `BridgeIconMaskTest`.
 - **Маска значка не режет поверхность дороги.** У `highway main` символ
   из трёх линий: широкая тёмная обводка (3,5 мм), чёрная линия
   (1,95 мм) и поверхность, цвет которой считается по полю

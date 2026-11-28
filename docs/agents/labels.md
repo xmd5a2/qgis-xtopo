@@ -457,6 +457,13 @@
   читают `hide`, поэтому мост уступает любому более приоритетному значку
   и сам вытесняет нижние. Проверки — `BridgeIconLayersTest`,
   `BridgeIconSuppressionTest`, `BridgeIconTest`.
+- **Мостовые значки маскируются, как остальные POI.** Белая обводка была
+  вшита в SVG (`bridge.svg`, `bridge_pedestrian.svg`, `bridge_rail.svg`):
+  она не совпадала с маской и не вырезала линии под значком. Теперь
+  обводки в рисунке нет, а разделение с картой даёт `MaskMarker` с тем же
+  списком целей, что у остальных значков; маски `*_m.svg` строит
+  `tools/build_icon_masks.py --init`. Список целей пересобирает
+  `tools/update_icon_masks.py`. Проверка — `BridgeIconMaskTest`.
 - **Значок моста не попадает на обзорные масштабы.** Последнее правило
   значка (`highway main bridge icons`, `railway bridge icons`) не имеет
   `scalemaxdenom`, но содержит `@map_scale < 800000`: канонические

@@ -2467,7 +2467,7 @@ class IconMaskGeometryTest(unittest.TestCase):
         return (raw[:, : pixels * 4].reshape(pixels, pixels, 4)[:, :, 3] > 16)
 
     @staticmethod
-    def _edge(mask):
+    def _boundary(mask):
         """Пиксели границы фигуры."""
         import numpy
         inner = mask.copy()
@@ -2475,7 +2475,44 @@ class IconMaskGeometryTest(unittest.TestCase):
         inner[:-1, :] &= mask[1:, :]
         inner[:, 1:] &= mask[:, :-1]
         inner[:, :-1] &= mask[:, 1:]
-        return int((mask & ~inner).sum())
+        return mask & ~inner
+
+    @staticmethod
+    def _distance(mask):
+        """Расстояние от каждого пикселя до ближайшего пикселя фигуры.
+
+        Чамфер 3-4: прямые шаги весят 3, диагональные 4.  Так меряется
+        настоящий отступ границы маски от контура, а площадь с
+        периметром врут на значках с узкими зазорами — буфер их
+        заливает, и оценка выходит на треть больше.
+        """
+        import numpy
+        height, width = mask.shape
+        big = 1 << 20
+        dist = numpy.where(mask, 0, big).astype("int32")
+        columns = numpy.arange(width, dtype="int32")
+        for y in range(height):
+            row = dist[y]
+            if y:
+                up = dist[y - 1]
+                row = numpy.minimum(row, up + 3)
+                row[1:] = numpy.minimum(row[1:], up[:-1] + 4)
+                row[:-1] = numpy.minimum(row[:-1], up[1:] + 4)
+            row = numpy.minimum.accumulate(row - 3 * columns) + 3 * columns
+            dist[y] = row
+        for y in range(height - 1, -1, -1):
+            row = dist[y]
+            if y + 1 < height:
+                down = dist[y + 1]
+                row = numpy.minimum(row, down + 3)
+                row[1:] = numpy.minimum(row[1:], down[:-1] + 4)
+                row[:-1] = numpy.minimum(row[:-1], down[1:] + 4)
+            row = (
+                numpy.minimum.accumulate((row + 3 * columns)[::-1])[::-1]
+                - 3 * columns
+            )
+            dist[y] = row
+        return dist / 3.0
 
     def test_base_is_kept(self):
         """У каждой маски есть основа: из неё считается отступ."""
@@ -2503,10 +2540,10 @@ class IconMaskGeometryTest(unittest.TestCase):
             base, data = _mask_paths(root)
             base_mask = self._raster(base, width, height, viewbox)
             mask = self._raster(data, width, height, viewbox)
-            edge = self._edge(base_mask)
-            self.assertTrue(edge, name)
-            # Площадь полосы отступа: длина контура плюс углы.
-            pixels = (int(mask.sum()) - int(base_mask.sum())) / edge
+            boundary = self._boundary(mask)
+            self.assertTrue(boundary.any(), name)
+            # Расстояние от границы маски до основы: медиана по контуру.
+            pixels = float(numpy.median(self._distance(base_mask)[boundary]))
             # Отступ в мм: один пиксель равен size_mm / RASTER.
             millimetres = pixels * size_mm / self.RASTER
             self.assertAlmostEqual(
@@ -2713,6 +2750,74 @@ class IconMaskReferencesTest(unittest.TestCase):
             borders, masked,
             "highway main overview: обводка дороги не вырезается под значком",
         )
+
+
+class BridgeIconMaskTest(unittest.TestCase):
+    """Мостовые значки маскируются, как остальные значки проекта.
+
+    Белая обводка была вшита в SVG мостового значка: она не совпадала по
+    размеру с маской и не вырезала линии под значком.  Теперь обводки в
+    рисунке нет, а разделение с картой даёт MaskMarker с тем же списком
+    целей, что у остальных значков.
+    """
+
+    ICONS = ("bridge.svg", "bridge_pedestrian.svg", "bridge_rail.svg")
+
+    def test_no_baked_outline_in_bridge_icons(self):
+        icons = PACKAGE_DIR / "resources" / "icons"
+        for name in self.ICONS:
+            text = (icons / name).read_text(encoding="utf-8")
+            for white in ("fill:#ffffff", "fill:#fff", "fill:white"):
+                self.assertNotIn(white, text, name)
+
+    def test_bridge_icon_symbols_are_masked(self):
+        masks = 0
+        checked = 0
+        for maplayer in _template_root().iter("maplayer"):
+            name = maplayer.findtext("layername") or ""
+            if not name.endswith("bridge icons"):
+                continue
+            renderer = maplayer.find("renderer-v2")
+            if renderer is None:
+                continue
+            symbols = renderer.find("symbols")
+            if symbols is None:
+                continue
+            for symbol in symbols.findall("symbol"):
+                icons = [
+                    item for item in symbol.findall("layer")
+                    if item.get("class") == "SvgMarker"
+                    and Path(_options(item).get("name") or "").name
+                    in self.ICONS
+                ]
+                if not icons:
+                    continue
+                markers = [
+                    item for item in symbol.findall("layer")
+                    if item.get("class") == "MaskMarker"
+                ]
+                self.assertEqual(
+                    len(markers), 1,
+                    f"{name}, символ {symbol.get('name')}: нет маски")
+                sub = markers[0].find("symbol")
+                self.assertIsNotNone(sub, name)
+                sub_icon = next(
+                    (item for item in sub.findall("layer")
+                     if item.get("class") == "SvgMarker"), None,
+                )
+                self.assertIsNotNone(sub_icon, name)
+                mask_options = _options(sub_icon)
+                icon_options = _options(icons[0])
+                self.assertAlmostEqual(
+                    float(mask_options.get("size") or 0),
+                    float(icon_options.get("size") or 0),
+                    places=3,
+                    msg=f"{name}: размер маски не совпадает со значком",
+                )
+                masks += 1
+                checked += 1
+        self.assertGreater(checked, 100, "символы мостовых значков не найдены")
+        self.assertEqual(masks, checked)
 
 
 class ServiceRoadLodTest(unittest.TestCase):
